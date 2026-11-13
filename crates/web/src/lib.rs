@@ -73,23 +73,19 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
         .layer(DefaultBodyLimit::max(100 << 20))
         .with_state(web.clone());
 
-    let mut bound = vec![];
+    // Bind first, learn the ports, fill in the Host allowlist, and only then
+    // start answering: a request must never race the allowlist.
+    let mut listeners = vec![];
     for ip in ips {
         match tokio::net::TcpListener::bind(SocketAddr::new(ip, port)).await {
-            Ok(listener) => {
-                let addr = listener.local_addr()?;
-                bound.push(addr);
-                let app = app.clone();
-                tokio::spawn(async move {
-                    let _ = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await;
-                });
-            }
+            Ok(listener) => listeners.push(listener),
             Err(e) => tracing::warn!(%ip, port, error = %e, "could not listen"),
         }
     }
-    if bound.is_empty() {
+    if listeners.is_empty() {
         anyhow::bail!("could not listen on port {port} on any address");
     }
+    let bound: Vec<SocketAddr> = listeners.iter().filter_map(|l| l.local_addr().ok()).collect();
 
     let mut hosts = vec![];
     let dns = tokio::task::spawn_blocking(|| {
@@ -114,6 +110,12 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
     hosts.sort();
     hosts.dedup();
     *web.hosts.write().unwrap() = hosts;
+    for listener in listeners {
+        let app = app.clone();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await;
+        });
+    }
     *daemon.web_addrs.lock().unwrap() = bound.iter().map(|a| a.to_string()).collect();
     Ok(bound)
 }

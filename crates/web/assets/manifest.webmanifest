@@ -1,0 +1,10 @@
+{
+  "name": "spandeck",
+  "short_name": "spandeck",
+  "description": "Control Deck for AI coding agents across your machines",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#0f1318",
+  "theme_color": "#0f1318",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

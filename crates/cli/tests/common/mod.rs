@@ -100,7 +100,11 @@ impl Station {
     }
 
     pub fn wait_ready(&self) {
-        wait_for("daemon to answer", 15, || self.try_call("station.info", json!({})).ok());
+        // Ready means both the socket and the Control Deck listener are up.
+        wait_for("daemon to answer", 15, || {
+            let info = self.try_call("station.info", json!({})).ok()?;
+            info["web"].as_array().is_some_and(|w| !w.is_empty()).then_some(())
+        });
     }
 
     pub fn paths(&self) -> Paths {

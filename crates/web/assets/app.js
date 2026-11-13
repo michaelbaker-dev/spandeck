@@ -1,0 +1,639 @@
+// The Control Deck. Three zoom levels, each with a URL:
+//   #/fleet                      every station
+//   #/s/<station>                one station: the deck of panes, and split workspaces
+//   #/s/<station>/p/<pane>       one pane, full size
+// On a phone the same URLs show a small view: status, blockers, approvals, stop.
+
+import { Api } from './api.js';
+import { PaneTerm } from './term.js';
+import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL } from './ui.js';
+
+const api = new Api();
+const root = document.getElementById('app');
+const isPhone = () => matchMedia('(max-width: 760px)').matches;
+
+const S = {
+  route: { view: 'fleet' },
+  fleet: { stations: [], stops: [] },
+  panes: new Map(),      // station -> [pane]
+  projects: new Map(),   // station -> [project]
+  approvals: [],         // across the fleet
+  notes: [],             // notification inbox (this station)
+  terms: new Map(),      // key -> PaneTerm
+  focused: null,
+};
+
+// ------------------------------------------------------------------ routing
+
+function parseRoute() {
+  const parts = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
+  if (parts[0] === 's' && parts[1]) {
+    if (parts[2] === 'p' && parts[3]) return { view: 'pane', station: parts[1], pane: parts[3] };
+    return { view: 'station', station: parts[1] };
+  }
+  return { view: 'fleet' };
+}
+const go = (hash) => { if (location.hash !== hash) location.hash = hash; else render(); };
+const stationUrl = (s) => `#/s/${encodeURIComponent(s)}`;
+const paneUrl = (s, p) => `#/s/${encodeURIComponent(s)}/p/${encodeURIComponent(p)}`;
+
+// --------------------------------------------------------------------- data
+
+const panesOf = (st) => S.panes.get(st) || [];
+const liveAgents = (st) => panesOf(st).filter(p => !p.exited);
+const findPane = (st, id) => panesOf(st).find(p => p.id === id || p.name === id);
+const online = (st) => S.fleet.stations.find(s => s.station === st)?.state === 'online';
+
+async function refreshStation(st) {
+  try {
+    const [panes, projects] = await Promise.all([api.on(st, 'pane.list'), api.on(st, 'project.list')]);
+    S.panes.set(st, panes);
+    S.projects.set(st, projects);
+  } catch (e) { /* unreachable: the fleet view says so */ }
+}
+
+async function refresh() {
+  if (!api.connected) return;
+  try { S.fleet = await api.call('fleet.view'); } catch (e) { return; }
+  const stations = S.fleet.stations.filter(s => s.state === 'online').map(s => s.station);
+  await Promise.all(stations.map(refreshStation));
+  const lists = await Promise.all(stations.map(st => api.on(st, 'approval.list').catch(() => [])));
+  S.approvals = lists.flat();
+  try { S.notes = await api.call('notify.list', { limit: 60 }); } catch (e) { /* keep */ }
+  update();
+}
+
+let refreshTimer = null;
+function refreshSoon(ms = 120) { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, ms); }
+setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, 2500);
+
+api.onEvent((ev) => {
+  if (ev.kind === 'pane.resized') {
+    for (const t of S.terms.values()) if (t.station === api.station && t.pane.id === ev.pane) t.resizedBy(ev.data.controller, ev.data.cols, ev.data.rows);
+    return;
+  }
+  if (ev.kind === 'notify.new') notifyBrowser(ev.data);
+  if (ev.kind === 'connection.restored') { for (const t of S.terms.values()) t.attach(); }
+  if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events)\./.test(ev.kind)) refreshSoon();
+});
+
+function notifyBrowser(n) {
+  toast(n.title + (n.body ? ' — ' + n.body : ''), n.kind === 'error' ? 'error' : 'info');
+  if (document.visibilityState !== 'visible' && 'Notification' in window && Notification.permission === 'granted') {
+    const note = new Notification(n.title, { body: n.body || '', tag: n.id });
+    note.onclick = () => { window.focus(); if (n.url) location.hash = n.url.replace(/^\/#/, '#'); };
+  }
+}
+
+// You are "at a keyboard" while you use a full client: pushes are held back.
+let lastTouch = 0;
+function touch() {
+  if (isPhone() || Date.now() - lastTouch < 20000) return;
+  lastTouch = Date.now();
+  api.call('presence.touch').catch(() => {});
+}
+addEventListener('keydown', touch, true);
+addEventListener('mousedown', touch, true);
+
+const rpc = (st, method, params) => api.on(st, method, params).then((r) => { refreshSoon(60); return r; }).catch((e) => { toast(e.message, 'error'); throw e; });
+
+// --------------------------------------------------------------- layouts
+// Per station: tabs, each a tree of splits. Leaves name a pane.
+
+function loadLayout(st) {
+  try { return JSON.parse(localStorage.getItem('spandeck.layout.' + st)) || { tabs: [], active: -1 }; }
+  catch (e) { return { tabs: [], active: -1 }; }
+}
+function saveLayout(st, l) { localStorage.setItem('spandeck.layout.' + st, JSON.stringify(l)); }
+const leaves = (n, out = []) => { if (!n) return out; if (n.pane) out.push(n); else { leaves(n.a, out); leaves(n.b, out); } return out; };
+
+function openInWorkspace(st, paneId, dir) {
+  const l = loadLayout(st);
+  let tab = l.tabs[l.active];
+  const existing = l.tabs.findIndex(t => leaves(t.tree).some(x => x.pane === paneId));
+  if (existing >= 0 && !dir) { l.active = existing; saveLayout(st, l); return go(stationUrl(st)); }
+  if (!tab) {
+    const p = findPane(st, paneId);
+    tab = { name: p?.project || p?.name || 'workspace', tree: { pane: paneId } };
+    l.tabs.push(tab);
+    l.active = l.tabs.length - 1;
+  } else if (!tab.tree) {
+    tab.tree = { pane: paneId };
+  } else {
+    const target = leaves(tab.tree).find(x => x.pane === S.focused) || leaves(tab.tree).pop();
+    const old = { ...target };
+    for (const k of Object.keys(target)) delete target[k];
+    Object.assign(target, { dir: dir || 'row', ratio: 0.5, a: old, b: { pane: paneId } });
+  }
+  saveLayout(st, l);
+  go(stationUrl(st));
+}
+
+function closeLeaf(st, paneId) {
+  const l = loadLayout(st);
+  const tab = l.tabs[l.active];
+  if (!tab) return;
+  const prune = (n) => {
+    if (!n) return null;
+    if (n.pane) return n.pane === paneId ? null : n;
+    const a = prune(n.a), b = prune(n.b);
+    if (a && b) return { ...n, a, b };
+    return a || b;
+  };
+  tab.tree = prune(tab.tree);
+  if (!tab.tree) { l.tabs.splice(l.active, 1); l.active = l.tabs.length ? Math.max(0, l.active - 1) : -1; }
+  saveLayout(st, l);
+  render();
+}
+
+// ------------------------------------------------------------- pane menus
+
+function paneMenu(e, st, p, where) {
+  const s = stateOf(p), agent = p.agent !== 'shell', alive = !p.exited;
+  const act = (m, extra) => () => rpc(st, m, { pane: p.id, ...extra });
+  showMenu(e.clientX, e.clientY, [
+    { title: `${p.name} · ${p.address}` },
+    where !== 'zoom' && { label: 'Open full size', action: () => go(paneUrl(st, p.id)) },
+    where !== 'leaf' && { label: 'Open in workspace', action: () => openInWorkspace(st, p.id) },
+    { label: 'Split right', hint: 'Ctrl+Shift+E', action: () => pickPane(st, (id) => openInWorkspace(st, id, 'row'), p.id) },
+    { label: 'Split down', hint: 'Ctrl+Shift+O', action: () => pickPane(st, (id) => openInWorkspace(st, id, 'col'), p.id) },
+    where === 'leaf' && { label: 'Close this view', hint: 'Ctrl+Shift+W', action: () => closeLeaf(st, p.id) },
+    '-',
+    agent && alive && { label: 'Stop this turn', action: act('pane.stop'), disabled: !(s === 'working' || s === 'needs_you') },
+    agent && alive && { label: p.paused ? 'Unpause (deliver work again)' : 'Pause (no new work)', action: act('pane.pause', { paused: !p.paused }) },
+    agent && { label: p.watch ? 'Stop notifying when it finishes' : 'Notify me when it finishes', action: act('pane.set', { watch: !p.watch }) },
+    { label: p.muted ? 'Unmute notifications' : 'Mute notifications', action: act('pane.set', { muted: !p.muted }) },
+    '-',
+    { label: 'Show changes (diff)', action: () => diffPanel(st, p) },
+    agent && { label: 'Standing orders for this pane', action: () => ordersPanel(st, p) },
+    agent && p.project && alive && { label: 'Start a review loop on its work', action: () => rpc(st, 'recipe.review', { pane: p.id }).then(() => toast('Review loop started')) },
+    { label: 'Send it a message', action: () => messageDialog(st, p) },
+    { label: 'Rename', action: () => renameDialog(st, p) },
+    { label: 'Copy address', action: () => navigator.clipboard?.writeText(p.address).then(() => toast('Copied ' + p.address)) },
+    '-',
+    alive && { label: 'Kill the process', danger: true, action: () => confirmBox('Kill ' + p.name + '?', 'The process ends now. An agent can be resumed later by its session.', 'Kill', act('pane.kill')) },
+    { label: alive ? 'Kill and remove' : 'Remove from the list', danger: true, action: () => confirmBox('Remove ' + p.name + '?', 'The pane is closed and removed from this station.', 'Remove', act('pane.close')) },
+  ]);
+}
+
+function pickPane(st, then, exclude) {
+  const options = liveAgents(st).filter(p => p.id !== exclude);
+  dialog('Choose a pane', (close) => h('div', { class: 'list' },
+    options.map(p => h('button', { class: 'list-row', onclick: () => { close(); then(p.id); } }, dot(p), h('b', {}, p.name), h('span', { class: 'muted' }, p.project || ''))),
+    h('button', { class: 'list-row', onclick: () => { close(); newPaneDialog(st, null, then); } }, '＋ New pane…')));
+}
+
+// ------------------------------------------------------------------ dialogs
+
+function newPaneDialog(st, project, then) {
+  dialog('New pane on ' + st, (close) => {
+    const agent = h('select', {}, h('option', { value: 'claude' }, 'Claude Code'), h('option', { value: 'codex' }, 'Codex'), h('option', { value: 'shell' }, 'Shell'));
+    const name = h('input', { placeholder: 'optional' });
+    const proj = h('select', {}, h('option', { value: '' }, '(no project)'), (S.projects.get(st) || []).map(p => h('option', { value: p.name, selected: p.name === project }, p.name)));
+    const cwd = h('input', { placeholder: 'default: the project folder, or your home folder' });
+    const submit = async () => {
+      const params = { agent: agent.value, name: name.value || undefined, project: proj.value || undefined, cwd: cwd.value || undefined };
+      const pane = await rpc(st, 'pane.spawn', params);
+      close();
+      then ? then(pane.id) : go(paneUrl(st, pane.id));
+    };
+    return h('form', { onsubmit: (e) => { e.preventDefault(); submit(); } },
+      field('Run', agent), field('Name', name), field('Project', proj), field('Folder', cwd),
+      h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel'), h('button', { class: 'primary', type: 'submit' }, 'Start')));
+  });
+}
+
+function newProjectDialog(st) {
+  dialog('New project on ' + st, (close) => {
+    const path = h('input', { placeholder: '/path/to/the/repo', required: true });
+    const name = h('input', { placeholder: 'default: the folder name' });
+    const rows = h('div', { class: 'slots' });
+    const addRow = (n = '', a = 'claude', r = '') => rows.append(h('div', { class: 'slot' },
+      h('input', { placeholder: 'pane name', value: n, 'aria-label': 'Pane name' }),
+      h('select', { 'aria-label': 'Agent' }, ['claude', 'codex', 'shell'].map(x => h('option', { value: x, selected: x === a }, x))),
+      h('input', { placeholder: 'role (optional)', value: r, 'aria-label': 'Role' }),
+      h('button', { type: 'button', class: 'icon-btn', title: 'Remove', onclick: (e) => e.target.closest('.slot').remove() }, '✕')));
+    addRow('dev', 'claude', 'author');
+    const submit = async () => {
+      const panes = [...rows.children].map(r => { const [n, a, ro] = r.querySelectorAll('input,select'); return { name: n.value.trim(), agent: a.value, role: ro.value.trim() || undefined }; }).filter(p => p.name);
+      const v = await rpc(st, 'project.new', { path: path.value.trim(), name: name.value.trim() || undefined, panes, open: true });
+      close();
+      toast(`Project ${v.name} is open`);
+      go(stationUrl(st));
+    };
+    return h('form', { onsubmit: (e) => { e.preventDefault(); submit(); } },
+      field('Folder on ' + st, path, 'A folder that already has .spandeck/project.toml is opened as it is.'),
+      field('Name', name),
+      h('div', { class: 'field' }, h('span', {}, 'Panes to start'), rows, h('button', { type: 'button', class: 'mini', onclick: () => addRow() }, '＋ Add a pane')),
+      h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel'), h('button', { class: 'primary', type: 'submit' }, 'Create and open')));
+  });
+}
+
+function renameDialog(st, p) {
+  dialog('Rename pane', (close) => {
+    const name = h('input', { value: p.name });
+    return h('form', { onsubmit: (e) => { e.preventDefault(); rpc(st, 'pane.rename', { pane: p.id, name: name.value.trim() }).then(close); } },
+      field('Name', name), h('div', { class: 'row end' }, h('button', { class: 'primary', type: 'submit' }, 'Rename')));
+  });
+}
+
+function messageDialog(st, p) {
+  dialog('Message to ' + p.name, (close) => {
+    const body = h('textarea', { rows: 4, placeholder: 'It lands in the agent\'s inbox; a one-line nudge wakes it if it is idle.' });
+    return h('form', { onsubmit: (e) => { e.preventDefault(); rpc(st, 'msg.send', { to: p.id, body: body.value, kind: 'note' }).then(() => { close(); toast('Sent'); }); } },
+      field('Message', body), h('div', { class: 'row end' }, h('button', { class: 'primary', type: 'submit' }, 'Send')));
+  });
+}
+
+async function diffPanel(st, p) {
+  let d;
+  try { d = await api.on(st, 'diff', { pane: p.id }); } catch (e) { return toast(e.message, 'error'); }
+  dialog(`Changes in ${p.name}`, () => {
+    const pre = h('pre', { class: 'diff' });
+    for (const line of (d.diff || '').split('\n')) {
+      const cls = line.startsWith('+') && !line.startsWith('+++') ? 'add' : line.startsWith('-') && !line.startsWith('---') ? 'del' : line.startsWith('@@') ? 'hunk' : line.startsWith('diff ') ? 'file' : '';
+      pre.append(h('span', { class: cls }, line + '\n'));
+    }
+    return h('div', {},
+      h('p', { class: 'muted' }, `Since ${d.task ? 'the task started' : 'the last commit'} (${String(d.base).slice(0, 10)}). Read-only.`),
+      d.stat ? h('pre', { class: 'stat' }, d.stat) : h('p', {}, 'No changes to tracked files.'),
+      d.untracked?.length ? h('p', {}, 'New files: ' + d.untracked.join(', ')) : null,
+      d.diff ? pre : null,
+      d.truncated ? h('p', { class: 'muted' }, 'The diff was cut short at 400 KB.') : null);
+  }, { wide: true });
+}
+
+async function ordersPanel(st, p) {
+  let v, table;
+  try { [v, table] = await Promise.all([api.on(st, 'orders.view', { pane: p.id }), api.on(st, 'orders.table')]); } catch (e) { return toast(e.message, 'error'); }
+  dialog(`Standing orders for ${p.name}`, () => h('div', {},
+    v.orders.length === 0 ? h('p', {}, 'No standing orders apply to this pane.') :
+      h('table', { class: 'table' },
+        h('thead', {}, h('tr', {}, h('th', {}, 'Order'), h('th', {}, 'Layer'), h('th', {}, 'For this agent'))),
+        h('tbody', {}, v.orders.map(o => h('tr', {},
+          h('td', {}, o.text),
+          h('td', {}, o.layer),
+          h('td', { title: o.why_guidance || '' }, h('span', { class: 'chip ' + (o.enforced ? 'ok' : '') }, o.shown_as), o.why_guidance ? h('small', { class: 'muted block' }, o.why_guidance) : null))))),
+    v.problems?.length ? h('p', { class: 'warn-text' }, v.problems.join(' · ')) : null,
+    h('h3', {}, 'What each agent can block'),
+    h('table', { class: 'table' },
+      h('thead', {}, h('tr', {}, h('th', {}, 'Agent'), h('th', {}, 'Rules are'), h('th', {}, 'Note'))),
+      h('tbody', {}, table.map(r => h('tr', {}, h('td', {}, r.name), h('td', {}, h('span', { class: 'chip ' + (r.rules_shown_as === 'enforced' ? 'ok' : '') }, r.rules_shown_as)), h('td', { class: 'muted' }, r.note)))))), { wide: true });
+}
+
+function approvalRow(a, close) {
+  const reason = h('input', { placeholder: 'reason (optional)', 'aria-label': 'Reason' });
+  const answer = (allow) => rpc(a.station, 'approval.answer', { id: a.id, allow, reason: reason.value || undefined }).then(() => { toast(allow ? 'Allowed' : 'Denied'); close && close(); });
+  const p = findPane(a.station, a.pane);
+  return h('div', { class: 'approval' },
+    h('div', { class: 'approval-what' }, h('b', {}, p?.name || a.pane), h('span', { class: 'muted' }, ` on ${a.station} · ${ago(a.ts)} ago`), h('div', { class: 'mono' }, a.summary)),
+    h('div', { class: 'row' }, reason,
+      h('button', { class: 'primary', onclick: () => answer(true) }, 'Allow'),
+      h('button', { class: 'danger', onclick: () => answer(false) }, 'Deny')));
+}
+
+function approvalsPanel() {
+  dialog('Approval requests', (close) => S.approvals.length
+    ? h('div', { class: 'list' }, S.approvals.map(a => approvalRow(a, close)))
+    : h('p', {}, 'Nothing is waiting for your approval.'));
+}
+
+function inboxPanel() {
+  api.call('msg.inbox', { all: true, peek: true }).then((msgs) => {
+    dialog('Inbox', () => h('div', {},
+      h('div', { class: 'row end' }, h('button', { class: 'mini', onclick: () => { api.call('notify.read', {}); api.call('msg.inbox', {}); refreshSoon(); } }, 'Mark all read'),
+        'Notification' in window && Notification.permission === 'default' ? h('button', { class: 'mini', onclick: () => Notification.requestPermission() }, 'Enable browser notifications') : null),
+      h('h3', {}, 'Messages to you'),
+      msgs.length ? h('div', { class: 'list' }, msgs.slice().reverse().map(m => h('div', { class: 'note' + (m.read ? '' : ' unread') },
+        h('div', {}, h('b', {}, m.from), h('span', { class: 'muted' }, ` · ${m.kind} · ${ago(m.ts)} ago`)), h('div', { class: 'pre' }, m.body)))) : h('p', { class: 'muted' }, 'No messages.'),
+      h('h3', {}, 'Notifications'),
+      S.notes.length ? h('div', { class: 'list' }, S.notes.map(n => h('button', { class: 'list-row note' + (n.read ? '' : ' unread'), onclick: () => { api.call('notify.read', { id: n.id }); if (n.url) location.hash = n.url.replace(/^\/#/, '#'); } },
+        h('span', { class: 'dot ' + (n.kind === 'approval' ? 'needs_you' : n.kind) }), h('b', {}, n.title), h('span', { class: 'muted' }, n.body), h('span', { class: 'grow' }),
+        h('span', { class: 'muted' }, n.pushed === 2 ? 'held (you were here) · ' : n.pushed === 1 ? 'pushed · ' : '', ago(n.ts))))) : h('p', { class: 'muted' }, 'No notifications.')), { wide: true });
+  }).catch(e => toast(e.message, 'error'));
+}
+
+function stopAllMenu(e) {
+  const stop = (scope, label) => () => confirmBox('Stop ' + label + '?', 'Every running agent turn is interrupted. Processes stay, and nothing is lost.', 'Stop', () => rpc(api.station, 'stop.all', { scope }).then(() => toast('Stop sent')));
+  showMenu(e.clientX, e.clientY, [
+    { label: `Stop every agent on ${api.station}`, danger: true, action: stop('station', 'this station') },
+    { label: 'Stop every agent in the fleet', danger: true, action: stop('fleet', 'the whole fleet') },
+  ]);
+}
+
+async function tasksPanel(st, project) {
+  const [tasks, recipes, sign] = await Promise.all([
+    api.on(st, 'task.list', { project, limit: 30 }), api.on(st, 'recipe.list', { project }), api.on(st, 'signoff.status', { project }).catch(() => null)]);
+  dialog(`Tasks in ${project}`, (close) => h('div', {},
+    h('h3', {}, 'Sign-off'),
+    sign ? h('p', {}, sign.signed ? `Commit ${String(sign.commit).slice(0, 10)} was signed off ${ago(sign.ts)} ago. ` : 'No sign-off yet. ',
+      sign.stale ? h('span', { class: 'warn-text' }, `Stale: ${sign.why_stale}. `) : null,
+      h('button', { class: 'mini', onclick: () => rpc(st, 'signoff.give', { project }).then(() => { close(); toast('Signed off'); }) }, 'Sign off the current commit')) : null,
+    h('h3', {}, 'Review loops'),
+    recipes.length ? h('div', { class: 'list' }, recipes.map(r => h('div', { class: 'note' }, h('b', {}, `Round ${r.data.round} of ${r.data.max_rounds} · ${r.data.phase.replace('_', ' ')}`), h('div', { class: 'muted' }, r.data.note || ''),
+      r.state === 'active' ? h('button', { class: 'mini', onclick: () => rpc(st, 'recipe.cancel', { id: r.id }).then(close) }, 'Cancel') : null))) : h('p', { class: 'muted' }, 'None.'),
+    h('h3', {}, 'Tasks'),
+    tasks.length ? h('table', { class: 'table' }, h('thead', {}, h('tr', {}, h('th', {}, 'State'), h('th', {}, 'Role'), h('th', {}, 'Goal'), h('th', {}, 'Result'))),
+      h('tbody', {}, tasks.map(t => h('tr', {}, h('td', {}, h('span', { class: 'chip' }, t.state.replaceAll('_', ' '))), h('td', {}, t.role || ''), h('td', {}, t.goal), h('td', { class: 'muted' }, t.outputs?.summary || t.resume?.reason || ''))))) : h('p', { class: 'muted' }, 'No tasks yet.')), { wide: true });
+}
+
+function palette() {
+  const actions = [
+    { label: 'Go to the fleet', run: () => go('#/fleet') },
+    ...S.fleet.stations.map(s => ({ label: `Go to station ${s.station}`, run: () => go(stationUrl(s.station)) })),
+    ...S.fleet.stations.flatMap(s => liveAgents(s.station).map(p => ({ label: `Open pane ${p.name} on ${s.station}`, run: () => go(paneUrl(s.station, p.id)) }))),
+    { label: 'New pane…', run: () => newPaneDialog(S.route.station || api.station) },
+    { label: 'New project…', run: () => newProjectDialog(S.route.station || api.station) },
+    { label: 'Approval requests', run: approvalsPanel },
+    { label: 'Inbox', run: inboxPanel },
+    { label: 'Stop every agent on this station', run: () => rpc(api.station, 'stop.all', { scope: 'station' }) },
+    { label: 'Check this station (doctor)', run: doctorPanel },
+  ];
+  dialog('Go to or do…', (close) => {
+    const input = h('input', { placeholder: 'Type to filter', 'aria-label': 'Filter' });
+    const list = h('div', { class: 'list' });
+    const draw = () => {
+      const q = input.value.toLowerCase();
+      const hits = actions.filter(a => a.label.toLowerCase().includes(q)).slice(0, 12);
+      list.replaceChildren(...hits.map((a, i) => h('button', { class: 'list-row' + (i === 0 ? ' first' : ''), onclick: () => { close(); a.run(); } }, a.label)));
+    };
+    input.addEventListener('input', draw);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); list.firstChild?.click(); } });
+    draw();
+    return h('div', {}, input, list);
+  });
+}
+
+async function doctorPanel() {
+  const st = S.route.station || api.station;
+  const d = await api.on(st, 'station.doctor');
+  dialog('Station check: ' + st, () => h('table', { class: 'table' }, h('tbody', {}, d.checks.map(c => h('tr', {},
+    h('td', {}, h('span', { class: 'chip ' + (c.ok ? 'ok' : c.required ? 'bad' : 'warn') }, c.ok ? 'ok' : c.required ? 'fail' : 'warn')), h('td', {}, c.name), h('td', { class: 'muted' }, c.detail))))), { wide: true });
+}
+
+// -------------------------------------------------------------------- views
+
+function topbar() {
+  const r = S.route;
+  const needs = S.fleet.stations.flatMap(s => liveAgents(s.station)).filter(p => p.state === 'needs_you').length;
+  const unread = S.notes.filter(n => !n.read).length;
+  const pane = r.view === 'pane' ? findPane(r.station, r.pane) : null;
+  const crumbs = [h('a', { href: '#/fleet' }, 'Fleet')];
+  if (r.station) crumbs.push('›', h('a', { href: stationUrl(r.station) }, r.station));
+  if (pane?.project) crumbs.push('›', h('span', {}, pane.project));
+  if (pane) crumbs.push('›', h('span', { class: 'here' }, pane.name));
+  return h('header', { class: 'topbar' },
+    h('a', { class: 'brand', href: '#/fleet', title: 'spandeck ' + (api.version || '') }, 'spandeck'),
+    h('nav', { class: 'crumbs', 'aria-label': 'Where you are' }, crumbs),
+    h('span', { class: 'grow' }),
+    !api.connected ? h('span', { class: 'chip bad' }, api.authError || 'reconnecting…') : null,
+    needs ? h('span', { class: 'chip needs', title: 'Agents waiting for you' }, `${needs} need${needs === 1 ? 's' : ''} you`) : null,
+    h('button', { class: S.approvals.length ? 'attn' : '', onclick: approvalsPanel }, 'Approvals', S.approvals.length ? h('span', { class: 'count' }, S.approvals.length) : null),
+    h('button', { onclick: inboxPanel }, 'Inbox', unread ? h('span', { class: 'count' }, unread) : null),
+    h('button', { class: 'danger', onclick: stopAllMenu, title: 'Interrupt running agent turns' }, 'Stop all'),
+    isPhone() ? null : h('button', { onclick: palette, title: 'Ctrl+K' }, '⌘K'));
+}
+
+function stopRows() {
+  const recent = (S.fleet.stops || []).filter(s => Date.now() - s.issued_ms < 10 * 60 * 1000 || s.status !== 'confirmed').slice(0, 6);
+  if (!recent.length) return null;
+  return h('div', { class: 'stops' }, h('b', {}, 'Stop requests'), recent.map(s => h('span', { class: 'stop ' + s.status, title: `issued ${ago(s.issued_ms)} ago` },
+    `${s.station}: ${s.label}`, s.status === 'confirmed' ? ` (${s.result?.stopped?.length ?? 0} stopped)` : s.status === 'unreachable' ? ' — will be delivered when it is back' : '')));
+}
+
+function stationTile(s) {
+  const agents = liveAgents(s.station).filter(p => p.agent !== 'shell').sort((a, b) => stateRank(a) - stateRank(b));
+  const up = s.state === 'online';
+  return h('a', {
+    class: 'tile station ' + s.state, href: stationUrl(s.station),
+    oncontextmenu: (e) => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
+      { label: 'Open ' + s.station, action: () => go(stationUrl(s.station)) },
+      up && { label: 'New pane here…', action: () => newPaneDialog(s.station) },
+      up && { label: 'New project here…', action: () => newProjectDialog(s.station) },
+      up && { label: 'Stop every agent here', danger: true, action: () => rpc(api.station, 'stop.all', { scope: s.station === api.station ? 'station' : s.station }) },
+    ]); },
+  },
+    h('div', { class: 'tile-head' }, h('span', { class: 'dot ' + (up ? (s.needs_you ? 'needs_you' : s.working ? 'working' : 'idle') : 'unreachable') }), h('b', {}, s.station), s.self ? h('span', { class: 'chip' }, 'this station') : null, h('span', { class: 'grow' }), h('span', { class: 'muted' }, s.version || '')),
+    up ? h('div', { class: 'tile-stats' },
+      h('span', {}, h('b', {}, s.working ?? 0), ' working'), h('span', { class: s.needs_you ? 'needs' : '' }, h('b', {}, s.needs_you ?? 0), ' need you'),
+      s.load != null ? h('span', { class: 'muted' }, 'load ' + Number(s.load).toFixed(1)) : null, s.keep_awake ? h('span', { class: 'chip' }, 'kept awake') : null)
+      : h('div', { class: 'tile-stats warn-text' }, s.state === 'update_needed' ? 'Needs an update before it can be controlled' : `Unreachable · last seen ${ago(s.last_seen_ms)} ago`),
+    h('div', { class: 'tile-agents' }, agents.slice(0, 8).map(p => h('div', { class: 'agent-line' }, dot(p), h('span', {}, p.name), h('span', { class: 'muted' }, p.tool || p.needs_reason || STATE_LABEL[stateOf(p)]))),
+      up && !agents.length ? h('span', { class: 'muted' }, 'No agents running') : null));
+}
+
+function fleetView() {
+  const stations = S.fleet.stations.slice().sort((a, b) => (b.needs_you || 0) - (a.needs_you || 0) || (b.self ? 1 : 0) - (a.self ? 1 : 0));
+  return h('main', { class: 'fleet' }, stopRows(),
+    h('div', { class: 'tiles' }, stations.map(stationTile)),
+    stations.length <= 1 ? h('p', { class: 'muted hint' }, 'Other stations appear here on their own: any machine under your Tailscale login that runs spandeckd.') : null);
+}
+
+const thumbs = new Map();
+async function loadThumbs(st, panes) {
+  await Promise.all(panes.map(async (p) => {
+    try { const t = await api.on(st, 'pane.text', { pane: p.id }); thumbs.set(st + '/' + p.id, t.lines); } catch (e) { /* ignore */ }
+  }));
+  for (const el of document.querySelectorAll('.thumb[data-key]')) {
+    const lines = thumbs.get(el.dataset.key);
+    if (lines) el.textContent = lines.slice(-14).join('\n');
+  }
+}
+
+function paneTile(st, p) {
+  const key = st + '/' + p.id;
+  return h('a', { class: 'tile pane-tile ' + stateOf(p), href: paneUrl(st, p.id), oncontextmenu: (e) => { e.preventDefault(); paneMenu(e, st, p, 'tile'); } },
+    h('div', { class: 'tile-head' }, dot(p), h('b', {}, p.name), p.agent !== 'shell' ? h('span', { class: 'chip' }, p.agent_name) : null, h('span', { class: 'grow' }),
+      h('span', { class: 'muted' }, p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}` : `${STATE_LABEL[stateOf(p)] || stateOf(p)} · ${ago(p.state_since_ms)}`)),
+    p.needs_reason ? h('div', { class: 'needs-line' }, p.needs_reason) : null,
+    h('pre', { class: 'thumb', dataset: { key } }, (thumbs.get(key) || []).slice(-14).join('\n')));
+}
+
+function sidebar(st) {
+  const projects = S.projects.get(st) || [];
+  const panes = panesOf(st);
+  const row = (p) => h('a', { class: 'side-pane' + (S.route.pane === p.id ? ' current' : ''), href: paneUrl(st, p.id), oncontextmenu: (e) => { e.preventDefault(); paneMenu(e, st, p, 'side'); } }, dot(p), h('span', {}, p.name), p.paused ? h('span', { class: 'chip warn' }, 'paused') : null);
+  const projMenu = (e, pr) => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
+    { title: pr.address },
+    pr.open ? { label: 'Close project (keeps conversations)', action: () => rpc(st, 'project.close', { name: pr.name }) } : { label: 'Open project', action: () => rpc(st, 'project.open', { name: pr.name }) },
+    { label: 'New pane in this project…', action: () => newPaneDialog(st, pr.name) },
+    { label: 'Tasks, reviews and sign-off', action: () => tasksPanel(st, pr.name).catch(er => toast(er.message, 'error')) },
+    '-',
+    { label: 'Remove from this station', danger: true, action: () => confirmBox('Remove ' + pr.name + '?', 'Its panes are closed. The folder and its .spandeck files are not touched.', 'Remove', () => rpc(st, 'project.remove', { name: pr.name })) },
+  ]); };
+  return h('aside', { class: 'sidebar', oncontextmenu: (e) => { if (e.target.closest('.side-pane,.side-project')) return; e.preventDefault(); showMenu(e.clientX, e.clientY, [
+    { label: 'New pane…', action: () => newPaneDialog(st) }, { label: 'New project…', action: () => newProjectDialog(st) }, { label: 'Check this station', action: doctorPanel }]); } },
+    projects.map(pr => h('div', { class: 'side-group' },
+      h('div', { class: 'side-project', oncontextmenu: (e) => projMenu(e, pr), title: pr.path }, h('b', {}, pr.name), pr.branch ? h('span', { class: 'muted' }, pr.branch) : null, h('span', { class: 'grow' }),
+        h('button', { class: 'icon-btn', 'aria-label': 'Project menu', onclick: (e) => projMenu(e, pr) }, '⋮')),
+      pr.open ? panes.filter(p => p.project === pr.name).sort((a, b) => stateRank(a) - stateRank(b)).map(row) : h('button', { class: 'mini', onclick: () => rpc(st, 'project.open', { name: pr.name }) }, 'Open'),
+      pr.problem ? h('div', { class: 'warn-text small' }, pr.problem) : null)),
+    h('div', { class: 'side-group' }, h('div', { class: 'side-project' }, h('b', {}, 'Other panes')), panes.filter(p => !p.project).sort((a, b) => stateRank(a) - stateRank(b)).map(row)),
+    h('div', { class: 'side-actions' }, h('button', { onclick: () => newPaneDialog(st) }, '＋ Pane'), h('button', { onclick: () => newProjectDialog(st) }, '＋ Project')));
+}
+
+function getTerm(st, p, where, mode) {
+  const key = `${where}:${st}/${p.id}`;
+  let t = S.terms.get(key);
+  if (!t) {
+    t = new PaneTerm(api, st, p, { mode, onMenu: (e, term) => paneMenu(e, st, term.pane, where), onFocus: (term) => { S.focused = term.pane.id; } });
+    S.terms.set(key, t);
+    t._fresh = true;
+  } else t.update(p);
+  t._used = true;
+  return t;
+}
+
+function renderTree(st, node, tab) {
+  if (!node) return h('div', { class: 'empty' }, 'Empty workspace. Click a pane on the left to place it here.');
+  if (node.pane) {
+    const p = findPane(st, node.pane);
+    if (!p) return h('div', { class: 'empty' }, 'This pane was closed. ', h('button', { class: 'mini', onclick: () => closeLeaf(st, node.pane) }, 'Remove the view'));
+    return getTerm(st, p, 'leaf', 'control').el;
+  }
+  const a = h('div', { class: 'split-a', style: { flex: `${node.ratio} 1 0` } }, renderTree(st, node.a, tab));
+  const b = h('div', { class: 'split-b', style: { flex: `${1 - node.ratio} 1 0` } }, renderTree(st, node.b, tab));
+  const gutter = h('div', { class: 'gutter', role: 'separator', title: 'Drag to resize' });
+  const box = h('div', { class: 'split ' + node.dir }, a, gutter, b);
+  gutter.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const rect = box.getBoundingClientRect();
+    const move = (ev) => {
+      const r = node.dir === 'row' ? (ev.clientX - rect.left) / rect.width : (ev.clientY - rect.top) / rect.height;
+      node.ratio = Math.min(0.9, Math.max(0.1, r));
+      a.style.flex = `${node.ratio} 1 0`;
+      b.style.flex = `${1 - node.ratio} 1 0`;
+    };
+    const up = () => { removeEventListener('mousemove', move); removeEventListener('mouseup', up); document.body.classList.remove('dragging'); const l = loadLayout(st); l.tabs[l.active] = tab; saveLayout(st, l); };
+    document.body.classList.add('dragging');
+    addEventListener('mousemove', move);
+    addEventListener('mouseup', up);
+  });
+  return box;
+}
+
+function stationView(st) {
+  const info = S.fleet.stations.find(s => s.station === st);
+  if (info && info.state !== 'online') return h('main', { class: 'fleet' }, h('p', { class: 'warn-text' }, `${st} is ${info.state === 'update_needed' ? 'on a version this station cannot control' : 'unreachable'}. Nothing here says what it is doing right now.`));
+  const l = loadLayout(st);
+  if (l.active >= l.tabs.length) l.active = l.tabs.length - 1;
+  const tab = l.tabs[l.active];
+  const tabs = h('div', { class: 'tabs', role: 'tablist' },
+    h('button', { class: 'tab' + (l.active < 0 ? ' current' : ''), role: 'tab', onclick: () => { l.active = -1; saveLayout(st, l); render(); } }, 'Deck'),
+    l.tabs.map((t, i) => h('button', { class: 'tab' + (i === l.active ? ' current' : ''), role: 'tab',
+      onclick: () => { l.active = i; saveLayout(st, l); render(); },
+      oncontextmenu: (e) => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
+        { label: 'Rename', action: () => dialog('Rename workspace', (close) => { const n = h('input', { value: t.name }); return h('form', { onsubmit: (ev) => { ev.preventDefault(); t.name = n.value; saveLayout(st, l); close(); render(); } }, field('Name', n), h('div', { class: 'row end' }, h('button', { class: 'primary', type: 'submit' }, 'Rename'))); }) },
+        { label: 'Close workspace', danger: true, action: () => { l.tabs.splice(i, 1); l.active = Math.min(l.active, l.tabs.length - 1); saveLayout(st, l); render(); } }]); } }, t.name)),
+    h('button', { class: 'tab add', title: 'New workspace', onclick: () => { l.tabs.push({ name: 'workspace ' + (l.tabs.length + 1), tree: null }); l.active = l.tabs.length - 1; saveLayout(st, l); render(); } }, '＋'));
+  let content;
+  if (!tab) {
+    const live = liveAgents(st).sort((a, b) => stateRank(a) - stateRank(b));
+    content = h('div', { class: 'deck' }, live.length ? h('div', { class: 'tiles' }, live.map(p => paneTile(st, p))) : h('div', { class: 'empty' }, 'Nothing is running here. Start a pane or a project from the left.'));
+    loadThumbs(st, live);
+  } else {
+    content = h('div', { class: 'workspace' }, renderTree(st, tab.tree, tab));
+  }
+  return h('div', { class: 'station-view' }, sidebar(st), h('main', { class: 'station-main' }, tabs, content));
+}
+
+function paneView(st, id) {
+  const p = findPane(st, id);
+  if (!p) return h('div', { class: 'station-view' }, sidebar(st), h('main', { class: 'station-main' }, h('div', { class: 'empty' }, online(st) === false ? `${st} is unreachable.` : 'That pane is not on this station any more.')));
+  const t = getTerm(st, p, 'zoom', 'control');
+  setTimeout(() => t.focus(), 50);
+  return h('div', { class: 'station-view' }, sidebar(st), h('main', { class: 'station-main zoomed' }, t.el));
+}
+
+// ---- phone: status, blockers, approvals, stop controls, read-only attach ----
+
+function phoneView() {
+  const r = S.route;
+  if (r.view === 'pane') {
+    const p = findPane(r.station, r.pane);
+    if (!p) return h('main', { class: 'phone' }, h('p', {}, 'That pane is gone.'), h('a', { href: '#/fleet' }, 'Back'));
+    const t = getTerm(r.station, p, 'phone', 'watch');
+    return h('main', { class: 'phone phone-pane' },
+      h('div', { class: 'row' }, h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'), h('span', { class: 'grow' }),
+        h('button', { class: 'danger big', disabled: p.exited || !(p.state === 'working' || p.state === 'needs_you'), onclick: () => rpc(r.station, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')) }, 'Stop this turn')),
+      t.el, h('p', { class: 'muted small' }, 'Watching only. Use a computer to type.'));
+  }
+  const all = S.fleet.stations.flatMap(s => liveAgents(s.station).filter(p => p.agent !== 'shell').map(p => ({ st: s.station, p })));
+  const blockers = all.filter(x => x.p.state === 'needs_you' || x.p.state === 'error');
+  const line = ({ st, p }) => h('a', { class: 'phone-row', href: paneUrl(st, p.id) }, dot(p), h('div', { class: 'grow' }, h('b', {}, p.name), h('span', { class: 'muted' }, ` · ${st}${p.project ? ' · ' + p.project : ''}`),
+    h('div', { class: 'muted small' }, p.needs_reason || (p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}` : `${STATE_LABEL[stateOf(p)]} · ${ago(p.state_since_ms)}`))), '›');
+  return h('main', { class: 'phone' },
+    h('section', {}, h('h2', {}, 'Approvals'), S.approvals.length ? S.approvals.map(a => approvalRow(a)) : h('p', { class: 'muted' }, 'Nothing is waiting for approval.')),
+    h('section', {}, h('h2', {}, 'Needs you'), blockers.length ? blockers.map(line) : h('p', { class: 'muted' }, 'No agent is blocked.')),
+    h('section', {}, h('h2', {}, 'Stations'),
+      S.fleet.stations.map(s => h('div', { class: 'phone-station' },
+        h('div', { class: 'row' }, h('span', { class: 'dot ' + (s.state === 'online' ? 'idle' : 'unreachable') }), h('b', {}, s.station), h('span', { class: 'muted' }, s.state === 'online' ? `${s.working ?? 0} working · ${s.needs_you ?? 0} need you` : s.state.replace('_', ' ')), h('span', { class: 'grow' }),
+          s.state === 'online' ? h('button', { class: 'danger', onclick: () => confirmBox(`Stop every agent on ${s.station}?`, 'Running turns are interrupted. Processes stay.', 'Stop', () => rpc(api.station, 'stop.all', { scope: s.self ? 'station' : s.station })) }, 'Stop') : null),
+        all.filter(x => x.st === s.station).sort((a, b) => stateRank(a.p) - stateRank(b.p)).map(line)))),
+    stopRows(),
+    h('section', {}, h('button', { class: 'danger big wide', onclick: () => confirmBox('Stop the whole fleet?', 'Every running agent turn on every station is interrupted.', 'Stop everything', () => rpc(api.station, 'stop.all', { scope: 'fleet' })) }, 'Stop every agent in the fleet')));
+}
+
+// ------------------------------------------------------------------- render
+
+function render() {
+  if (!api.connected && api.authError) {
+    root.replaceChildren(h('main', { class: 'login' }, h('h1', {}, 'spandeck'), h('p', {}, api.authError),
+      h('p', { class: 'muted' }, 'On this computer, run `spandeck cc` and open the address it prints. From another device, open this station by its Tailscale name while signed in to the same Tailscale account.')));
+    return;
+  }
+  closeMenu();
+  S.route = parseRoute();
+  for (const t of S.terms.values()) t._used = false;
+  const r = S.route;
+  let main;
+  if (isPhone()) main = phoneView();
+  else if (r.view === 'pane') main = paneView(r.station, r.pane);
+  else if (r.view === 'station') main = stationView(r.station);
+  else main = fleetView();
+  root.replaceChildren(topbar(), main);
+  for (const [key, t] of S.terms) {
+    if (!t._used) { t.dispose(); S.terms.delete(key); }
+    else if (t._fresh) { t._fresh = false; t.mount(); }
+    else t.layout();
+  }
+  document.title = (r.pane ? (findPane(r.station, r.pane)?.name || 'pane') + ' · ' : r.station ? r.station + ' · ' : '') + 'spandeck';
+}
+
+// Data changed: redraw everything except live terminals, which are reused.
+function update() {
+  // Do not redraw under an open dialog's feet or while a menu is open.
+  if (document.querySelector('.menu')) return;
+  const active = document.activeElement;
+  const typing = active && active.closest && active.closest('.dialog');
+  const focusedTerm = [...S.terms.values()].find(t => t.el.contains(active));
+  render();
+  if (focusedTerm && !typing) focusedTerm.focus();
+}
+
+addEventListener('hashchange', render);
+addEventListener('resize', () => { clearTimeout(S._rs); S._rs = setTimeout(render, 150); });
+addEventListener('keydown', (e) => {
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); palette(); return; }
+  const st = S.route.station;
+  if (mod && e.shiftKey && st) {
+    const k = e.key.toLowerCase();
+    if (k === 'e' || k === 'o') { e.preventDefault(); pickPane(st, (id) => openInWorkspace(st, id, k === 'e' ? 'row' : 'col'), S.focused); }
+    if (k === 'w' && S.focused) { e.preventDefault(); closeLeaf(st, S.focused); }
+  }
+  // Esc zooms out, unless a terminal has the keyboard (agents need Esc).
+  if (e.key === 'Escape' && !document.querySelector('.backdrop,.menu') && !document.activeElement?.closest('.pane')) {
+    if (S.route.view === 'pane') go(stationUrl(S.route.station));
+    else if (S.route.view === 'station') go('#/fleet');
+  }
+}, false);
+
+api.onStatus(() => render());
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+api.connect().then((ok) => {
+  if (!ok) return render();
+  if (!location.hash || location.hash === '#') history.replaceState(null, '', '#/fleet');
+  render();
+  refresh();
+});
