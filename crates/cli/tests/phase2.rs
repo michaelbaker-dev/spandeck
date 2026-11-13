@@ -357,3 +357,86 @@ fn a_second_browser_letterboxes_instead_of_resizing_the_pane() {
         "the letterboxed client did not fight over the size"
     );
 }
+
+/// Not a test of behaviour: writes screenshots of each view for a human to
+/// look at. `SPANDECK_SHOTS=/some/dir cargo test --test phase2 -- --ignored screenshots`
+#[test]
+#[ignore]
+fn screenshots_of_every_view() {
+    use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png;
+    let dir =
+        std::path::PathBuf::from(std::env::var("SPANDECK_SHOTS").expect("set SPANDECK_SHOTS"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let s = Station::start("spark2");
+    let repo = s.git_repo("api");
+    std::fs::create_dir_all(repo.join(".spandeck")).unwrap();
+    std::fs::write(
+        repo.join(".spandeck/project.toml"),
+        "name = \"api\"\n\n[[pane]]\nname = \"term\"\nagent = \"shell\"\n",
+    )
+    .unwrap();
+    s.call("project.new", json!({"path": repo, "open": true}));
+    let spawn = |name: &str, role: &str, script: Value| {
+        s.fake(
+            script,
+            json!({"name": name, "project": "api", "role": role, "cwd": repo}),
+        )
+    };
+    let dev = spawn(
+        "dev",
+        "author",
+        json!({"steps": [{"say": "● I'll add the importer and its tests."}, {"prompt": "add the importer"}, {"tool": {"name": "Edit", "file": "src/importer.rs"}}, {"say": "● Running the test suite…"}, {"work": 600000}]}),
+    );
+    spawn(
+        "reviewer",
+        "reviewer",
+        json!({"steps": [{"prompt": "clean the build"}, {"say": "I need to remove the build directory first."}, {"permission": {"name": "Bash", "command": "rm -rf build && cargo build --release"}}, {"sleep": 600000}]}),
+    );
+    spawn(
+        "tester",
+        "tester",
+        json!({"steps": [{"prompt": "run tests"}, {"tool": {"name": "Bash", "command": "cargo test"}}, {"turn_end": "All 42 tests pass."}]}),
+    );
+    s.call(
+        "pane.send_text",
+        json!({"pane": "term", "text": "git log --oneline && ls -la"}),
+    );
+    s.wait_state(&dev, "working");
+    s.wait_state("reviewer", "needs_you");
+
+    let shoot = |page: &Page, name: &str| {
+        std::thread::sleep(Duration::from_millis(1200));
+        let png = page.tab.capture_screenshot(Png, None, None, true).unwrap();
+        std::fs::write(dir.join(format!("{name}.png")), png).unwrap();
+    };
+    let page = Page::open(&s, 1400, 860);
+    page.wait(
+        "fleet",
+        "!!document.querySelector('.tile.station .agent-line')",
+    );
+    shoot(&page, "1-fleet");
+    page.goto("/s/spark2");
+    page.wait(
+        "deck",
+        "document.querySelectorAll('.pane-tile').length === 4",
+    );
+    shoot(&page, "2-station-deck");
+    page.goto(&format!("/s/spark2/p/{dev}"));
+    page.wait("pane", "!!document.querySelector('.pane .xterm-rows')");
+    shoot(&page, "3-pane");
+    page.js("document.querySelector('.pane').dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, clientX: 700, clientY: 260}))");
+    shoot(&page, "4-right-click-menu");
+    page.js("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))");
+    page.js("[...document.querySelectorAll('.topbar button')].find(b => b.innerText.startsWith('Approvals')).click()");
+    shoot(&page, "5-approvals");
+    page.js("document.querySelector('.dialog .icon-btn').click()");
+    page.js("[...document.querySelectorAll('.topbar button')].find(b => b.innerText === 'Agent setup').click()");
+    page.wait(
+        "setup",
+        "!!document.querySelector('.dialog [aria-label=\"Server name\"]')",
+    );
+    shoot(&page, "6-agent-setup");
+    let phone = Page::open(&s, 390, 844);
+    phone.wait("phone", "!!document.querySelector('main.phone .approval')");
+    shoot(&phone, "7-phone");
+}

@@ -167,6 +167,7 @@ function paneMenu(e, st, p, where) {
     { label: 'Show changes (diff)', action: () => diffPanel(st, p) },
     agent && { label: 'Standing orders for this pane', action: () => ordersPanel(st, p) },
     agent && p.project && alive && { label: 'Start a review loop on its work', action: () => rpc(st, 'recipe.review', { pane: p.id }).then(() => toast('Review loop started')) },
+    agent && alive && { label: 'Run a command in it…', action: () => commandDialog(st, p) },
     { label: 'Send it a message', action: () => messageDialog(st, p) },
     { label: 'Rename', action: () => renameDialog(st, p) },
     { label: 'Copy address', action: () => navigator.clipboard?.writeText(p.address).then(() => toast('Copied ' + p.address)) },
@@ -348,6 +349,8 @@ function palette() {
     { label: 'Inbox', run: inboxPanel },
     { label: 'Stop every agent on this station', run: () => rpc(api.station, 'stop.all', { scope: 'station' }) },
     { label: 'Check this station (doctor)', run: doctorPanel },
+    { label: 'Agent setup: MCP servers, skills, models', run: setupPanel },
+    { label: 'Run a command in every agent…', run: () => commandDialog(api.station, null) },
   ];
   dialog('Go to or do…', (close) => {
     const input = h('input', { placeholder: 'Type to filter', 'aria-label': 'Filter' });
@@ -371,6 +374,115 @@ async function doctorPanel() {
     h('td', {}, h('span', { class: 'chip ' + (c.ok ? 'ok' : c.required ? 'bad' : 'warn') }, c.ok ? 'ok' : c.required ? 'fail' : 'warn')), h('td', {}, c.name), h('td', { class: 'muted' }, c.detail))))), { wide: true });
 }
 
+// ----------------------------------------------------------- agent setup
+
+const COMMAND_PRESETS = [
+  ['/login', 'Sign in again (finish in the terminal)'],
+  ['/model ', 'Change the model'],
+  ['/effort ', 'Change the effort level'],
+  ['/compact', 'Compact the conversation'],
+  ['/clear', 'Start a fresh conversation'],
+  ['/mcp', 'Show MCP servers'],
+  ['/status', 'Show the agent\'s status'],
+];
+
+// Run a command in one agent (pane given) or in many.
+function commandDialog(st, pane) {
+  dialog(pane ? `Run a command in ${pane.name}` : 'Run a command in agents', (close) => {
+    const cmd = h('input', { placeholder: '/model opus', 'aria-label': 'Command' });
+    const scope = h('select', { 'aria-label': 'Where' },
+      h('option', { value: 'station' }, `Every agent on ${st}`), h('option', { value: 'fleet' }, 'Every agent in the fleet'));
+    const kind = h('select', { 'aria-label': 'Which agents' }, h('option', { value: '' }, 'All agents'), h('option', { value: 'claude' }, 'Claude Code only'), h('option', { value: 'codex' }, 'Codex only'));
+    const force = h('input', { type: 'checkbox', style: { width: 'auto' } });
+    const result = h('div', { class: 'list' });
+    const run = async () => {
+      const command = cmd.value.trim();
+      if (!command) return;
+      const params = pane ? { command, pane: pane.id, force: true } : { command, fleet: scope.value === 'fleet', agent: kind.value || undefined, force: force.checked };
+      const out = await rpc(pane ? st : api.station, 'agents.command', params);
+      if (pane) {
+        close();
+        // Commands like /login are finished by hand: bring the terminal up.
+        go(paneUrl(st, pane.id));
+        return;
+      }
+      result.replaceChildren(...out.stations.map(x => h('div', { class: 'note' }, h('b', {}, x.station), x.error ? h('span', { class: 'warn-text' }, ' ' + x.error) :
+        h('span', {}, ` sent to ${x.sent.length}`, x.skipped.length ? `, skipped ${x.skipped.length} (${x.skipped.map(k => `${k.name}: ${k.why}`).join('; ')})` : ''))));
+    };
+    return h('form', { onsubmit: (e) => { e.preventDefault(); run(); } },
+      field('Command', cmd, 'Typed into the agent exactly as you would type it.'),
+      h('div', { class: 'row', style: { flexWrap: 'wrap' } }, COMMAND_PRESETS.map(([c, title]) => h('button', { type: 'button', class: 'mini', title, onclick: () => { cmd.value = c; cmd.focus(); } }, c.trim()))),
+      pane ? null : h('div', { class: 'row', style: { marginTop: '10px' } }, scope, kind),
+      pane ? null : h('label', { class: 'row', style: { marginTop: '8px' } }, force, 'Also send to agents that are in the middle of a turn'),
+      h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Close'), h('button', { class: 'primary', type: 'submit' }, pane ? 'Run and open the terminal' : 'Run')),
+      result);
+  });
+}
+
+// MCP servers, skills and model defaults: set once, applied on every station.
+async function setupPanel() {
+  let view;
+  try { view = await api.call('setup.get'); } catch (e) { return toast(e.message, 'error'); }
+  const setup = view.setup;
+  setup.mcp_servers ||= {}; setup.skills ||= {}; setup.defaults ||= {};
+  dialog('Agent setup', (close, body) => {
+    const draw = () => body.replaceChildren(content());
+    const save = async () => {
+      const out = await rpc(api.station, 'setup.set', { setup, fleet: true });
+      const bad = out.stations.filter(x => !x.ok);
+      toast(bad.length ? `Saved. Not yet on: ${bad.map(x => x.station).join(', ')} (they catch up when they are back)` : `Saved on ${out.stations.length} station${out.stations.length === 1 ? '' : 's'}`);
+      const problems = out.stations.flatMap(x => x.problems || []);
+      if (problems.length) toast(problems.join(' · '), 'error');
+      close();
+    };
+    const agentsBox = (item) => h('select', { 'aria-label': 'Which agents', onchange: (e) => { item.agents = e.target.value ? [e.target.value] : []; } },
+      [['', 'All agents'], ['claude', 'Claude Code'], ['codex', 'Codex']].map(([v, l]) => h('option', { value: v, selected: (item.agents?.[0] || '') === v }, l)));
+    const content = () => {
+      const mName = h('input', { placeholder: 'name', 'aria-label': 'Server name' });
+      const mCmd = h('input', { placeholder: 'npx -y some-mcp-server   or   https://mcp.example.com', 'aria-label': 'Command or URL' });
+      const sName = h('input', { placeholder: 'name', 'aria-label': 'Skill name' });
+      const sDesc = h('input', { placeholder: 'When the agent should use it (one line)', 'aria-label': 'Skill description' });
+      const sBody = h('textarea', { rows: 5, placeholder: 'The instructions (the body of SKILL.md)', 'aria-label': 'Skill content' });
+      const def = (agent, key, placeholder) => h('input', { placeholder, value: setup.defaults[agent]?.[key] || '', 'aria-label': `${agent} ${key}`,
+        oninput: (e) => { setup.defaults[agent] ||= {}; setup.defaults[agent][key] = e.target.value.trim() || null; } });
+      return h('div', {},
+        h('p', { class: 'muted' }, `One list for every station${setup.updated_by ? ` · last changed by ${setup.updated_by}` : ''}. New agent panes pick it up when they start.`),
+        h('h3', {}, 'MCP servers'),
+        h('table', { class: 'table' }, h('tbody', {}, Object.entries(setup.mcp_servers).map(([name, sv]) => h('tr', {},
+          h('td', {}, h('b', {}, name)), h('td', { class: 'mono' }, sv.url || [sv.command, ...(sv.args || [])].join(' ')), h('td', {}, agentsBox(sv)),
+          h('td', {}, h('button', { class: 'mini danger', onclick: () => { delete setup.mcp_servers[name]; draw(); } }, 'Remove')))),
+          h('tr', {}, h('td', {}, mName), h('td', {}, mCmd), h('td', {}), h('td', {}, h('button', { class: 'mini', onclick: () => {
+            const name = mName.value.trim(), line = mCmd.value.trim();
+            if (!name || !line) return toast('Give the server a name and a command or URL', 'error');
+            if (/^https?:\/\//.test(line)) setup.mcp_servers[name] = { url: line, agents: [] };
+            else { const parts = line.split(/\s+/); setup.mcp_servers[name] = { command: parts[0], args: parts.slice(1), env: {}, agents: [] }; }
+            draw();
+          } }, 'Add'))))),
+        h('h3', {}, 'Skills'),
+        h('table', { class: 'table' }, h('tbody', {}, Object.entries(setup.skills).map(([name, sk]) => h('tr', {},
+          h('td', {}, h('b', {}, name)), h('td', {}, sk.description), h('td', {}, agentsBox(sk)),
+          h('td', {}, h('button', { class: 'mini danger', onclick: () => { delete setup.skills[name]; draw(); } }, 'Remove')))))),
+        h('div', { class: 'slot', style: { gridTemplateColumns: '1fr 2fr auto' } }, sName, sDesc, h('button', { class: 'mini', onclick: () => {
+          const name = sName.value.trim();
+          if (!name || !sDesc.value.trim() || !sBody.value.trim()) return toast('A skill needs a name, a description and content', 'error');
+          setup.skills[name] = { description: sDesc.value.trim(), content: sBody.value, agents: [] };
+          draw();
+        } }, 'Add')), sBody,
+        h('h3', {}, 'Defaults for new agent panes'),
+        h('table', { class: 'table' },
+          h('thead', {}, h('tr', {}, h('th', {}, 'Agent'), h('th', {}, 'Model'), h('th', {}, 'Effort'), h('th', {}, 'Installed here'), h('th', {}, 'Running here'))),
+          h('tbody', {}, view.agents.map(a => h('tr', {}, h('td', {}, a.name), h('td', {}, def(a.agent, 'model', 'default')), h('td', {}, def(a.agent, 'effort', 'default')),
+            h('td', { class: 'muted' }, a.installed_version || 'not installed'),
+            h('td', {}, a.running.length ? a.running.map(r => h('span', { class: 'chip ' + (r.state === 'needs_you' ? 'warn' : ''), title: r.needs_reason || '' }, r.name)) : h('span', { class: 'muted' }, 'none')))))),
+        h('p', { class: 'muted small' }, 'Agents that are already running keep their settings. To change them now, use "Run a command in agents" (for example /model opus).'),
+        h('div', { class: 'row end' },
+          h('button', { onclick: () => { close(); commandDialog(api.station, null); } }, 'Run a command in agents…'),
+          h('span', { class: 'grow' }), h('button', { onclick: close }, 'Cancel'), h('button', { class: 'primary', onclick: save }, 'Save for every station')));
+    };
+    return content();
+  }, { wide: true });
+}
+
 // -------------------------------------------------------------------- views
 
 function topbar() {
@@ -390,6 +502,7 @@ function topbar() {
     needs ? h('span', { class: 'chip needs', title: 'Agents waiting for you' }, `${needs} need${needs === 1 ? 's' : ''} you`) : null,
     h('button', { class: S.approvals.length ? 'attn' : '', onclick: approvalsPanel }, 'Approvals', S.approvals.length ? h('span', { class: 'count' }, S.approvals.length) : null),
     h('button', { onclick: inboxPanel }, 'Inbox', unread ? h('span', { class: 'count' }, unread) : null),
+    isPhone() ? null : h('button', { onclick: setupPanel, title: 'MCP servers, skills and model defaults for every agent' }, 'Agent setup'),
     h('button', { class: 'danger', onclick: stopAllMenu, title: 'Interrupt running agent turns' }, 'Stop all'),
     isPhone() ? null : h('button', { onclick: palette, title: 'Ctrl+K' }, '⌘K'));
 }
@@ -430,13 +543,19 @@ function fleetView() {
 }
 
 const thumbs = new Map();
+// The last lines that have something on them (a screen is mostly blank rows).
+function thumbText(lines) {
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1].trim()) end--;
+  return lines.slice(Math.max(0, end - 14), end).join('\n');
+}
 async function loadThumbs(st, panes) {
   await Promise.all(panes.map(async (p) => {
     try { const t = await api.on(st, 'pane.text', { pane: p.id }); thumbs.set(st + '/' + p.id, t.lines); } catch (e) { /* ignore */ }
   }));
   for (const el of document.querySelectorAll('.thumb[data-key]')) {
     const lines = thumbs.get(el.dataset.key);
-    if (lines) el.textContent = lines.slice(-14).join('\n');
+    if (lines) el.textContent = thumbText(lines);
   }
 }
 
@@ -446,7 +565,7 @@ function paneTile(st, p) {
     h('div', { class: 'tile-head' }, dot(p), h('b', {}, p.name), p.agent !== 'shell' ? h('span', { class: 'chip' }, p.agent_name) : null, h('span', { class: 'grow' }),
       h('span', { class: 'muted' }, p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}` : `${STATE_LABEL[stateOf(p)] || stateOf(p)} · ${ago(p.state_since_ms)}`)),
     p.needs_reason ? h('div', { class: 'needs-line' }, p.needs_reason) : null,
-    h('pre', { class: 'thumb', dataset: { key } }, (thumbs.get(key) || []).slice(-14).join('\n')));
+    h('pre', { class: 'thumb', dataset: { key } }, thumbText(thumbs.get(key) || [])));
 }
 
 function sidebar(st) {

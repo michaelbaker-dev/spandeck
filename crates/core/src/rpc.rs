@@ -49,6 +49,7 @@ const AGENT_METHODS: &[&str] = &[
 /// Methods another station may call directly. `rpc.forward` carries the
 /// user's own request from a Control Deck opened on that station.
 const PEER_METHODS: &[&str] = &[
+    "setup.push",
     "station.info",
     "relay.accept",
     "stop.apply",
@@ -81,6 +82,7 @@ const READ_METHODS: &[&str] = &[
     "stop.list",
     "integration.status",
     "archive.sessions",
+    "setup.get",
 ];
 
 fn p<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T> {
@@ -658,6 +660,47 @@ impl Daemon {
                         .await
                         .map_err(|e| Error::Other(anyhow::anyhow!("{station}: {e}")))?
                 }
+            }
+
+            // --------------------------------------------------- agent setup
+            "setup.get" => {
+                let d = self.clone();
+                tokio::task::spawn_blocking(move || d.setup_view())
+                    .await
+                    .map_err(|e| invalid(e.to_string()))?
+            }
+            "setup.set" => {
+                let setup: crate::setup::AgentSetup = p(params
+                    .get("setup")
+                    .ok_or_else(|| invalid("missing setup"))?)?;
+                let fleet = params
+                    .get("fleet")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                self.setup_set(setup, by, fleet).await?
+            }
+            "setup.push" => {
+                let setup: crate::setup::AgentSetup = p(params
+                    .get("setup")
+                    .ok_or_else(|| invalid("missing setup"))?)?;
+                self.setup_push(setup, by)?
+            }
+            "agents.command" => {
+                let agent = match opt(&params, "agent") {
+                    Some(a) => Some(
+                        AgentKind::parse(a).ok_or_else(|| invalid("agent is claude or codex"))?,
+                    ),
+                    None => None,
+                };
+                self.agents_command(
+                    s(&params, "command")?,
+                    opt(&params, "pane"),
+                    agent,
+                    flag(&params, "fleet"),
+                    flag(&params, "force"),
+                    by,
+                )
+                .await?
             }
 
             // ------------------------------------------------- notifications

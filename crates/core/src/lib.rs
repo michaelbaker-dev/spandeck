@@ -14,6 +14,7 @@
 //!   orders    standing orders at five layers
 //!   fleet     discovery over Tailscale, trust, peer calls, stop-all
 //!   notify    the inbox and push rules
+//!   setup     fleet-wide agent setup: MCP servers, skills, model defaults
 
 pub mod client;
 pub mod daemon;
@@ -32,6 +33,7 @@ pub mod recipes;
 pub mod relay;
 pub mod rpc;
 pub mod server;
+pub mod setup;
 pub mod tasks;
 
 pub use daemon::{Authority, BusEvent, Caller, Daemon, Error, StartOpts, PROTOCOL, VERSION};

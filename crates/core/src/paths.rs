@@ -39,7 +39,20 @@ impl Paths {
         if let Some(p) = std::env::var_os("SPANDECK_SOCKET") {
             return PathBuf::from(p);
         }
-        self.state_dir.join("spandeckd.sock")
+        let path = self.state_dir.join("spandeckd.sock");
+        // Unix socket paths are limited to about 100 bytes. A state directory
+        // deeper than that gets a short, stable stand-in.
+        if path.as_os_str().len() <= 100 {
+            return path;
+        }
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(self.state_dir.as_os_str().as_encoded_bytes());
+        let tag: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        let dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|d| d.is_dir())
+            .unwrap_or_else(std::env::temp_dir);
+        dir.join(format!("spandeck-{tag}.sock"))
     }
     pub fn db(&self) -> PathBuf {
         self.state_dir.join("spandeck.db")

@@ -25,6 +25,9 @@ pub const CLAUDE_RULES: &[Rule] = &[
             "❯ 1. Yes",
             "Would you like to proceed",
             "Yes, I trust this folder",
+            // Signed out: the agent cannot work until someone runs /login.
+            "Please run /login",
+            "Run /login",
         ],
         window: 16,
     },

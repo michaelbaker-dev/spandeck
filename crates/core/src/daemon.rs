@@ -675,9 +675,11 @@ impl Daemon {
     /// spandeck starts works with no global install.
     fn integration_args(&self, agent: AgentKind) -> Vec<String> {
         let bin = self.exe.display().to_string();
+        let setup = self.setup();
+        // The fleet-wide agent setup: model defaults and shared MCP servers.
+        let mut args = setup.launch_args(agent);
         match agent {
             AgentKind::Claude => {
-                let mut args = vec![];
                 let installed = install::status(agent, &self.home)
                     .map(|s| s.installed)
                     .unwrap_or(false);
@@ -685,14 +687,12 @@ impl Daemon {
                     args.push("--settings".to_string());
                     args.push(json!({"hooks": install::hooks_block(agent, &bin)}).to_string());
                 }
+                let mut servers = setup.mcp_json(agent);
+                servers.insert("spandeck".into(), json!({"command": bin, "args": ["mcp"]}));
                 args.push("--mcp-config".to_string());
-                args.push(
-                    json!({"mcpServers": {"spandeck": {"command": bin, "args": ["mcp"]}}})
-                        .to_string(),
-                );
-                args
+                args.push(json!({"mcpServers": servers}).to_string());
             }
-            AgentKind::Codex => vec![
+            AgentKind::Codex => args.extend([
                 "-c".to_string(),
                 format!(
                     "mcp_servers.spandeck.command={}",
@@ -700,9 +700,10 @@ impl Daemon {
                 ),
                 "-c".to_string(),
                 "mcp_servers.spandeck.args=[\"mcp\"]".to_string(),
-            ],
-            _ => vec![],
+            ]),
+            _ => {}
         }
+        args
     }
 
     pub(crate) fn save_pane(&self, p: &PaneEntry) {
@@ -1304,6 +1305,7 @@ impl Daemon {
             "at_keyboard": self.at_keyboard(),
             "web": self.web_addrs.lock().unwrap().clone(),
             "load": load_average(),
+            "setup": {"updated_ms": self.setup().updated_ms},
         })
     }
 }

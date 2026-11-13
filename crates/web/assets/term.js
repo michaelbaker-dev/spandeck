@@ -154,7 +154,8 @@ export class PaneTerm {
       : `${STATE_LABEL[s] || s}${s === 'working' || s === 'needs_you' ? ' · ' + ago(p.state_since_ms) : ''}`;
     const rpc = (m, extra = {}) => this.api.on(this.station, m, { pane: p.id, ...extra }).catch(e => toast(e.message, 'error'));
     this.strip.className = 'strip ' + s;
-    this.strip.replaceChildren(
+    // replaceChildren would print a missing piece as the word "null".
+    this.strip.replaceChildren(...[
       dot(p),
       h('span', { class: 'strip-name', title: p.address }, p.name),
       p.agent !== 'shell' ? h('span', { class: 'chip' }, p.agent_name) : null,
@@ -169,7 +170,7 @@ export class PaneTerm {
       p.agent !== 'shell' && !p.exited && (s === 'working' || s === 'needs_you')
         ? h('button', { class: 'mini danger', title: 'Stop: interrupt this turn. The process stays.', onclick: () => rpc('pane.stop') }, 'Stop') : null,
       h('button', { class: 'icon-btn', title: 'Pane menu', 'aria-label': 'Pane menu', onclick: (e) => this._menu(e) }, '⋮'),
-    );
+    ].filter(Boolean));
   }
 
   _menu(e) {
