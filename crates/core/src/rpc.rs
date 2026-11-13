@@ -31,6 +31,7 @@ const READ_METHODS: &[&str] = &[
     "station.info", "station.doctor", "pane.list", "pane.get", "pane.text", "approval.list", "log.query",
     "project.list", "project.get", "fleet.view", "notify.list", "task.list", "task.get", "msg.thread",
     "msg.recent", "orders.view", "orders.table", "signoff.status", "diff", "recipe.list", "stop.list", "integration.status",
+    "archive.sessions",
 ];
 
 fn p<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T> {
@@ -382,6 +383,9 @@ impl Daemon {
                 let hits = self.archive.search(s(&params, "query")?, &scope, limit);
                 json!(hits.into_iter().map(|h| { let mut v = json!(h); v["station"] = json!(self.station); v }).collect::<Vec<_>>())
             }
+
+            "archive.sessions" => json!(self.archive.sessions()),
+            "archive.restore" => json!({"path": self.archive.restore(s(&params, "session")?).map_err(Error::Other)?}),
 
             // -------------------------------------------------------- orders
             "orders.view" => self.orders_view(&self.target_pane(caller, &params)?)?,

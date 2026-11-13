@@ -227,6 +227,9 @@ impl Adapter for ClaudeCode {
         }
         args.extend(opts.extra_args.iter().cloned());
         if let Some(prompt) = &opts.prompt {
+            // `--mcp-config` and `--allowedTools` take several values and would
+            // swallow the prompt without the separator (found by the live canary).
+            args.push("--".to_string());
             args.push(prompt.clone());
         }
         Launch { program: opts.program.clone().unwrap_or_else(|| "claude".into()), args }
