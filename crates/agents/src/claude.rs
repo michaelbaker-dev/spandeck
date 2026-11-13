@@ -73,6 +73,11 @@ pub(crate) fn normalize_claude_dialect(agent: AgentKind, p: &Value) -> Option<Ag
             }
             (EventKind::ToolEnd, Some(AgentState::Working), t, None, None)
         }
+        // The user interrupted the turn mid-tool. Claude Code fires no Stop
+        // hook for an interrupt (seen live on 2.1.323), so this is the signal.
+        "PostToolUseFailure" if p.get("is_interrupt").and_then(|i| i.as_bool()) == Some(true) => {
+            (EventKind::Interrupted, Some(AgentState::Idle), tool(), Some("interrupted".to_string()), None)
+        }
         "PostToolUseFailure" => {
             let mut t = tool();
             if let Some(t) = t.as_mut() {

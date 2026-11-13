@@ -233,3 +233,47 @@ fn canary_real_claude_code_reports_through_hooks() {
     let sessions = s.call("archive.sessions", json!({}));
     assert!(sessions[0]["lines"].as_u64().unwrap() > 0, "the real session file was archived");
 }
+
+/// Live: what the real Claude Code lets us interrupt. Stop must end the turn
+/// and leave the process running. Run with `cargo test -- --ignored canary`.
+#[test]
+#[ignore]
+fn canary_stop_interrupts_a_real_claude_code_turn_and_the_process_stays() {
+    let real_home = std::env::var("HOME").unwrap();
+    let s = Station::start_with("canary", "", &[("HOME", &real_home)]);
+    let work = s.git_repo("canary-stop");
+    let pane = s.call("pane.spawn", json!({"agent": "claude", "cwd": work, "args": ["--model", "haiku", "--allowedTools", "Bash(sleep:*)"]}))["id"].as_str().unwrap().to_string();
+
+    // A new folder: Claude Code asks whether to trust it. spandeck sees that
+    // from the screen alone (no hook has fired yet) and says the pane needs you.
+    let p = s.wait_state(&pane, "needs_you");
+    assert_eq!(p["hooks_seen"], json!(false));
+    s.call("pane.input", json!({"pane": pane, "data": "\u{1b}[B"}));
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    s.call("pane.input", json!({"pane": pane, "data": "\r"}));
+    wait_for("the prompt box", 60, || s.text(&pane).contains("Claude Code v").then_some(()));
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    s.call("pane.send_text", json!({"pane": pane, "text": "Use the Bash tool to run exactly: sleep 90"}));
+    wait_for("the turn to be working on the sleep", 90, || {
+        let p = s.pane(&pane);
+        (p["state"] == json!("working") && p["tool"] == json!("Bash")).then_some(())
+    });
+    let pid = s.pane(&pane)["pid"].clone();
+
+    s.call("pane.stop", json!({"pane": pane}));
+    let start = std::time::Instant::now();
+    let after = loop {
+        let p = s.pane(&pane);
+        if p["state"] != json!("working") {
+            break p;
+        }
+        assert!(start.elapsed().as_secs() < 30, "the turn did not end; screen:\n{}", s.text(&pane));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert_eq!(after["exited"], json!(false), "stop: the process stays");
+    assert_eq!(after["pid"], pid);
+    assert!(s.text(&pane).to_lowercase().contains("interrupt"), "screen:\n{}", s.text(&pane));
+    s.call("pane.kill", json!({"pane": pane}));
+    wait_for("kill: the process ends", 15, || (s.pane(&pane)["exited"] == json!(true)).then_some(()));
+}

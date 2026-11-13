@@ -784,6 +784,28 @@ impl Daemon {
         p.term.write(keys)?;
         self.cancel_pane_approvals(&p.id);
         self.record("pane.stopped", Some(&p.id), meta.project.as_deref(), meta.task.as_deref(), Some(by), json!({}));
+        // An interrupt while the model is thinking fires no hook at all. Confirm
+        // from the screen: once the agent no longer shows itself as busy, the
+        // turn is over.
+        if let Some(a) = adapter(meta.agent) {
+            let d = self.clone();
+            let id = p.id.clone();
+            tokio::spawn(async move {
+                for _ in 0..40 {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    let Ok(p) = d.pane(&id) else { return };
+                    let state = p.meta.lock().unwrap().state;
+                    if !matches!(state, AgentState::Working | AgentState::NeedsYou) {
+                        return;
+                    }
+                    if a.detect_screen(&p.term.lines()) != Some(AgentState::Working) {
+                        p.meta.lock().unwrap().tool = None;
+                        d.set_state(&p, AgentState::Idle, None);
+                        return;
+                    }
+                }
+            });
+        }
         Ok(())
     }
 
