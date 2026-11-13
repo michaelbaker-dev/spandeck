@@ -246,16 +246,26 @@ impl Daemon {
         Ok(())
     }
 
-    /// Hook delivery: a short notice for an agent that is already running.
-    /// Marks the messages announced so the notice is given once.
+    /// Hook delivery: a short notice for an agent that is in the middle of a
+    /// turn. Returns nothing for a paused pane (no new work is delivered).
+    /// A notice that is ignored is repeated after `nudge_secs`.
     pub(crate) fn mail_notice(&self, pane_id: &str) -> Option<String> {
+        // Read the pause flag now, not from an earlier copy: a pause that lands
+        // while a hook is being handled must still hold the mail back.
+        if self.pane(pane_id).ok()?.meta.lock().unwrap().paused {
+            return None;
+        }
         let names = self.pane_names(pane_id);
         let mail = self.mail();
-        let waiting = mail.unannounced(&names);
+        let now = now_ms();
+        let waiting = mail.unannounced(&names, now.saturating_sub(self.cfg.nudge_secs * 1000));
         if waiting.is_empty() {
             return None;
         }
-        mail.mark_announced(&waiting.iter().map(|w| w.0.clone()).collect::<Vec<_>>());
+        mail.mark_announced(
+            &waiting.iter().map(|w| w.0.clone()).collect::<Vec<_>>(),
+            now,
+        );
         let senders: Vec<String> = {
             let mut s: Vec<String> = waiting.iter().map(|w| w.1.clone()).collect();
             s.dedup();
@@ -275,24 +285,31 @@ impl Daemon {
     /// The nudge is the only typed text; the payload never is.
     pub(crate) fn pump_mail(&self) {
         let mail = self.mail();
+        let now = now_ms();
         for p in self.list_panes() {
-            let (idle, id, agent) = {
+            let (idle, id) = {
                 let m = p.meta.lock().unwrap();
                 let idle = m.exit.is_none()
                     && !m.paused
                     && m.agent.is_agent()
                     && matches!(m.state, AgentState::Idle | AgentState::Done)
-                    && now_ms().saturating_sub(m.state_since_ms) > 1200;
-                (idle, m.id.clone(), m.agent)
+                    && now.saturating_sub(m.state_since_ms) > 1200;
+                (idle, m.id.clone())
             };
-            if !idle || !agent.is_agent() {
+            if !idle {
                 continue;
             }
-            let waiting = mail.unannounced(&self.pane_names(&id));
+            let waiting = mail.unannounced(
+                &self.pane_names(&id),
+                now.saturating_sub(self.cfg.nudge_secs * 1000),
+            );
             let Some((_, sender, _)) = waiting.first().cloned() else {
                 continue;
             };
-            mail.mark_announced(&waiting.iter().map(|w| w.0.clone()).collect::<Vec<_>>());
+            mail.mark_announced(
+                &waiting.iter().map(|w| w.0.clone()).collect::<Vec<_>>(),
+                now,
+            );
             let nudge = format!("You have mail from {sender}. Check your spandeck inbox.");
             if self.send_text(&id, &nudge, true).is_ok() {
                 self.record(

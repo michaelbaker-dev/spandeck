@@ -346,27 +346,33 @@ impl MessageStore {
         rows
     }
 
-    /// Unread messages for these names that the agent has not been told about.
-    pub fn unannounced(&self, names: &[String]) -> Vec<(String, String, String)> {
+    /// Unread messages for these names that the agent has not been told about,
+    /// or was told about before `told_before_ms` and still has not read.
+    pub fn unannounced(
+        &self,
+        names: &[String],
+        told_before_ms: u64,
+    ) -> Vec<(String, String, String)> {
         let list = json!(names.iter().map(|n| self.qualify(n)).collect::<Vec<_>>()).to_string();
         self.db
             .with(|c| {
                 let mut stmt = c.prepare(
                     "SELECT id, sender, body FROM messages WHERE recipient IN (SELECT value FROM json_each(?1))
-                     AND received IS NOT NULL AND read IS NULL AND announced=0 ORDER BY received",
+                     AND received IS NOT NULL AND read IS NULL AND (announced=0 OR announced < ?2) ORDER BY received",
                 )?;
-                let rows = stmt.query_map([list], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                let rows = stmt.query_map(params![list, told_before_ms as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
                 rows.collect()
             })
             .unwrap_or_default()
     }
 
-    pub fn mark_announced(&self, ids: &[String]) {
+    /// Remember when the recipient was told about these messages.
+    pub fn mark_announced(&self, ids: &[String], now: u64) {
         let list = json!(ids).to_string();
         let _ = self.db.with(|c| {
             c.execute(
-                "UPDATE messages SET announced=1 WHERE id IN (SELECT value FROM json_each(?1))",
-                [list],
+                "UPDATE messages SET announced=?2 WHERE id IN (SELECT value FROM json_each(?1))",
+                params![list, now.max(1) as i64],
             )
         });
     }

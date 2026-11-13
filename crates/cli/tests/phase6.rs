@@ -785,3 +785,40 @@ fn messages_and_recall_cross_stations() {
     assert!(hits.iter().all(|h| h["station"] == json!("bravo")));
     assert!(!json!(hits).to_string().contains("PLANTED"));
 }
+
+/// A bug that happened: mail that arrived while an agent was starting was
+/// announced once, in a place the agent could not act on, and never again.
+#[test]
+fn mail_that_is_not_read_is_nudged_again_and_mail_sent_at_startup_is_not_lost() {
+    let s = Station::start_with("alpha", "nudge_secs = 2\n", &[]);
+    let repo = project(&s, "demo", &[], "");
+    // This agent acknowledges input but never reads its inbox.
+    let ignorer = agent(
+        &s,
+        "demo",
+        &repo,
+        "ignorer",
+        json!({"steps": [], "on_input": [{"turn_end": "ok"}]}),
+    );
+    // Sent the instant the pane exists, before the agent has finished starting.
+    s.call(
+        "msg.send",
+        json!({"to": "ignorer", "body": "please look at the stork ticket"}),
+    );
+    wait_for("a second nudge for the unread message", 20, || {
+        (s.text(&ignorer)
+            .matches("You have mail from you@alpha")
+            .count()
+            >= 2)
+            .then_some(())
+    });
+    assert!(
+        !s.text(&ignorer).contains("stork"),
+        "the payload is never typed"
+    );
+    // Once it is read, the nudging stops.
+    s.call_as_pane(&ignorer, "msg.inbox", json!({})).unwrap();
+    let count = s.text(&ignorer).matches("You have mail").count();
+    std::thread::sleep(Duration::from_millis(4500));
+    assert_eq!(s.text(&ignorer).matches("You have mail").count(), count);
+}

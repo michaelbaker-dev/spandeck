@@ -265,11 +265,8 @@ impl Daemon {
                 if let Some(o) = self.orders_guidance(&meta) {
                     parts.push(o);
                 }
-                if !meta.paused {
-                    if let Some(mail) = self.mail_notice(&meta.id) {
-                        parts.push(mail);
-                    }
-                }
+                // No mail notice here: the agent is not in a turn yet, so it
+                // would not act on one. The nudge wakes an idle agent instead.
                 if !parts.is_empty() {
                     decision.context = Some(parts.join("\n\n"));
                 }
