@@ -1,0 +1,89 @@
+//! `spandeck doctor`: is this station set up to work?
+
+use serde_json::{json, Value};
+use spandeck_agents::{install, AgentKind};
+
+use crate::daemon::Daemon;
+use crate::db::Db;
+
+fn version_of(program: &str) -> Option<String> {
+    let out = std::process::Command::new(program).arg("--version").output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").trim().to_string())
+}
+
+impl Daemon {
+    pub fn doctor(&self) -> Value {
+        let mut checks: Vec<Value> = vec![];
+        let mut add = |name: &str, ok: bool, required: bool, detail: String| {
+            checks.push(json!({"name": name, "ok": ok, "required": required, "detail": detail}));
+        };
+        add("daemon", true, true, format!("spandeckd {} running as pid {}", crate::daemon::VERSION, std::process::id()));
+        let schema = self.db.schema_version();
+        add("database", schema == Db::LATEST_SCHEMA, true, format!("schema {schema} of {}", Db::LATEST_SCHEMA));
+        add("git", version_of("git").is_some(), true, version_of("git").unwrap_or_else(|| "git not found: worktrees, checkpoints and sign-offs need it".into()));
+
+        let me = self.fleet.tailnet_self();
+        add(
+            "tailscale",
+            me.is_some(),
+            false,
+            match &me {
+                Some(m) => format!("logged in as {} ({})", m.login, m.ips.first().cloned().unwrap_or_default()),
+                None => "Tailscale is not running or not logged in: this station cannot see the fleet".into(),
+            },
+        );
+        let web = self.web_addrs.lock().unwrap().clone();
+        add("control deck", !web.is_empty(), false, if web.is_empty() { "the web listener is not running".into() } else { format!("serving on {}", web.join(", ")) });
+
+        for kind in [AgentKind::Claude, AgentKind::Codex] {
+            let program = self.cfg.agents.get(kind.as_str()).and_then(|a| a.program.clone()).unwrap_or_else(|| kind.as_str().to_string());
+            let version = version_of(&program);
+            add(&format!("{} installed", kind.display()), version.is_some(), false, version.unwrap_or_else(|| format!("`{program}` not found on PATH")));
+            if let Ok(st) = install::status(kind, &self.home) {
+                let detail = match (st.installed, st.outdated, kind) {
+                    (true, true, _) => "hooks installed but out of date: run `spandeck integration install`".to_string(),
+                    (true, false, _) => format!("hooks installed (v{}){}", st.version.unwrap_or(0), st.note.map(|n| format!("; {n}")).unwrap_or_default()),
+                    (false, _, AgentKind::Claude) => "not installed globally; panes spandeck starts are hooked at launch anyway".to_string(),
+                    (false, _, _) => "not installed: run `spandeck integration install codex`, then trust the hooks in Codex with /hooks".to_string(),
+                };
+                add(&format!("{} hooks", kind.display()), st.installed && !st.outdated || kind == AgentKind::Claude, false, detail);
+            }
+        }
+        let keep = self.cfg.keep_awake_cmd.clone().map(|c| c.first().cloned().unwrap_or_default()).unwrap_or_else(|| {
+            if cfg!(target_os = "macos") { "caffeinate".into() } else { "systemd-inhibit".into() }
+        });
+        let found = std::process::Command::new("sh").args(["-c", &format!("command -v {keep}")]).output().is_ok_and(|o| o.status.success());
+        add("keep-awake", found || !self.cfg.keep_awake, false, if found { format!("{keep} available") } else { format!("{keep} not found: the station may sleep while agents work") });
+
+        let ok = checks.iter().all(|c| c["ok"] == json!(true) || c["required"] == json!(false));
+        json!({"ok": ok, "station": self.station, "checks": checks})
+    }
+}
+
+/// A systemd user unit (Linux) or launchd agent (macOS) that starts spandeckd at login.
+pub fn service_definition(exe: &std::path::Path, home: &std::path::Path) -> (std::path::PathBuf, String, String) {
+    let exe = exe.display();
+    if cfg!(target_os = "macos") {
+        let path = home.join("Library/LaunchAgents/dev.spandeck.spandeckd.plist");
+        let body = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.spandeck.spandeckd</string>
+  <key>ProgramArguments</key><array><string>{exe}</string><string>daemon</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ProcessType</key><string>Interactive</string>
+</dict></plist>
+"#
+        );
+        let enable = format!("launchctl bootstrap gui/$(id -u) {}", path.display());
+        (path, body, enable)
+    } else {
+        let path = home.join(".config/systemd/user/spandeckd.service");
+        let body = format!(
+            "[Unit]\nDescription=spandeck daemon\nAfter=network-online.target\n\n[Service]\nExecStart={exe} daemon\nRestart=on-failure\nRestartSec=2\n# An upgrade replaces the process image in place; do not kill panes with it.\nKillMode=process\n\n[Install]\nWantedBy=default.target\n"
+        );
+        (path, body, "systemctl --user daemon-reload && systemctl --user enable --now spandeckd && loginctl enable-linger $USER".to_string())
+    }
+}

@@ -1,0 +1,680 @@
+//! `spandeck`: the daemon and its command line.
+//!
+//! Every subcommand except `daemon` is a thin client of the local socket, so
+//! the CLI covers the API and nothing else.
+
+mod mcp;
+
+use std::io::Read;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use clap::{Parser, Subcommand};
+use serde_json::{json, Value};
+use spandeck_core::client::Client;
+use spandeck_core::{Config, Daemon, Paths, StartOpts};
+
+#[derive(Parser)]
+#[command(name = "spandeck", version, about = "Run AI coding agents in panes across your machines, from one Control Deck")]
+struct Cli {
+    /// Print raw JSON instead of a summary.
+    #[arg(long, global = true)]
+    json: bool,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Run the daemon in the foreground.
+    Daemon {
+        /// Adopt terminals left by the previous program image (used by upgrades).
+        #[arg(long)]
+        handoff: Option<PathBuf>,
+        /// Do not serve the Control Deck.
+        #[arg(long)]
+        no_web: bool,
+    },
+    /// What this station is doing.
+    Status,
+    /// Check this station's setup.
+    Doctor,
+    /// Print the Control Deck address (with the localhost token).
+    Cc,
+    /// Work with panes.
+    Pane {
+        #[command(subcommand)]
+        cmd: PaneCmd,
+    },
+    /// Work with projects.
+    Project {
+        #[command(subcommand)]
+        cmd: ProjectCmd,
+    },
+    /// Send a message to a pane, `name@station`, or `you`.
+    Send {
+        to: String,
+        body: String,
+        #[arg(long, default_value = "note")]
+        kind: String,
+    },
+    /// Read your messages (a pane reads its own; outside a pane, the user's).
+    Inbox {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Reply to a message.
+    Reply { id: String, body: String },
+    /// Mark a message acted on.
+    Ack { id: String },
+    /// Hand a task to a helper with a role.
+    Delegate {
+        role: String,
+        task: String,
+        #[arg(long, default_value = "")]
+        acceptance: String,
+    },
+    /// Work with tasks.
+    Task {
+        #[command(subcommand)]
+        cmd: TaskCmd,
+    },
+    /// Search earlier session history.
+    Recall {
+        query: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Add a note to the shared project memory.
+    Note {
+        text: String,
+        #[arg(long, default_value = "note")]
+        kind: String,
+    },
+    /// Search the shared project memory.
+    Context { query: Option<String> },
+    /// Wait until a pane is done, needs you, or fails.
+    Wait {
+        pane: String,
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+    },
+    /// Sign off a project's current commit.
+    Signoff {
+        project: String,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// Start a review loop on an author's pane.
+    Review {
+        pane: String,
+        #[arg(long)]
+        reviewer: Option<String>,
+    },
+    /// Show what changed in a pane's workspace.
+    Diff { pane: String },
+    /// Standing orders that apply to a pane, or the enforcement table.
+    Orders { pane: Option<String> },
+    /// Stop every running agent turn on this station (or the whole fleet).
+    StopAll {
+        #[arg(long)]
+        fleet: bool,
+    },
+    /// The fleet: every station under your Tailscale login.
+    Fleet,
+    /// Agent hook integrations.
+    Integration {
+        #[command(subcommand)]
+        cmd: IntegrationCmd,
+    },
+    /// Start spandeckd at login.
+    Service {
+        /// Write the unit and print the command that enables it.
+        #[arg(long)]
+        install: bool,
+    },
+    /// Replace the running daemon with a new binary, keeping every terminal.
+    Upgrade { binary: PathBuf },
+    /// Call any API method: spandeck rpc pane.list '{}'
+    Rpc { method: String, params: Option<String> },
+    /// Called by agent hooks. Reads the hook payload on stdin.
+    #[command(hide = true)]
+    Hook { agent: String },
+    /// The stdio MCP server agents use.
+    #[command(hide = true)]
+    Mcp,
+    /// Used by upgrades to check a new binary before switching to it.
+    #[command(hide = true)]
+    HandoffCheck,
+}
+
+#[derive(Subcommand)]
+enum PaneCmd {
+    /// Start a pane: a shell, or an agent (claude, codex).
+    New {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Program and arguments instead of an agent.
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+    List,
+    /// Print a pane's screen.
+    Text {
+        pane: String,
+        #[arg(long, default_value_t = 0)]
+        history: u64,
+    },
+    /// Type text into a pane.
+    Type { pane: String, text: String },
+    /// Pause: no new work is delivered; the current turn finishes.
+    Pause { pane: String },
+    Unpause { pane: String },
+    /// Stop: interrupt the current turn; the process stays.
+    Stop { pane: String },
+    /// Kill: end the process.
+    Kill { pane: String },
+    /// Forget a pane.
+    Close { pane: String },
+}
+
+#[derive(Subcommand)]
+enum ProjectCmd {
+    /// Create a project in a folder (default: here) and open it.
+    New {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Panes to start, as name:agent[:role], for example dev:claude:author
+        #[arg(long = "pane")]
+        panes: Vec<String>,
+        #[arg(long)]
+        no_open: bool,
+    },
+    List,
+    Open { name: String },
+    Close { name: String },
+    Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum TaskCmd {
+    List {
+        #[arg(long)]
+        active: bool,
+    },
+    Show { task: String },
+    /// Report the result of your task. This is what completes it.
+    Result {
+        #[arg(long)]
+        summary: String,
+        #[arg(long = "finding")]
+        findings: Vec<String>,
+        #[arg(long)]
+        report_file: Option<PathBuf>,
+        #[arg(long)]
+        failed: bool,
+        #[arg(long)]
+        task: Option<String>,
+    },
+    Cancel { task: String },
+}
+
+#[derive(Subcommand)]
+enum IntegrationCmd {
+    Status,
+    /// Write spandeck's hook entries into the agent's config.
+    Install { agent: String },
+    /// Remove exactly the entries install wrote.
+    Uninstall { agent: String },
+}
+
+fn main() {
+    let cli = Cli::parse();
+    let code = match run(cli) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("spandeck: {e}");
+            1
+        }
+    };
+    std::process::exit(code);
+}
+
+fn connect(paths: &Paths) -> anyhow::Result<Client> {
+    Ok(Client::from_env(paths)?)
+}
+
+fn show(json_out: bool, v: &Value, summary: impl FnOnce(&Value) -> String) {
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+    } else {
+        let s = summary(v);
+        if !s.is_empty() {
+            println!("{s}");
+        }
+    }
+}
+
+fn pane_line(p: &Value) -> String {
+    format!(
+        "{:<28} {:<14} {:<10} {:<10} {}{}",
+        p["id"].as_str().unwrap_or(""),
+        p["name"].as_str().unwrap_or(""),
+        p["agent"].as_str().unwrap_or(""),
+        if p["exited"] == json!(true) { "exited" } else { p["state"].as_str().unwrap_or("") },
+        p["project"].as_str().unwrap_or("-"),
+        p["needs_reason"].as_str().map(|r| format!("  ({r})")).unwrap_or_default(),
+    )
+}
+
+fn run(cli: Cli) -> anyhow::Result<i32> {
+    let paths = Paths::from_env();
+    let j = cli.json;
+    match cli.cmd {
+        Cmd::Daemon { handoff, no_web } => return daemon_main(paths, handoff, no_web),
+        Cmd::Hook { agent } => return Ok(hook_main(&paths, &agent)),
+        Cmd::Mcp => {
+            mcp::run(&paths)?;
+            return Ok(0);
+        }
+        Cmd::HandoffCheck => {
+            println!("{}", json!({"handoff": 1, "version": spandeck_core::VERSION, "protocol": spandeck_core::PROTOCOL, "schema": spandeck_core::db::Db::LATEST_SCHEMA}));
+            return Ok(0);
+        }
+        Cmd::Service { install } => {
+            let exe = std::env::current_exe()?;
+            let home = PathBuf::from(std::env::var("HOME")?);
+            let (path, body, enable) = spandeck_core::doctor::service_definition(&exe, &home);
+            if install {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                std::fs::write(&path, body)?;
+                println!("Wrote {}\nTo start spandeckd at login, run:\n  {enable}", path.display());
+            } else {
+                println!("# {}\n{body}\n# enable with: {enable}", path.display());
+            }
+            return Ok(0);
+        }
+        _ => {}
+    }
+
+    let mut c = connect(&paths)?;
+    c.set_timeout(Some(Duration::from_secs(3700)));
+    match cli.cmd {
+        Cmd::Status => {
+            let info = c.call("station.info", json!({}))?;
+            let panes = c.call("pane.list", json!({}))?;
+            show(j, &json!({"station": info, "panes": panes}), |v| {
+                let i = &v["station"];
+                let mut s = format!(
+                    "station {}  spandeck {}  {} pane(s), {} working, {} need you\n",
+                    i["station"].as_str().unwrap_or(""),
+                    i["version"].as_str().unwrap_or(""),
+                    i["panes"],
+                    i["working"],
+                    i["needs_you"]
+                );
+                for p in v["panes"].as_array().into_iter().flatten() {
+                    s.push_str(&pane_line(p));
+                    s.push('\n');
+                }
+                s.trim_end().to_string()
+            });
+        }
+        Cmd::Doctor => {
+            let v = c.call("station.doctor", json!({}))?;
+            show(j, &v, |v| {
+                v["checks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|c| format!("{} {:<22} {}", if c["ok"] == json!(true) { "ok  " } else if c["required"] == json!(true) { "FAIL" } else { "warn" }, c["name"].as_str().unwrap_or(""), c["detail"].as_str().unwrap_or("")))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+            return Ok(if v["ok"] == json!(true) { 0 } else { 1 });
+        }
+        Cmd::Cc => {
+            let info = c.call("station.info", json!({}))?;
+            let token = std::fs::read_to_string(paths.token_file()).unwrap_or_default();
+            for addr in info["web"].as_array().into_iter().flatten().filter_map(|a| a.as_str()) {
+                if addr.starts_with("127.") {
+                    println!("http://{addr}/#token={}", token.trim());
+                } else {
+                    println!("http://{addr}/   (from your other devices on Tailscale)");
+                }
+            }
+        }
+        Cmd::Pane { cmd } => match cmd {
+            PaneCmd::New { agent, name, project, cwd, command } => {
+                let cwd = cwd.or_else(|| std::env::current_dir().ok());
+                let (program, args) = match command.split_first() {
+                    Some((p, rest)) => (Some(p.clone()), rest.to_vec()),
+                    None => (None, vec![]),
+                };
+                let v = c.call("pane.spawn", json!({"agent": agent, "name": name, "project": project, "cwd": cwd, "program": program, "args": args}))?;
+                show(j, &v, |v| v["id"].as_str().unwrap_or("").to_string());
+            }
+            PaneCmd::List => {
+                let v = c.call("pane.list", json!({}))?;
+                show(j, &v, |v| v.as_array().into_iter().flatten().map(pane_line).collect::<Vec<_>>().join("\n"));
+            }
+            PaneCmd::Text { pane, history } => {
+                let v = c.call("pane.text", json!({"pane": pane, "history": history}))?;
+                show(j, &v, |v| v["lines"].as_array().into_iter().flatten().filter_map(|l| l.as_str()).collect::<Vec<_>>().join("\n").trim_end().to_string());
+            }
+            PaneCmd::Type { pane, text } => {
+                c.call("pane.send_text", json!({"pane": pane, "text": text}))?;
+            }
+            PaneCmd::Pause { pane } => {
+                c.call("pane.pause", json!({"pane": pane, "paused": true}))?;
+            }
+            PaneCmd::Unpause { pane } => {
+                c.call("pane.pause", json!({"pane": pane, "paused": false}))?;
+            }
+            PaneCmd::Stop { pane } => {
+                c.call("pane.stop", json!({"pane": pane}))?;
+            }
+            PaneCmd::Kill { pane } => {
+                c.call("pane.kill", json!({"pane": pane}))?;
+            }
+            PaneCmd::Close { pane } => {
+                c.call("pane.close", json!({"pane": pane}))?;
+            }
+        },
+        Cmd::Project { cmd } => match cmd {
+            ProjectCmd::New { name, path, panes, no_open } => {
+                let path = path.canonicalize()?;
+                let panes: Vec<Value> = panes
+                    .iter()
+                    .map(|spec| {
+                        let mut parts = spec.split(':');
+                        json!({"name": parts.next().unwrap_or("pane"), "agent": parts.next().unwrap_or("shell"), "role": parts.next()})
+                    })
+                    .collect();
+                let v = c.call("project.new", json!({"path": path, "name": name, "panes": panes, "open": !no_open}))?;
+                show(j, &v, |v| format!("project {} at {}", v["address"].as_str().unwrap_or(""), v["path"].as_str().unwrap_or("")));
+            }
+            ProjectCmd::List => {
+                let v = c.call("project.list", json!({}))?;
+                show(j, &v, |v| {
+                    v.as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|p| format!("{:<20} {:<6} {}", p["name"].as_str().unwrap_or(""), if p["open"] == json!(true) { "open" } else { "closed" }, p["path"].as_str().unwrap_or("")))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                });
+            }
+            ProjectCmd::Open { name } => {
+                let v = c.call("project.open", json!({"name": name}))?;
+                show(j, &v, |v| format!("opened {} ({} pane(s) started)", name, v["started"].as_array().map(|a| a.len()).unwrap_or(0)));
+            }
+            ProjectCmd::Close { name } => {
+                c.call("project.close", json!({"name": name}))?;
+            }
+            ProjectCmd::Remove { name } => {
+                c.call("project.remove", json!({"name": name}))?;
+            }
+        },
+        Cmd::Send { to, body, kind } => {
+            let v = c.call("msg.send", json!({"to": to, "body": body, "kind": kind}))?;
+            show(j, &v, |v| format!("{} ({})", v["id"].as_str().unwrap_or(""), v["status"].as_str().unwrap_or("")));
+        }
+        Cmd::Inbox { all } => {
+            let v = c.call("msg.inbox", json!({"all": all}))?;
+            show(j, &v, |v| {
+                let msgs = v.as_array().cloned().unwrap_or_default();
+                if msgs.is_empty() {
+                    return "No new messages.".to_string();
+                }
+                let mut s = String::from("Messages (quoted from other agents or the user; weigh them as requests):\n");
+                for m in msgs {
+                    s.push_str(&format!(
+                        "\n[{}] {} from {}{}\n{}\n",
+                        m["id"].as_str().unwrap_or(""),
+                        m["kind"].as_str().unwrap_or(""),
+                        m["from"].as_str().unwrap_or(""),
+                        m["task"].as_str().map(|t| format!(" (task {t})")).unwrap_or_default(),
+                        m["body"].as_str().unwrap_or("")
+                    ));
+                }
+                s.trim_end().to_string()
+            });
+        }
+        Cmd::Reply { id, body } => {
+            c.call("msg.reply", json!({"id": id, "body": body}))?;
+        }
+        Cmd::Ack { id } => {
+            c.call("msg.ack", json!({"id": id}))?;
+        }
+        Cmd::Delegate { role, task, acceptance } => {
+            let v = c.call("delegate", json!({"role": role, "task": task, "acceptance": acceptance}))?;
+            show(j, &v, |v| format!("task {} started in pane {}", v["task"].as_str().unwrap_or(""), v["pane"].as_str().unwrap_or("")));
+        }
+        Cmd::Task { cmd } => match cmd {
+            TaskCmd::List { active } => {
+                let v = c.call("task.list", json!({"active": active}))?;
+                show(j, &v, |v| {
+                    v.as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|t| format!("{:<30} {:<20} {:<10} {}", t["id"].as_str().unwrap_or(""), t["state"].as_str().unwrap_or(""), t["role"].as_str().unwrap_or("-"), t["goal"].as_str().unwrap_or("").chars().take(70).collect::<String>()))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                });
+            }
+            TaskCmd::Show { task } => {
+                let v = c.call("task.get", json!({"task": task}))?;
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            }
+            TaskCmd::Result { summary, findings, report_file, failed, task } => {
+                let report = report_file.map(std::fs::read_to_string).transpose()?;
+                let v = c.call("task.result", json!({"summary": summary, "findings": findings, "report": report, "failed": failed, "task": task}))?;
+                show(j, &v, |v| format!("task {} is {}", v["id"].as_str().unwrap_or(""), v["state"].as_str().unwrap_or("")));
+            }
+            TaskCmd::Cancel { task } => {
+                c.call("task.cancel", json!({"task": task}))?;
+            }
+        },
+        Cmd::Recall { query, project } => {
+            let v = c.call("recall", json!({"query": query, "project": project}))?;
+            show(j, &v, |v| {
+                let hits = v["hits"].as_array().cloned().unwrap_or_default();
+                if hits.is_empty() {
+                    return "Nothing found.".to_string();
+                }
+                let mut s = format!("{}\n", v["note"].as_str().unwrap_or(""));
+                for h in hits {
+                    s.push_str(&format!(
+                        "\n[{} · {} · {}{}] {} {}:\n  {}\n",
+                        h["station"].as_str().unwrap_or(""),
+                        h["ts"].as_str().unwrap_or("?"),
+                        h["commit"].as_str().map(|c| &c[..c.len().min(8)]).unwrap_or("no commit"),
+                        h["project"].as_str().map(|p| format!(" · {p}")).unwrap_or_default(),
+                        h["role"].as_str().unwrap_or(""),
+                        h["kind"].as_str().unwrap_or(""),
+                        h["excerpt"].as_str().unwrap_or("").replace('\n', " ")
+                    ));
+                }
+                s.trim_end().to_string()
+            });
+        }
+        Cmd::Note { text, kind } => {
+            c.call("note.add", json!({"text": text, "kind": kind}))?;
+        }
+        Cmd::Context { query } => {
+            let v = c.call("context.search", json!({"query": query.unwrap_or_default()}))?;
+            show(j, &v, |v| {
+                v.as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|n| format!("[{}{}] {}", n["kind"].as_str().unwrap_or(""), n["author"].as_str().map(|a| format!(" by {a}")).unwrap_or_default(), n["text"].as_str().unwrap_or("")))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+        }
+        Cmd::Wait { pane, timeout } => {
+            let v = c.call("wait", json!({"pane": pane, "timeout_ms": timeout * 1000}))?;
+            show(j, &v, pane_line);
+            return Ok(if v["timed_out"] == json!(true) { 2 } else { 0 });
+        }
+        Cmd::Signoff { project, note } => {
+            let v = c.call("signoff.give", json!({"project": project, "note": note}))?;
+            show(j, &v, |v| format!("signed off commit {}", v["commit"].as_str().unwrap_or("")));
+        }
+        Cmd::Review { pane, reviewer } => {
+            let v = c.call("recipe.review", json!({"pane": pane, "reviewer": reviewer}))?;
+            show(j, &v, |v| format!("review loop {} started", v["id"].as_str().unwrap_or("")));
+        }
+        Cmd::Diff { pane } => {
+            let v = c.call("diff", json!({"pane": pane}))?;
+            show(j, &v, |v| format!("{}\n{}", v["stat"].as_str().unwrap_or(""), v["diff"].as_str().unwrap_or("")));
+        }
+        Cmd::Orders { pane } => {
+            let v = match pane {
+                Some(p) => c.call("orders.view", json!({"pane": p}))?,
+                None => c.call("orders.table", json!({}))?,
+            };
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+        Cmd::StopAll { fleet } => {
+            let v = c.call("stop.all", json!({"scope": if fleet { "fleet" } else { "station" }}))?;
+            show(j, &v, |v| {
+                v["stops"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|s| format!("{:<16} {}", s["station"].as_str().unwrap_or(""), s["label"].as_str().unwrap_or("")))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+        }
+        Cmd::Fleet => {
+            let v = c.call("fleet.refresh", json!({}))?;
+            show(j, &v, |v| {
+                v["stations"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|s| format!("{:<18} {:<14} {:<8} working {}  need you {}", s["station"].as_str().unwrap_or(""), s["state"].as_str().unwrap_or(""), s["version"].as_str().unwrap_or(""), s["working"], s["needs_you"]))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+        }
+        Cmd::Integration { cmd } => {
+            let v = match cmd {
+                IntegrationCmd::Status => c.call("integration.status", json!({}))?,
+                IntegrationCmd::Install { agent } => c.call("integration.install", json!({"agent": agent}))?,
+                IntegrationCmd::Uninstall { agent } => c.call("integration.uninstall", json!({"agent": agent}))?,
+            };
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+        Cmd::Upgrade { binary } => {
+            let v = c.call("station.upgrade", json!({"binary": binary.canonicalize()?}))?;
+            show(j, &v, |v| format!("upgrading {} -> {}; terminals stay open", v["from"].as_str().unwrap_or(""), v["to"].as_str().unwrap_or("")));
+        }
+        Cmd::Rpc { method, params } => {
+            let params: Value = match params {
+                Some(p) => serde_json::from_str(&p).map_err(|e| anyhow::anyhow!("params are not JSON: {e}"))?,
+                None => json!({}),
+            };
+            let v = c.call(&method, params)?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+        Cmd::Daemon { .. } | Cmd::Hook { .. } | Cmd::Mcp | Cmd::HandoffCheck | Cmd::Service { .. } => unreachable!(),
+    }
+    Ok(0)
+}
+
+/// `spandeck hook <agent>`: forward one hook payload to the daemon and print
+/// its decision. It must never break the agent: any failure is a silent pass.
+fn hook_main(paths: &Paths, agent: &str) -> i32 {
+    // Outside a spandeck pane this is a no-op, so a global install is harmless.
+    if std::env::var_os("SPANDECK_PANE").is_none() || std::env::var_os("SPANDECK_TOKEN").is_none() {
+        return 0;
+    }
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        return 0;
+    }
+    let Ok(payload) = serde_json::from_str::<Value>(&input) else { return 0 };
+    let Ok(mut client) = Client::from_env(paths) else { return 0 };
+    // A permission request may wait minutes for an answer from the phone.
+    client.set_timeout(Some(Duration::from_secs(400)));
+    match client.call("hook.ingest", json!({"agent": agent, "payload": payload})) {
+        Ok(reply) => {
+            if let Some(out) = reply["stdout"].as_str().filter(|s| !s.is_empty()) {
+                println!("{out}");
+            }
+            reply["exit_code"].as_i64().unwrap_or(0) as i32
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Close descriptors inherited from a previous image whose handoff we are not
+/// adopting, so orphaned terminals do not stay half-open.
+fn close_inherited_fds() {
+    for fd in 3..1024 {
+        // SAFETY: nothing has opened a descriptor yet in this process image.
+        unsafe { libc::close(fd) };
+    }
+}
+
+fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::Result<i32> {
+    if handoff.is_none() {
+        close_inherited_fds();
+    }
+    // Children and the next program image find the same station through these.
+    std::env::set_var("SPANDECK_STATE_DIR", &paths.state_dir);
+    std::env::set_var("SPANDECK_CONFIG_DIR", &paths.config_dir);
+    std::fs::create_dir_all(&paths.state_dir)?;
+
+    let log_file = std::fs::OpenOptions::new().create(true).append(true).open(paths.log_file())?;
+    use tracing_subscriber::prelude::*;
+    let filter = tracing_subscriber::EnvFilter::try_from_env("SPANDECK_LOG").unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().json().with_writer(std::sync::Mutex::new(log_file)))
+        .with(tracing_subscriber::fmt::layer().compact().with_writer(std::io::stderr))
+        .init();
+
+    let cfg = Config::load(&paths)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    runtime.block_on(async move {
+        // Another daemon already answering on this socket?
+        if handoff.is_none() && std::os::unix::net::UnixStream::connect(paths.socket()).is_ok() {
+            anyhow::bail!("spandeckd is already running on {}", paths.socket().display());
+        }
+        let daemon = Daemon::start(paths, cfg, StartOpts { handoff, exe: None })?;
+        let listener = spandeck_core::server::bind(&daemon)?;
+        tokio::spawn(spandeck_core::server::serve(daemon.clone(), listener));
+        if !no_web {
+            match spandeck_web::start(daemon.clone()).await {
+                Ok(addrs) => tracing::info!(?addrs, "Control Deck listening"),
+                Err(e) => tracing::warn!(error = %e, "Control Deck is not available"),
+            }
+        }
+        tracing::info!(station = %daemon.station, version = spandeck_core::VERSION, socket = %daemon.paths.socket().display(), "spandeckd ready");
+
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut int = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+        tracing::info!("spandeckd stopping");
+        let _ = std::fs::remove_file(daemon.paths.socket());
+        Ok(0)
+    })
+}

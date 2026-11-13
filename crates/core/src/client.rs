@@ -1,0 +1,96 @@
+//! A small blocking client for the local socket. Used by the CLI, by hooks
+//! (which must start fast) and by tests.
+
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use crate::paths::Paths;
+
+pub struct Client {
+    reader: BufReader<UnixStream>,
+    writer: UnixStream,
+    token: String,
+    next_id: u64,
+}
+
+#[derive(Debug)]
+pub struct ClientError {
+    pub code: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for ClientError {}
+
+fn io_err(e: std::io::Error) -> ClientError {
+    ClientError { code: "io".into(), message: e.to_string() }
+}
+
+impl Client {
+    pub fn connect(socket: &Path, token: &str) -> Result<Client, ClientError> {
+        let stream = UnixStream::connect(socket).map_err(|e| ClientError {
+            code: "not_running".into(),
+            message: format!("spandeckd is not running ({}: {e}). Start it with `spandeck daemon`.", socket.display()),
+        })?;
+        let writer = stream.try_clone().map_err(io_err)?;
+        Ok(Client { reader: BufReader::new(stream), writer, token: token.to_string(), next_id: 0 })
+    }
+
+    /// Connect as whoever the environment says we are: a pane (its own token)
+    /// or the user (the client token file).
+    pub fn from_env(paths: &Paths) -> Result<Client, ClientError> {
+        let token = match std::env::var("SPANDECK_TOKEN") {
+            Ok(t) if !t.is_empty() => t,
+            _ => std::fs::read_to_string(paths.token_file())
+                .map(|t| t.trim().to_string())
+                .map_err(|_| ClientError { code: "not_running".into(), message: "spandeckd has not run on this station yet. Start it with `spandeck daemon`.".into() })?,
+        };
+        Client::connect(&paths.socket(), &token)
+    }
+
+    pub fn set_timeout(&mut self, d: Option<Duration>) {
+        let _ = self.reader.get_ref().set_read_timeout(d);
+    }
+
+    pub fn call(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
+        self.next_id += 1;
+        let req = json!({"id": self.next_id, "token": self.token, "method": method, "params": params});
+        self.writer.write_all(format!("{req}\n").as_bytes()).map_err(io_err)?;
+        let mut line = String::new();
+        let n = self.reader.read_line(&mut line).map_err(io_err)?;
+        if n == 0 {
+            return Err(ClientError { code: "closed".into(), message: "spandeckd closed the connection".into() });
+        }
+        let resp: Value = serde_json::from_str(&line).map_err(|e| ClientError { code: "protocol".into(), message: e.to_string() })?;
+        if let Some(err) = resp.get("error") {
+            return Err(ClientError {
+                code: err.get("code").and_then(|c| c.as_str()).unwrap_or("error").to_string(),
+                message: err.get("message").and_then(|c| c.as_str()).unwrap_or("error").to_string(),
+            });
+        }
+        Ok(resp.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    /// Subscribe to events; then call `next_event` repeatedly.
+    pub fn subscribe(&mut self, kind_prefix: Option<&str>) -> Result<(), ClientError> {
+        self.call("events.subscribe", json!({"kind": kind_prefix})).map(|_| ())
+    }
+
+    pub fn next_event(&mut self) -> Result<Value, ClientError> {
+        let mut line = String::new();
+        let n = self.reader.read_line(&mut line).map_err(io_err)?;
+        if n == 0 {
+            return Err(ClientError { code: "closed".into(), message: "spandeckd closed the connection".into() });
+        }
+        serde_json::from_str(&line).map_err(|e| ClientError { code: "protocol".into(), message: e.to_string() })
+    }
+}

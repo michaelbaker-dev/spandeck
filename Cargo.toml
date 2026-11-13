@@ -35,12 +35,13 @@ axum = { version = "0.8", features = ["ws"] }
 rust-embed = "8"
 mime_guess = "2"
 futures-util = "0.3"
+tokio-tungstenite = "0.30"
 bytes = "1"
 sha2 = "0.11"
 base64 = "0.23"
 rand = "0.10"
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde"] }
-reqwest = { version = "0.13", default-features = false, features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 insta = { version = "1", features = ["json"] }
 proptest = "1"
 turmoil = "0.7"

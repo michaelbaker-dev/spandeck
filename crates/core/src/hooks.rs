@@ -1,0 +1,377 @@
+//! The hook pipeline: one vendor payload in, one normalized event applied,
+//! one decision out.
+//!
+//! Observing and enforcing are separate. This is the only place that can
+//! block an agent (Guarantees: Enforcement).
+
+use std::path::Path;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+use spandeck_agents::{adapter, AgentEvent, AgentKind, AgentState, EventKind, HookDecision, HookReply};
+use tokio::sync::oneshot;
+
+use crate::daemon::{invalid, ApprovalAnswer, Daemon, PaneEntry, PaneMeta, Result, TurnStats};
+use crate::paths::{new_id, now_ms};
+
+impl Daemon {
+    pub async fn hook_ingest(&self, pane_id: &str, vendor: &str, payload: Value) -> Result<HookReply> {
+        let p = self.pane(pane_id)?;
+        let kind = AgentKind::parse(vendor).ok_or_else(|| invalid(format!("unknown agent {vendor}")))?;
+        let a = adapter(kind).ok_or_else(|| invalid("that agent has no hooks"))?;
+        let Some(ev) = a.normalize(&payload) else { return Ok(HookReply::default()) };
+        let decision = self.apply_agent_event(&p, &ev).await;
+        Ok(a.reply(&ev.raw_event, &decision))
+    }
+
+    /// Apply a normalized event to a pane and decide what to tell the agent.
+    /// Hook-driven and API-driven agents both end up here.
+    pub async fn apply_agent_event(&self, p: &PaneEntry, ev: &AgentEvent) -> HookDecision {
+        let now = now_ms();
+        let mut stuck: Option<String> = None;
+        let (meta, session_changed) = {
+            let mut m = p.meta.lock().unwrap();
+            m.hooks_seen = true;
+            // A pane started as a shell that turns out to run an agent.
+            if !m.agent.is_agent() {
+                m.agent = ev.agent;
+            }
+            let mut session_changed = false;
+            if let Some(sid) = &ev.session_id {
+                if m.session_id.as_deref() != Some(sid) {
+                    m.session_id = Some(sid.clone());
+                    session_changed = true;
+                }
+            }
+            if let Some(tp) = &ev.transcript_path {
+                if m.transcript_path.as_deref() != Some(tp) {
+                    m.transcript_path = Some(tp.clone());
+                    session_changed = true;
+                }
+            }
+            match ev.kind {
+                EventKind::PromptSubmit => {
+                    let idle_turns = m.turn.idle_turns;
+                    m.turn = TurnStats { started_ms: now, idle_turns, ..Default::default() };
+                    m.last_message = ev.message.clone();
+                }
+                EventKind::ToolStart => {
+                    m.tool = ev.tool.as_ref().map(|t| t.name.clone());
+                    m.tool_since_ms = now;
+                    m.turn.tool_calls += 1;
+                }
+                EventKind::ToolEnd => {
+                    m.tool = None;
+                    if let Some(t) = &ev.tool {
+                        let ok = t.ok.unwrap_or(true);
+                        if ok && t.writes {
+                            m.turn.file_changes += 1;
+                        }
+                        match (&t.command, ok) {
+                            (Some(cmd), false) => {
+                                if m.turn.fail_cmd.as_deref() == Some(cmd.as_str()) {
+                                    m.turn.fail_streak += 1;
+                                } else {
+                                    m.turn.fail_cmd = Some(cmd.clone());
+                                    m.turn.fail_streak = 1;
+                                }
+                                if m.turn.fail_streak >= self.cfg.stuck_same_failure {
+                                    stuck = Some(format!(
+                                        "stuck: the same command failed {} times in a row ({})",
+                                        m.turn.fail_streak,
+                                        truncate(cmd, 80)
+                                    ));
+                                }
+                            }
+                            (Some(_), true) => {
+                                m.turn.fail_cmd = None;
+                                m.turn.fail_streak = 0;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                EventKind::TurnEnd | EventKind::TurnFailed | EventKind::Interrupted => {
+                    m.tool = None;
+                    m.last_message = ev.message.clone().or(m.last_message.take());
+                    if ev.kind == EventKind::TurnEnd {
+                        if m.turn.tool_calls >= 5 && m.turn.file_changes == 0 {
+                            m.turn.idle_turns += 1;
+                        } else if m.turn.file_changes > 0 {
+                            m.turn.idle_turns = 0;
+                        }
+                        if m.turn.idle_turns >= self.cfg.stuck_idle_turns {
+                            stuck = Some(format!(
+                                "stuck: {} turns in a row used tools but changed no files",
+                                m.turn.idle_turns
+                            ));
+                        }
+                    }
+                }
+                EventKind::SessionStart => {
+                    m.tool = None;
+                }
+                _ => {}
+            }
+            (m.clone(), session_changed)
+        };
+
+        if session_changed {
+            self.save_pane(p);
+            if let (Some(sid), Some(path)) = (&meta.session_id, &meta.transcript_path) {
+                self.archive.follow(sid, meta.agent.as_str(), path, meta.project.as_deref(), Some(&meta.id));
+            }
+            self.emit("pane.session", Some(&p.id), meta.project.as_deref(), json!({"session_id": meta.session_id}));
+        }
+        if matches!(ev.kind, EventKind::SessionStart | EventKind::TurnEnd) {
+            if let Some(sid) = &meta.session_id {
+                self.archive.set_commit(sid, crate::git::head(Path::new(&meta.cwd)).as_deref());
+            }
+        }
+
+        // The ship's log keeps a tool call's name, timing and result, not its contents.
+        match ev.kind {
+            EventKind::ToolEnd => {
+                if let Some(t) = &ev.tool {
+                    self.record(
+                        "agent.tool",
+                        Some(&p.id),
+                        meta.project.as_deref(),
+                        meta.task.as_deref(),
+                        None,
+                        json!({"tool": t.name, "ok": t.ok, "duration_ms": t.duration_ms}),
+                    );
+                }
+            }
+            EventKind::ToolStart => {
+                self.emit(
+                    "agent.tool_start",
+                    Some(&p.id),
+                    meta.project.as_deref(),
+                    json!({"tool": ev.tool.as_ref().map(|t| t.name.clone())}),
+                );
+            }
+            EventKind::SessionStart | EventKind::SessionEnd | EventKind::Compact | EventKind::TurnFailed => {
+                self.record(
+                    &format!("agent.{}", serde_json::to_value(ev.kind).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()),
+                    Some(&p.id),
+                    meta.project.as_deref(),
+                    meta.task.as_deref(),
+                    None,
+                    json!({"source": ev.source, "session_id": ev.session_id}),
+                );
+            }
+            _ => {}
+        }
+
+        self.memory_capture(&meta, ev);
+
+        // Decide.
+        let mut decision = HookDecision::none();
+        match ev.kind {
+            EventKind::ToolStart => {
+                if let Some(tool) = &ev.tool {
+                    if let Some(block) = self.orders_check(&meta, tool) {
+                        self.record(
+                            "order.blocked",
+                            Some(&p.id),
+                            meta.project.as_deref(),
+                            meta.task.as_deref(),
+                            None,
+                            json!({"order": block.order, "layer": block.layer, "tool": tool.name}),
+                        );
+                        self.set_state(p, AgentState::Working, None);
+                        return HookDecision::deny(block.reason);
+                    }
+                }
+            }
+            EventKind::PermissionRequest => {
+                let summary = ev
+                    .tool
+                    .as_ref()
+                    .map(|t| match (&t.command, &t.file_path) {
+                        (Some(c), _) => format!("{}: {}", t.name, truncate(c, 160)),
+                        (None, Some(f)) => format!("{} {}", t.name, f),
+                        _ => t.name.clone(),
+                    })
+                    .unwrap_or_else(|| "permission".into());
+                self.set_state(p, AgentState::NeedsYou, Some(format!("wants to run {summary}")));
+                let answer = self.request_approval(p, "permission", &summary, json!({"tool": ev.tool})).await;
+                return match answer {
+                    Some(ApprovalAnswer { allow: true, .. }) => {
+                        self.set_state(p, AgentState::Working, None);
+                        HookDecision::allow()
+                    }
+                    Some(ApprovalAnswer { allow: false, reason }) => {
+                        self.set_state(p, AgentState::Working, None);
+                        HookDecision::deny(reason.unwrap_or_else(|| "Denied from the Control Deck.".into()))
+                    }
+                    // No remote answer in time: the agent's own prompt takes over.
+                    None => HookDecision::none(),
+                };
+            }
+            EventKind::SessionStart => {
+                let mut parts: Vec<String> = vec![];
+                if let Some(d) = self.start_digest(&meta, ev.source.as_deref()) {
+                    parts.push(d);
+                }
+                if let Some(o) = self.orders_guidance(&meta) {
+                    parts.push(o);
+                }
+                if !meta.paused {
+                    if let Some(mail) = self.mail_notice(&meta.id) {
+                        parts.push(mail);
+                    }
+                }
+                if !parts.is_empty() {
+                    decision.context = Some(parts.join("\n\n"));
+                }
+            }
+            EventKind::PromptSubmit | EventKind::ToolEnd => {
+                if !meta.paused {
+                    decision.context = self.mail_notice(&meta.id);
+                }
+            }
+            EventKind::TurnEnd => {
+                // Pause: no new work is delivered; the current turn finishes.
+                if !meta.paused && stuck.is_none() {
+                    decision.continue_with = self.mail_notice(&meta.id);
+                }
+            }
+            _ => {}
+        }
+
+        if let Some(reason) = stuck {
+            self.set_state(p, AgentState::NeedsYou, Some(reason.clone()));
+            self.record("agent.stuck", Some(&p.id), meta.project.as_deref(), meta.task.as_deref(), None, json!({"reason": reason}));
+        } else if let Some(state) = ev.state {
+            // A turn that is being continued with mail is still working.
+            let state = if decision.continue_with.is_some() { AgentState::Working } else { state };
+            let reason = (state == AgentState::NeedsYou).then(|| ev.message.clone().unwrap_or_else(|| "waiting for you".into()));
+            self.set_state(p, state, reason);
+        }
+        decision
+    }
+
+    // -------------------------------------------------------------- approvals
+
+    /// Ask the user, wherever they are. None when nobody answered in time.
+    pub async fn request_approval(&self, p: &PaneEntry, kind: &str, summary: &str, detail: Value) -> Option<ApprovalAnswer> {
+        let meta = p.meta();
+        let id = new_id("a");
+        let (tx, rx) = oneshot::channel();
+        self.approvals.lock().unwrap().insert(id.clone(), tx);
+        let _ = self.db.with(|c| {
+            c.execute(
+                "INSERT INTO approvals(id,ts,pane,project,kind,summary,detail) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                rusqlite::params![id, now_ms() as i64, p.id, meta.project, kind, summary, detail.to_string()],
+            )
+        });
+        self.record(
+            "approval.requested",
+            Some(&p.id),
+            meta.project.as_deref(),
+            meta.task.as_deref(),
+            None,
+            json!({"id": id, "kind": kind, "summary": summary, "pane_name": meta.name}),
+        );
+        self.notify(
+            "approval",
+            Some(&p.id),
+            meta.project.as_deref(),
+            &format!("{} needs approval", meta.name),
+            summary,
+        );
+        let answer = tokio::time::timeout(Duration::from_secs(self.cfg.approval_timeout_secs), rx).await;
+        self.approvals.lock().unwrap().remove(&id);
+        match answer {
+            Ok(Ok(a)) => Some(a),
+            _ => {
+                let _ = self.db.with(|c| {
+                    c.execute(
+                        "UPDATE approvals SET status='expired', answered=?2 WHERE id=?1 AND status='pending'",
+                        rusqlite::params![id, now_ms() as i64],
+                    )
+                });
+                self.emit("approval.resolved", Some(&p.id), None, json!({"id": id, "status": "expired"}));
+                None
+            }
+        }
+    }
+
+    pub fn answer_approval(&self, id: &str, allow: bool, reason: Option<String>, by: &str) -> Result<()> {
+        let tx = self.approvals.lock().unwrap().remove(id);
+        let Some(tx) = tx else {
+            return Err(invalid("that request is no longer waiting (answered, expired, or the agent moved on)"));
+        };
+        let status = if allow { "allowed" } else { "denied" };
+        let pane: Option<String> = self
+            .db
+            .with(|c| {
+                c.execute(
+                    "UPDATE approvals SET status=?2, answered=?3, answered_by=?4, reason=?5 WHERE id=?1",
+                    rusqlite::params![id, status, now_ms() as i64, by, reason],
+                )?;
+                c.query_row("SELECT pane FROM approvals WHERE id=?1", [id], |r| r.get(0))
+            })
+            .ok();
+        let _ = tx.send(ApprovalAnswer { allow, reason: reason.clone() });
+        self.record("approval.resolved", pane.as_deref(), None, None, Some(by), json!({"id": id, "status": status, "reason": reason}));
+        Ok(())
+    }
+
+    pub(crate) fn cancel_pane_approvals(&self, pane: &str) {
+        let ids: Vec<String> = self
+            .db
+            .with(|c| {
+                let mut stmt = c.prepare("SELECT id FROM approvals WHERE pane=?1 AND status='pending'")?;
+                let rows = stmt.query_map([pane], |r| r.get(0))?;
+                rows.collect()
+            })
+            .unwrap_or_default();
+        for id in ids {
+            // Dropping the sender makes the waiting hook fall through.
+            self.approvals.lock().unwrap().remove(&id);
+            let _ = self.db.with(|c| {
+                c.execute("UPDATE approvals SET status='cancelled', answered=?2 WHERE id=?1", rusqlite::params![id, now_ms() as i64])
+            });
+            self.emit("approval.resolved", Some(pane), None, json!({"id": id, "status": "cancelled"}));
+        }
+    }
+
+    pub fn approvals(&self, pending_only: bool) -> Vec<Value> {
+        self.db
+            .with(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT id,ts,pane,project,kind,summary,detail,status,answered_by,reason FROM approvals
+                     WHERE (?1=0 OR status='pending') ORDER BY ts DESC LIMIT 200",
+                )?;
+                let rows = stmt.query_map([pending_only as i64], |r| {
+                    let detail: String = r.get(6)?;
+                    Ok(json!({
+                        "id": r.get::<_, String>(0)?, "ts": r.get::<_, i64>(1)?,
+                        "pane": r.get::<_, String>(2)?, "project": r.get::<_, Option<String>>(3)?,
+                        "kind": r.get::<_, String>(4)?, "summary": r.get::<_, String>(5)?,
+                        "detail": serde_json::from_str::<Value>(&detail).unwrap_or(Value::Null),
+                        "status": r.get::<_, String>(7)?, "answered_by": r.get::<_, Option<String>>(8)?,
+                        "reason": r.get::<_, Option<String>>(9)?, "station": self.station,
+                    }))
+                })?;
+                rows.collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+pub(crate) fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+}
+
+#[allow(dead_code)]
+fn _meta_is_send(_: &PaneMeta) {}
