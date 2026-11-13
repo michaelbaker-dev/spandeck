@@ -74,7 +74,7 @@ api.onEvent((ev) => {
   }
   if (ev.kind === 'notify.new') notifyBrowser(ev.data);
   if (ev.kind === 'connection.restored') { for (const t of S.terms.values()) t.attach(); }
-  if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events)\./.test(ev.kind)) refreshSoon();
+  if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events|vault)\./.test(ev.kind)) refreshSoon();
 });
 
 function notifyBrowser(n) {
@@ -350,6 +350,7 @@ function palette() {
     { label: 'Stop every agent on this station', run: () => rpc(api.station, 'stop.all', { scope: 'station' }) },
     { label: 'Check this station (doctor)', run: doctorPanel },
     { label: 'Agent setup: MCP servers, skills, models', run: setupPanel },
+    { label: 'Vault: connect stations and set token rotation', run: vaultPanel },
     { label: 'Run a command in every agent…', run: () => commandDialog(api.station, null) },
   ];
   dialog('Go to or do…', (close) => {
@@ -483,6 +484,81 @@ async function setupPanel() {
   }, { wide: true });
 }
 
+// ------------------------------------------------------------------- vault
+// AgentVault. The passphrase is typed only into the vault's own page, which
+// opens in a small pop-up showing the vault's address. Never into this page.
+
+const VAULT_LABEL = { connected: 'connected', not_connected: 'not connected', locked: 'vault locked', unreachable: 'vault unreachable', token_rejected: 'token refused' };
+
+function vaultChip(s) {
+  const v = s.vault;
+  if (!v || !v.found) return null;
+  const cls = v.state === 'connected' ? 'ok' : v.state === 'not_connected' ? '' : 'warn';
+  return h('span', { class: 'chip vault-chip ' + cls, title: v.problem || 'AgentVault' }, 'vault: ' + (VAULT_LABEL[v.state] || v.state));
+}
+
+// Opened at the moment of the click (or the browser blocks it), pointed at
+// the vault's approval page once the station has asked for a token.
+function openVaultPopup() {
+  return window.open('', 'spandeck-vault', 'popup,width=540,height=700');
+}
+
+async function vaultConnect(stations) {
+  const popup = openVaultPopup();
+  let shown = false;
+  for (const st of stations) {
+    try {
+      const out = await api.on(st, 'vault.connect');
+      if (!shown && popup) { popup.location.href = out.approve_url; shown = true; }
+    } catch (e) { toast(`${st}: ${e.message}`, 'error'); }
+  }
+  if (!shown && popup) popup.close();
+  if (shown && !popup) toast('Your browser blocked the pop-up. Allow pop-ups for this page and try again.', 'error');
+  refreshSoon(300);
+}
+
+function vaultPanel() {
+  dialog('Vault', (close, body) => {
+    const draw = () => {
+      const stations = S.fleet.stations;
+      const vault = stations.map(s => s.vault).find(v => v && v.found);
+      const can = (s) => s.state === 'online' && s.vault?.found;
+      const unconnected = stations.filter(s => can(s) && ['not_connected', 'token_rejected'].includes(s.vault.state)).map(s => s.station);
+      body.replaceChildren(h('div', {},
+        h('p', { class: 'muted' }, vault ? `AgentVault at ${vault.url}${vault.version ? ' · ' + vault.version : ''}. Agents use keys through it and never see them. You approve each station once, on the vault's own page.` : 'No AgentVault was found on your tailnet.'),
+        h('table', { class: 'table' },
+          h('thead', {}, h('tr', {}, h('th', {}, 'Station'), h('th', {}, 'Vault'), h('th', {}, 'Token rotation'), h('th', {}))),
+          h('tbody', {}, stations.map(s => {
+            const v = s.vault || {};
+            const rotation = h('select', { 'aria-label': 'Token rotation for ' + s.station, disabled: v.state !== 'connected',
+              onchange: (e) => rpc(s.station, 'vault.rotation', { every_hours: e.target.value ? Number(e.target.value) : null }).then(() => toast(`Rotation for ${s.station} updated`)) },
+              [['', 'Never'], ['1', 'Every hour'], ['6', 'Every 6 hours'], ['24', 'Every day'], ['168', 'Every week'], ['720', 'Every 30 days']].map(([val, label]) => h('option', { value: val, selected: String(v.rotation_hours ?? '') === val }, label)));
+            return h('tr', {},
+              h('td', {}, h('b', {}, s.station)),
+              h('td', {}, s.state !== 'online' ? h('span', { class: 'muted' }, 'station ' + s.state.replace('_', ' ')) : vaultChip(s) || h('span', { class: 'muted' }, 'no vault found'),
+                v.pending ? h('small', { class: 'muted block' }, 'Waiting for your approval on the vault…') : null,
+                v.problem && v.state !== 'connected' ? h('small', { class: 'warn-text block' }, v.problem) : null,
+                v.state === 'connected' && v.vault_rotation_hours !== v.rotation_hours && v.vault_rotation_hours !== undefined && (v.vault_rotation_hours ?? null) !== (v.rotation_hours ?? null) ? h('small', { class: 'warn-text block' }, 'The vault has a different rotation setting than this one.') : null),
+              h('td', {}, rotation, v.next_rotation_ms && v.rotation_hours ? h('small', { class: 'muted block' }, 'next ' + new Date(v.next_rotation_ms).toLocaleString()) : null),
+              h('td', {}, !can(s) ? null
+                : v.state === 'connected' ? h('button', { class: 'mini', onclick: () => confirmBox(`Disconnect ${s.station}?`, `The station forgets its token. Revoke spandeck:${s.station} on the vault's Tokens page to end it there too.`, 'Disconnect', () => rpc(s.station, 'vault.disconnect').then((r) => toast(r.next))) }, 'Disconnect')
+                : v.state === 'locked' || v.state === 'unreachable' ? h('span', { class: 'muted' }, v.state === 'locked' ? 'Unlock the vault first' : '')
+                : h('button', { class: 'primary', onclick: () => vaultConnect([s.station]) }, 'Connect')));
+          }))),
+        h('div', { class: 'row end' },
+          h('button', { onclick: () => rpc(api.station, 'vault.refresh').then(() => refresh()) }, 'Check now'),
+          h('span', { class: 'grow' }),
+          unconnected.length > 1 ? h('button', { class: 'primary', onclick: () => vaultConnect(unconnected) }, 'Connect all stations') : null,
+          h('button', { onclick: close }, 'Close'))));
+    };
+    draw();
+    const off = api.onEvent((ev) => { if (ev.kind.startsWith('vault.')) setTimeout(draw, 400); });
+    const timer = setInterval(draw, 1500);
+    vaultPanel._stop = () => { off(); clearInterval(timer); };
+    return h('span');
+  }, { wide: true, onClose: () => vaultPanel._stop && vaultPanel._stop() });
+}
+
 // -------------------------------------------------------------------- views
 
 function topbar() {
@@ -503,6 +579,7 @@ function topbar() {
     h('button', { class: S.approvals.length ? 'attn' : '', onclick: approvalsPanel }, 'Approvals', S.approvals.length ? h('span', { class: 'count' }, S.approvals.length) : null),
     h('button', { onclick: inboxPanel }, 'Inbox', unread ? h('span', { class: 'count' }, unread) : null),
     isPhone() ? null : h('button', { onclick: setupPanel, title: 'MCP servers, skills and model defaults for every agent' }, 'Agent setup'),
+    isPhone() || !S.fleet.stations.some(x => x.vault?.found) ? null : h('button', { class: S.fleet.stations.some(x => x.state === 'online' && ['not_connected', 'token_rejected', 'locked'].includes(x.vault?.state)) ? 'attn' : '', onclick: vaultPanel, title: 'AgentVault: keys for agents without handing over keys' }, 'Vault'),
     h('button', { class: 'danger', onclick: stopAllMenu, title: 'Interrupt running agent turns' }, 'Stop all'),
     isPhone() ? null : h('button', { onclick: palette, title: 'Ctrl+K' }, '⌘K'));
 }
@@ -529,7 +606,7 @@ function stationTile(s) {
     h('div', { class: 'tile-head' }, h('span', { class: 'dot ' + (up ? (s.needs_you ? 'needs_you' : s.working ? 'working' : 'idle') : 'unreachable') }), h('b', {}, s.station), s.self ? h('span', { class: 'chip' }, 'this station') : null, h('span', { class: 'grow' }), h('span', { class: 'muted' }, s.version || '')),
     up ? h('div', { class: 'tile-stats' },
       h('span', {}, h('b', {}, s.working ?? 0), ' working'), h('span', { class: s.needs_you ? 'needs' : '' }, h('b', {}, s.needs_you ?? 0), ' need you'),
-      s.load != null ? h('span', { class: 'muted' }, 'load ' + Number(s.load).toFixed(1)) : null, s.keep_awake ? h('span', { class: 'chip' }, 'kept awake') : null)
+      s.load != null ? h('span', { class: 'muted' }, 'load ' + Number(s.load).toFixed(1)) : null, s.keep_awake ? h('span', { class: 'chip' }, 'kept awake') : null, vaultChip(s))
       : h('div', { class: 'tile-stats warn-text' }, s.state === 'update_needed' ? 'Needs an update before it can be controlled' : `Unreachable · last seen ${ago(s.last_seen_ms)} ago`),
     h('div', { class: 'tile-agents' }, agents.slice(0, 8).map(p => h('div', { class: 'agent-line' }, dot(p), h('span', {}, p.name), h('span', { class: 'muted' }, p.tool || p.needs_reason || STATE_LABEL[stateOf(p)]))),
       up && !agents.length ? h('span', { class: 'muted' }, 'No agents running') : null));

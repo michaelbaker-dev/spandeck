@@ -260,6 +260,7 @@ pub struct Inner {
     pub(crate) seq: AtomicU64,
     pub fleet: crate::fleet::FleetState,
     pub web_addrs: Mutex<Vec<String>>,
+    pub vault: crate::vault::VaultState,
 }
 
 #[derive(Clone)]
@@ -342,6 +343,7 @@ impl Daemon {
             keep_awake: Mutex::new(None),
             seq: AtomicU64::new(0),
             web_addrs: Mutex::new(vec![]),
+            vault: Default::default(),
         }));
         let _ = std::fs::write(daemon.paths.pid_file(), std::process::id().to_string());
 
@@ -401,6 +403,11 @@ impl Daemon {
         }
         if n % 20 == 1 {
             self.discover_peers().await;
+            self.vault_discover().await;
+        }
+        if n % 20 == 11 {
+            self.vault_maintain().await;
+            self.vault_report_archive().await;
         }
         if n % 4 == 2 {
             self.pump_stops().await;
@@ -1306,6 +1313,7 @@ impl Daemon {
             "web": self.web_addrs.lock().unwrap().clone(),
             "load": load_average(),
             "setup": {"updated_ms": self.setup().updated_ms},
+            "vault": self.vault_view(),
         })
     }
 }

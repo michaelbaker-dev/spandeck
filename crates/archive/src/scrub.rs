@@ -49,6 +49,46 @@ fn assignment() -> &'static Regex {
     })
 }
 
+/// Vendor key shapes only: strict enough to act on (block a command, report
+/// an exposure) without tripping on ordinary code. `scrub` is wider.
+fn key_shapes() -> &'static [(&'static str, Regex)] {
+    static P: OnceLock<Vec<(&'static str, Regex)>> = OnceLock::new();
+    P.get_or_init(|| {
+        [
+            (
+                "private key",
+                r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+            ),
+            ("Anthropic", r"\bsk-ant-[A-Za-z0-9_\-]{24,}"),
+            ("OpenAI-style", r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{32,}"),
+            ("GitHub", r"\bgh[pousr]_[A-Za-z0-9]{30,}"),
+            ("GitHub", r"\bgithub_pat_[A-Za-z0-9_]{40,}"),
+            ("GitLab", r"\bglpat-[A-Za-z0-9_\-]{20,}"),
+            ("AWS", r"\bAKIA[0-9A-Z]{16}\b"),
+            ("Google", r"\bAIza[0-9A-Za-z_\-]{35}\b"),
+            ("Slack", r"\bxox[abprs]-[A-Za-z0-9\-]{20,}"),
+            ("Tailscale", r"\btskey-[a-z]+-[A-Za-z0-9\-]{20,}"),
+            ("Hugging Face", r"\bhf_[A-Za-z0-9]{30,}"),
+        ]
+        .into_iter()
+        .map(|(kind, p)| (kind, Regex::new(p).expect("valid key shape")))
+        .collect()
+    })
+}
+
+/// Things in `text` that are shaped like a real provider key: (kind, value).
+pub fn find_keys(text: &str) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = vec![];
+    for (kind, re) in key_shapes() {
+        for m in re.find_iter(text) {
+            if !out.iter().any(|(_, v)| v == m.as_str()) {
+                out.push((kind, m.as_str().to_string()));
+            }
+        }
+    }
+    out
+}
+
 pub fn scrub(text: &str) -> String {
     let mut out = text.to_string();
     for p in patterns() {
@@ -68,6 +108,23 @@ pub fn scrub(text: &str) -> String {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn find_keys_spots_real_shapes_and_ignores_ordinary_code() {
+        let key = "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        let found = find_keys(&format!(
+            "curl -H 'x-api-key: {key}' https://api.example.com"
+        ));
+        assert_eq!(found, vec![("Anthropic", key.to_string())]);
+        for ordinary in [
+            "let token = get_token(); password = input()",
+            "git commit -m 'rotate the api_key handling' && echo sk-short",
+            "commit 3f2a9c1e5b7d4e8a9c217d4e5f6a8b90aabbccdd",
+            "export OPENAI_API_KEY=$(vault read)",
+        ] {
+            assert!(find_keys(ordinary).is_empty(), "{ordinary}");
+        }
+    }
 
     #[test]
     fn known_shapes_are_removed() {

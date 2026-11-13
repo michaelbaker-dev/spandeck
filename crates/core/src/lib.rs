@@ -15,6 +15,7 @@
 //!   fleet     discovery over Tailscale, trust, peer calls, stop-all
 //!   notify    the inbox and push rules
 //!   setup     fleet-wide agent setup: MCP servers, skills, model defaults
+//!   vault     AgentVault: station token, key use through the vault's proxy
 
 pub mod client;
 pub mod daemon;
@@ -35,6 +36,7 @@ pub mod rpc;
 pub mod server;
 pub mod setup;
 pub mod tasks;
+pub mod vault;
 
 pub use daemon::{Authority, BusEvent, Caller, Daemon, Error, StartOpts, PROTOCOL, VERSION};
 pub use paths::{Config, Paths};

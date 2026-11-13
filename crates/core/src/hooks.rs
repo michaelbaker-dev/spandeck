@@ -30,6 +30,62 @@ impl Daemon {
         let Some(ev) = a.normalize(&payload) else {
             return Ok(HookReply::default());
         };
+        // With a vault connected, raw keys do not belong in commands, files or
+        // prompts: block the tool call and say what to do instead.
+        if self.vault_connected() {
+            let raw_event = payload
+                .get("hook_event_name")
+                .and_then(|e| e.as_str())
+                .unwrap_or("");
+            let text = match raw_event {
+                "PreToolUse" => payload.get("tool_input").map(|t| t.to_string()),
+                "UserPromptSubmit" => payload
+                    .get("prompt")
+                    .and_then(|t| t.as_str())
+                    .map(String::from),
+                _ => None,
+            };
+            let found = text
+                .map(|t| spandeck_archive::find_keys(&t))
+                .unwrap_or_default();
+            if let Some((kind, _)) = found.first() {
+                let meta = p.meta();
+                for (_, value) in &found {
+                    self.vault_report(
+                        value,
+                        if raw_event == "PreToolUse" {
+                            "a command or file an agent wrote"
+                        } else {
+                            "a prompt"
+                        },
+                    )
+                    .await;
+                }
+                if raw_event == "PreToolUse" {
+                    self.record(
+                        "order.blocked",
+                        Some(&p.id),
+                        meta.project.as_deref(),
+                        meta.task.as_deref(),
+                        None,
+                        json!({"order": "no-raw-keys", "layer": "fleet", "tool": payload.get("tool_name")}),
+                    );
+                    return Ok(a.reply(
+                        "PreToolUse",
+                        &HookDecision::deny(format!(
+                            "Blocked by spandeck: this contains what looks like a {kind} key. Keys must not be put in commands or files. Use the vault tools instead (vault_list, then vault_call) so the key is attached for you and never appears here. If the key came from the user, tell them it is now exposed and should be rotated."
+                        )),
+                    ));
+                }
+                self.notify(
+                    "error",
+                    Some(&p.id),
+                    meta.project.as_deref(),
+                    &format!("A {kind} key was pasted into {}", meta.name),
+                    "It is now in that agent's transcript. Rotate it in the vault, and use the vault tools instead of pasting keys.",
+                );
+            }
+        }
         let decision = self.apply_agent_event(&p, &ev).await;
         Ok(a.reply(&ev.raw_event, &decision))
     }

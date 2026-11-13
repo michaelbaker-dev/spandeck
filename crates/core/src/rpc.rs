@@ -41,6 +41,9 @@ const AGENT_METHODS: &[&str] = &[
     "context.search",
     "recall",
     "project.list",
+    "vault.list",
+    "vault.describe",
+    "vault.call",
     "orders.view",
     "signoff.status",
     "diff",
@@ -83,6 +86,7 @@ const READ_METHODS: &[&str] = &[
     "integration.status",
     "archive.sessions",
     "setup.get",
+    "vault.status",
 ];
 
 fn p<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T> {
@@ -663,6 +667,38 @@ impl Daemon {
             }
 
             // --------------------------------------------------- agent setup
+            // ---------------------------------------------------------- vault
+            "vault.status" => self.vault_view(),
+            "vault.refresh" => {
+                self.vault_discover().await;
+                self.vault_maintain().await;
+                self.vault_report_archive().await;
+                self.vault_view()
+            }
+            "vault.connect" => self.vault_connect(by).await?,
+            "vault.disconnect" => self.vault_disconnect(by)?,
+            "vault.rotation" => {
+                let hours = match params.get("every_hours") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(v.as_u64().ok_or_else(|| {
+                        invalid("every_hours is a whole number of hours, or null for never")
+                    })?),
+                };
+                self.vault_set_rotation(hours, by).await?
+            }
+            "vault.list" => self.vault_list(caller).await?,
+            "vault.describe" => self.vault_describe(caller, s(&params, "name")?).await?,
+            "vault.call" => {
+                self.vault_call(
+                    caller,
+                    s(&params, "name")?,
+                    s(&params, "path")?,
+                    opt(&params, "method").unwrap_or("GET"),
+                    params.get("body").filter(|b| !b.is_null()).cloned(),
+                )
+                .await?
+            }
+
             "setup.get" => {
                 let d = self.clone();
                 tokio::task::spawn_blocking(move || d.setup_view())

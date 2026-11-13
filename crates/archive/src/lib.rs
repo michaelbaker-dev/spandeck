@@ -16,7 +16,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 pub use normalize::Entry;
-pub use scrub::scrub;
+pub use scrub::{find_keys, scrub};
 
 /// Only the first part of a large entry is indexed; the raw line holds it all.
 const INDEX_CAP: usize = 4000;
@@ -24,6 +24,10 @@ const EXCERPT_CHARS: usize = 320;
 
 pub struct Archive {
     conn: Mutex<Connection>,
+    /// Key-shaped values seen in session files since the last `take_found_keys`.
+    /// Held in memory only, so the daemon can report them as exposed; never
+    /// written anywhere by the archive.
+    found: Mutex<Vec<(String, String)>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +104,7 @@ impl Archive {
         )?;
         Ok(Archive {
             conn: Mutex::new(conn),
+            found: Mutex::new(vec![]),
         })
     }
 
@@ -231,6 +236,12 @@ impl Archive {
                 params![id, line_no as i64, raw.as_ref()],
             );
             for e in normalize::normalize(agent, &raw) {
+                for (_, value) in find_keys(&e.text) {
+                    let mut found = self.found.lock().unwrap();
+                    if found.len() < 200 && !found.iter().any(|(_, v)| *v == value) {
+                        found.push((id.to_string(), value));
+                    }
+                }
                 let mut text = scrub(&e.text);
                 if text.len() > INDEX_CAP {
                     let mut cut = INDEX_CAP;
@@ -262,6 +273,11 @@ impl Archive {
         );
         let _ = tx.commit();
         added
+    }
+
+    /// Key-shaped values found since the last call, as (session, value).
+    pub fn take_found_keys(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut *self.found.lock().unwrap())
     }
 
     /// Raw lines exactly as written. Local use only: restore and resume.

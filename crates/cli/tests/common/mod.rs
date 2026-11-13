@@ -489,3 +489,417 @@ pub mod browser {
         }
     }
 }
+
+/// A stand-in for AgentVault that follows the contract in
+/// docs/specs/spandeck-agentvault.md, for scenario tests.
+pub mod fake_vault {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::{Path, State};
+    use axum::http::{HeaderMap, Method, StatusCode};
+    use axum::response::{Html, IntoResponse};
+    use axum::routing::{any, get, post, put};
+    use axum::{Json, Router};
+    use serde_json::{json, Value};
+
+    #[derive(Default)]
+    pub struct Tok {
+        pub station: String,
+        pub rotation: Option<u64>,
+        pub retired: bool,
+        pub overdue: bool,
+        /// A rotation's new token that has not been used yet.
+        pub unused_new: Option<String>,
+        /// The token this one replaces once it is first used.
+        pub replaces: Option<String>,
+    }
+
+    #[derive(Default)]
+    pub struct Inner {
+        pub unlocked: bool,
+        pub service: bool,
+        pub requests: HashMap<String, (String, String, String, bool)>, // id -> (code, station, status, collected)
+        pub tokens: HashMap<String, Tok>,
+        pub calls: Vec<Value>,
+        pub reports: Vec<String>,
+        pub issued: Vec<String>,
+        n: u32,
+    }
+
+    #[derive(Clone)]
+    pub struct FakeVault {
+        pub port: u16,
+        pub inner: Arc<Mutex<Inner>>,
+    }
+
+    type S = Arc<Mutex<Inner>>;
+
+    fn bearer(h: &HeaderMap) -> String {
+        h.get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// Ok(token) when it may be used. Using a rotation's new token retires the old one.
+    fn auth(
+        s: &mut Inner,
+        h: &HeaderMap,
+        allow_overdue: bool,
+    ) -> Result<String, (StatusCode, Json<Value>)> {
+        let t = bearer(h);
+        let Some(tok) = s.tokens.get(&t) else {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "unknown token"})),
+            ));
+        };
+        if tok.retired {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "token was replaced"})),
+            ));
+        }
+        if tok.overdue && !allow_overdue {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "token is overdue for rotation", "overdue": true})),
+            ));
+        }
+        if let Some(old) = tok.replaces.clone() {
+            if let Some(o) = s.tokens.get_mut(&old) {
+                o.retired = true;
+                o.unused_new = None;
+            }
+            s.tokens.get_mut(&t).unwrap().replaces = None;
+        }
+        Ok(t)
+    }
+
+    async fn status(State(s): State<S>) -> Json<Value> {
+        let s = s.lock().unwrap();
+        if s.service {
+            Json(json!({"service": "agentvault", "version": "0.1.0-fake", "unlocked": s.unlocked}))
+        } else {
+            Json(json!({"version": "something else"}))
+        }
+    }
+
+    async fn open_request(State(s): State<S>, Json(body): Json<Value>) -> Json<Value> {
+        let mut s = s.lock().unwrap();
+        s.n += 1;
+        let id = format!("req{}", s.n);
+        let code = format!("code-{}-secret", s.n);
+        let station = body["station"].as_str().unwrap_or("?").to_string();
+        // One pending request per station: a new one replaces it.
+        s.requests
+            .retain(|_, r| !(r.1 == station && r.2 == "pending"));
+        s.requests
+            .insert(id.clone(), (code.clone(), station, "pending".into(), false));
+        Json(
+            json!({"request_id": id, "approve_url": format!("/approve/{id}"), "collect_code": code, "expires_at": 0}),
+        )
+    }
+
+    async fn approve_page(Path(id): Path<String>, State(s): State<S>) -> impl IntoResponse {
+        let s = s.lock().unwrap();
+        let station = s.requests.get(&id).map(|r| r.1.clone()).unwrap_or_default();
+        Html(format!("<!doctype html><title>AgentVault</title><h1>Approve a token for station {station}?</h1><p id=req>{id}</p>"))
+    }
+
+    async fn collect(
+        Path(id): Path<String>,
+        State(s): State<S>,
+        h: HeaderMap,
+    ) -> (StatusCode, Json<Value>) {
+        let mut s = s.lock().unwrap();
+        let code = h
+            .get("x-agentvault-collect-code")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let Some(req) = s.requests.get(&id).cloned() else {
+            return (StatusCode::NOT_FOUND, Json(json!({"status": "expired"})));
+        };
+        if req.0 != code {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "wrong collect code"})),
+            );
+        }
+        match (req.2.as_str(), req.3) {
+            ("approved", false) => {
+                s.n += 1;
+                let token = format!("avt_station_{}_{}", req.1, s.n);
+                // Approving replaces that station's earlier token.
+                for t in s.tokens.values_mut().filter(|t| t.station == req.1) {
+                    t.retired = true;
+                }
+                s.tokens.insert(
+                    token.clone(),
+                    Tok {
+                        station: req.1.clone(),
+                        ..Default::default()
+                    },
+                );
+                s.issued.push(token.clone());
+                s.requests.get_mut(&id).unwrap().3 = true;
+                (
+                    StatusCode::OK,
+                    Json(
+                        json!({"token": token, "scopes": ["list", "proxy"], "secrets": ["*"], "proxy_get_only": true}),
+                    ),
+                )
+            }
+            ("approved", true) => (StatusCode::GONE, Json(json!({"status": "collected"}))),
+            (other, _) => (StatusCode::OK, Json(json!({"status": other}))),
+        }
+    }
+
+    async fn token_self(State(s): State<S>, h: HeaderMap) -> (StatusCode, Json<Value>) {
+        let mut s = s.lock().unwrap();
+        match auth(&mut s, &h, false) {
+            Ok(t) => {
+                let tok = &s.tokens[&t];
+                (
+                    StatusCode::OK,
+                    Json(
+                        json!({"valid": true, "scopes": ["list", "proxy"], "proxy_get_only": true, "rotation": {"every_hours": tok.rotation}, "overdue": false}),
+                    ),
+                )
+            }
+            Err(e) => e,
+        }
+    }
+
+    async fn rotate(State(s): State<S>, h: HeaderMap) -> (StatusCode, Json<Value>) {
+        let mut s = s.lock().unwrap();
+        let t = match auth(&mut s, &h, true) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        s.n += 1;
+        let (station, rotation) = (s.tokens[&t].station.clone(), s.tokens[&t].rotation);
+        let new = format!("avt_station_{station}_{}", s.n);
+        // A repeat swap with the old token discards the unused new one.
+        if let Some(prev) = s.tokens.get_mut(&t).unwrap().unused_new.take() {
+            s.tokens.remove(&prev);
+        }
+        s.tokens.insert(
+            new.clone(),
+            Tok {
+                station,
+                rotation,
+                replaces: Some(t.clone()),
+                ..Default::default()
+            },
+        );
+        let old = s.tokens.get_mut(&t).unwrap();
+        old.unused_new = Some(new.clone());
+        old.overdue = false;
+        s.issued.push(new.clone());
+        (StatusCode::OK, Json(json!({"token": new})))
+    }
+
+    async fn set_rotation(
+        State(s): State<S>,
+        h: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
+        let mut s = s.lock().unwrap();
+        let t = match auth(&mut s, &h, false) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        let hours = body["every_hours"].as_u64();
+        if hours == Some(0) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "minimum 1 hour"})),
+            );
+        }
+        s.tokens.get_mut(&t).unwrap().rotation = hours;
+        (StatusCode::OK, Json(json!({"every_hours": hours})))
+    }
+
+    async fn secrets(State(s): State<S>, h: HeaderMap) -> (StatusCode, Json<Value>) {
+        let mut s = s.lock().unwrap();
+        if !s.unlocked {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "vault is locked"})),
+            );
+        }
+        if let Err(e) = auth(&mut s, &h, false) {
+            return e;
+        }
+        (
+            StatusCode::OK,
+            Json(json!([
+                {"name": "OPENAI_API_KEY", "description": "OpenAI key for the demo project", "provider": "openai", "risk": "medium"},
+                {"name": "OPENAI_ORG", "description": "OpenAI organisation id", "provider": "openai", "risk": "low"},
+                {"name": "GITHUB_TOKEN", "description": "GitHub token", "provider": "github", "risk": "high"}
+            ])),
+        )
+    }
+
+    async fn secret(
+        Path(name): Path<String>,
+        State(s): State<S>,
+        h: HeaderMap,
+    ) -> (StatusCode, Json<Value>) {
+        let mut s = s.lock().unwrap();
+        if let Err(e) = auth(&mut s, &h, false) {
+            return e;
+        }
+        (
+            StatusCode::OK,
+            Json(
+                json!({"name": name, "description": "a key", "provider": "openai", "risk": "medium"}),
+            ),
+        )
+    }
+
+    async fn proxy(
+        Path((name, path)): Path<(String, String)>,
+        State(s): State<S>,
+        method: Method,
+        h: HeaderMap,
+        body: String,
+    ) -> (StatusCode, Json<Value>) {
+        let mut s = s.lock().unwrap();
+        if !s.unlocked {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "vault is locked"})),
+            );
+        }
+        let t = match auth(&mut s, &h, false) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        let actor = h
+            .get("x-agentvault-actor")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        s.calls.push(json!({"name": name, "path": path, "method": method.as_str(), "actor": actor, "token": t, "body": body}));
+        (
+            StatusCode::OK,
+            Json(json!({"provider_says": "ok", "data": [{"id": "model-a"}], "key_used": name})),
+        )
+    }
+
+    async fn report(
+        State(s): State<S>,
+        h: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
+        let mut s = s.lock().unwrap();
+        if let Err(e) = auth(&mut s, &h, false) {
+            return e;
+        }
+        s.reports
+            .push(body["value"].as_str().unwrap_or("").to_string());
+        // Always the same reply: a report never says whether it matched.
+        (StatusCode::OK, Json(json!({"received": true})))
+    }
+
+    impl FakeVault {
+        pub fn start() -> FakeVault {
+            let inner: S = Arc::new(Mutex::new(Inner {
+                unlocked: true,
+                service: true,
+                ..Default::default()
+            }));
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let app = Router::new()
+                .route("/v1/status", get(status))
+                .route("/v1/token-requests", post(open_request))
+                .route("/v1/token-requests/{id}", get(collect))
+                .route("/approve/{id}", get(approve_page))
+                .route("/v1/tokens/self", get(token_self))
+                .route("/v1/tokens/self/rotate", post(rotate))
+                .route("/v1/tokens/self/rotation", put(set_rotation))
+                .route("/v1/secrets", get(secrets))
+                .route("/v1/secrets/{name}", get(secret))
+                .route("/v1/proxy/{name}/{*path}", any(proxy))
+                .route("/v1/attention/report", post(report))
+                .with_state(inner.clone());
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async move {
+                    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                    let _ = axum::serve(listener, app).await;
+                });
+            });
+            FakeVault { port, inner }
+        }
+
+        pub fn url(&self) -> String {
+            format!("http://127.0.0.1:{}", self.port)
+        }
+
+        /// The config lines that point a station at this vault.
+        pub fn config(&self) -> String {
+            format!("\n[vault]\nurl = \"{}\"\n", self.url())
+        }
+
+        /// The owner approves (or denies) every pending request on the vault's page.
+        pub fn decide(&self, approve: bool) -> usize {
+            let mut s = self.inner.lock().unwrap();
+            let mut n = 0;
+            for r in s.requests.values_mut().filter(|r| r.2 == "pending") {
+                r.2 = if approve {
+                    "approved".into()
+                } else {
+                    "denied".into()
+                };
+                n += 1;
+            }
+            n
+        }
+
+        pub fn calls(&self) -> Vec<Value> {
+            self.inner.lock().unwrap().calls.clone()
+        }
+        pub fn reports(&self) -> Vec<String> {
+            self.inner.lock().unwrap().reports.clone()
+        }
+        pub fn issued(&self) -> Vec<String> {
+            self.inner.lock().unwrap().issued.clone()
+        }
+        pub fn set_unlocked(&self, unlocked: bool) {
+            self.inner.lock().unwrap().unlocked = unlocked;
+        }
+        /// The live (not retired) tokens of a station.
+        pub fn live_tokens(&self, station: &str) -> Vec<String> {
+            let s = self.inner.lock().unwrap();
+            let mut v: Vec<String> = s
+                .tokens
+                .iter()
+                .filter(|(_, t)| t.station == station && !t.retired)
+                .map(|(k, _)| k.clone())
+                .collect();
+            v.sort();
+            v
+        }
+        pub fn with_tokens(&self, station: &str, f: impl Fn(&mut Tok)) {
+            let mut s = self.inner.lock().unwrap();
+            for t in s
+                .tokens
+                .values_mut()
+                .filter(|t| t.station == station && !t.retired)
+            {
+                f(t);
+            }
+        }
+    }
+}

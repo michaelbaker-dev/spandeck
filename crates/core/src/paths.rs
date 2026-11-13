@@ -133,6 +133,8 @@ pub struct Config {
     pub stuck_idle_turns: u32,
     /// Seconds between nudges typed into an idle agent with unread mail.
     pub nudge_secs: u64,
+    /// AgentVault: normally empty, because spandeck finds the vault by itself.
+    pub vault: crate::vault::VaultConfig,
 }
 
 impl Default for Config {
@@ -153,6 +155,7 @@ impl Default for Config {
             stuck_same_failure: 3,
             stuck_idle_turns: 3,
             nudge_secs: 60,
+            vault: Default::default(),
         }
     }
 }

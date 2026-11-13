@@ -71,6 +71,14 @@ pub struct RecallSettings {
     pub cross_project: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct VaultSettings {
+    /// Vault keys this project's agents may use, as names or patterns
+    /// (`OPENAI_*`). Empty: none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectFile {
     pub name: String,
@@ -82,6 +90,8 @@ pub struct ProjectFile {
     pub review: ReviewSettings,
     #[serde(default)]
     pub recall: RecallSettings,
+    #[serde(default)]
+    pub vault: VaultSettings,
 }
 
 impl ProjectFile {
@@ -214,6 +224,7 @@ impl Daemon {
                     roles: BTreeMap::new(),
                     review: Default::default(),
                     recall: Default::default(),
+                    vault: Default::default(),
                 };
                 file.save(&dir)?;
                 file

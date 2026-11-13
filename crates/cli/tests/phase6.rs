@@ -704,6 +704,9 @@ fn the_mcp_server_gives_an_agent_the_spandeck_tools() {
         "note_add",
         "context_search",
         "recall",
+        "vault_list",
+        "vault_describe",
+        "vault_call",
     ] {
         assert!(names.contains(&want), "missing tool {want}");
     }
