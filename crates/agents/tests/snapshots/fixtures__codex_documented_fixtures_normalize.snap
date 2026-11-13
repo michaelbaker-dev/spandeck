@@ -1,0 +1,130 @@
+---
+source: crates/agents/tests/fixtures.rs
+expression: "normalize_dir(AgentKind::Codex, \"codex/documented\")"
+---
+[
+  {
+    "fixture": "01-SessionStart.json",
+    "event": {
+      "kind": "session_start",
+      "agent": "codex",
+      "session_id": "019a7c3e-5b1e-7a40-9d6f-2f6a0c1b7e11",
+      "transcript_path": "/home/user/.codex/sessions/2026/11/13/rollout-2026-11-13T05-10-00-019a7c3e.jsonl",
+      "cwd": "/work/proj",
+      "state": "idle",
+      "source": "startup",
+      "raw_event": "SessionStart"
+    }
+  },
+  {
+    "fixture": "02-UserPromptSubmit.json",
+    "event": {
+      "kind": "prompt_submit",
+      "agent": "codex",
+      "session_id": "019a7c3e-5b1e-7a40-9d6f-2f6a0c1b7e11",
+      "transcript_path": "/home/user/.codex/sessions/2026/11/13/rollout-2026-11-13T05-10-00-019a7c3e.jsonl",
+      "cwd": "/work/proj",
+      "state": "working",
+      "message": "review the diff",
+      "raw_event": "UserPromptSubmit"
+    }
+  },
+  {
+    "fixture": "03-PreToolUse.json",
+    "event": {
+      "kind": "tool_start",
+      "agent": "codex",
+      "session_id": "019a7c3e-5b1e-7a40-9d6f-2f6a0c1b7e11",
+      "transcript_path": "/home/user/.codex/sessions/2026/11/13/rollout-2026-11-13T05-10-00-019a7c3e.jsonl",
+      "cwd": "/work/proj",
+      "state": "working",
+      "tool": {
+        "name": "Bash",
+        "id": "call_abc123",
+        "command": "git diff HEAD~1",
+        "writes": false
+      },
+      "raw_event": "PreToolUse"
+    }
+  },
+  {
+    "fixture": "04-PostToolUse.json",
+    "event": {
+      "kind": "tool_end",
+      "agent": "codex",
+      "session_id": "019a7c3e-5b1e-7a40-9d6f-2f6a0c1b7e11",
+      "transcript_path": "/home/user/.codex/sessions/2026/11/13/rollout-2026-11-13T05-10-00-019a7c3e.jsonl",
+      "cwd": "/work/proj",
+      "state": "working",
+      "tool": {
+        "name": "Bash",
+        "id": "call_abc123",
+        "command": "git diff HEAD~1",
+        "writes": false,
+        "ok": true
+      },
+      "raw_event": "PostToolUse"
+    }
+  },
+  {
+    "fixture": "05-PostToolUse-failed.json",
+    "event": {
+      "kind": "tool_end",
+      "agent": "codex",
+      "session_id": "019a7c3e-5b1e-7a40-9d6f-2f6a0c1b7e11",
+      "transcript_path": "/home/user/.codex/sessions/2026/11/13/rollout-2026-11-13T05-10-00-019a7c3e.jsonl",
+      "cwd": "/work/proj",
+      "state": "working",
+      "tool": {
+        "name": "Bash",
+        "id": "call_abc124",
+        "command": "cargo test",
+        "writes": false,
+        "ok": false,
+        "error": "Exit code 101"
+      },
+      "raw_event": "PostToolUse"
+    }
+  },
+  {
+    "fixture": "06-PermissionRequest.json",
+    "event": {
+      "kind": "permission_request",
+      "agent": "codex",
+      "session_id": "019a7c3e-5b1e-7a40-9d6f-2f6a0c1b7e11",
+      "transcript_path": "/home/user/.codex/sessions/2026/11/13/rollout-2026-11-13T05-10-00-019a7c3e.jsonl",
+      "cwd": "/work/proj",
+      "state": "needs_you",
+      "tool": {
+        "name": "apply_patch",
+        "command": "*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch",
+        "writes": true
+      },
+      "raw_event": "PermissionRequest"
+    }
+  },
+  {
+    "fixture": "07-Stop.json",
+    "event": {
+      "kind": "turn_end",
+      "agent": "codex",
+      "session_id": "019a7c3e-5b1e-7a40-9d6f-2f6a0c1b7e11",
+      "transcript_path": "/home/user/.codex/sessions/2026/11/13/rollout-2026-11-13T05-10-00-019a7c3e.jsonl",
+      "cwd": "/work/proj",
+      "state": "done",
+      "message": "No issues found.",
+      "raw_event": "Stop"
+    }
+  },
+  {
+    "fixture": "08-Interrupt.json",
+    "event": {
+      "kind": "interrupted",
+      "agent": "codex",
+      "session_id": "019a7c3e-5b1e-7a40-9d6f-2f6a0c1b7e11",
+      "cwd": "/work/proj",
+      "state": "idle",
+      "raw_event": "Interrupt"
+    }
+  }
+]

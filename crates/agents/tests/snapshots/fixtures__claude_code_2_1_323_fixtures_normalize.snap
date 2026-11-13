@@ -1,0 +1,190 @@
+---
+source: crates/agents/tests/fixtures.rs
+expression: "normalize_dir(AgentKind::Claude, \"claude-code/2.1.323\")"
+---
+[
+  {
+    "fixture": "01-SessionStart.json",
+    "event": {
+      "kind": "session_start",
+      "agent": "claude",
+      "session_id": "7bd8862d-889a-467c-a5f1-362e05f5d4a3",
+      "transcript_path": "/home/user/.claude/projects/-work-proj/7bd8862d-889a-467c-a5f1-362e05f5d4a3.jsonl",
+      "cwd": "/work/proj",
+      "state": "idle",
+      "source": "startup",
+      "raw_event": "SessionStart"
+    }
+  },
+  {
+    "fixture": "02-UserPromptSubmit.json",
+    "event": {
+      "kind": "prompt_submit",
+      "agent": "claude",
+      "session_id": "7bd8862d-889a-467c-a5f1-362e05f5d4a3",
+      "transcript_path": "/home/user/.claude/projects/-work-proj/7bd8862d-889a-467c-a5f1-362e05f5d4a3.jsonl",
+      "cwd": "/work/proj",
+      "state": "working",
+      "message": "Use the Bash tool to run exactly: echo spandeck-canary . Then use the Read tool on note.txt. Then use the Bash tool to run exactly: false . Then reply with the single word done.",
+      "raw_event": "UserPromptSubmit"
+    }
+  },
+  {
+    "fixture": "03-PreToolUse.json",
+    "event": {
+      "kind": "tool_start",
+      "agent": "claude",
+      "session_id": "7bd8862d-889a-467c-a5f1-362e05f5d4a3",
+      "transcript_path": "/home/user/.claude/projects/-work-proj/7bd8862d-889a-467c-a5f1-362e05f5d4a3.jsonl",
+      "cwd": "/work/proj",
+      "state": "working",
+      "tool": {
+        "name": "Bash",
+        "id": "toolu_01Qk3CVXW1WrSPHFyvLUdX5u",
+        "command": "echo spandeck-canary",
+        "writes": false
+      },
+      "raw_event": "PreToolUse"
+    }
+  },
+  {
+    "fixture": "04-PostToolUse.json",
+    "event": {
+      "kind": "tool_end",
+      "agent": "claude",
+      "session_id": "7bd8862d-889a-467c-a5f1-362e05f5d4a3",
+      "transcript_path": "/home/user/.claude/projects/-work-proj/7bd8862d-889a-467c-a5f1-362e05f5d4a3.jsonl",
+      "cwd": "/work/proj",
+      "state": "working",
+      "tool": {
+        "name": "Bash",
+        "id": "toolu_01Qk3CVXW1WrSPHFyvLUdX5u",
+        "command": "echo spandeck-canary",
+        "writes": false,
+        "ok": true,
+        "duration_ms": 24
+      },
+      "raw_event": "PostToolUse"
+    }
+  },
+  {
+    "fixture": "05-PreToolUse.json",
+    "event": {
+      "kind": "tool_start",
+      "agent": "claude",
+      "session_id": "7bd8862d-889a-467c-a5f1-362e05f5d4a3",
+      "transcript_path": "/home/user/.claude/projects/-work-proj/7bd8862d-889a-467c-a5f1-362e05f5d4a3.jsonl",
+      "cwd": "/work/proj",
+      "state": "working",
+      "tool": {
+        "name": "Read",
+        "id": "toolu_01NjmzYiz7F89naynXKh4Evp",
+        "file_path": "/work/proj/note.txt",
+        "writes": false
+      },
+      "raw_event": "PreToolUse"
+    }
+  },
+  {
+    "fixture": "06-PostToolUse.json",
+    "event": {
+      "kind": "tool_end",
+      "agent": "claude",
+      "session_id": "7bd8862d-889a-467c-a5f1-362e05f5d4a3",
+      "transcript_path": "/home/user/.claude/projects/-work-proj/7bd8862d-889a-467c-a5f1-362e05f5d4a3.jsonl",
+      "cwd": "/work/proj",
+      "state": "working",
+      "tool": {
+        "name": "Read",
+        "id": "toolu_01NjmzYiz7F89naynXKh4Evp",
+        "file_path": "/work/proj/note.txt",
+        "writes": false,
+        "ok": true,
+        "duration_ms": 3
+      },
+      "raw_event": "PostToolUse"
+    }
+  },
+  {
+    "fixture": "07-PreToolUse.json",
+    "event": {
+      "kind": "tool_start",
+      "agent": "claude",
+      "session_id": "7bd8862d-889a-467c-a5f1-362e05f5d4a3",
+      "transcript_path": "/home/user/.claude/projects/-work-proj/7bd8862d-889a-467c-a5f1-362e05f5d4a3.jsonl",
+      "cwd": "/work/proj",
+      "state": "working",
+      "tool": {
+        "name": "Bash",
+        "id": "toolu_01HrW6b56din2L4N9YJpesaP",
+        "command": "false",
+        "writes": false
+      },
+      "raw_event": "PreToolUse"
+    }
+  },
+  {
+    "fixture": "08-PostToolUseFailure.json",
+    "event": {
+      "kind": "tool_end",
+      "agent": "claude",
+      "session_id": "7bd8862d-889a-467c-a5f1-362e05f5d4a3",
+      "transcript_path": "/home/user/.claude/projects/-work-proj/7bd8862d-889a-467c-a5f1-362e05f5d4a3.jsonl",
+      "cwd": "/work/proj",
+      "state": "working",
+      "tool": {
+        "name": "Bash",
+        "id": "toolu_01HrW6b56din2L4N9YJpesaP",
+        "command": "false",
+        "writes": false,
+        "ok": false,
+        "error": "Exit code 1",
+        "duration_ms": 7
+      },
+      "raw_event": "PostToolUseFailure"
+    }
+  },
+  {
+    "fixture": "09-Stop.json",
+    "event": {
+      "kind": "turn_end",
+      "agent": "claude",
+      "session_id": "7bd8862d-889a-467c-a5f1-362e05f5d4a3",
+      "transcript_path": "/home/user/.claude/projects/-work-proj/7bd8862d-889a-467c-a5f1-362e05f5d4a3.jsonl",
+      "cwd": "/work/proj",
+      "state": "done",
+      "message": "done",
+      "raw_event": "Stop"
+    }
+  },
+  {
+    "fixture": "10-SessionEnd.json",
+    "event": {
+      "kind": "session_end",
+      "agent": "claude",
+      "session_id": "7bd8862d-889a-467c-a5f1-362e05f5d4a3",
+      "transcript_path": "/home/user/.claude/projects/-work-proj/7bd8862d-889a-467c-a5f1-362e05f5d4a3.jsonl",
+      "cwd": "/work/proj",
+      "state": "idle",
+      "source": "other",
+      "raw_event": "SessionEnd"
+    }
+  },
+  {
+    "fixture": "12-PermissionRequest.json",
+    "event": {
+      "kind": "permission_request",
+      "agent": "claude",
+      "session_id": "df106fbc-510f-4817-a835-b7ac0442b209",
+      "transcript_path": "/home/user/.claude/projects/-work-proj/df106fbc-510f-4817-a835-b7ac0442b209.jsonl",
+      "cwd": "/work/proj",
+      "state": "needs_you",
+      "tool": {
+        "name": "Write",
+        "file_path": "/work/proj/out.txt",
+        "writes": true
+      },
+      "raw_event": "PermissionRequest"
+    }
+  }
+]
