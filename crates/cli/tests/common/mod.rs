@@ -20,7 +20,7 @@ pub struct Station {
     pub child: Option<Child>,
     pub env: Vec<(String, String)>,
     _dir: Option<tempfile::TempDir>,
-    scripts: std::cell::Cell<u32>,
+    scripts: std::sync::atomic::AtomicU32,
 }
 
 pub fn free_port() -> u16 {
@@ -45,9 +45,28 @@ impl Station {
 
     /// `extra` is appended to config.toml; `env` is added to the daemon's environment.
     pub fn start_with(name: &str, extra: &str, env: &[(&str, &str)]) -> Station {
+        Station::start_on(name, free_port(), extra, env)
+    }
+
+    /// Two stations on this machine that list each other as peers. Loopback
+    /// peers are trusted only because the test says so.
+    pub fn pair() -> (Station, Station) {
+        let (pa, pb) = (free_port(), free_port());
+        let env = [("SPANDECK_TRUST_LOOPBACK_PEERS", "1")];
+        let a = Station::start_on("alpha", pa, &format!("peers = [\"127.0.0.1:{pb}\"]\n"), &env);
+        let b = Station::start_on("bravo", pb, &format!("peers = [\"127.0.0.1:{pa}\"]\n"), &env);
+        for s in [&a, &b] {
+            wait_for("the stations to find each other", 20, || {
+                let v = s.call("fleet.refresh", json!({}));
+                (v["stations"].as_array().unwrap().iter().filter(|x| x["state"] == json!("online")).count() == 2).then_some(())
+            });
+        }
+        (a, b)
+    }
+
+    pub fn start_on(name: &str, port: u16, extra: &str, env: &[(&str, &str)]) -> Station {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        let port = free_port();
         std::fs::create_dir_all(root.join("config")).unwrap();
         std::fs::create_dir_all(root.join("home")).unwrap();
         std::fs::create_dir_all(root.join("fake")).unwrap();
@@ -72,7 +91,7 @@ impl Station {
             child: None,
             env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
             _dir: Some(dir),
-            scripts: std::cell::Cell::new(0),
+            scripts: std::sync::atomic::AtomicU32::new(0),
         };
         s.launch();
         s
@@ -142,8 +161,7 @@ impl Station {
     }
 
     pub fn script_file(&self, script: &Value) -> PathBuf {
-        let n = self.scripts.get();
-        self.scripts.set(n + 1);
+        let n = self.scripts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let path = self.root.join(format!("script-{n}.json"));
         std::fs::write(&path, script.to_string()).unwrap();
         path
@@ -213,6 +231,12 @@ impl Station {
         self.child.as_ref().unwrap().id()
     }
 
+    /// Freeze or thaw the daemon: to its peers it looks unreachable, while
+    /// its panes keep running.
+    pub fn signal(&self, sig: i32) {
+        unsafe { libc_kill(self.pid() as i32, sig) };
+    }
+
     pub fn kill9(&mut self) {
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
@@ -275,4 +299,87 @@ impl Drop for Station {
 extern "C" {
     #[link_name = "kill"]
     fn libc_kill(pid: i32, sig: i32) -> i32;
+}
+
+pub mod browser {
+    use super::*;
+    use std::time::Duration;
+
+    // ------------------------------------------------------------ browser smoke
+
+    fn chrome() -> Option<std::path::PathBuf> {
+        if let Some(p) = std::env::var_os("SPANDECK_CHROME") {
+            return Some(p.into());
+        }
+        let home = std::env::var("HOME").unwrap_or_default();
+        let mut found = vec![];
+        for base in [format!("{home}/.cache/ms-playwright"), format!("{home}/Library/Caches/ms-playwright")] {
+            for entry in std::fs::read_dir(&base).into_iter().flatten().flatten() {
+                for sub in std::fs::read_dir(entry.path()).into_iter().flatten().flatten() {
+                    for name in ["chrome-headless-shell", "chrome", "Chromium.app/Contents/MacOS/Chromium"] {
+                        let p = sub.path().join(name);
+                        if p.is_file() {
+                            found.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        found.sort();
+        found.pop().or_else(|| {
+            ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+                .iter()
+                .map(std::path::PathBuf::from)
+                .find(|p| p.is_file())
+        })
+    }
+
+    pub struct Page {
+        _browser: headless_chrome::Browser,
+        pub tab: std::sync::Arc<headless_chrome::Tab>,
+    }
+
+    impl Page {
+        pub fn open(s: &Station, width: u32, height: u32) -> Page {
+            let path = chrome().expect("no Chrome found: set SPANDECK_CHROME to a Chrome or Chromium binary");
+            let browser = headless_chrome::Browser::new(
+                headless_chrome::LaunchOptions::default_builder()
+                    .path(Some(path))
+                    .window_size(Some((width, height)))
+                    .sandbox(false)
+                    .idle_browser_timeout(Duration::from_secs(120))
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+            let tab = browser.new_tab().unwrap();
+            tab.navigate_to(&format!("{}#token={}", s.url("/"), s.token())).unwrap();
+            tab.wait_for_element(".topbar").unwrap();
+            Page { _browser: browser, tab }
+        }
+
+        pub fn js(&self, expr: &str) -> Value {
+            // Values come back as JSON text, so arrays and objects survive.
+            let wrapped = format!("(async () => JSON.stringify(await ({expr})))()");
+            let r = self.tab.evaluate(&wrapped, true).unwrap_or_else(|e| panic!("js failed: {e}\n{expr}"));
+            r.value.and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok())).unwrap_or(Value::Null)
+        }
+
+        pub fn wait(&self, what: &str, expr: &str) -> Value {
+            wait_for(what, 20, || {
+                let v = self.js(expr);
+                (!v.is_null() && v != json!(false) && v != json!("")).then_some(v)
+            })
+        }
+
+        pub fn goto(&self, hash: &str) {
+            self.js(&format!("location.hash = {}", json!(hash)));
+        }
+
+        /// The text on a pane's terminal as the browser shows it.
+        pub fn term_text(&self) -> String {
+            self.js("[...document.querySelectorAll('.pane .xterm-rows')].map(r => r.innerText).join('\\n----\\n')").as_str().unwrap_or("").to_string()
+        }
+    }
+
 }

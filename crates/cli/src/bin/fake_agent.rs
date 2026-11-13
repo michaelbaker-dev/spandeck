@@ -160,8 +160,9 @@ impl Agent {
                 self.hook("Stop", json!({"last_assistant_message": "interrupted", "stop_hook_active": false}));
                 self.interrupted = true;
             } else {
-                self.hook("PostToolUse", json!({"tool_name": "Bash", "tool_input": {"command": format!("sleep {ms}ms")}, "tool_use_id": "work", "tool_response": {}}));
+                let post = self.hook("PostToolUse", json!({"tool_name": "Bash", "tool_input": {"command": format!("sleep {ms}ms")}, "tool_use_id": "work", "tool_response": {}}));
                 out("[fake] work finished");
+                Self::show_context(&post);
             }
         } else if let Some(msg) = step.get("turn_end").and_then(|s| s.as_str()) {
             self.append_transcript(&json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": msg}]}}));
