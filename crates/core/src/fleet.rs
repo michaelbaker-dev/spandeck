@@ -72,7 +72,8 @@ impl FleetState {
             peers: Mutex::new(BTreeMap::new()),
             whois: Mutex::new(HashMap::new()),
             me: Mutex::new(None),
-            trust_loopback_peers: std::env::var("SPANDECK_TRUST_LOOPBACK_PEERS").is_ok_and(|v| v == "1"),
+            trust_loopback_peers: std::env::var("SPANDECK_TRUST_LOOPBACK_PEERS")
+                .is_ok_and(|v| v == "1"),
             station: cfg.station.clone(),
         }
     }
@@ -106,9 +107,17 @@ impl FleetState {
             let ips = me
                 .get("TailscaleIPs")
                 .and_then(|a| a.as_array())
-                .map(|a| a.iter().filter_map(|i| i.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|i| i.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
-            Some(TailnetSelf { user_id, login, ips })
+            Some(TailnetSelf {
+                user_id,
+                login,
+                ips,
+            })
         });
         *self.me.lock().unwrap() = Some((now_ms(), v.clone()));
         v
@@ -128,28 +137,59 @@ impl FleetState {
         let remote = match (self.tailnet_self(), tailscale_whois(ip)) {
             (Some(me), Some(who)) => {
                 let uid = who.pointer("/UserProfile/ID").and_then(|v| v.as_i64());
-                let login = who.pointer("/UserProfile/LoginName").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                let node = who.pointer("/Node/ComputedName").or_else(|| who.pointer("/Node/Name")).and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                let tagged = who.pointer("/Node/Tags").and_then(|t| t.as_array()).is_some_and(|t| !t.is_empty());
+                let login = who
+                    .pointer("/UserProfile/LoginName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let node = who
+                    .pointer("/Node/ComputedName")
+                    .or_else(|| who.pointer("/Node/Name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let tagged = who
+                    .pointer("/Node/Tags")
+                    .and_then(|t| t.as_array())
+                    .is_some_and(|t| !t.is_empty());
                 if uid == Some(me.user_id) && !tagged {
                     Remote::Owner { login, node }
                 } else {
-                    Remote::Stranger(if tagged { format!("tagged device {node}") } else { login })
+                    Remote::Stranger(if tagged {
+                        format!("tagged device {node}")
+                    } else {
+                        login
+                    })
                 }
             }
             _ => Remote::Stranger(ip.to_string()),
         };
-        self.whois.lock().unwrap().insert(ip, (now_ms(), remote.clone()));
+        self.whois
+            .lock()
+            .unwrap()
+            .insert(ip, (now_ms(), remote.clone()));
         remote
     }
 
     /// Call another station.
-    pub async fn call(&self, station: &str, method: &str, params: Value) -> std::result::Result<Value, String> {
-        let peer = self.peer(station).ok_or_else(|| format!("station {station} is not in the fleet"))?;
+    pub async fn call(
+        &self,
+        station: &str,
+        method: &str,
+        params: Value,
+    ) -> std::result::Result<Value, String> {
+        let peer = self
+            .peer(station)
+            .ok_or_else(|| format!("station {station} is not in the fleet"))?;
         self.call_addr(&peer.addr, method, params).await
     }
 
-    pub async fn call_addr(&self, addr: &str, method: &str, params: Value) -> std::result::Result<Value, String> {
+    pub async fn call_addr(
+        &self,
+        addr: &str,
+        method: &str,
+        params: Value,
+    ) -> std::result::Result<Value, String> {
         let resp = self
             .http
             .post(format!("http://{addr}/api/peer/rpc"))
@@ -161,7 +201,11 @@ impl FleetState {
         let status = resp.status();
         let body: Value = resp.json().await.map_err(|e| format!("bad reply: {e}"))?;
         if let Some(err) = body.get("error") {
-            return Err(err.get("message").and_then(|m| m.as_str()).unwrap_or("error").to_string());
+            return Err(err
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("error")
+                .to_string());
         }
         if !status.is_success() {
             return Err(format!("HTTP {status}"));
@@ -172,18 +216,35 @@ impl FleetState {
 
 /// The production station link for the message relay.
 impl Transport for FleetState {
-    fn deliver<'a>(&'a self, station: &'a str, env: &'a Envelope) -> BoxFuture<'a, std::result::Result<RelayAck, String>> {
+    fn deliver<'a>(
+        &'a self,
+        station: &'a str,
+        env: &'a Envelope,
+    ) -> BoxFuture<'a, std::result::Result<RelayAck, String>> {
         Box::pin(async move {
-            let v = self.call(station, "relay.accept", json!({"envelope": env})).await?;
+            let v = self
+                .call(station, "relay.accept", json!({"envelope": env}))
+                .await?;
             serde_json::from_value(v).map_err(|e| e.to_string())
         })
     }
 }
 
 fn tailscale_bin() -> Option<&'static str> {
-    ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/usr/local/bin/tailscale"]
-        .into_iter()
-        .find(|p| std::process::Command::new(p).arg("version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()))
+    [
+        "tailscale",
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "/usr/local/bin/tailscale",
+    ]
+    .into_iter()
+    .find(|p| {
+        std::process::Command::new(p)
+            .arg("version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
 }
 
 fn tailscale_json(args: &[&str]) -> Option<Value> {
@@ -213,15 +274,31 @@ impl Daemon {
             let fleet = &self.fleet;
             let me = tokio::task::block_in_place(|| fleet.tailnet_self());
             if let (Some(me), Some(status)) = (me, tokio::task::block_in_place(tailscale_status)) {
-                for peer in status.get("Peer").and_then(|p| p.as_object()).into_iter().flat_map(|m| m.values()) {
+                for peer in status
+                    .get("Peer")
+                    .and_then(|p| p.as_object())
+                    .into_iter()
+                    .flat_map(|m| m.values())
+                {
                     let same_user = peer.get("UserID").and_then(|u| u.as_i64()) == Some(me.user_id);
-                    let online = peer.get("Online").and_then(|o| o.as_bool()).unwrap_or(false);
-                    let tagged = peer.get("Tags").and_then(|t| t.as_array()).is_some_and(|t| !t.is_empty());
+                    let online = peer
+                        .get("Online")
+                        .and_then(|o| o.as_bool())
+                        .unwrap_or(false);
+                    let tagged = peer
+                        .get("Tags")
+                        .and_then(|t| t.as_array())
+                        .is_some_and(|t| !t.is_empty());
                     let os = peer.get("OS").and_then(|o| o.as_str()).unwrap_or("");
                     if !same_user || !online || tagged || matches!(os, "iOS" | "tvOS" | "android") {
                         continue;
                     }
-                    if let Some(ip) = peer.get("TailscaleIPs").and_then(|a| a.as_array()).and_then(|a| a.first()).and_then(|i| i.as_str()) {
+                    if let Some(ip) = peer
+                        .get("TailscaleIPs")
+                        .and_then(|a| a.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|i| i.as_str())
+                    {
                         candidates.push(format!("{ip}:{}", self.cfg.web_port));
                     }
                 }
@@ -232,7 +309,11 @@ impl Daemon {
         let probes = candidates.iter().map(|addr| {
             let addr = addr.clone();
             async move {
-                let r = tokio::time::timeout(Duration::from_millis(2500), self.fleet.call_addr(&addr, "station.info", json!({}))).await;
+                let r = tokio::time::timeout(
+                    Duration::from_millis(2500),
+                    self.fleet.call_addr(&addr, "station.info", json!({})),
+                )
+                .await;
                 (addr, r.ok().and_then(|r| r.ok()))
             }
         });
@@ -244,12 +325,22 @@ impl Daemon {
             let mut seen_addrs = vec![];
             for (addr, info) in results {
                 let Some(info) = info else { continue };
-                let Some(station) = info.get("station").and_then(|s| s.as_str()).map(String::from) else { continue };
+                let Some(station) = info
+                    .get("station")
+                    .and_then(|s| s.as_str())
+                    .map(String::from)
+                else {
+                    continue;
+                };
                 if station == self.station {
                     continue;
                 }
                 let protocol = info.get("protocol").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
-                let state = if protocol == PROTOCOL { "online" } else { "update_needed" };
+                let state = if protocol == PROTOCOL {
+                    "online"
+                } else {
+                    "update_needed"
+                };
                 let prev = peers.get(&station).map(|p| p.state.clone());
                 if prev.as_deref() != Some(state) {
                     changed = true;
@@ -260,7 +351,11 @@ impl Daemon {
                     Peer {
                         station,
                         addr,
-                        version: info.get("version").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
+                        version: info
+                            .get("version")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string(),
                         protocol,
                         state: state.to_string(),
                         last_seen_ms: now,
@@ -284,8 +379,16 @@ impl Daemon {
         let mut me = self.info();
         me["state"] = json!("online");
         me["self"] = json!(true);
-        me["agents"] = json!(self.pane_views().into_iter().filter(|p| p["exited"] == json!(false)).collect::<Vec<_>>());
-        me["projects"] = json!(self.projects().iter().map(|p| json!({"name": p["name"], "open": p["open"]})).collect::<Vec<_>>());
+        me["agents"] = json!(self
+            .pane_views()
+            .into_iter()
+            .filter(|p| p["exited"] == json!(false))
+            .collect::<Vec<_>>());
+        me["projects"] = json!(self
+            .projects()
+            .iter()
+            .map(|p| json!({"name": p["name"], "open": p["open"]}))
+            .collect::<Vec<_>>());
         let peers: Vec<Value> = self
             .fleet
             .peers()
@@ -335,7 +438,14 @@ impl Daemon {
         }
         let result = json!({"stopped": stopped, "station": self.station, "applied_ms": now_ms()});
         self.db.kv_set(&key, &result.to_string());
-        self.record("station.stop_all", None, None, None, Some(by), json!({"id": stop_id, "issued_ms": issued_ms, "stopped": stopped.len()}));
+        self.record(
+            "station.stop_all",
+            None,
+            None,
+            None,
+            Some(by),
+            json!({"id": stop_id, "issued_ms": issued_ms, "stopped": stopped.len()}),
+        );
         result
     }
 
@@ -344,7 +454,9 @@ impl Daemon {
     pub async fn stop_all(&self, scope: &str, by: &str) -> Result<Value> {
         let issued = now_ms();
         let mut targets: Vec<String> = match scope {
-            "fleet" => std::iter::once(self.station.clone()).chain(self.fleet.peers().into_iter().map(|p| p.station)).collect(),
+            "fleet" => std::iter::once(self.station.clone())
+                .chain(self.fleet.peers().into_iter().map(|p| p.station))
+                .collect(),
             "station" | "" => vec![self.station.clone()],
             other => vec![other.to_string()],
         };
@@ -371,7 +483,9 @@ impl Daemon {
             rows.push(id);
         }
         self.emit("stop.updated", None, None, json!({"ids": rows}));
-        Ok(json!({"issued_ms": issued, "stops": self.stops(20).into_iter().filter(|s| rows.iter().any(|r| s["id"] == json!(r))).collect::<Vec<_>>()}))
+        Ok(
+            json!({"issued_ms": issued, "stops": self.stops(20).into_iter().filter(|s| rows.iter().any(|r| s["id"] == json!(r))).collect::<Vec<_>>()}),
+        )
     }
 
     fn stop_mark(&self, id: &str, status: &str, result: &Value) {
@@ -384,7 +498,15 @@ impl Daemon {
     }
 
     async fn stop_try(&self, id: &str, station: &str, issued: u64, by: &str) {
-        match self.fleet.call(station, "stop.apply", json!({"id": id, "issued_ms": issued, "by": by})).await {
+        match self
+            .fleet
+            .call(
+                station,
+                "stop.apply",
+                json!({"id": id, "issued_ms": issued, "by": by}),
+            )
+            .await
+        {
             Ok(result) => self.stop_mark(id, "confirmed", &result),
             // Unreachable is its own state. It is never shown as stopped.
             Err(e) => self.stop_mark(id, "unreachable", &json!({"error": e})),
@@ -403,8 +525,13 @@ impl Daemon {
             })
             .unwrap_or_default();
         for (id, station, issued, by) in waiting {
-            if self.fleet.peer(&station).is_some_and(|p| p.state == "online") {
-                self.stop_try(&id, &station, issued as u64, by.as_deref().unwrap_or("you")).await;
+            if self
+                .fleet
+                .peer(&station)
+                .is_some_and(|p| p.state == "online")
+            {
+                self.stop_try(&id, &station, issued as u64, by.as_deref().unwrap_or("you"))
+                    .await;
             }
         }
     }
@@ -431,25 +558,43 @@ impl Daemon {
 
     /// Recall across stations: each station answers from its own scrubbed copy.
     pub async fn recall_fleet(&self, query: &str, project: &str, limit: u32) -> Vec<Value> {
-        let peers: Vec<String> = self.fleet.peers().into_iter().filter(|p| p.state == "online").map(|p| p.station).collect();
+        let peers: Vec<String> = self
+            .fleet
+            .peers()
+            .into_iter()
+            .filter(|p| p.state == "online")
+            .map(|p| p.station)
+            .collect();
         let calls = peers.iter().map(|station| async move {
             self.fleet
-                .call(station, "recall.local", json!({"query": query, "project": project, "limit": limit}))
+                .call(
+                    station,
+                    "recall.local",
+                    json!({"query": query, "project": project, "limit": limit}),
+                )
                 .await
                 .ok()
                 .and_then(|v| v.as_array().cloned())
                 .unwrap_or_default()
         });
-        futures_join_all(calls).await.into_iter().flatten().collect()
+        futures_join_all(calls)
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     pub fn require_peer(&self, station: &str) -> Result<Peer> {
-        self.fleet.peer(station).ok_or_else(|| invalid(format!("station {station} is not in the fleet")))
+        self.fleet
+            .peer(station)
+            .ok_or_else(|| invalid(format!("station {station} is not in the fleet")))
     }
 }
 
 /// Run futures concurrently and collect their outputs (no extra crate).
-pub async fn futures_join_all<F: std::future::Future>(futs: impl IntoIterator<Item = F>) -> Vec<F::Output> {
+pub async fn futures_join_all<F: std::future::Future>(
+    futs: impl IntoIterator<Item = F>,
+) -> Vec<F::Output> {
     let mut pinned: Vec<_> = futs.into_iter().map(|f| Box::pin(f)).collect();
     let mut out: Vec<Option<F::Output>> = (0..pinned.len()).map(|_| None).collect();
     std::future::poll_fn(|cx| {
@@ -462,7 +607,11 @@ pub async fn futures_join_all<F: std::future::Future>(futs: impl IntoIterator<It
                 }
             }
         }
-        if pending { std::task::Poll::Pending } else { std::task::Poll::Ready(()) }
+        if pending {
+            std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(())
+        }
     })
     .await;
     out.into_iter().flatten().collect()

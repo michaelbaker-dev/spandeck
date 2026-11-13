@@ -18,18 +18,33 @@ impl Daemon {
         let configured = &self.cfg.notify.states;
         let wanted = |s: &str| configured.is_empty() || configured.iter().any(|c| c == s);
         let (kind, title) = match new {
-            AgentState::NeedsYou if wanted("needs_you") => ("needs_you", format!("{} needs you", meta.name)),
-            AgentState::Error if wanted("error") => ("error", format!("{} hit an error", meta.name)),
+            AgentState::NeedsYou if wanted("needs_you") => {
+                ("needs_you", format!("{} needs you", meta.name))
+            }
+            AgentState::Error if wanted("error") => {
+                ("error", format!("{} hit an error", meta.name))
+            }
             AgentState::Done if meta.watch || configured.iter().any(|c| c == "done") => {
                 ("done", format!("{} finished", meta.name))
             }
             _ => return,
         };
-        let body = meta.needs_reason.clone().or(meta.last_message.clone()).unwrap_or_default();
+        let body = meta
+            .needs_reason
+            .clone()
+            .or(meta.last_message.clone())
+            .unwrap_or_default();
         self.notify(kind, Some(&meta.id), meta.project.as_deref(), &title, &body);
     }
 
-    pub fn notify(&self, kind: &str, pane: Option<&str>, project: Option<&str>, title: &str, body: &str) {
+    pub fn notify(
+        &self,
+        kind: &str,
+        pane: Option<&str>,
+        project: Option<&str>,
+        title: &str,
+        body: &str,
+    ) {
         let id = new_id("n");
         let url = pane.map(|p| format!("/#/s/{}/p/{}", self.station, p));
         let _ = self.db.with(|c| {
@@ -97,7 +112,12 @@ impl Daemon {
                 self.push(&kind, &title, &body, url.as_deref()).await;
                 1
             };
-            let _ = self.db.with(|c| c.execute("UPDATE notifications SET pushed=?2 WHERE id=?1", rusqlite::params![id, mark]));
+            let _ = self.db.with(|c| {
+                c.execute(
+                    "UPDATE notifications SET pushed=?2 WHERE id=?1",
+                    rusqlite::params![id, mark],
+                )
+            });
         }
     }
 
@@ -105,7 +125,11 @@ impl Daemon {
         let client = &self.fleet.http;
         let title = format!("{} · {}", title, self.station);
         if let Some(ntfy) = &self.cfg.notify.ntfy_url {
-            let mut req = client.post(ntfy).header("Title", title.clone()).header("Tags", kind.to_string()).body(body.to_string());
+            let mut req = client
+                .post(ntfy)
+                .header("Title", title.clone())
+                .header("Tags", kind.to_string())
+                .body(body.to_string());
             if matches!(kind, "needs_you" | "approval" | "error") {
                 req = req.header("Priority", "high");
             }

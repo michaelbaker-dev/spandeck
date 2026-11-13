@@ -20,7 +20,15 @@ use crate::hooks::truncate;
 use crate::orders::{Block, Layer};
 use crate::paths::{new_id, now_ms};
 
-pub const STATES: &[&str] = &["queued", "running", "waiting_for_approval", "blocked", "completed", "failed", "cancelled"];
+pub const STATES: &[&str] = &[
+    "queued",
+    "running",
+    "waiting_for_approval",
+    "blocked",
+    "completed",
+    "failed",
+    "cancelled",
+];
 
 /// The task state machine. Completed and cancelled are final; a failed task
 /// can be resumed.
@@ -28,7 +36,10 @@ pub fn transition_allowed(from: &str, to: &str) -> bool {
     matches!(
         (from, to),
         ("queued", "running" | "cancelled" | "failed")
-            | ("running", "waiting_for_approval" | "blocked" | "completed" | "failed" | "cancelled")
+            | (
+                "running",
+                "waiting_for_approval" | "blocked" | "completed" | "failed" | "cancelled"
+            )
             | ("waiting_for_approval", "running" | "cancelled" | "failed")
             | ("blocked", "running" | "cancelled" | "failed")
             | ("failed", "running")
@@ -88,13 +99,26 @@ impl Daemon {
                 ],
             )
         })?;
-        self.record("task.created", t.pane.as_deref(), t.project.as_deref(), Some(&id), t.requester.as_deref(), json!({"goal": truncate(&t.goal, 200), "role": t.role, "state": state}));
+        self.record(
+            "task.created",
+            t.pane.as_deref(),
+            t.project.as_deref(),
+            Some(&id),
+            t.requester.as_deref(),
+            json!({"goal": truncate(&t.goal, 200), "role": t.role, "state": state}),
+        );
         Ok(id)
     }
 
     pub fn task_get(&self, id: &str) -> Result<Value> {
         self.db
-            .with(|c| c.query_row(&format!("SELECT {TASK_COLS} FROM tasks WHERE id=?1"), [id], row_task))
+            .with(|c| {
+                c.query_row(
+                    &format!("SELECT {TASK_COLS} FROM tasks WHERE id=?1"),
+                    [id],
+                    row_task,
+                )
+            })
             .map_err(|_| Error::NotFound(format!("task {id}")))
     }
 
@@ -121,7 +145,10 @@ impl Daemon {
         }
         let merged = |field: &str| -> String {
             let mut cur = task[field].clone();
-            if let (Some(obj), Some(add)) = (cur.as_object_mut(), patch.get(field).and_then(|p| p.as_object())) {
+            if let (Some(obj), Some(add)) = (
+                cur.as_object_mut(),
+                patch.get(field).and_then(|p| p.as_object()),
+            ) {
                 for (k, v) in add {
                     obj.insert(k.clone(), v.clone());
                 }
@@ -155,20 +182,31 @@ impl Daemon {
     fn prepare_workspace(&self, project_path: &Path, task: &str, placement: &str) -> Result<Value> {
         let commit = head(project_path);
         match placement {
-            "same-tree" => Ok(json!({"kind": "same-tree", "path": project_path.display().to_string(), "commit": commit})),
+            "same-tree" => Ok(
+                json!({"kind": "same-tree", "path": project_path.display().to_string(), "commit": commit}),
+            ),
             "snapshot" | "worktree" => {
                 if !is_repo(project_path) {
-                    return Err(invalid("this placement needs the project to be a git repository"));
+                    return Err(invalid(
+                        "this placement needs the project to be a git repository",
+                    ));
                 }
-                let commit = commit.ok_or_else(|| invalid("the project has no commits yet; commit first"))?;
+                let commit = commit
+                    .ok_or_else(|| invalid("the project has no commits yet; commit first"))?;
                 let dir = self.paths.worktrees_dir().join(task);
                 std::fs::create_dir_all(self.paths.worktrees_dir())?;
                 let dir_s = dir.display().to_string();
                 let branch = format!("spandeck/{task}");
                 let res = if placement == "snapshot" {
-                    git(project_path, &["worktree", "add", "--detach", &dir_s, &commit])
+                    git(
+                        project_path,
+                        &["worktree", "add", "--detach", &dir_s, &commit],
+                    )
                 } else {
-                    git(project_path, &["worktree", "add", "-b", &branch, &dir_s, &commit])
+                    git(
+                        project_path,
+                        &["worktree", "add", "-b", &branch, &dir_s, &commit],
+                    )
                 };
                 res.map_err(|e| invalid(format!("could not create the workspace: {e}")))?;
                 Ok(json!({
@@ -176,16 +214,27 @@ impl Daemon {
                     "branch": (placement == "worktree").then_some(branch),
                 }))
             }
-            other => Err(invalid(format!("unknown placement {other}; use same-tree, snapshot or worktree"))),
+            other => Err(invalid(format!(
+                "unknown placement {other}; use same-tree, snapshot or worktree"
+            ))),
         }
     }
 
     /// One Git snapshot of the working tree at task start, without touching it.
-    fn checkpoint(&self, path: &Path, project: Option<&str>, task: Option<&str>, pane: Option<&str>) -> Option<String> {
+    fn checkpoint(
+        &self,
+        path: &Path,
+        project: Option<&str>,
+        task: Option<&str>,
+        pane: Option<&str>,
+    ) -> Option<String> {
         if !is_repo(path) {
             return None;
         }
-        let sha = git(path, &["stash", "create", "spandeck checkpoint"]).ok().filter(|s| !s.is_empty()).or_else(|| head(path))?;
+        let sha = git(path, &["stash", "create", "spandeck checkpoint"])
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| head(path))?;
         let id = new_id("c");
         let ref_name = format!("refs/spandeck/checkpoints/{}", task.unwrap_or(&id));
         let _ = git(path, &["update-ref", &ref_name, &sha]);
@@ -249,8 +298,20 @@ impl Daemon {
 
     /// One agent hands work to another. spandeck starts a fresh pane with the
     /// brief as its first prompt; the report comes back to the requester's inbox.
-    pub fn delegate(&self, caller: &Caller, role: &str, goal: &str, acceptance: &str, project: Option<&str>, recipe: Option<&str>) -> Result<Value> {
-        let requester_meta: Option<PaneMeta> = caller.pane.as_ref().and_then(|id| self.pane(id).ok()).map(|p| p.meta());
+    pub fn delegate(
+        &self,
+        caller: &Caller,
+        role: &str,
+        goal: &str,
+        acceptance: &str,
+        project: Option<&str>,
+        recipe: Option<&str>,
+    ) -> Result<Value> {
+        let requester_meta: Option<PaneMeta> = caller
+            .pane
+            .as_ref()
+            .and_then(|id| self.pane(id).ok())
+            .map(|p| p.meta());
         let project = project
             .map(|s| s.to_string())
             .or_else(|| requester_meta.as_ref().and_then(|m| m.project.clone()))
@@ -261,14 +322,22 @@ impl Daemon {
             if m.parent_pane.is_some() || m.task.is_some() {
                 let allowed = m.role.as_deref().is_some_and(|r| file.role(r).can_delegate);
                 if !allowed {
-                    return Err(Error::Denied("helpers cannot delegate further (depth 1) unless their role allows it".into()));
+                    return Err(Error::Denied(
+                        "helpers cannot delegate further (depth 1) unless their role allows it"
+                            .into(),
+                    ));
                 }
             }
         }
         let settings = file.role(role);
         let agent = AgentKind::parse(&settings.agent)
             .filter(|a| a.is_agent())
-            .ok_or_else(|| invalid(format!("role {role} names agent {:?}; use claude or codex", settings.agent)))?;
+            .ok_or_else(|| {
+                invalid(format!(
+                    "role {role} names agent {:?}; use claude or codex",
+                    settings.agent
+                ))
+            })?;
         let requester = requester_meta
             .as_ref()
             .map(|m| format!("{project}/{}", m.name))
@@ -288,7 +357,12 @@ impl Daemon {
         let workspace = match self.prepare_workspace(&project_path, &task, &settings.placement) {
             Ok(w) => w,
             Err(e) => {
-                let _ = self.task_set_state(&task, "failed", json!({"resume": {"error": e.to_string()}}), "spandeck");
+                let _ = self.task_set_state(
+                    &task,
+                    "failed",
+                    json!({"resume": {"error": e.to_string()}}),
+                    "spandeck",
+                );
                 return Err(e);
             }
         };
@@ -333,7 +407,12 @@ impl Daemon {
         let pane = match pane {
             Ok(p) => p,
             Err(e) => {
-                let _ = self.task_set_state(&task, "failed", json!({"workspace": workspace, "resume": {"error": e.to_string()}}), "spandeck");
+                let _ = self.task_set_state(
+                    &task,
+                    "failed",
+                    json!({"workspace": workspace, "resume": {"error": e.to_string()}}),
+                    "spandeck",
+                );
                 return Err(e);
             }
         };
@@ -357,7 +436,11 @@ impl Daemon {
         findings: Vec<String>,
         failed: bool,
     ) -> Result<Value> {
-        let pane_meta = caller.pane.as_ref().and_then(|id| self.pane(id).ok()).map(|p| p.meta());
+        let pane_meta = caller
+            .pane
+            .as_ref()
+            .and_then(|id| self.pane(id).ok())
+            .map(|p| p.meta());
         let task_id = task
             .map(|s| s.to_string())
             .or_else(|| pane_meta.as_ref().and_then(|m| m.task.clone()))
@@ -365,7 +448,9 @@ impl Daemon {
         let t = self.task_get(&task_id)?;
         if let Some(m) = &pane_meta {
             if t["pane"].as_str() != Some(m.id.as_str()) {
-                return Err(Error::Denied("only the pane working on a task can report its result".into()));
+                return Err(Error::Denied(
+                    "only the pane working on a task can report its result".into(),
+                ));
             }
         }
         if summary.trim().is_empty() {
@@ -376,7 +461,10 @@ impl Daemon {
         let dir = self.paths.state_dir.join("reports");
         std::fs::create_dir_all(&dir)?;
         let file = dir.join(format!("{task_id}.md"));
-        let mut body = format!("# Task {task_id}\n\n**Goal:** {}\n\n**Summary:** {summary}\n", t["goal"].as_str().unwrap_or(""));
+        let mut body = format!(
+            "# Task {task_id}\n\n**Goal:** {}\n\n**Summary:** {summary}\n",
+            t["goal"].as_str().unwrap_or("")
+        );
         if !findings.is_empty() {
             body.push_str("\n## Findings\n\n");
             for f in &findings {
@@ -408,11 +496,20 @@ impl Daemon {
         }
         if let Some(project) = t["project"].as_str() {
             for f in &findings {
-                let _ = self.note_add(project, "finding", pane_meta.as_ref().map(|m| m.name.as_str()), Some(&task_id), f);
+                let _ = self.note_add(
+                    project,
+                    "finding",
+                    pane_meta.as_ref().map(|m| m.name.as_str()),
+                    Some(&task_id),
+                    f,
+                );
             }
         }
         // The summary lands in the requester's inbox.
-        if let Some(requester) = t["requester"].as_str().filter(|r| !r.starts_with("recipe:")) {
+        if let Some(requester) = t["requester"]
+            .as_str()
+            .filter(|r| !r.starts_with("recipe:"))
+        {
             let mut text = format!("Task {task_id} {state}: {summary}");
             if !findings.is_empty() {
                 text.push_str(&format!("\nFindings ({}):\n", findings.len()));
@@ -425,7 +522,15 @@ impl Daemon {
                 text.push_str(&format!("\nBranch to integrate: {b}"));
             }
             let _ = self
-                .msg_send(caller, requester, "result", &text, json!([{"file": file.display().to_string()}]), Some(task_id.clone()), Some(task_id.clone()))
+                .msg_send(
+                    caller,
+                    requester,
+                    "result",
+                    &text,
+                    json!([{"file": file.display().to_string()}]),
+                    Some(task_id.clone()),
+                    Some(task_id.clone()),
+                )
                 .await;
         }
         Ok(updated)
@@ -436,7 +541,10 @@ impl Daemon {
     pub(crate) fn on_pane_exit_tasks(&self, meta: &PaneMeta) {
         let Some(task) = &meta.task else { return };
         let Ok(t) = self.task_get(task) else { return };
-        if !matches!(t["state"].as_str(), Some("running" | "blocked" | "waiting_for_approval" | "queued")) {
+        if !matches!(
+            t["state"].as_str(),
+            Some("running" | "blocked" | "waiting_for_approval" | "queued")
+        ) {
             return;
         }
         let _ = self.task_set_state(
@@ -461,11 +569,22 @@ impl Daemon {
     // ---------------------------------------------------------------- sign-off
 
     /// Sign off the project's current commit.
-    pub fn signoff(&self, project: &str, task: Option<&str>, by: &str, note: &str) -> Result<Value> {
-        let path = PathBuf::from(self.project_path(project).ok_or_else(|| Error::NotFound(format!("project {project}")))?);
+    pub fn signoff(
+        &self,
+        project: &str,
+        task: Option<&str>,
+        by: &str,
+        note: &str,
+    ) -> Result<Value> {
+        let path = PathBuf::from(
+            self.project_path(project)
+                .ok_or_else(|| Error::NotFound(format!("project {project}")))?,
+        );
         let commit = head(&path).ok_or_else(|| invalid("the project has no commit to sign off"))?;
         if is_dirty(&path) {
-            return Err(invalid("there are uncommitted changes; a sign-off names a commit, so commit first"));
+            return Err(invalid(
+                "there are uncommitted changes; a sign-off names a commit, so commit first",
+            ));
         }
         let id = new_id("s");
         self.db.with(|c| {
@@ -474,11 +593,26 @@ impl Daemon {
                 rusqlite::params![id, now_ms() as i64, project, task, commit, by, note],
             )
         })?;
-        self.record("signoff.given", None, Some(project), task, Some(by), json!({"commit": commit}));
+        self.record(
+            "signoff.given",
+            None,
+            Some(project),
+            task,
+            Some(by),
+            json!({"commit": commit}),
+        );
         if let Some(task) = task {
             if let Ok(t) = self.task_get(task) {
-                if matches!(t["state"].as_str(), Some("running" | "waiting_for_approval")) {
-                    let _ = self.task_set_state(task, "completed", json!({"review": {"signed_off": commit, "by": by}}), by);
+                if matches!(
+                    t["state"].as_str(),
+                    Some("running" | "waiting_for_approval")
+                ) {
+                    let _ = self.task_set_state(
+                        task,
+                        "completed",
+                        json!({"review": {"signed_off": commit, "by": by}}),
+                        by,
+                    );
                 }
             }
         }
@@ -487,7 +621,10 @@ impl Daemon {
 
     /// The latest sign-off and whether it still covers the code.
     pub fn signoff_status(&self, project: &str) -> Result<Value> {
-        let path = PathBuf::from(self.project_path(project).ok_or_else(|| Error::NotFound(format!("project {project}")))?);
+        let path = PathBuf::from(
+            self.project_path(project)
+                .ok_or_else(|| Error::NotFound(format!("project {project}")))?,
+        );
         self.signoff_status_at(project, &path)
     }
 
@@ -513,7 +650,9 @@ impl Daemon {
                     "why_stale": if !stale { None } else if dirty { Some("uncommitted changes since the sign-off") } else { Some("the code changed since the sign-off") },
                 })
             }
-            None => json!({"signed": false, "valid": false, "stale": false, "head": head_now, "dirty": dirty}),
+            None => {
+                json!({"signed": false, "valid": false, "stale": false, "head": head_now, "dirty": dirty})
+            }
         })
     }
 
@@ -523,11 +662,15 @@ impl Daemon {
     pub(crate) fn push_guard(&self, meta: &PaneMeta, tool: &ToolCall) -> Option<Block> {
         let cmd = tool.command.as_deref()?;
         let project = meta.project.as_deref()?;
-        let re = Regex::new(r"(^|[;&|(]\s*|\s)git(\s+-[^\s]+(\s+[^\s-][^\s]*)?)*\s+push(\s|$)").ok()?;
+        let re =
+            Regex::new(r"(^|[;&|(]\s*|\s)git(\s+-[^\s]+(\s+[^\s-][^\s]*)?)*\s+push(\s|$)").ok()?;
         if !re.is_match(cmd) {
             return None;
         }
-        let wants = self.project_file(project).map(|(_, f)| f.review.signoff_before_push).unwrap_or(false)
+        let wants = self
+            .project_file(project)
+            .map(|(_, f)| f.review.signoff_before_push)
+            .unwrap_or(false)
             || self.active_recipe(project).is_some();
         if !wants {
             return None;

@@ -70,7 +70,11 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// The station link. An `Err` means "could not reach them": retry later.
 pub trait Transport: Send + Sync {
-    fn deliver<'a>(&'a self, station: &'a str, env: &'a Envelope) -> BoxFuture<'a, Result<RelayAck, String>>;
+    fn deliver<'a>(
+        &'a self,
+        station: &'a str,
+        env: &'a Envelope,
+    ) -> BoxFuture<'a, Result<RelayAck, String>>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -101,7 +105,10 @@ pub struct MessageStore {
 
 impl MessageStore {
     pub fn new(db: Arc<Db>, station: &str) -> MessageStore {
-        MessageStore { db, station: station.to_string() }
+        MessageStore {
+            db,
+            station: station.to_string(),
+        }
     }
 
     fn qualify(&self, addr: &str) -> String {
@@ -121,7 +128,10 @@ impl MessageStore {
         }
         let sender = self.qualify(&new.sender);
         let recipient = self.qualify(&new.recipient);
-        let dest = split_address(&recipient).1.unwrap_or(&self.station).to_string();
+        let dest = split_address(&recipient)
+            .1
+            .unwrap_or(&self.station)
+            .to_string();
         let id = new_id("m");
         let thread = new.thread.unwrap_or_else(|| id.clone());
         let local = dest == self.station;
@@ -159,7 +169,11 @@ impl MessageStore {
 
     /// Receiver side. Idempotent: the same envelope twice is stored once.
     pub fn accept(&self, env: &Envelope, now: u64) -> RelayAck {
-        let refused = |why: &str| RelayAck { received: false, duplicate: false, refused: Some(why.to_string()) };
+        let refused = |why: &str| RelayAck {
+            received: false,
+            duplicate: false,
+            refused: Some(why.to_string()),
+        };
         if split_address(&env.recipient).1 != Some(self.station.as_str()) {
             return refused("not for this station");
         }
@@ -178,18 +192,33 @@ impl MessageStore {
             }
         }
         let r = self.db.with_tx(|tx| {
-            let seen: Option<i64> = tx.query_row("SELECT ts FROM receipts WHERE msg=?1", [&env.id], |r| r.get(0)).optional()?;
+            let seen: Option<i64> = tx
+                .query_row("SELECT ts FROM receipts WHERE msg=?1", [&env.id], |r| {
+                    r.get(0)
+                })
+                .optional()?;
             if seen.is_some() {
                 return Ok(true);
             }
-            tx.execute("INSERT INTO receipts(msg,ts) VALUES(?1,?2)", params![env.id, now as i64])?;
+            tx.execute(
+                "INSERT INTO receipts(msg,ts) VALUES(?1,?2)",
+                params![env.id, now as i64],
+            )?;
             insert(tx, env, "delivered", Some(now))?;
             Ok(false)
         });
         match r {
-            Ok(duplicate) => RelayAck { received: true, duplicate, refused: None },
+            Ok(duplicate) => RelayAck {
+                received: true,
+                duplicate,
+                refused: None,
+            },
             // A storage error is not a refusal: the sender retries.
-            Err(_) => RelayAck { received: false, duplicate: false, refused: None },
+            Err(_) => RelayAck {
+                received: false,
+                duplicate: false,
+                refused: None,
+            },
         }
     }
 
@@ -210,7 +239,9 @@ impl MessageStore {
         let mut delivered = 0;
         for (msg, dest) in heads {
             let Some(env) = self.get(&msg) else {
-                let _ = self.db.with(|c| c.execute("DELETE FROM outbox WHERE msg=?1", [&msg]));
+                let _ = self
+                    .db
+                    .with(|c| c.execute("DELETE FROM outbox WHERE msg=?1", [&msg]));
                 continue;
             };
             match transport.deliver(&dest, &env).await {
@@ -224,10 +255,15 @@ impl MessageStore {
                     });
                     delivered += 1;
                 }
-                Ok(RelayAck { refused: Some(why), .. }) => {
+                Ok(RelayAck {
+                    refused: Some(why), ..
+                }) => {
                     let _ = self.db.with_tx(|tx| {
                         tx.execute("UPDATE outbox SET state='refused' WHERE msg=?1", [&msg])?;
-                        tx.execute("UPDATE messages SET status=?2 WHERE id=?1", params![msg, format!("refused: {why}")])
+                        tx.execute(
+                            "UPDATE messages SET status=?2 WHERE id=?1",
+                            params![msg, format!("refused: {why}")],
+                        )
                     });
                 }
                 // Unreachable, or they could not store it: keep it at the head.
@@ -247,7 +283,13 @@ impl MessageStore {
 
     pub fn queued(&self) -> u64 {
         self.db
-            .with(|c| c.query_row("SELECT COUNT(*) FROM outbox WHERE state='pending'", [], |r| r.get::<_, i64>(0)))
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM outbox WHERE state='pending'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+            })
             .unwrap_or(0) as u64
     }
 
@@ -266,7 +308,13 @@ impl MessageStore {
     }
 
     /// Messages for any of these local names, oldest first, in thread order.
-    pub fn inbox(&self, names: &[String], unread_only: bool, mark_read: bool, now: u64) -> Vec<Value> {
+    pub fn inbox(
+        &self,
+        names: &[String],
+        unread_only: bool,
+        mark_read: bool,
+        now: u64,
+    ) -> Vec<Value> {
         let recipients: Vec<String> = names.iter().map(|n| self.qualify(n)).collect();
         let list = json!(recipients).to_string();
         let rows: Vec<Value> = self
@@ -282,7 +330,11 @@ impl MessageStore {
             })
             .unwrap_or_default();
         if mark_read && !rows.is_empty() {
-            let ids = json!(rows.iter().filter_map(|r| r["id"].as_str()).collect::<Vec<_>>()).to_string();
+            let ids = json!(rows
+                .iter()
+                .filter_map(|r| r["id"].as_str())
+                .collect::<Vec<_>>())
+            .to_string();
             let _ = self.db.with(|c| {
                 c.execute(
                     "UPDATE messages SET read=?2, status=CASE WHEN status='delivered' THEN 'read' ELSE status END, announced=1
@@ -311,7 +363,12 @@ impl MessageStore {
 
     pub fn mark_announced(&self, ids: &[String]) {
         let list = json!(ids).to_string();
-        let _ = self.db.with(|c| c.execute("UPDATE messages SET announced=1 WHERE id IN (SELECT value FROM json_each(?1))", [list]));
+        let _ = self.db.with(|c| {
+            c.execute(
+                "UPDATE messages SET announced=1 WHERE id IN (SELECT value FROM json_each(?1))",
+                [list],
+            )
+        });
     }
 
     /// The acted-on acknowledgment (separate from received).
@@ -353,7 +410,12 @@ impl MessageStore {
     }
 }
 
-fn insert(tx: &rusqlite::Transaction<'_>, env: &Envelope, status: &str, received: Option<u64>) -> rusqlite::Result<usize> {
+fn insert(
+    tx: &rusqlite::Transaction<'_>,
+    env: &Envelope,
+    status: &str,
+    received: Option<u64>,
+) -> rusqlite::Result<usize> {
     tx.execute(
         "INSERT INTO messages(id,thread,seq,ts,sender,recipient,kind,body,refs,task,project,status,received,auth)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",

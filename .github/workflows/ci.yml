@@ -1,0 +1,33 @@
+# Merge tier: everything fast, plus browser smoke, on macOS and Linux.
+# Budget: under 10 minutes.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format and lint
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests (replays, fixtures, scenarios, simulation, browser smoke, handoff)
+        run: cargo test --workspace --no-fail-fast
+        env:
+          # Hosted runners ship Chrome; the browser tests find it.
+          SPANDECK_CHROME: ${{ matrix.os == 'macos-latest' && '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' || '/usr/bin/google-chrome' }}

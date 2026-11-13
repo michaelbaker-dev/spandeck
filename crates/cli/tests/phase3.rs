@@ -27,7 +27,12 @@ fn hooks_drive_the_pane_state_and_capture_the_session() {
     assert_eq!(tools[0]["data"]["ok"], json!(true));
     assert!(!tools[0]["data"].to_string().contains("cargo build"));
     // working -> done were both recorded.
-    let states: Vec<String> = s.log("pane.state").iter().rev().map(|e| e["data"]["state"].as_str().unwrap().to_string()).collect();
+    let states: Vec<String> = s
+        .log("pane.state")
+        .iter()
+        .rev()
+        .map(|e| e["data"]["state"].as_str().unwrap().to_string())
+        .collect();
     assert_eq!(states, vec!["working", "done"]);
 }
 
@@ -49,7 +54,11 @@ fn an_agent_repeating_a_failing_command_is_flagged_as_stuck() {
     assert_eq!(s.log("agent.stuck").len(), 1);
     // It also lands in the inbox.
     let n = s.call("notify.list", json!({}));
-    assert!(n.as_array().unwrap().iter().any(|n| n["kind"] == json!("needs_you")));
+    assert!(n
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n["kind"] == json!("needs_you")));
 }
 
 #[test]
@@ -60,16 +69,28 @@ fn turns_that_burn_tool_calls_without_changing_files_are_flagged() {
         {"repeat": 5, "steps": [{"tool": {"name": "Read", "file": "a.rs"}}]},
         {"turn_end": "still looking"}
     ]);
-    let pane = s.fake(json!({"steps": [{"repeat": 2, "steps": busy_turn}, {"sleep": 60000}]}), json!({}));
+    let pane = s.fake(
+        json!({"steps": [{"repeat": 2, "steps": busy_turn}, {"sleep": 60000}]}),
+        json!({}),
+    );
     let p = s.wait_state(&pane, "needs_you");
-    assert!(p["needs_reason"].as_str().unwrap().contains("changed no files"), "{p}");
+    assert!(
+        p["needs_reason"]
+            .as_str()
+            .unwrap()
+            .contains("changed no files"),
+        "{p}"
+    );
 }
 
 /// Done when: pause, stop and kill each do what Guarantees says.
 #[test]
 fn stop_interrupts_the_turn_and_the_process_stays_kill_ends_it() {
     let s = Station::start("alpha");
-    let pane = s.fake(json!({"steps": [{"prompt": "long job"}, {"work": 60000}, {"turn_end": "finished"}]}), json!({}));
+    let pane = s.fake(
+        json!({"steps": [{"prompt": "long job"}, {"work": 60000}, {"turn_end": "finished"}]}),
+        json!({}),
+    );
     s.wait_state(&pane, "working");
     let pid = s.pane(&pane)["pid"].clone();
 
@@ -83,7 +104,9 @@ fn stop_interrupts_the_turn_and_the_process_stays_kill_ends_it() {
     s.wait_text(&pane, "[fake] got: next");
 
     s.call("pane.kill", json!({"pane": pane}));
-    wait_for("the process to end", 10, || (s.pane(&pane)["exited"] == json!(true)).then_some(()));
+    wait_for("the process to end", 10, || {
+        (s.pane(&pane)["exited"] == json!(true)).then_some(())
+    });
 }
 
 #[test]
@@ -99,7 +122,11 @@ fn a_permission_request_waits_for_a_remote_answer() {
         json!({}),
     );
     // First request: allowed from "the phone".
-    let first = wait_for("an approval request", 10, || s.call("approval.list", json!({})).as_array().and_then(|a| a.first().cloned()));
+    let first = wait_for("an approval request", 10, || {
+        s.call("approval.list", json!({}))
+            .as_array()
+            .and_then(|a| a.first().cloned())
+    });
     assert_eq!(first["summary"], json!("Write /tmp/a.txt"));
     assert_eq!(s.pane(&pane)["state"], json!("needs_you"));
     s.call("approval.answer", json!({"id": first["id"], "allow": true}));
@@ -107,14 +134,24 @@ fn a_permission_request_waits_for_a_remote_answer() {
 
     // Second request: denied, with a reason the agent sees.
     let second = wait_for("the second request", 10, || {
-        s.call("approval.list", json!({})).as_array().and_then(|a| a.iter().find(|x| x["id"] != first["id"]).cloned())
+        s.call("approval.list", json!({}))
+            .as_array()
+            .and_then(|a| a.iter().find(|x| x["id"] != first["id"]).cloned())
     });
     assert!(second["summary"].as_str().unwrap().contains("rm -rf build"));
-    s.call("approval.answer", json!({"id": second["id"], "allow": false, "reason": "not that directory"}));
+    s.call(
+        "approval.answer",
+        json!({"id": second["id"], "allow": false, "reason": "not that directory"}),
+    );
     s.wait_text(&pane, "[fake] permission: deny");
     s.wait_state(&pane, "done");
     // An answered request cannot be answered again.
-    assert!(s.try_call("approval.answer", json!({"id": first["id"], "allow": false})).is_err());
+    assert!(s
+        .try_call(
+            "approval.answer",
+            json!({"id": first["id"], "allow": false})
+        )
+        .is_err());
 }
 
 #[test]
@@ -147,14 +184,21 @@ fn the_session_file_is_archived_line_for_line() {
     assert_eq!(on_disk, 4);
     let archived = wait_for("the archive to catch up", 10, || {
         let sessions = s.call("archive.sessions", json!({}));
-        let me = sessions.as_array()?.iter().find(|x| x["id"] == json!(session))?.clone();
+        let me = sessions
+            .as_array()?
+            .iter()
+            .find(|x| x["id"] == json!(session))?
+            .clone();
         (me["lines"] == json!(on_disk)).then_some(me)
     });
     assert_eq!(archived["pane"], json!(pane));
     // A deleted session file can be put back for a resume.
     std::fs::remove_file(&file).unwrap();
     s.call("archive.restore", json!({"session": session}));
-    assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count() as u64, on_disk);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap().lines().count() as u64,
+        on_disk
+    );
 }
 
 /// Observing without hooks: the screen is the fallback signal.
@@ -190,7 +234,9 @@ fn an_agent_cannot_use_methods_that_administer_the_station() {
     }
     // It can read, and report on itself.
     assert!(s.call_as_pane(&pane, "pane.list", json!({})).is_ok());
-    assert!(s.call_as_pane(&pane, "pane.report_agent", json!({"state": "working"})).is_ok());
+    assert!(s
+        .call_as_pane(&pane, "pane.report_agent", json!({"state": "working"}))
+        .is_ok());
 }
 
 #[test]
@@ -199,10 +245,14 @@ fn integration_install_is_reversible_through_the_api() {
     let st = s.call("integration.install", json!({"agent": "claude"}));
     assert_eq!(st["installed"], json!(true));
     let settings = s.root.join("home/.claude/settings.json");
-    assert!(std::fs::read_to_string(&settings).unwrap().contains("hook claude"));
+    assert!(std::fs::read_to_string(&settings)
+        .unwrap()
+        .contains("hook claude"));
     let st = s.call("integration.uninstall", json!({"agent": "claude"}));
     assert_eq!(st["installed"], json!(false));
-    assert!(!std::fs::read_to_string(&settings).unwrap().contains("spandeck"));
+    assert!(!std::fs::read_to_string(&settings)
+        .unwrap()
+        .contains("spandeck"));
 }
 
 /// Live canary: the real Claude Code runs one trivial prompt in a pane.
@@ -211,7 +261,11 @@ fn integration_install_is_reversible_through_the_api() {
 #[ignore]
 fn canary_real_claude_code_reports_through_hooks() {
     let real_home = std::env::var("HOME").unwrap();
-    let s = Station::start_with("canary", "approval_timeout_secs = 20\n", &[("HOME", &real_home)]);
+    let s = Station::start_with(
+        "canary",
+        "approval_timeout_secs = 20\n",
+        &[("HOME", &real_home)],
+    );
     let work = s.git_repo("canary-work");
     let pane = s.call(
         "pane.spawn",
@@ -224,14 +278,29 @@ fn canary_real_claude_code_reports_through_hooks() {
         .as_str()
         .unwrap()
         .to_string();
-    wait_for("claude to finish", 120, || (s.pane(&pane)["exited"] == json!(true)).then_some(()));
+    wait_for("claude to finish", 120, || {
+        (s.pane(&pane)["exited"] == json!(true)).then_some(())
+    });
     let p = s.pane(&pane);
-    assert_eq!(p["hooks_seen"], json!(true), "hooks did not report; screen:\n{}", s.text(&pane));
+    assert_eq!(
+        p["hooks_seen"],
+        json!(true),
+        "hooks did not report; screen:\n{}",
+        s.text(&pane)
+    );
     assert!(p["session_id"].is_string());
     let tools = s.log("agent.tool");
-    assert!(tools.iter().any(|t| t["data"]["tool"] == json!("Bash") && t["data"]["ok"] == json!(true)), "{tools:?}");
+    assert!(
+        tools
+            .iter()
+            .any(|t| t["data"]["tool"] == json!("Bash") && t["data"]["ok"] == json!(true)),
+        "{tools:?}"
+    );
     let sessions = s.call("archive.sessions", json!({}));
-    assert!(sessions[0]["lines"].as_u64().unwrap() > 0, "the real session file was archived");
+    assert!(
+        sessions[0]["lines"].as_u64().unwrap() > 0,
+        "the real session file was archived"
+    );
 }
 
 /// Live: what the real Claude Code lets us interrupt. Stop must end the turn
@@ -251,10 +320,15 @@ fn canary_stop_interrupts_a_real_claude_code_turn_and_the_process_stays() {
     s.call("pane.input", json!({"pane": pane, "data": "\u{1b}[B"}));
     std::thread::sleep(std::time::Duration::from_millis(400));
     s.call("pane.input", json!({"pane": pane, "data": "\r"}));
-    wait_for("the prompt box", 60, || s.text(&pane).contains("Claude Code v").then_some(()));
+    wait_for("the prompt box", 60, || {
+        s.text(&pane).contains("Claude Code v").then_some(())
+    });
     std::thread::sleep(std::time::Duration::from_millis(1500));
 
-    s.call("pane.send_text", json!({"pane": pane, "text": "Use the Bash tool to run exactly: sleep 90"}));
+    s.call(
+        "pane.send_text",
+        json!({"pane": pane, "text": "Use the Bash tool to run exactly: sleep 90"}),
+    );
     wait_for("the turn to be working on the sleep", 90, || {
         let p = s.pane(&pane);
         (p["state"] == json!("working") && p["tool"] == json!("Bash")).then_some(())
@@ -268,12 +342,22 @@ fn canary_stop_interrupts_a_real_claude_code_turn_and_the_process_stays() {
         if p["state"] != json!("working") {
             break p;
         }
-        assert!(start.elapsed().as_secs() < 30, "the turn did not end; screen:\n{}", s.text(&pane));
+        assert!(
+            start.elapsed().as_secs() < 30,
+            "the turn did not end; screen:\n{}",
+            s.text(&pane)
+        );
         std::thread::sleep(std::time::Duration::from_millis(100));
     };
     assert_eq!(after["exited"], json!(false), "stop: the process stays");
     assert_eq!(after["pid"], pid);
-    assert!(s.text(&pane).to_lowercase().contains("interrupt"), "screen:\n{}", s.text(&pane));
+    assert!(
+        s.text(&pane).to_lowercase().contains("interrupt"),
+        "screen:\n{}",
+        s.text(&pane)
+    );
     s.call("pane.kill", json!({"pane": pane}));
-    wait_for("kill: the process ends", 15, || (s.pane(&pane)["exited"] == json!(true)).then_some(()));
+    wait_for("kill: the process ends", 15, || {
+        (s.pane(&pane)["exited"] == json!(true)).then_some(())
+    });
 }

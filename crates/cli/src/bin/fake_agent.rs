@@ -61,7 +61,10 @@ impl Agent {
         obj.insert("transcript_path".into(), json!(self.transcript));
         obj.insert("cwd".into(), json!(self.cwd));
         match self.rpc("hook.ingest", json!({"agent": "fake", "payload": extra})) {
-            Ok(reply) => reply["stdout"].as_str().and_then(|s| serde_json::from_str(s).ok()).unwrap_or(Value::Null),
+            Ok(reply) => reply["stdout"]
+                .as_str()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or(Value::Null),
             Err(e) => {
                 out(&format!("[fake] hook error: {e}"));
                 Value::Null
@@ -70,13 +73,20 @@ impl Agent {
     }
 
     fn show_context(reply: &Value) {
-        if let Some(ctx) = reply.pointer("/hookSpecificOutput/additionalContext").and_then(|c| c.as_str()) {
+        if let Some(ctx) = reply
+            .pointer("/hookSpecificOutput/additionalContext")
+            .and_then(|c| c.as_str())
+        {
             out(&format!("[fake] context: {}", ctx.replace('\n', " | ")));
         }
     }
 
     fn append_transcript(&self, line: &Value) {
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.transcript) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.transcript)
+        {
             let _ = writeln!(f, "{line}");
         }
     }
@@ -140,7 +150,9 @@ impl Agent {
         } else if let Some(ms) = step.get("sleep").and_then(|s| s.as_u64()) {
             std::thread::sleep(Duration::from_millis(ms));
         } else if let Some(text) = step.get("prompt").and_then(|s| s.as_str()) {
-            self.append_transcript(&json!({"type": "user", "message": {"role": "user", "content": text}}));
+            self.append_transcript(
+                &json!({"type": "user", "message": {"role": "user", "content": text}}),
+            );
             let reply = self.hook("UserPromptSubmit", json!({"prompt": text}));
             Self::show_context(&reply);
         } else if let Some(tool) = step.get("tool") {
@@ -149,15 +161,24 @@ impl Agent {
             let name = perm["name"].as_str().unwrap_or("Write");
             let input = json!({"file_path": perm["file"], "command": perm["command"]});
             out("[fake] permission?");
-            let reply = self.hook("PermissionRequest", json!({"tool_name": name, "tool_input": input}));
-            let behavior = reply.pointer("/hookSpecificOutput/decision/behavior").and_then(|b| b.as_str()).unwrap_or("none");
+            let reply = self.hook(
+                "PermissionRequest",
+                json!({"tool_name": name, "tool_input": input}),
+            );
+            let behavior = reply
+                .pointer("/hookSpecificOutput/decision/behavior")
+                .and_then(|b| b.as_str())
+                .unwrap_or("none");
             out(&format!("[fake] permission: {behavior}"));
         } else if let Some(ms) = step.get("work").and_then(|s| s.as_u64()) {
             self.hook("PreToolUse", json!({"tool_name": "Bash", "tool_input": {"command": format!("sleep {ms}ms")}, "tool_use_id": "work"}));
             out("[fake] working (esc to interrupt)");
             if self.wait_or_escape(ms) {
                 out("[fake] interrupted");
-                self.hook("Stop", json!({"last_assistant_message": "interrupted", "stop_hook_active": false}));
+                self.hook(
+                    "Stop",
+                    json!({"last_assistant_message": "interrupted", "stop_hook_active": false}),
+                );
                 self.interrupted = true;
             } else {
                 let post = self.hook("PostToolUse", json!({"tool_name": "Bash", "tool_input": {"command": format!("sleep {ms}ms")}, "tool_use_id": "work", "tool_response": {}}));
@@ -166,9 +187,15 @@ impl Agent {
             }
         } else if let Some(msg) = step.get("turn_end").and_then(|s| s.as_str()) {
             self.append_transcript(&json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": msg}]}}));
-            let reply = self.hook("Stop", json!({"last_assistant_message": msg, "stop_hook_active": false}));
+            let reply = self.hook(
+                "Stop",
+                json!({"last_assistant_message": msg, "stop_hook_active": false}),
+            );
             if reply["decision"] == json!("block") {
-                out(&format!("[fake] CONTINUE: {}", reply["reason"].as_str().unwrap_or("")));
+                out(&format!(
+                    "[fake] CONTINUE: {}",
+                    reply["reason"].as_str().unwrap_or("")
+                ));
             } else {
                 out("[fake] turn done");
             }
@@ -181,7 +208,10 @@ impl Agent {
         } else if let Some(tr) = step.get("task_result") {
             let mut params = tr.clone();
             if let Some(by_round) = tr.get("findings_by_round").and_then(|f| f.as_array()) {
-                let idx = self.round.saturating_sub(1).min(by_round.len().saturating_sub(1));
+                let idx = self
+                    .round
+                    .saturating_sub(1)
+                    .min(by_round.len().saturating_sub(1));
                 params["findings"] = by_round.get(idx).cloned().unwrap_or(json!([]));
             }
             match self.rpc("task.result", params) {
@@ -189,7 +219,12 @@ impl Agent {
                 Err(e) => out(&format!("[fake] task.result ERROR: {e}")),
             }
         } else if let Some(cmd) = step.get("sh").and_then(|s| s.as_str()) {
-            let status = std::process::Command::new("sh").arg("-c").arg(cmd).current_dir(&self.cwd).stdin(std::process::Stdio::null()).output();
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .current_dir(&self.cwd)
+                .stdin(std::process::Stdio::null())
+                .output();
             match status {
                 Ok(o) => out(&format!("[fake] sh exit {}", o.status.code().unwrap_or(-1))),
                 Err(e) => out(&format!("[fake] sh error {e}")),
@@ -218,11 +253,16 @@ impl Agent {
             input["file_path"] = f.clone();
         }
         let id = spandeck_core::paths::new_id("toolu");
-        let pre = self.hook("PreToolUse", json!({"tool_name": name, "tool_input": input, "tool_use_id": id}));
+        let pre = self.hook(
+            "PreToolUse",
+            json!({"tool_name": name, "tool_input": input, "tool_use_id": id}),
+        );
         if pre.pointer("/hookSpecificOutput/permissionDecision") == Some(&json!("deny")) {
             out(&format!(
                 "[fake] BLOCKED {name}: {}",
-                pre.pointer("/hookSpecificOutput/permissionDecisionReason").and_then(|r| r.as_str()).unwrap_or("")
+                pre.pointer("/hookSpecificOutput/permissionDecisionReason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("")
             ));
             return;
         }
@@ -238,11 +278,21 @@ impl Agent {
                     .is_ok_and(|o| o.status.success());
             }
         }
-        if let (Some(file), Some(content)) = (tool.get("file").and_then(|f| f.as_str()), tool.get("content").and_then(|c| c.as_str())) {
-            let path = if file.starts_with('/') { file.to_string() } else { format!("{}/{file}", self.cwd) };
+        if let (Some(file), Some(content)) = (
+            tool.get("file").and_then(|f| f.as_str()),
+            tool.get("content").and_then(|c| c.as_str()),
+        ) {
+            let path = if file.starts_with('/') {
+                file.to_string()
+            } else {
+                format!("{}/{file}", self.cwd)
+            };
             let _ = std::fs::write(path, content);
         }
-        out(&format!("[fake] ran {name} ({})", if ok { "ok" } else { "failed" }));
+        out(&format!(
+            "[fake] ran {name} ({})",
+            if ok { "ok" } else { "failed" }
+        ));
         let post = if ok {
             self.hook("PostToolUse", json!({"tool_name": name, "tool_input": input, "tool_use_id": id, "tool_response": {}, "duration_ms": 5}))
         } else {
@@ -277,16 +327,26 @@ fn restore_terminal() {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let arg = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
     let script: Value = arg("--script")
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(json!({"steps": []}));
     let resume = arg("--resume");
     let prompt = arg("--prompt");
-    let session = resume.clone().unwrap_or_else(|| spandeck_core::paths::new_id("fake"));
-    let dir = std::env::var("SPANDECK_FAKE_DIR").unwrap_or_else(|_| std::env::temp_dir().display().to_string());
-    let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
+    let session = resume
+        .clone()
+        .unwrap_or_else(|| spandeck_core::paths::new_id("fake"));
+    let dir = std::env::var("SPANDECK_FAKE_DIR")
+        .unwrap_or_else(|_| std::env::temp_dir().display().to_string());
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
 
     raw_terminal();
     let (tx, rx) = mpsc::channel();
@@ -321,11 +381,15 @@ fn main() {
         Some(id) => out(&format!("[fake] RESUMED {id}")),
         None => out(&format!("[fake] session {}", agent.session)),
     }
-    let start = agent.hook("SessionStart", json!({"source": if resume.is_some() { "resume" } else { "startup" }}));
+    let start = agent.hook(
+        "SessionStart",
+        json!({"source": if resume.is_some() { "resume" } else { "startup" }}),
+    );
     Agent::show_context(&start);
     if let Some(p) = &prompt {
         out(&format!("[fake] prompt: {}", p.replace('\n', " | ")));
-        agent.append_transcript(&json!({"type": "user", "message": {"role": "user", "content": p}}));
+        agent
+            .append_transcript(&json!({"type": "user", "message": {"role": "user", "content": p}}));
         agent.hook("UserPromptSubmit", json!({"prompt": p}));
     }
     let steps = script["steps"].as_array().cloned().unwrap_or_default();
@@ -338,7 +402,9 @@ fn main() {
         let _ = std::io::stdout().flush();
         let Some(line) = agent.read_line() else { break };
         out(&format!("[fake] got: {line}"));
-        agent.append_transcript(&json!({"type": "user", "message": {"role": "user", "content": line}}));
+        agent.append_transcript(
+            &json!({"type": "user", "message": {"role": "user", "content": line}}),
+        );
         let reply = agent.hook("UserPromptSubmit", json!({"prompt": line}));
         Agent::show_context(&reply);
         if on_input.is_empty() {

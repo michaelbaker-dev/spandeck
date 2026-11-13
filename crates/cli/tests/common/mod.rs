@@ -24,7 +24,11 @@ pub struct Station {
 }
 
 pub fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 pub fn wait_for<T>(what: &str, secs: u64, mut f: impl FnMut() -> Option<T>) -> T {
@@ -33,7 +37,10 @@ pub fn wait_for<T>(what: &str, secs: u64, mut f: impl FnMut() -> Option<T>) -> T
         if let Some(v) = f() {
             return v;
         }
-        assert!(start.elapsed() < Duration::from_secs(secs), "timed out waiting for {what}");
+        assert!(
+            start.elapsed() < Duration::from_secs(secs),
+            "timed out waiting for {what}"
+        );
         std::thread::sleep(Duration::from_millis(40));
     }
 }
@@ -53,12 +60,29 @@ impl Station {
     pub fn pair() -> (Station, Station) {
         let (pa, pb) = (free_port(), free_port());
         let env = [("SPANDECK_TRUST_LOOPBACK_PEERS", "1")];
-        let a = Station::start_on("alpha", pa, &format!("peers = [\"127.0.0.1:{pb}\"]\n"), &env);
-        let b = Station::start_on("bravo", pb, &format!("peers = [\"127.0.0.1:{pa}\"]\n"), &env);
+        let a = Station::start_on(
+            "alpha",
+            pa,
+            &format!("peers = [\"127.0.0.1:{pb}\"]\n"),
+            &env,
+        );
+        let b = Station::start_on(
+            "bravo",
+            pb,
+            &format!("peers = [\"127.0.0.1:{pa}\"]\n"),
+            &env,
+        );
         for s in [&a, &b] {
             wait_for("the stations to find each other", 20, || {
                 let v = s.call("fleet.refresh", json!({}));
-                (v["stations"].as_array().unwrap().iter().filter(|x| x["state"] == json!("online")).count() == 2).then_some(())
+                (v["stations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|x| x["state"] == json!("online"))
+                    .count()
+                    == 2)
+                    .then_some(())
             });
         }
         (a, b)
@@ -72,7 +96,11 @@ impl Station {
         std::fs::create_dir_all(root.join("fake")).unwrap();
         // Top-level keys first: TOML tables swallow everything after them.
         let (top, tables): (Vec<&str>, Vec<&str>) = {
-            let idx = extra.find("\n[").map(|i| i + 1).or_else(|| extra.starts_with('[').then_some(0)).unwrap_or(extra.len());
+            let idx = extra
+                .find("\n[")
+                .map(|i| i + 1)
+                .or_else(|| extra.starts_with('[').then_some(0))
+                .unwrap_or(extra.len());
             (vec![&extra[..idx]], vec![&extra[idx..]])
         };
         std::fs::write(
@@ -89,7 +117,10 @@ impl Station {
             root,
             port,
             child: None,
-            env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             _dir: Some(dir),
             scripts: std::sync::atomic::AtomicU32::new(0),
         };
@@ -122,20 +153,33 @@ impl Station {
         // Ready means both the socket and the Control Deck listener are up.
         wait_for("daemon to answer", 15, || {
             let info = self.try_call("station.info", json!({})).ok()?;
-            info["web"].as_array().is_some_and(|w| !w.is_empty()).then_some(())
+            info["web"]
+                .as_array()
+                .is_some_and(|w| !w.is_empty())
+                .then_some(())
         });
     }
 
     pub fn paths(&self) -> Paths {
-        Paths { state_dir: self.root.join("state"), config_dir: self.root.join("config") }
+        Paths {
+            state_dir: self.root.join("state"),
+            config_dir: self.root.join("config"),
+        }
     }
 
     pub fn token(&self) -> String {
-        std::fs::read_to_string(self.paths().token_file()).unwrap().trim().to_string()
+        std::fs::read_to_string(self.paths().token_file())
+            .unwrap()
+            .trim()
+            .to_string()
     }
 
     pub fn client(&self) -> Result<Client, ClientError> {
-        let token = std::fs::read_to_string(self.paths().token_file()).map_err(|e| ClientError { code: "io".into(), message: e.to_string() })?;
+        let token =
+            std::fs::read_to_string(self.paths().token_file()).map_err(|e| ClientError {
+                code: "io".into(),
+                message: e.to_string(),
+            })?;
         let mut c = Client::connect(&self.root.join("state/spandeckd.sock"), token.trim())?;
         c.set_timeout(Some(Duration::from_secs(60)));
         Ok(c)
@@ -146,11 +190,17 @@ impl Station {
     }
 
     pub fn call(&self, method: &str, params: Value) -> Value {
-        self.try_call(method, params).unwrap_or_else(|e| panic!("{method} failed: {e}"))
+        self.try_call(method, params)
+            .unwrap_or_else(|e| panic!("{method} failed: {e}"))
     }
 
     /// Call the API as a pane (with the pane's own token), the way an agent does.
-    pub fn call_as_pane(&self, pane: &str, method: &str, params: Value) -> Result<Value, ClientError> {
+    pub fn call_as_pane(
+        &self,
+        pane: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, ClientError> {
         let token: String = {
             let db = rusqlite_token(&self.root.join("state/spandeck.db"), pane);
             db.unwrap_or_else(|| panic!("no token for pane {pane}"))
@@ -161,7 +211,9 @@ impl Station {
     }
 
     pub fn script_file(&self, script: &Value) -> PathBuf {
-        let n = self.scripts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let n = self
+            .scripts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let path = self.root.join(format!("script-{n}.json"));
         std::fs::write(&path, script.to_string()).unwrap();
         path
@@ -170,13 +222,17 @@ impl Station {
     /// Start a fake agent pane running `script`. Extra fields go to pane.spawn.
     pub fn fake(&self, script: Value, extra: Value) -> String {
         let path = self.script_file(&script);
-        let mut params = json!({"agent": "fake", "args": ["--script", path], "cwd": self.root.join("home")});
+        let mut params =
+            json!({"agent": "fake", "args": ["--script", path], "cwd": self.root.join("home")});
         if let Some(obj) = extra.as_object() {
             for (k, v) in obj {
                 params[k] = v.clone();
             }
         }
-        self.call("pane.spawn", params)["id"].as_str().unwrap().to_string()
+        self.call("pane.spawn", params)["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     pub fn pane(&self, pane: &str) -> Value {
@@ -198,12 +254,24 @@ impl Station {
         let start = Instant::now();
         loop {
             if let Ok(v) = self.try_call("pane.text", json!({"pane": pane, "history": 500})) {
-                last = v["lines"].as_array().map(|a| a.iter().filter_map(|l| l.as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
+                last = v["lines"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|l| l.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
                 if last.contains(needle) {
                     return last;
                 }
             }
-            assert!(start.elapsed() < Duration::from_secs(20), "timed out waiting for {needle:?} in pane {pane}; screen:\n{}", last.trim_end());
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "timed out waiting for {needle:?} in pane {pane}; screen:\n{}",
+                last.trim_end()
+            );
             std::thread::sleep(Duration::from_millis(40));
         }
     }
@@ -215,7 +283,11 @@ impl Station {
             if p["state"] == json!(state) {
                 return p;
             }
-            assert!(start.elapsed() < Duration::from_secs(20), "timed out waiting for state {state}; pane is {p}\nscreen:\n{}", self.text(pane).trim_end());
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "timed out waiting for state {state}; pane is {p}\nscreen:\n{}",
+                self.text(pane).trim_end()
+            );
             std::thread::sleep(Duration::from_millis(40));
         }
     }
@@ -262,8 +334,17 @@ impl Station {
 }
 
 pub fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -313,10 +394,21 @@ pub mod browser {
         }
         let home = std::env::var("HOME").unwrap_or_default();
         let mut found = vec![];
-        for base in [format!("{home}/.cache/ms-playwright"), format!("{home}/Library/Caches/ms-playwright")] {
+        for base in [
+            format!("{home}/.cache/ms-playwright"),
+            format!("{home}/Library/Caches/ms-playwright"),
+        ] {
             for entry in std::fs::read_dir(&base).into_iter().flatten().flatten() {
-                for sub in std::fs::read_dir(entry.path()).into_iter().flatten().flatten() {
-                    for name in ["chrome-headless-shell", "chrome", "Chromium.app/Contents/MacOS/Chromium"] {
+                for sub in std::fs::read_dir(entry.path())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    for name in [
+                        "chrome-headless-shell",
+                        "chrome",
+                        "Chromium.app/Contents/MacOS/Chromium",
+                    ] {
                         let p = sub.path().join(name);
                         if p.is_file() {
                             found.push(p);
@@ -327,10 +419,15 @@ pub mod browser {
         }
         found.sort();
         found.pop().or_else(|| {
-            ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
-                .iter()
-                .map(std::path::PathBuf::from)
-                .find(|p| p.is_file())
+            [
+                "/usr/bin/google-chrome",
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser",
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            ]
+            .iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.is_file())
         })
     }
 
@@ -341,7 +438,8 @@ pub mod browser {
 
     impl Page {
         pub fn open(s: &Station, width: u32, height: u32) -> Page {
-            let path = chrome().expect("no Chrome found: set SPANDECK_CHROME to a Chrome or Chromium binary");
+            let path = chrome()
+                .expect("no Chrome found: set SPANDECK_CHROME to a Chrome or Chromium binary");
             let browser = headless_chrome::Browser::new(
                 headless_chrome::LaunchOptions::default_builder()
                     .path(Some(path))
@@ -353,16 +451,25 @@ pub mod browser {
             )
             .unwrap();
             let tab = browser.new_tab().unwrap();
-            tab.navigate_to(&format!("{}#token={}", s.url("/"), s.token())).unwrap();
+            tab.navigate_to(&format!("{}#token={}", s.url("/"), s.token()))
+                .unwrap();
             tab.wait_for_element(".topbar").unwrap();
-            Page { _browser: browser, tab }
+            Page {
+                _browser: browser,
+                tab,
+            }
         }
 
         pub fn js(&self, expr: &str) -> Value {
             // Values come back as JSON text, so arrays and objects survive.
             let wrapped = format!("(async () => JSON.stringify(await ({expr})))()");
-            let r = self.tab.evaluate(&wrapped, true).unwrap_or_else(|e| panic!("js failed: {e}\n{expr}"));
-            r.value.and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok())).unwrap_or(Value::Null)
+            let r = self
+                .tab
+                .evaluate(&wrapped, true)
+                .unwrap_or_else(|e| panic!("js failed: {e}\n{expr}"));
+            r.value
+                .and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
+                .unwrap_or(Value::Null)
         }
 
         pub fn wait(&self, what: &str, expr: &str) -> Value {
@@ -381,5 +488,4 @@ pub mod browser {
             self.js("[...document.querySelectorAll('.pane .xterm-rows')].map(r => r.innerText).join('\\n----\\n')").as_str().unwrap_or("").to_string()
         }
     }
-
 }

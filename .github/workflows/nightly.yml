@@ -1,0 +1,36 @@
+# Nightly: simulation with many seeds, the 50-pane soak, and the three-target
+# build. The live canary needs a station with Claude Code and Codex logged in,
+# so it runs on the fleet (scripts/canary.sh), not on hosted runners.
+name: nightly
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Relay simulation, many seeds
+        run: SPANDECK_SIM_SEEDS=500 cargo test -p spandeck-core --test relay_sim --release
+      - name: 50-pane soak
+        run: cargo test -p spandeck --test soak --release -- --ignored
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --bin spandeck --target ${{ matrix.target }}

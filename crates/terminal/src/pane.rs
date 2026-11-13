@@ -50,7 +50,10 @@ pub struct Pane {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 impl Pane {
@@ -88,60 +91,62 @@ impl Pane {
             let detach = detach.clone();
             let bytes_out = bytes_out.clone();
             let last_output_ms = last_output_ms.clone();
-            thread::Builder::new().name(format!("pane-{pid}")).spawn(move || {
-                let mut buf = vec![0u8; 64 * 1024];
-                loop {
-                    // Poll so a detach request is noticed without output arriving.
-                    let mut pfd = [nix::poll::PollFd::new(
-                        std::os::fd::AsFd::as_fd(&reader),
-                        nix::poll::PollFlags::POLLIN,
-                    )];
-                    match nix::poll::poll(&mut pfd, 200u16) {
-                        Ok(0) => {
-                            if detach.load(Ordering::SeqCst) {
-                                return;
+            thread::Builder::new()
+                .name(format!("pane-{pid}"))
+                .spawn(move || {
+                    let mut buf = vec![0u8; 64 * 1024];
+                    loop {
+                        // Poll so a detach request is noticed without output arriving.
+                        let mut pfd = [nix::poll::PollFd::new(
+                            std::os::fd::AsFd::as_fd(&reader),
+                            nix::poll::PollFlags::POLLIN,
+                        )];
+                        match nix::poll::poll(&mut pfd, 200u16) {
+                            Ok(0) => {
+                                if detach.load(Ordering::SeqCst) {
+                                    return;
+                                }
+                                continue;
                             }
-                            continue;
+                            Err(nix::errno::Errno::EINTR) => continue,
+                            Err(_) => break,
+                            Ok(_) => {}
                         }
-                        Err(nix::errno::Errno::EINTR) => continue,
-                        Err(_) => break,
-                        Ok(_) => {}
-                    }
-                    if detach.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    let n = match reader.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => n,
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                        // EIO: every slave descriptor is closed, the pane is done.
-                        Err(_) => break,
-                    };
-                    let chunk = &buf[..n];
-                    // Feed and publish under one lock: a late joiner that holds the
-                    // screen lock gets a snapshot and a stream cut at the same point.
-                    let events = {
-                        let mut guard = screen.lock().unwrap();
-                        let events = guard.feed(chunk);
-                        sink(PaneEvent::Output(Arc::from(chunk)));
-                        events
-                    };
-                    bytes_out.fetch_add(n as u64, Ordering::Relaxed);
-                    last_output_ms.store(now_ms(), Ordering::Relaxed);
-                    for ev in events {
-                        match ev {
-                            ScreenEvent::Reply(bytes) => {
-                                let _ = reply_writer.write_all(&bytes);
+                        if detach.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        let n = match reader.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => n,
+                            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                            // EIO: every slave descriptor is closed, the pane is done.
+                            Err(_) => break,
+                        };
+                        let chunk = &buf[..n];
+                        // Feed and publish under one lock: a late joiner that holds the
+                        // screen lock gets a snapshot and a stream cut at the same point.
+                        let events = {
+                            let mut guard = screen.lock().unwrap();
+                            let events = guard.feed(chunk);
+                            sink(PaneEvent::Output(Arc::from(chunk)));
+                            events
+                        };
+                        bytes_out.fetch_add(n as u64, Ordering::Relaxed);
+                        last_output_ms.store(now_ms(), Ordering::Relaxed);
+                        for ev in events {
+                            match ev {
+                                ScreenEvent::Reply(bytes) => {
+                                    let _ = reply_writer.write_all(&bytes);
+                                }
+                                ScreenEvent::Title(t) => sink(PaneEvent::Title(t)),
+                                ScreenEvent::Bell => sink(PaneEvent::Bell),
                             }
-                            ScreenEvent::Title(t) => sink(PaneEvent::Title(t)),
-                            ScreenEvent::Bell => sink(PaneEvent::Bell),
                         }
                     }
-                }
-                let info = wait_exit(pid);
-                *exited.lock().unwrap() = Some(info);
-                sink(PaneEvent::Exited(info));
-            })?
+                    let info = wait_exit(pid);
+                    *exited.lock().unwrap() = Some(info);
+                    sink(PaneEvent::Exited(info));
+                })?
         };
 
         Ok(Pane {

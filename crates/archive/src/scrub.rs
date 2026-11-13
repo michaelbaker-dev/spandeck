@@ -57,7 +57,9 @@ pub fn scrub(text: &str) -> String {
         }
     }
     if assignment().is_match(&out) {
-        out = assignment().replace_all(&out, format!("${{1}}{REDACTED}")).into_owned();
+        out = assignment()
+            .replace_all(&out, format!("${{1}}{REDACTED}"))
+            .into_owned();
     }
     out
 }
@@ -86,10 +88,20 @@ mod tests {
 
     #[test]
     fn assignments_keep_the_name_and_ordinary_text_is_untouched() {
-        assert_eq!(scrub("DB_PASSWORD=hunter2hunter2"), "DB_PASSWORD=[redacted]");
-        assert_eq!(scrub(r#""api_key": "abcd1234efgh""#), r#""api_key": [redacted]"#);
-        assert_eq!(scrub("postgres://admin:s3cretpw@db.internal/x"), "[redacted]db.internal/x");
-        let plain = "commit 3f2a9c1e5b7d4e8a9c217d4e5f6a8b90aabbccdd fixes the tokenizer in src/auth.rs";
+        assert_eq!(
+            scrub("DB_PASSWORD=hunter2hunter2"),
+            "DB_PASSWORD=[redacted]"
+        );
+        assert_eq!(
+            scrub(r#""api_key": "abcd1234efgh""#),
+            r#""api_key": [redacted]"#
+        );
+        assert_eq!(
+            scrub("postgres://admin:s3cretpw@db.internal/x"),
+            "[redacted]db.internal/x"
+        );
+        let plain =
+            "commit 3f2a9c1e5b7d4e8a9c217d4e5f6a8b90aabbccdd fixes the tokenizer in src/auth.rs";
         assert_eq!(scrub(plain), plain);
     }
 

@@ -8,24 +8,35 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use spandeck_agents::{adapter, AgentEvent, AgentKind, AgentState, EventKind, HookDecision, HookReply};
+use spandeck_agents::{
+    adapter, AgentEvent, AgentKind, AgentState, EventKind, HookDecision, HookReply,
+};
 use tokio::sync::oneshot;
 
 use crate::daemon::{invalid, ApprovalAnswer, Daemon, PaneEntry, PaneMeta, Result, TurnStats};
 use crate::paths::{new_id, now_ms};
 
 impl Daemon {
-    pub async fn hook_ingest(&self, pane_id: &str, vendor: &str, payload: Value) -> Result<HookReply> {
+    pub async fn hook_ingest(
+        &self,
+        pane_id: &str,
+        vendor: &str,
+        payload: Value,
+    ) -> Result<HookReply> {
         let p = self.pane(pane_id)?;
-        let kind = AgentKind::parse(vendor).ok_or_else(|| invalid(format!("unknown agent {vendor}")))?;
+        let kind =
+            AgentKind::parse(vendor).ok_or_else(|| invalid(format!("unknown agent {vendor}")))?;
         let a = adapter(kind).ok_or_else(|| invalid("that agent has no hooks"))?;
-        let Some(ev) = a.normalize(&payload) else { return Ok(HookReply::default()) };
+        let Some(ev) = a.normalize(&payload) else {
+            return Ok(HookReply::default());
+        };
         let decision = self.apply_agent_event(&p, &ev).await;
         Ok(a.reply(&ev.raw_event, &decision))
     }
 
     /// Apply a normalized event to a pane and decide what to tell the agent.
     /// Hook-driven and API-driven agents both end up here.
+    #[allow(clippy::collapsible_match)]
     pub async fn apply_agent_event(&self, p: &PaneEntry, ev: &AgentEvent) -> HookDecision {
         let now = now_ms();
         let mut stuck: Option<String> = None;
@@ -52,7 +63,11 @@ impl Daemon {
             match ev.kind {
                 EventKind::PromptSubmit => {
                     let idle_turns = m.turn.idle_turns;
-                    m.turn = TurnStats { started_ms: now, idle_turns, ..Default::default() };
+                    m.turn = TurnStats {
+                        started_ms: now,
+                        idle_turns,
+                        ..Default::default()
+                    };
                     m.last_message = ev.message.clone();
                 }
                 EventKind::ToolStart => {
@@ -119,13 +134,25 @@ impl Daemon {
         if session_changed {
             self.save_pane(p);
             if let (Some(sid), Some(path)) = (&meta.session_id, &meta.transcript_path) {
-                self.archive.follow(sid, meta.agent.as_str(), path, meta.project.as_deref(), Some(&meta.id));
+                self.archive.follow(
+                    sid,
+                    meta.agent.as_str(),
+                    path,
+                    meta.project.as_deref(),
+                    Some(&meta.id),
+                );
             }
-            self.emit("pane.session", Some(&p.id), meta.project.as_deref(), json!({"session_id": meta.session_id}));
+            self.emit(
+                "pane.session",
+                Some(&p.id),
+                meta.project.as_deref(),
+                json!({"session_id": meta.session_id}),
+            );
         }
         if matches!(ev.kind, EventKind::SessionStart | EventKind::TurnEnd) {
             if let Some(sid) = &meta.session_id {
-                self.archive.set_commit(sid, crate::git::head(Path::new(&meta.cwd)).as_deref());
+                self.archive
+                    .set_commit(sid, crate::git::head(Path::new(&meta.cwd)).as_deref());
             }
         }
 
@@ -151,9 +178,18 @@ impl Daemon {
                     json!({"tool": ev.tool.as_ref().map(|t| t.name.clone())}),
                 );
             }
-            EventKind::SessionStart | EventKind::SessionEnd | EventKind::Compact | EventKind::TurnFailed => {
+            EventKind::SessionStart
+            | EventKind::SessionEnd
+            | EventKind::Compact
+            | EventKind::TurnFailed => {
                 self.record(
-                    &format!("agent.{}", serde_json::to_value(ev.kind).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()),
+                    &format!(
+                        "agent.{}",
+                        serde_json::to_value(ev.kind)
+                            .ok()
+                            .and_then(|v| v.as_str().map(String::from))
+                            .unwrap_or_default()
+                    ),
                     Some(&p.id),
                     meta.project.as_deref(),
                     meta.task.as_deref(),
@@ -195,16 +231,27 @@ impl Daemon {
                         _ => t.name.clone(),
                     })
                     .unwrap_or_else(|| "permission".into());
-                self.set_state(p, AgentState::NeedsYou, Some(format!("wants to run {summary}")));
-                let answer = self.request_approval(p, "permission", &summary, json!({"tool": ev.tool})).await;
+                self.set_state(
+                    p,
+                    AgentState::NeedsYou,
+                    Some(format!("wants to run {summary}")),
+                );
+                let answer = self
+                    .request_approval(p, "permission", &summary, json!({"tool": ev.tool}))
+                    .await;
                 return match answer {
                     Some(ApprovalAnswer { allow: true, .. }) => {
                         self.set_state(p, AgentState::Working, None);
                         HookDecision::allow()
                     }
-                    Some(ApprovalAnswer { allow: false, reason }) => {
+                    Some(ApprovalAnswer {
+                        allow: false,
+                        reason,
+                    }) => {
                         self.set_state(p, AgentState::Working, None);
-                        HookDecision::deny(reason.unwrap_or_else(|| "Denied from the Control Deck.".into()))
+                        HookDecision::deny(
+                            reason.unwrap_or_else(|| "Denied from the Control Deck.".into()),
+                        )
                     }
                     // No remote answer in time: the agent's own prompt takes over.
                     None => HookDecision::none(),
@@ -243,11 +290,26 @@ impl Daemon {
 
         if let Some(reason) = stuck {
             self.set_state(p, AgentState::NeedsYou, Some(reason.clone()));
-            self.record("agent.stuck", Some(&p.id), meta.project.as_deref(), meta.task.as_deref(), None, json!({"reason": reason}));
+            self.record(
+                "agent.stuck",
+                Some(&p.id),
+                meta.project.as_deref(),
+                meta.task.as_deref(),
+                None,
+                json!({"reason": reason}),
+            );
         } else if let Some(state) = ev.state {
             // A turn that is being continued with mail is still working.
-            let state = if decision.continue_with.is_some() { AgentState::Working } else { state };
-            let reason = (state == AgentState::NeedsYou).then(|| ev.message.clone().unwrap_or_else(|| "waiting for you".into()));
+            let state = if decision.continue_with.is_some() {
+                AgentState::Working
+            } else {
+                state
+            };
+            let reason = (state == AgentState::NeedsYou).then(|| {
+                ev.message
+                    .clone()
+                    .unwrap_or_else(|| "waiting for you".into())
+            });
             self.set_state(p, state, reason);
         }
         decision
@@ -256,7 +318,13 @@ impl Daemon {
     // -------------------------------------------------------------- approvals
 
     /// Ask the user, wherever they are. None when nobody answered in time.
-    pub async fn request_approval(&self, p: &PaneEntry, kind: &str, summary: &str, detail: Value) -> Option<ApprovalAnswer> {
+    pub async fn request_approval(
+        &self,
+        p: &PaneEntry,
+        kind: &str,
+        summary: &str,
+        detail: Value,
+    ) -> Option<ApprovalAnswer> {
         let meta = p.meta();
         let id = new_id("a");
         let (tx, rx) = oneshot::channel();
@@ -282,7 +350,8 @@ impl Daemon {
             &format!("{} needs approval", meta.name),
             summary,
         );
-        let answer = tokio::time::timeout(Duration::from_secs(self.cfg.approval_timeout_secs), rx).await;
+        let answer =
+            tokio::time::timeout(Duration::from_secs(self.cfg.approval_timeout_secs), rx).await;
         self.approvals.lock().unwrap().remove(&id);
         match answer {
             Ok(Ok(a)) => Some(a),
@@ -293,16 +362,29 @@ impl Daemon {
                         rusqlite::params![id, now_ms() as i64],
                     )
                 });
-                self.emit("approval.resolved", Some(&p.id), None, json!({"id": id, "status": "expired"}));
+                self.emit(
+                    "approval.resolved",
+                    Some(&p.id),
+                    None,
+                    json!({"id": id, "status": "expired"}),
+                );
                 None
             }
         }
     }
 
-    pub fn answer_approval(&self, id: &str, allow: bool, reason: Option<String>, by: &str) -> Result<()> {
+    pub fn answer_approval(
+        &self,
+        id: &str,
+        allow: bool,
+        reason: Option<String>,
+        by: &str,
+    ) -> Result<()> {
         let tx = self.approvals.lock().unwrap().remove(id);
         let Some(tx) = tx else {
-            return Err(invalid("that request is no longer waiting (answered, expired, or the agent moved on)"));
+            return Err(invalid(
+                "that request is no longer waiting (answered, expired, or the agent moved on)",
+            ));
         };
         let status = if allow { "allowed" } else { "denied" };
         let pane: Option<String> = self
@@ -315,8 +397,18 @@ impl Daemon {
                 c.query_row("SELECT pane FROM approvals WHERE id=?1", [id], |r| r.get(0))
             })
             .ok();
-        let _ = tx.send(ApprovalAnswer { allow, reason: reason.clone() });
-        self.record("approval.resolved", pane.as_deref(), None, None, Some(by), json!({"id": id, "status": status, "reason": reason}));
+        let _ = tx.send(ApprovalAnswer {
+            allow,
+            reason: reason.clone(),
+        });
+        self.record(
+            "approval.resolved",
+            pane.as_deref(),
+            None,
+            None,
+            Some(by),
+            json!({"id": id, "status": status, "reason": reason}),
+        );
         Ok(())
     }
 
@@ -324,7 +416,8 @@ impl Daemon {
         let ids: Vec<String> = self
             .db
             .with(|c| {
-                let mut stmt = c.prepare("SELECT id FROM approvals WHERE pane=?1 AND status='pending'")?;
+                let mut stmt =
+                    c.prepare("SELECT id FROM approvals WHERE pane=?1 AND status='pending'")?;
                 let rows = stmt.query_map([pane], |r| r.get(0))?;
                 rows.collect()
             })
@@ -333,9 +426,17 @@ impl Daemon {
             // Dropping the sender makes the waiting hook fall through.
             self.approvals.lock().unwrap().remove(&id);
             let _ = self.db.with(|c| {
-                c.execute("UPDATE approvals SET status='cancelled', answered=?2 WHERE id=?1", rusqlite::params![id, now_ms() as i64])
+                c.execute(
+                    "UPDATE approvals SET status='cancelled', answered=?2 WHERE id=?1",
+                    rusqlite::params![id, now_ms() as i64],
+                )
             });
-            self.emit("approval.resolved", Some(pane), None, json!({"id": id, "status": "cancelled"}));
+            self.emit(
+                "approval.resolved",
+                Some(pane),
+                None,
+                json!({"id": id, "status": "cancelled"}),
+            );
         }
     }
 

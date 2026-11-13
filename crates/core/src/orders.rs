@@ -95,7 +95,11 @@ pub fn parse_orders(text: &str, repo_file: bool) -> (Vec<Order>, Vec<String>) {
                 "order {} is a {:?} order and belongs in the {} file",
                 o.id,
                 o.layer,
-                if in_repo_layer { "project's .spandeck/orders.toml" } else { "station's orders.toml" }
+                if in_repo_layer {
+                    "project's .spandeck/orders.toml"
+                } else {
+                    "station's orders.toml"
+                }
             ));
             continue;
         }
@@ -129,7 +133,10 @@ pub struct Subject<'a> {
 fn applies(o: &Order, s: &Subject<'_>) -> bool {
     match o.layer {
         Layer::Fleet | Layer::Project => true,
-        Layer::Group => o.group.as_ref().is_some_and(|g| s.labels.iter().any(|l| l == g)),
+        Layer::Group => o
+            .group
+            .as_ref()
+            .is_some_and(|g| s.labels.iter().any(|l| l == g)),
         Layer::Station => o.station.as_deref().is_none_or(|st| st == s.station),
         Layer::Role => o.role.as_deref() == s.role,
     }
@@ -203,7 +210,11 @@ impl Daemon {
             all.extend(repo);
             problems.extend(p2);
         }
-        let subject = Subject { station: &self.station, labels: &self.cfg.labels, role: meta.role.as_deref() };
+        let subject = Subject {
+            station: &self.station,
+            labels: &self.cfg.labels,
+            role: meta.role.as_deref(),
+        };
         (effective(&all, &subject), problems)
     }
 
@@ -220,7 +231,11 @@ impl Daemon {
         }
         let mut s = String::from("Standing orders from spandeck (set by the user; follow them):\n");
         for o in &orders {
-            let tag = if o.kind == OrderKind::Rule { " [enforced rule]" } else { "" };
+            let tag = if o.kind == OrderKind::Rule {
+                " [enforced rule]"
+            } else {
+                ""
+            };
             s.push_str(&format!("- {}{tag}\n", o.text));
         }
         Some(s.trim_end().to_string())
@@ -233,7 +248,9 @@ impl Daemon {
         let meta = p.meta();
         let (orders, problems) = self.orders_for(&meta);
         let caps = adapter(meta.agent).map(|a| a.capabilities());
-        let can_block = caps.as_ref().is_some_and(|c| c.block_tools && c.verified && meta.agent.is_agent());
+        let can_block = caps
+            .as_ref()
+            .is_some_and(|c| c.block_tools && c.verified && meta.agent.is_agent());
         let list: Vec<Value> = orders
             .iter()
             .map(|o| {
@@ -286,7 +303,11 @@ impl Daemon {
         let block = guidance.map(|g| format!("{BLOCK_START}\n{g}\n{BLOCK_END}"));
         let without = match (existing.find(BLOCK_START), existing.find(BLOCK_END)) {
             (Some(s), Some(e)) if e > s => {
-                format!("{}{}", &existing[..s], existing[e + BLOCK_END.len()..].trim_start_matches('\n'))
+                format!(
+                    "{}{}",
+                    &existing[..s],
+                    existing[e + BLOCK_END.len()..].trim_start_matches('\n')
+                )
             }
             _ => existing.clone(),
         };
@@ -364,25 +385,50 @@ layer = "fleet"
     }
 
     fn bash(cmd: &str) -> ToolCall {
-        ToolCall { name: "Bash".into(), command: Some(cmd.into()), ..Default::default() }
+        ToolCall {
+            name: "Bash".into(),
+            command: Some(cmd.into()),
+            ..Default::default()
+        }
     }
 
     #[test]
     fn layers_apply_to_the_right_subjects() {
         let labels = vec!["laptop".to_string()];
-        let s = Subject { station: "macbook", labels: &labels, role: Some("author") };
+        let s = Subject {
+            station: "macbook",
+            labels: &labels,
+            role: Some("author"),
+        };
         let ids: Vec<String> = effective(&all(), &s).into_iter().map(|o| o.id).collect();
-        assert!(ids.contains(&"battery".to_string()), "group order applies to a labelled station");
-        assert!(!ids.contains(&"one-job".to_string()), "another station's order does not");
-        assert!(!ids.contains(&"reviewer-readonly".to_string()), "another role's order does not");
+        assert!(
+            ids.contains(&"battery".to_string()),
+            "group order applies to a labelled station"
+        );
+        assert!(
+            !ids.contains(&"one-job".to_string()),
+            "another station's order does not"
+        );
+        assert!(
+            !ids.contains(&"reviewer-readonly".to_string()),
+            "another role's order does not"
+        );
     }
 
     /// Conflict rule 2: for preferences, the narrower layer wins.
     #[test]
     fn a_narrower_preference_overrides_a_wider_one() {
-        let s = Subject { station: "x", labels: &[], role: None };
+        let s = Subject {
+            station: "x",
+            labels: &[],
+            role: None,
+        };
         let eff = effective(&all(), &s);
-        let styles: Vec<&str> = eff.iter().filter(|o| o.key.as_deref() == Some("commit-style")).map(|o| o.id.as_str()).collect();
+        let styles: Vec<&str> = eff
+            .iter()
+            .filter(|o| o.key.as_deref() == Some("commit-style"))
+            .map(|o| o.id.as_str())
+            .collect();
         assert_eq!(styles, vec!["style-project"]);
     }
 
@@ -402,21 +448,41 @@ layer = "fleet"
             pattern: None,
             key: Some("no-push-main".into()),
         });
-        let s = Subject { station: "x", labels: &[], role: Some("author") };
+        let s = Subject {
+            station: "x",
+            labels: &[],
+            role: Some("author"),
+        };
         let eff = effective(&orders, &s);
         let block = check(&eff, &bash("git push origin main")).expect("still blocked");
-        assert_eq!((block.order.as_str(), block.layer), ("no-push-main", Layer::Fleet));
+        assert_eq!(
+            (block.order.as_str(), block.layer),
+            ("no-push-main", Layer::Fleet)
+        );
         assert!(check(&eff, &bash("git push origin feature/x")).is_none());
         assert!(check(&eff, &bash("git status")).is_none());
     }
 
     #[test]
     fn role_rules_match_by_tool() {
-        let s = Subject { station: "x", labels: &[], role: Some("reviewer") };
+        let s = Subject {
+            station: "x",
+            labels: &[],
+            role: Some("reviewer"),
+        };
         let eff = effective(&all(), &s);
-        let edit = ToolCall { name: "Edit".into(), file_path: Some("src/a.rs".into()), writes: true, ..Default::default() };
+        let edit = ToolCall {
+            name: "Edit".into(),
+            file_path: Some("src/a.rs".into()),
+            writes: true,
+            ..Default::default()
+        };
         assert_eq!(check(&eff, &edit).unwrap().order, "reviewer-readonly");
-        let read = ToolCall { name: "Read".into(), file_path: Some("src/a.rs".into()), ..Default::default() };
+        let read = ToolCall {
+            name: "Read".into(),
+            file_path: Some("src/a.rs".into()),
+            ..Default::default()
+        };
         assert!(check(&eff, &read).is_none());
     }
 }

@@ -87,8 +87,9 @@ pub struct ProjectFile {
 impl ProjectFile {
     pub fn load(dir: &Path) -> Result<ProjectFile> {
         let file = dir.join(".spandeck/project.toml");
-        let text = std::fs::read_to_string(&file)
-            .map_err(|_| Error::NotFound(format!("{} has no .spandeck/project.toml", dir.display())))?;
+        let text = std::fs::read_to_string(&file).map_err(|_| {
+            Error::NotFound(format!("{} has no .spandeck/project.toml", dir.display()))
+        })?;
         toml::from_str(&text).map_err(|e| invalid(format!("{}: {e}", file.display())))
     }
 
@@ -120,19 +121,27 @@ impl ProjectFile {
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         && !name.starts_with('.')
 }
 
 impl Daemon {
     pub fn project_path(&self, name: &str) -> Option<String> {
         self.db
-            .with(|c| c.query_row("SELECT path FROM projects WHERE name=?1", [name], |r| r.get(0)))
+            .with(|c| {
+                c.query_row("SELECT path FROM projects WHERE name=?1", [name], |r| {
+                    r.get(0)
+                })
+            })
             .ok()
     }
 
     pub fn project_file(&self, name: &str) -> Result<(PathBuf, ProjectFile)> {
-        let path = self.project_path(name).ok_or_else(|| Error::NotFound(format!("project {name}")))?;
+        let path = self
+            .project_path(name)
+            .ok_or_else(|| Error::NotFound(format!("project {name}")))?;
         let path = PathBuf::from(path);
         let file = ProjectFile::load(&path)?;
         Ok((path, file))
@@ -140,9 +149,18 @@ impl Daemon {
 
     /// Create a project in a folder (writing its definition) or register a
     /// folder that already has one.
-    pub fn project_new(&self, dir: &Path, name: Option<String>, panes: Vec<PaneSlot>, by: &str) -> Result<Value> {
+    pub fn project_new(
+        &self,
+        dir: &Path,
+        name: Option<String>,
+        panes: Vec<PaneSlot>,
+        by: &str,
+    ) -> Result<Value> {
         if !dir.is_dir() {
-            return Err(invalid(format!("{} is not a folder on this station", dir.display())));
+            return Err(invalid(format!(
+                "{} is not a folder on this station",
+                dir.display()
+            )));
         }
         let dir = dir.canonicalize()?;
         let file = match ProjectFile::load(&dir) {
@@ -156,7 +174,9 @@ impl Daemon {
             }
             Err(_) => {
                 let name = name.unwrap_or_else(|| {
-                    dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "project".into())
+                    dir.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "project".into())
                 });
                 if !valid_name(&name) {
                     return Err(invalid("project names use letters, digits, - _ . only"));
@@ -164,24 +184,49 @@ impl Daemon {
                 let mut seen = std::collections::BTreeSet::new();
                 for p in &panes {
                     if !valid_name(&p.name) || !seen.insert(p.name.clone()) {
-                        return Err(invalid(format!("pane name {:?} is invalid or repeated", p.name)));
+                        return Err(invalid(format!(
+                            "pane name {:?} is invalid or repeated",
+                            p.name
+                        )));
                     }
                     if AgentKind::parse(&p.agent).is_none() {
-                        return Err(invalid(format!("unknown agent {:?}; use claude, codex or shell", p.agent)));
+                        return Err(invalid(format!(
+                            "unknown agent {:?}; use claude, codex or shell",
+                            p.agent
+                        )));
                     }
                 }
                 let panes = if panes.is_empty() {
-                    vec![PaneSlot { name: "shell".into(), agent: "shell".into(), role: None, args: vec![], program: None, cwd: None }]
+                    vec![PaneSlot {
+                        name: "shell".into(),
+                        agent: "shell".into(),
+                        role: None,
+                        args: vec![],
+                        program: None,
+                        cwd: None,
+                    }]
                 } else {
                     panes
                 };
-                let file = ProjectFile { name, panes, roles: BTreeMap::new(), review: Default::default(), recall: Default::default() };
+                let file = ProjectFile {
+                    name,
+                    panes,
+                    roles: BTreeMap::new(),
+                    review: Default::default(),
+                    recall: Default::default(),
+                };
                 file.save(&dir)?;
                 file
             }
         };
-        if let Some(other) = self.project_path(&file.name).filter(|p| Path::new(p) != dir) {
-            return Err(invalid(format!("a project called {} already exists at {other}", file.name)));
+        if let Some(other) = self
+            .project_path(&file.name)
+            .filter(|p| Path::new(p) != dir)
+        {
+            return Err(invalid(format!(
+                "a project called {} already exists at {other}",
+                file.name
+            )));
         }
         self.db.with(|c| {
             c.execute(
@@ -189,14 +234,29 @@ impl Daemon {
                 rusqlite::params![file.name, dir.display().to_string(), now_ms() as i64],
             )
         })?;
-        self.record("project.added", None, Some(&file.name), None, Some(by), json!({"path": dir.display().to_string()}));
+        self.record(
+            "project.added",
+            None,
+            Some(&file.name),
+            None,
+            Some(by),
+            json!({"path": dir.display().to_string()}),
+        );
         self.project_view(&file.name)
     }
 
     pub fn project_remove(&self, name: &str, by: &str) -> Result<()> {
         self.project_close(name, by)?;
-        self.db.with(|c| c.execute("DELETE FROM projects WHERE name=?1", [name]))?;
-        self.record("project.removed", None, Some(name), None, Some(by), json!({}));
+        self.db
+            .with(|c| c.execute("DELETE FROM projects WHERE name=?1", [name]))?;
+        self.record(
+            "project.removed",
+            None,
+            Some(name),
+            None,
+            Some(by),
+            json!({}),
+        );
         Ok(())
     }
 
@@ -209,13 +269,22 @@ impl Daemon {
                 rows.collect()
             })
             .unwrap_or_default();
-        names.iter().filter_map(|n| self.project_view(n).ok()).collect()
+        names
+            .iter()
+            .filter_map(|n| self.project_view(n).ok())
+            .collect()
     }
 
     pub fn project_view(&self, name: &str) -> Result<Value> {
         let (path, open): (String, i64) = self
             .db
-            .with(|c| c.query_row("SELECT path, open FROM projects WHERE name=?1", [name], |r| Ok((r.get(0)?, r.get(1)?))))
+            .with(|c| {
+                c.query_row(
+                    "SELECT path, open FROM projects WHERE name=?1",
+                    [name],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
             .map_err(|_| Error::NotFound(format!("project {name}")))?;
         let file = ProjectFile::load(Path::new(&path));
         let panes: Vec<Value> = self
@@ -239,7 +308,8 @@ impl Daemon {
         let metas: Vec<String> = self
             .db
             .with(|c| {
-                let mut stmt = c.prepare("SELECT meta FROM panes ORDER BY created DESC LIMIT 500")?;
+                let mut stmt =
+                    c.prepare("SELECT meta FROM panes ORDER BY created DESC LIMIT 500")?;
                 let rows = stmt.query_map([], |r| r.get(0))?;
                 rows.collect()
             })
@@ -259,7 +329,9 @@ impl Daemon {
             .iter()
             .filter_map(|p| {
                 let m = p.meta.lock().unwrap();
-                (m.project.as_deref() == Some(name) && m.exit.is_none()).then(|| m.slot.clone()).flatten()
+                (m.project.as_deref() == Some(name) && m.exit.is_none())
+                    .then(|| m.slot.clone())
+                    .flatten()
             })
             .collect();
         let mut started = vec![];
@@ -267,8 +339,12 @@ impl Daemon {
             if running.contains(&slot.name) {
                 continue;
             }
-            let agent = AgentKind::parse(&slot.agent)
-                .ok_or_else(|| invalid(format!("pane {}: unknown agent {:?}", slot.name, slot.agent)))?;
+            let agent = AgentKind::parse(&slot.agent).ok_or_else(|| {
+                invalid(format!(
+                    "pane {}: unknown agent {:?}",
+                    slot.name, slot.agent
+                ))
+            })?;
             let previous = self.last_slot_meta(name, &slot.name);
             let resume = previous
                 .as_ref()
@@ -280,7 +356,10 @@ impl Daemon {
             };
             // Forget the old record so pane ids stay unique per live pane.
             if let Some(prev) = &previous {
-                self.panes.write().unwrap().retain(|id, p| !(id == &prev.id && p.meta.lock().unwrap().exit.is_some()));
+                self.panes
+                    .write()
+                    .unwrap()
+                    .retain(|id, p| !(id == &prev.id && p.meta.lock().unwrap().exit.is_some()));
             }
             let p = self.spawn_pane(SpawnOpts {
                 name: Some(slot.name.clone()),
@@ -297,8 +376,16 @@ impl Daemon {
             self.write_instructions(&p.meta());
             started.push(json!({"pane": p.id, "slot": slot.name, "resumed": resume.is_some()}));
         }
-        self.db.with(|c| c.execute("UPDATE projects SET open=1 WHERE name=?1", [name]))?;
-        self.record("project.opened", None, Some(name), None, Some(by), json!({"started": started}));
+        self.db
+            .with(|c| c.execute("UPDATE projects SET open=1 WHERE name=?1", [name]))?;
+        self.record(
+            "project.opened",
+            None,
+            Some(name),
+            None,
+            Some(by),
+            json!({"started": started}),
+        );
         let mut view = self.project_view(name)?;
         view["started"] = json!(started);
         Ok(view)
@@ -315,8 +402,16 @@ impl Daemon {
         for id in ids {
             self.close(&id, by)?;
         }
-        self.db.with(|c| c.execute("UPDATE projects SET open=0 WHERE name=?1", [name]))?;
-        self.record("project.closed", None, Some(name), None, Some(by), json!({}));
+        self.db
+            .with(|c| c.execute("UPDATE projects SET open=0 WHERE name=?1", [name]))?;
+        self.record(
+            "project.closed",
+            None,
+            Some(name),
+            None,
+            Some(by),
+            json!({}),
+        );
         Ok(())
     }
 }

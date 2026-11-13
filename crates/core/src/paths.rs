@@ -21,12 +21,18 @@ impl Paths {
         let config_dir = std::env::var_os("SPANDECK_CONFIG_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".config/spandeck"));
-        Paths { state_dir, config_dir }
+        Paths {
+            state_dir,
+            config_dir,
+        }
     }
 
     /// Everything under one directory (tests, and `--home`).
     pub fn at(root: &Path) -> Paths {
-        Paths { state_dir: root.join("state"), config_dir: root.join("config") }
+        Paths {
+            state_dir: root.join("state"),
+            config_dir: root.join("config"),
+        }
     }
 
     pub fn socket(&self) -> PathBuf {
@@ -142,8 +148,9 @@ impl Config {
     pub fn load(paths: &Paths) -> anyhow::Result<Config> {
         let file = paths.config_file();
         match std::fs::read_to_string(&file) {
-            Ok(text) => Ok(toml::from_str(&text)
-                .map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?),
+            Ok(text) => Ok(
+                toml::from_str(&text).map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?
+            ),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
             Err(e) => Err(e.into()),
         }
@@ -177,5 +184,8 @@ pub fn random_token() -> String {
 
 /// Sortable unique id with a short type prefix: `p-01J…`, `m-01J…`.
 pub fn new_id(prefix: &str) -> String {
-    format!("{prefix}-{}", ulid::Ulid::generate().to_string().to_lowercase())
+    format!(
+        "{prefix}-{}",
+        ulid::Ulid::generate().to_string().to_lowercase()
+    )
 }

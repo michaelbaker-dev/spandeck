@@ -32,17 +32,28 @@ impl std::fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 fn io_err(e: std::io::Error) -> ClientError {
-    ClientError { code: "io".into(), message: e.to_string() }
+    ClientError {
+        code: "io".into(),
+        message: e.to_string(),
+    }
 }
 
 impl Client {
     pub fn connect(socket: &Path, token: &str) -> Result<Client, ClientError> {
         let stream = UnixStream::connect(socket).map_err(|e| ClientError {
             code: "not_running".into(),
-            message: format!("spandeckd is not running ({}: {e}). Start it with `spandeck daemon`.", socket.display()),
+            message: format!(
+                "spandeckd is not running ({}: {e}). Start it with `spandeck daemon`.",
+                socket.display()
+            ),
         })?;
         let writer = stream.try_clone().map_err(io_err)?;
-        Ok(Client { reader: BufReader::new(stream), writer, token: token.to_string(), next_id: 0 })
+        Ok(Client {
+            reader: BufReader::new(stream),
+            writer,
+            token: token.to_string(),
+            next_id: 0,
+        })
     }
 
     /// Connect as whoever the environment says we are: a pane (its own token)
@@ -63,18 +74,35 @@ impl Client {
 
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
         self.next_id += 1;
-        let req = json!({"id": self.next_id, "token": self.token, "method": method, "params": params});
-        self.writer.write_all(format!("{req}\n").as_bytes()).map_err(io_err)?;
+        let req =
+            json!({"id": self.next_id, "token": self.token, "method": method, "params": params});
+        self.writer
+            .write_all(format!("{req}\n").as_bytes())
+            .map_err(io_err)?;
         let mut line = String::new();
         let n = self.reader.read_line(&mut line).map_err(io_err)?;
         if n == 0 {
-            return Err(ClientError { code: "closed".into(), message: "spandeckd closed the connection".into() });
+            return Err(ClientError {
+                code: "closed".into(),
+                message: "spandeckd closed the connection".into(),
+            });
         }
-        let resp: Value = serde_json::from_str(&line).map_err(|e| ClientError { code: "protocol".into(), message: e.to_string() })?;
+        let resp: Value = serde_json::from_str(&line).map_err(|e| ClientError {
+            code: "protocol".into(),
+            message: e.to_string(),
+        })?;
         if let Some(err) = resp.get("error") {
             return Err(ClientError {
-                code: err.get("code").and_then(|c| c.as_str()).unwrap_or("error").to_string(),
-                message: err.get("message").and_then(|c| c.as_str()).unwrap_or("error").to_string(),
+                code: err
+                    .get("code")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("error")
+                    .to_string(),
+                message: err
+                    .get("message")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("error")
+                    .to_string(),
             });
         }
         Ok(resp.get("result").cloned().unwrap_or(Value::Null))
@@ -82,15 +110,22 @@ impl Client {
 
     /// Subscribe to events; then call `next_event` repeatedly.
     pub fn subscribe(&mut self, kind_prefix: Option<&str>) -> Result<(), ClientError> {
-        self.call("events.subscribe", json!({"kind": kind_prefix})).map(|_| ())
+        self.call("events.subscribe", json!({"kind": kind_prefix}))
+            .map(|_| ())
     }
 
     pub fn next_event(&mut self) -> Result<Value, ClientError> {
         let mut line = String::new();
         let n = self.reader.read_line(&mut line).map_err(io_err)?;
         if n == 0 {
-            return Err(ClientError { code: "closed".into(), message: "spandeckd closed the connection".into() });
+            return Err(ClientError {
+                code: "closed".into(),
+                message: "spandeckd closed the connection".into(),
+            });
         }
-        serde_json::from_str(&line).map_err(|e| ClientError { code: "protocol".into(), message: e.to_string() })
+        serde_json::from_str(&line).map_err(|e| ClientError {
+            code: "protocol".into(),
+            message: e.to_string(),
+        })
     }
 }

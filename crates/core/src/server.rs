@@ -67,11 +67,16 @@ async fn connection(daemon: Daemon, stream: UnixStream) -> std::io::Result<()> {
             }
         };
         let id = req.get("id").cloned().unwrap_or(Value::Null);
-        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
+        let method = req
+            .get("method")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
         let params = req.get("params").cloned().unwrap_or(json!({}));
         let token = req.get("token").and_then(|t| t.as_str()).unwrap_or("");
         let Some(caller) = daemon.caller_for_token(token, &conn_id) else {
-            let out = json!({"id": id, "error": {"code": "denied", "message": "missing or wrong token"}});
+            let out =
+                json!({"id": id, "error": {"code": "denied", "message": "missing or wrong token"}});
             write.write_all(format!("{out}\n").as_bytes()).await?;
             continue;
         };
@@ -82,18 +87,32 @@ async fn connection(daemon: Daemon, stream: UnixStream) -> std::io::Result<()> {
                 continue;
             }
             let mut rx = daemon.bus.subscribe();
-            write.write_all(format!("{}\n", json!({"id": id, "result": {"subscribed": true}})).as_bytes()).await?;
-            let prefix = params.get("kind").and_then(|k| k.as_str()).map(String::from);
+            write
+                .write_all(
+                    format!("{}\n", json!({"id": id, "result": {"subscribed": true}})).as_bytes(),
+                )
+                .await?;
+            let prefix = params
+                .get("kind")
+                .and_then(|k| k.as_str())
+                .map(String::from);
             loop {
                 match rx.recv().await {
                     Ok(ev) => {
-                        if prefix.as_ref().is_some_and(|p| !ev.kind.starts_with(p.as_str())) {
+                        if prefix
+                            .as_ref()
+                            .is_some_and(|p| !ev.kind.starts_with(p.as_str()))
+                        {
                             continue;
                         }
-                        write.write_all(format!("{}\n", json!({"event": ev})).as_bytes()).await?;
+                        write
+                            .write_all(format!("{}\n", json!({"event": ev})).as_bytes())
+                            .await?;
                     }
                     Err(RecvError::Lagged(n)) => {
-                        write.write_all(format!("{}\n", json!({"events_lost": n})).as_bytes()).await?;
+                        write
+                            .write_all(format!("{}\n", json!({"events_lost": n})).as_bytes())
+                            .await?;
                     }
                     Err(RecvError::Closed) => return Ok(()),
                 }

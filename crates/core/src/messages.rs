@@ -19,7 +19,9 @@ impl Daemon {
 
     /// Every name a pane answers to on this station.
     pub(crate) fn pane_names(&self, pane_id: &str) -> Vec<String> {
-        let Ok(p) = self.pane(pane_id) else { return vec![pane_id.to_string()] };
+        let Ok(p) = self.pane(pane_id) else {
+            return vec![pane_id.to_string()];
+        };
         let m = p.meta.lock().unwrap();
         let mut names = vec![m.id.clone(), m.name.clone()];
         if let Some(project) = &m.project {
@@ -44,6 +46,7 @@ impl Daemon {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn msg_send(
         &self,
         caller: &Caller,
@@ -66,19 +69,27 @@ impl Daemon {
         if remote {
             let dest = station.unwrap_or_default();
             if self.fleet.peer(dest).is_none() {
-                return Err(Error::NotFound(format!("station {dest} (not in the fleet)")));
+                return Err(Error::NotFound(format!(
+                    "station {dest} (not in the fleet)"
+                )));
             }
             let approved_by = if caller.authority == Authority::Agent {
                 // An agent's first route to another station needs one approval.
-                self.ensure_route(caller, project.as_deref().unwrap_or("-"), &sender, dest).await?
+                self.ensure_route(caller, project.as_deref().unwrap_or("-"), &sender, dest)
+                    .await?
             } else {
                 "you".to_string()
             };
             if kind == "task" {
-                auth = Some(TaskAuth { approved_by, expires_ms: now_ms() + TASK_AUTH_MS });
+                auth = Some(TaskAuth {
+                    approved_by,
+                    expires_ms: now_ms() + TASK_AUTH_MS,
+                });
             }
         } else if name != "you" && self.pane(name).is_err() {
-            return Err(Error::NotFound(format!("no pane called {name} on this station")));
+            return Err(Error::NotFound(format!(
+                "no pane called {name} on this station"
+            )));
         }
         let env = self
             .mail()
@@ -107,12 +118,26 @@ impl Daemon {
             json!({"id": env.id, "thread": env.thread, "from": env.sender, "to": env.recipient, "kind": env.kind, "remote": remote}),
         );
         if name == "you" && !remote {
-            self.notify("message", caller.pane.as_deref(), project.as_deref(), &format!("Message from {}", env.sender), &truncate(body, 200));
+            self.notify(
+                "message",
+                caller.pane.as_deref(),
+                project.as_deref(),
+                &format!("Message from {}", env.sender),
+                &truncate(body, 200),
+            );
         }
-        Ok(json!({"id": env.id, "thread": env.thread, "status": if remote { "queued" } else { "delivered" }}))
+        Ok(
+            json!({"id": env.id, "thread": env.thread, "status": if remote { "queued" } else { "delivered" }}),
+        )
     }
 
-    async fn ensure_route(&self, caller: &Caller, project: &str, sender: &str, station: &str) -> Result<String> {
+    async fn ensure_route(
+        &self,
+        caller: &Caller,
+        project: &str,
+        sender: &str,
+        station: &str,
+    ) -> Result<String> {
         let now = now_ms();
         let existing: Option<String> = self
             .db
@@ -127,7 +152,10 @@ impl Daemon {
         if existing.is_some() {
             return Ok("you".into());
         }
-        let pane = caller.pane.as_ref().ok_or_else(|| Error::Denied("no pane".into()))?;
+        let pane = caller
+            .pane
+            .as_ref()
+            .ok_or_else(|| Error::Denied("no pane".into()))?;
         let p = self.pane(pane)?;
         let answer = self
             .request_approval(
@@ -148,8 +176,12 @@ impl Daemon {
                 });
                 Ok("you".into())
             }
-            Some(a) => Err(Error::Denied(a.reason.unwrap_or_else(|| "the route to that station was not approved".into()))),
-            None => Err(Error::Denied("nobody approved the route to that station in time".into())),
+            Some(a) => Err(Error::Denied(a.reason.unwrap_or_else(|| {
+                "the route to that station was not approved".into()
+            }))),
+            None => Err(Error::Denied(
+                "nobody approved the route to that station in time".into(),
+            )),
         }
     }
 
@@ -160,23 +192,57 @@ impl Daemon {
         };
         let rows = self.mail().inbox(&names, unread_only, !peek, now_ms());
         if !peek && !rows.is_empty() {
-            self.emit("msg.read", caller.pane.as_deref(), None, json!({"count": rows.len()}));
+            self.emit(
+                "msg.read",
+                caller.pane.as_deref(),
+                None,
+                json!({"count": rows.len()}),
+            );
         }
         rows
     }
 
-    pub async fn msg_reply(&self, caller: &Caller, id: &str, body: &str, kind: Option<&str>) -> Result<Value> {
-        let orig = self.mail().get(id).ok_or_else(|| Error::NotFound(format!("message {id}")))?;
-        let kind = kind.unwrap_or(if orig.kind == "task" { "result" } else { "note" });
+    pub async fn msg_reply(
+        &self,
+        caller: &Caller,
+        id: &str,
+        body: &str,
+        kind: Option<&str>,
+    ) -> Result<Value> {
+        let orig = self
+            .mail()
+            .get(id)
+            .ok_or_else(|| Error::NotFound(format!("message {id}")))?;
+        let kind = kind.unwrap_or(if orig.kind == "task" {
+            "result"
+        } else {
+            "note"
+        });
         self.mail().ack(id, now_ms());
-        self.msg_send(caller, &orig.sender, kind, body, json!([]), Some(orig.thread.clone()), orig.task.clone()).await
+        self.msg_send(
+            caller,
+            &orig.sender,
+            kind,
+            body,
+            json!([]),
+            Some(orig.thread.clone()),
+            orig.task.clone(),
+        )
+        .await
     }
 
     pub fn msg_ack(&self, caller: &Caller, id: &str) -> Result<()> {
         if !self.mail().ack(id, now_ms()) {
             return Err(Error::NotFound(format!("message {id}")));
         }
-        self.record("msg.acted", caller.pane.as_deref(), None, None, Some(&caller.who), json!({"id": id}));
+        self.record(
+            "msg.acted",
+            caller.pane.as_deref(),
+            None,
+            None,
+            Some(&caller.who),
+            json!({"id": id}),
+        );
         Ok(())
     }
 
@@ -223,11 +289,20 @@ impl Daemon {
                 continue;
             }
             let waiting = mail.unannounced(&self.pane_names(&id));
-            let Some((_, sender, _)) = waiting.first().cloned() else { continue };
+            let Some((_, sender, _)) = waiting.first().cloned() else {
+                continue;
+            };
             mail.mark_announced(&waiting.iter().map(|w| w.0.clone()).collect::<Vec<_>>());
             let nudge = format!("You have mail from {sender}. Check your spandeck inbox.");
             if self.send_text(&id, &nudge, true).is_ok() {
-                self.record("msg.nudged", Some(&id), None, None, None, json!({"count": waiting.len()}));
+                self.record(
+                    "msg.nudged",
+                    Some(&id),
+                    None,
+                    None,
+                    None,
+                    json!({"count": waiting.len()}),
+                );
             }
         }
     }
@@ -257,7 +332,13 @@ impl Daemon {
                 json!({"id": env.id, "thread": env.thread, "from": env.sender, "to": env.recipient, "kind": env.kind}),
             );
             if split_address(&env.recipient).0 == "you" {
-                self.notify("message", None, env.project.as_deref(), &format!("Message from {}", env.sender), &truncate(&env.body, 200));
+                self.notify(
+                    "message",
+                    None,
+                    env.project.as_deref(),
+                    &format!("Message from {}", env.sender),
+                    &truncate(&env.body, 200),
+                );
             }
         }
         ack

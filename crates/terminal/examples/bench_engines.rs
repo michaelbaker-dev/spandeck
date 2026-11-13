@@ -19,7 +19,20 @@ fn agent_stream(seed: u64, target_bytes: usize) -> Vec<u8> {
         x ^= x << 17;
         x
     };
-    let words = ["fn", "let", "match", "error:", "warning:", "Compiling", "tests", "passed", "src/main.rs", "→", "✓", "日本語"];
+    let words = [
+        "fn",
+        "let",
+        "match",
+        "error:",
+        "warning:",
+        "Compiling",
+        "tests",
+        "passed",
+        "src/main.rs",
+        "→",
+        "✓",
+        "日本語",
+    ];
     let mut i = 0u64;
     while out.len() < target_bytes {
         i += 1;
@@ -27,7 +40,10 @@ fn agent_stream(seed: u64, target_bytes: usize) -> Vec<u8> {
             0 => {
                 // spinner redraw
                 for f in ["⠋", "⠙", "⠹", "⠸"] {
-                    out.extend_from_slice(format!("\r\x1b[2K\x1b[36m{f}\x1b[0m Working… ({i}s · esc to interrupt)").as_bytes());
+                    out.extend_from_slice(
+                        format!("\r\x1b[2K\x1b[36m{f}\x1b[0m Working… ({i}s · esc to interrupt)")
+                            .as_bytes(),
+                    );
                 }
                 out.extend_from_slice(b"\r\n");
             }
@@ -53,11 +69,21 @@ fn agent_stream(seed: u64, target_bytes: usize) -> Vec<u8> {
     out
 }
 
-fn run(name: &str, panes: usize, mb_per_pane: usize, feed: impl Fn(&[u8]) + Send + Sync + Copy + 'static) {
-    let streams: Vec<Vec<u8>> = (0..panes).map(|i| agent_stream(i as u64 + 1, mb_per_pane << 20)).collect();
+fn run(
+    name: &str,
+    panes: usize,
+    mb_per_pane: usize,
+    feed: impl Fn(&[u8]) + Send + Sync + Copy + 'static,
+) {
+    let streams: Vec<Vec<u8>> = (0..panes)
+        .map(|i| agent_stream(i as u64 + 1, mb_per_pane << 20))
+        .collect();
     let total: usize = streams.iter().map(|s| s.len()).sum();
     let start = Instant::now();
-    let handles: Vec<_> = streams.into_iter().map(|s| thread::spawn(move || feed(&s))).collect();
+    let handles: Vec<_> = streams
+        .into_iter()
+        .map(|s| thread::spawn(move || feed(&s)))
+        .collect();
     for h in handles {
         h.join().unwrap();
     }
@@ -73,7 +99,12 @@ fn run(name: &str, panes: usize, mb_per_pane: usize, feed: impl Fn(&[u8]) + Send
 fn main() {
     let panes = 50;
     let mb = 8;
-    println!("cores: {}", thread::available_parallelism().map(|n| n.get()).unwrap_or(0));
+    println!(
+        "cores: {}",
+        thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0)
+    );
     run("alacritty_terminal", panes, mb, |s| {
         let mut screen = Screen::new(120, 40);
         for chunk in s.chunks(16 * 1024) {
@@ -82,7 +113,11 @@ fn main() {
         std::hint::black_box(screen.text());
     });
     run("vt100", panes, mb, |s| {
-        let mut p = vt100::Parser::new(std::num::NonZero::new(40).unwrap(), std::num::NonZero::new(120).unwrap(), 5000);
+        let mut p = vt100::Parser::new(
+            std::num::NonZero::new(40).unwrap(),
+            std::num::NonZero::new(120).unwrap(),
+            5000,
+        );
         for chunk in s.chunks(16 * 1024) {
             p.process(chunk);
         }
@@ -96,10 +131,17 @@ fn main() {
     for _ in 0..1000 {
         n += screen.snapshot_ansi(5000).len();
     }
-    println!("snapshot with 5000 lines of history: {:.2} ms each, {} KB", t.elapsed().as_secs_f64(), n / 1000 / 1024);
+    println!(
+        "snapshot with 5000 lines of history: {:.2} ms each, {} KB",
+        t.elapsed().as_secs_f64(),
+        n / 1000 / 1024
+    );
     let t = Instant::now();
     for _ in 0..1000 {
         std::hint::black_box(screen.text());
     }
-    println!("visible-grid text (thumbnail):       {:.3} ms each", t.elapsed().as_secs_f64());
+    println!(
+        "visible-grid text (thumbnail):       {:.3} ms each",
+        t.elapsed().as_secs_f64()
+    );
 }

@@ -19,7 +19,9 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 pub fn head(cwd: &Path) -> Option<String> {
-    git(cwd, &["rev-parse", "HEAD"]).ok().filter(|s| !s.is_empty())
+    git(cwd, &["rev-parse", "HEAD"])
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 pub fn is_repo(cwd: &Path) -> bool {
@@ -31,5 +33,7 @@ pub fn is_dirty(cwd: &Path) -> bool {
 }
 
 pub fn toplevel(cwd: &Path) -> Option<String> {
-    git(cwd, &["rev-parse", "--show-toplevel"]).ok().filter(|s| !s.is_empty())
+    git(cwd, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .filter(|s| !s.is_empty())
 }

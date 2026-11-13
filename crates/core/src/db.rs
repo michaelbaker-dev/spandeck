@@ -224,7 +224,9 @@ impl Db {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        let db = Db { conn: Mutex::new(conn) };
+        let db = Db {
+            conn: Mutex::new(conn),
+        };
         db.migrate()?;
         Ok(db)
     }
@@ -248,13 +250,17 @@ impl Db {
     }
 
     pub fn schema_version(&self) -> u32 {
-        self.with(|c| c.query_row("PRAGMA user_version", [], |r| r.get(0))).unwrap_or(0)
+        self.with(|c| c.query_row("PRAGMA user_version", [], |r| r.get(0)))
+            .unwrap_or(0)
     }
 
     pub const LATEST_SCHEMA: u32 = MIGRATIONS.len() as u32;
 
     /// Run `f` with the connection. Keep it short: one lock for the daemon.
-    pub fn with<R>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<R>) -> rusqlite::Result<R> {
+    pub fn with<R>(
+        &self,
+        f: impl FnOnce(&Connection) -> rusqlite::Result<R>,
+    ) -> rusqlite::Result<R> {
         f(&self.conn.lock().unwrap())
     }
 
@@ -270,9 +276,12 @@ impl Db {
     }
 
     pub fn kv_get(&self, key: &str) -> Option<String> {
-        self.with(|c| c.query_row("SELECT v FROM kv WHERE k=?1", [key], |r| r.get(0)).optional())
-            .ok()
-            .flatten()
+        self.with(|c| {
+            c.query_row("SELECT v FROM kv WHERE k=?1", [key], |r| r.get(0))
+                .optional()
+        })
+        .ok()
+        .flatten()
     }
 
     pub fn kv_set(&self, key: &str, value: &str) {

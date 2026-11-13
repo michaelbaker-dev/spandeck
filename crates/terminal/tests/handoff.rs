@@ -12,5 +12,8 @@ fn a_running_terminal_survives_exec_in_place() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success() && stdout.contains("HANDOFF_OK"), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        out.status.success() && stdout.contains("HANDOFF_OK"),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
 }

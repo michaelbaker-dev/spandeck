@@ -32,7 +32,11 @@ fn text_of(v: &Value) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        Value::Object(_) => v.get("text").or_else(|| v.get("content")).map(text_of).unwrap_or_default(),
+        Value::Object(_) => v
+            .get("text")
+            .or_else(|| v.get("content"))
+            .map(text_of)
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -40,7 +44,12 @@ fn text_of(v: &Value) -> String {
 fn files_of(input: &Value) -> Vec<String> {
     ["file_path", "path", "notebook_path"]
         .iter()
-        .filter_map(|k| input.get(*k).and_then(|p| p.as_str()).map(|p| p.to_string()))
+        .filter_map(|k| {
+            input
+                .get(*k)
+                .and_then(|p| p.as_str())
+                .map(|p| p.to_string())
+        })
         .collect()
 }
 
@@ -54,24 +63,39 @@ fn tool_text(name: &str, input: &Value) -> String {
 
 /// Claude Code `~/.claude/projects/<dir>/<session>.jsonl` (checked on 2.1.323).
 pub fn claude_line(raw: &str) -> Vec<Entry> {
-    let Ok(v) = serde_json::from_str::<Value>(raw) else { return vec![] };
-    let ts = v.get("timestamp").and_then(|t| t.as_str()).map(|t| t.to_string());
-    let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    let mk = |role: &str, kind: &str, text: String, tool: Option<String>, files: Vec<String>| Entry {
-        ts: ts.clone(),
-        role: role.into(),
-        kind: kind.into(),
-        text,
-        tool,
-        files,
+    let Ok(v) = serde_json::from_str::<Value>(raw) else {
+        return vec![];
     };
+    let ts = v
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .map(|t| t.to_string());
+    let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let mk =
+        |role: &str, kind: &str, text: String, tool: Option<String>, files: Vec<String>| Entry {
+            ts: ts.clone(),
+            role: role.into(),
+            kind: kind.into(),
+            text,
+            tool,
+            files,
+        };
     match ty {
         "system" if v.get("subtype").and_then(|s| s.as_str()) == Some("compact_boundary") => {
             let meta = v.get("compactMetadata").cloned().unwrap_or(Value::Null);
-            vec![mk("system", "compaction", format!("compaction {meta}"), None, vec![])]
+            vec![mk(
+                "system",
+                "compaction",
+                format!("compaction {meta}"),
+                None,
+                vec![],
+            )]
         }
         "user" => {
-            let content = v.pointer("/message/content").cloned().unwrap_or(Value::Null);
+            let content = v
+                .pointer("/message/content")
+                .cloned()
+                .unwrap_or(Value::Null);
             if v.get("isCompactSummary").and_then(|b| b.as_bool()) == Some(true) {
                 return vec![mk("system", "summary", text_of(&content), None, vec![])];
             }
@@ -127,8 +151,13 @@ pub fn claude_line(raw: &str) -> Vec<Entry> {
 /// Codex `~/.codex/sessions/.../rollout-*.jsonl`.
 /// UNVERIFIED: written from the public rollout format, not from a real file.
 pub fn codex_line(raw: &str) -> Vec<Entry> {
-    let Ok(v) = serde_json::from_str::<Value>(raw) else { return vec![] };
-    let ts = v.get("timestamp").and_then(|t| t.as_str()).map(|t| t.to_string());
+    let Ok(v) = serde_json::from_str::<Value>(raw) else {
+        return vec![];
+    };
+    let ts = v
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .map(|t| t.to_string());
     let payload = v.get("payload").unwrap_or(&v);
     let mk = |role: &str, kind: &str, text: String, tool: Option<String>| Entry {
         ts: ts.clone(),
@@ -140,32 +169,59 @@ pub fn codex_line(raw: &str) -> Vec<Entry> {
     };
     let out = match payload.get("type").and_then(|t| t.as_str()).unwrap_or("") {
         "message" => {
-            let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("assistant");
+            let role = payload
+                .get("role")
+                .and_then(|r| r.as_str())
+                .unwrap_or("assistant");
             let text = payload.get("content").map(text_of).unwrap_or_default();
             let kind = if role == "user" { "prompt" } else { "reply" };
-            vec![mk(if role == "user" { "user" } else { "assistant" }, kind, text, None)]
+            vec![mk(
+                if role == "user" { "user" } else { "assistant" },
+                kind,
+                text,
+                None,
+            )]
         }
         "function_call" | "local_shell_call" | "custom_tool_call" => {
-            let name = payload.get("name").and_then(|n| n.as_str()).unwrap_or("shell");
+            let name = payload
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("shell");
             let args = payload
                 .get("arguments")
                 .or_else(|| payload.get("input"))
                 .or_else(|| payload.get("action"))
-                .map(|a| a.as_str().map(|s| s.to_string()).unwrap_or_else(|| a.to_string()))
+                .map(|a| {
+                    a.as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| a.to_string())
+                })
                 .unwrap_or_default();
-            vec![mk("assistant", "tool_call", format!("{name}: {args}"), Some(name.to_string()))]
+            vec![mk(
+                "assistant",
+                "tool_call",
+                format!("{name}: {args}"),
+                Some(name.to_string()),
+            )]
         }
         "function_call_output" | "custom_tool_call_output" => {
             let out = payload
                 .get("output")
-                .map(|o| o.as_str().map(|s| s.to_string()).unwrap_or_else(|| text_of(o)))
+                .map(|o| {
+                    o.as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| text_of(o))
+                })
                 .unwrap_or_default();
             vec![mk("tool", "tool_result", out, None)]
         }
         "compacted" => vec![mk(
             "system",
             "compaction",
-            payload.get("message").map(text_of).unwrap_or_else(|| "compaction".into()),
+            payload
+                .get("message")
+                .map(text_of)
+                .unwrap_or_else(|| "compaction".into()),
             None,
         )],
         _ => vec![],

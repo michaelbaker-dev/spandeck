@@ -27,7 +27,10 @@ pub(crate) fn normalize_claude_dialect(agent: AgentKind, p: &Value) -> Option<Ag
             Some(Value::String(c)) => Some(c.clone()),
             // Codex's shell tool passes argv.
             Some(Value::Array(a)) => Some(
-                a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" "),
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
             ),
             _ => None,
         };
@@ -49,7 +52,13 @@ pub(crate) fn normalize_claude_dialect(agent: AgentKind, p: &Value) -> Option<Ag
     };
 
     let (kind, state, tool, message, source) = match raw.as_str() {
-        "SessionStart" => (EventKind::SessionStart, Some(AgentState::Idle), None, None, s(p, "source")),
+        "SessionStart" => (
+            EventKind::SessionStart,
+            Some(AgentState::Idle),
+            None,
+            None,
+            s(p, "source"),
+        ),
         "UserPromptSubmit" => (
             EventKind::PromptSubmit,
             Some(AgentState::Working),
@@ -57,7 +66,13 @@ pub(crate) fn normalize_claude_dialect(agent: AgentKind, p: &Value) -> Option<Ag
             s(p, "prompt").map(|m| cap(&m, 200)),
             None,
         ),
-        "PreToolUse" => (EventKind::ToolStart, Some(AgentState::Working), tool(), None, None),
+        "PreToolUse" => (
+            EventKind::ToolStart,
+            Some(AgentState::Working),
+            tool(),
+            None,
+            None,
+        ),
         "PostToolUse" => {
             let mut t = tool();
             if let Some(t) = t.as_mut() {
@@ -75,9 +90,13 @@ pub(crate) fn normalize_claude_dialect(agent: AgentKind, p: &Value) -> Option<Ag
         }
         // The user interrupted the turn mid-tool. Claude Code fires no Stop
         // hook for an interrupt (seen live on 2.1.323), so this is the signal.
-        "PostToolUseFailure" if p.get("is_interrupt").and_then(|i| i.as_bool()) == Some(true) => {
-            (EventKind::Interrupted, Some(AgentState::Idle), tool(), Some("interrupted".to_string()), None)
-        }
+        "PostToolUseFailure" if p.get("is_interrupt").and_then(|i| i.as_bool()) == Some(true) => (
+            EventKind::Interrupted,
+            Some(AgentState::Idle),
+            tool(),
+            Some("interrupted".to_string()),
+            None,
+        ),
         "PostToolUseFailure" => {
             let mut t = tool();
             if let Some(t) = t.as_mut() {
@@ -118,16 +137,46 @@ pub(crate) fn normalize_claude_dialect(agent: AgentKind, p: &Value) -> Option<Ag
             EventKind::TurnFailed,
             Some(AgentState::Error),
             None,
-            s(p, "error").or_else(|| s(p, "error_details")).map(|m| cap(&m, 200)),
+            s(p, "error")
+                .or_else(|| s(p, "error_details"))
+                .map(|m| cap(&m, 200)),
             None,
         ),
-        "Interrupt" => (EventKind::Interrupted, Some(AgentState::Idle), None, None, None),
-        "SubagentStart" => (EventKind::SubagentStart, Some(AgentState::Working), None, s(p, "agent_type"), None),
-        "SubagentStop" => (EventKind::SubagentStop, Some(AgentState::Working), None, s(p, "agent_type"), None),
-        "PreCompact" | "PostCompact" => {
-            (EventKind::Compact, None, None, None, s(p, "trigger").or(Some(raw.clone())))
-        }
-        "SessionEnd" => (EventKind::SessionEnd, Some(AgentState::Idle), None, None, s(p, "reason")),
+        "Interrupt" => (
+            EventKind::Interrupted,
+            Some(AgentState::Idle),
+            None,
+            None,
+            None,
+        ),
+        "SubagentStart" => (
+            EventKind::SubagentStart,
+            Some(AgentState::Working),
+            None,
+            s(p, "agent_type"),
+            None,
+        ),
+        "SubagentStop" => (
+            EventKind::SubagentStop,
+            Some(AgentState::Working),
+            None,
+            s(p, "agent_type"),
+            None,
+        ),
+        "PreCompact" | "PostCompact" => (
+            EventKind::Compact,
+            None,
+            None,
+            None,
+            s(p, "trigger").or(Some(raw.clone())),
+        ),
+        "SessionEnd" => (
+            EventKind::SessionEnd,
+            Some(AgentState::Idle),
+            None,
+            None,
+            s(p, "reason"),
+        ),
         _ => return None,
     };
 
@@ -196,7 +245,10 @@ pub(crate) fn reply_claude_dialect(raw_event: &str, d: &HookDecision) -> HookRep
         },
         _ => return HookReply::default(),
     };
-    HookReply { stdout: out.to_string(), exit_code: 0 }
+    HookReply {
+        stdout: out.to_string(),
+        exit_code: 0,
+    }
 }
 
 impl Adapter for ClaudeCode {
@@ -237,7 +289,10 @@ impl Adapter for ClaudeCode {
             args.push("--".to_string());
             args.push(prompt.clone());
         }
-        Launch { program: opts.program.clone().unwrap_or_else(|| "claude".into()), args }
+        Launch {
+            program: opts.program.clone().unwrap_or_else(|| "claude".into()),
+            args,
+        }
     }
 
     fn interrupt_keys(&self) -> &'static [u8] {
@@ -290,7 +345,10 @@ impl Adapter for FakeAgent {
             args.push(prompt.clone());
         }
         Launch {
-            program: opts.program.clone().unwrap_or_else(|| "spandeck-fake-agent".into()),
+            program: opts
+                .program
+                .clone()
+                .unwrap_or_else(|| "spandeck-fake-agent".into()),
             args,
         }
     }

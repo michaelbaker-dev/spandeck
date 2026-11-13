@@ -16,7 +16,12 @@ fn recordings() -> Vec<(String, u16, u16, Vec<u8>)> {
             let stem = name.strip_suffix(".bin")?;
             let (label, size) = stem.rsplit_once('.')?;
             let (cols, rows) = size.split_once('x')?;
-            Some((label.to_string(), cols.parse().ok()?, rows.parse().ok()?, fs::read(dir.join(&name)).unwrap()))
+            Some((
+                label.to_string(),
+                cols.parse().ok()?,
+                rows.parse().ok()?,
+                fs::read(dir.join(&name)).unwrap(),
+            ))
         })
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -57,8 +62,16 @@ fn chunking_does_not_change_the_result() {
         let whole = replay(&bytes, cols, rows, usize::MAX);
         for chunk in [1, 7, 64] {
             let split = replay(&bytes, cols, rows, chunk);
-            assert_eq!(whole.full_text(500), split.full_text(500), "{name} differs at chunk size {chunk}");
-            assert_eq!(whole.info(), split.info(), "{name} differs at chunk size {chunk}");
+            assert_eq!(
+                whole.full_text(500),
+                split.full_text(500),
+                "{name} differs at chunk size {chunk}"
+            );
+            assert_eq!(
+                whole.info(),
+                split.info(),
+                "{name} differs at chunk size {chunk}"
+            );
         }
     }
 }
@@ -75,13 +88,25 @@ fn a_snapshot_of_every_recording_reproduces_it() {
             let snap = server.snapshot_ansi(1000);
             let mut client = Screen::new(cols, rows);
             client.feed(&snap);
-            assert_eq!(server.full_text(1000), client.full_text(1000), "{name} cut at {cut}: text differs");
-            assert_eq!(server.info(), client.info(), "{name} cut at {cut}: cursor or modes differ");
+            assert_eq!(
+                server.full_text(1000),
+                client.full_text(1000),
+                "{name} cut at {cut}: text differs"
+            );
+            assert_eq!(
+                server.info(),
+                client.info(),
+                "{name} cut at {cut}: cursor or modes differ"
+            );
             // Then the live stream continues identically on both.
             let rest = &bytes[cut..];
             server.feed(rest);
             client.feed(rest);
-            assert_eq!(server.text(), client.text(), "{name} cut at {cut}: diverged after the snapshot");
+            assert_eq!(
+                server.text(),
+                client.text(),
+                "{name} cut at {cut}: diverged after the snapshot"
+            );
         }
     }
 }

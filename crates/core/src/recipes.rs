@@ -45,22 +45,38 @@ pub fn fingerprint(finding: &str) -> String {
 
 /// Stall check: has the reviewer raised any of these findings before?
 pub fn repeated(history: &[Vec<String>], findings: &[String]) -> Option<String> {
-    findings.iter().find(|f| {
-        let fp = fingerprint(f);
-        !fp.is_empty() && history.iter().any(|round| round.contains(&fp))
-    }).cloned()
+    findings
+        .iter()
+        .find(|f| {
+            let fp = fingerprint(f);
+            !fp.is_empty() && history.iter().any(|round| round.contains(&fp))
+        })
+        .cloned()
 }
 
 impl Daemon {
     fn recipe_save(&self, id: &str, r: &ReviewLoop) {
-        let active = matches!(r.phase.as_str(), "reviewing" | "fixing" | "awaiting_signoff");
+        let active = matches!(
+            r.phase.as_str(),
+            "reviewing" | "fixing" | "awaiting_signoff"
+        );
         let _ = self.db.with(|c| {
             c.execute(
                 "UPDATE recipes SET updated=?2, state=?3, data=?4 WHERE id=?1",
-                rusqlite::params![id, now_ms() as i64, if active { "active" } else { r.phase.as_str() }, serde_json::to_string(r).unwrap_or_default()],
+                rusqlite::params![
+                    id,
+                    now_ms() as i64,
+                    if active { "active" } else { r.phase.as_str() },
+                    serde_json::to_string(r).unwrap_or_default()
+                ],
             )
         });
-        self.emit("recipe.updated", Some(&r.author_pane), Some(&r.project), json!({"id": id, "phase": r.phase, "round": r.round, "note": r.note}));
+        self.emit(
+            "recipe.updated",
+            Some(&r.author_pane),
+            Some(&r.project),
+            json!({"id": id, "phase": r.phase, "round": r.round, "note": r.note}),
+        );
     }
 
     pub fn recipes(&self, project: Option<&str>) -> Vec<Value> {
@@ -82,20 +98,35 @@ impl Daemon {
 
     pub(crate) fn active_recipe(&self, project: &str) -> Option<String> {
         self.db
-            .with(|c| c.query_row("SELECT id FROM recipes WHERE project=?1 AND state='active' LIMIT 1", [project], |r| r.get(0)))
+            .with(|c| {
+                c.query_row(
+                    "SELECT id FROM recipes WHERE project=?1 AND state='active' LIMIT 1",
+                    [project],
+                    |r| r.get(0),
+                )
+            })
             .ok()
     }
 
     /// Start a review loop on the author's current commit.
-    pub fn review_start(&self, caller: &Caller, author_pane: &str, reviewer_role: Option<&str>) -> Result<Value> {
+    pub fn review_start(
+        &self,
+        caller: &Caller,
+        author_pane: &str,
+        reviewer_role: Option<&str>,
+    ) -> Result<Value> {
         let author = self.pane(author_pane)?;
         let meta = author.meta();
-        let project = meta.project.clone().ok_or_else(|| invalid("the author's pane is not in a project"))?;
+        let project = meta
+            .project
+            .clone()
+            .ok_or_else(|| invalid("the author's pane is not in a project"))?;
         if self.active_recipe(&project).is_some() {
             return Err(invalid("a review loop is already running in this project"));
         }
         let (path, file) = self.project_file(&project)?;
-        let commit = head(&path).ok_or_else(|| invalid("nothing to review: the project has no commits"))?;
+        let commit =
+            head(&path).ok_or_else(|| invalid("nothing to review: the project has no commits"))?;
         let id = new_id("r");
         let mut r = ReviewLoop {
             project: project.clone(),
@@ -125,7 +156,14 @@ impl Daemon {
             return Err(e);
         }
         self.recipe_save(&id, &r);
-        self.record("recipe.started", Some(&author.id), Some(&project), None, Some(&caller.who), json!({"id": id, "kind": "review_loop"}));
+        self.record(
+            "recipe.started",
+            Some(&author.id),
+            Some(&project),
+            None,
+            Some(&caller.who),
+            json!({"id": id, "kind": "review_loop"}),
+        );
         Ok(json!({"id": id, "recipe": r}))
     }
 
@@ -139,11 +177,28 @@ impl Daemon {
             &commit[..commit.len().min(12)],
             &commit[..commit.len().min(12)],
         );
-        let recipe_caller = Caller { authority: crate::daemon::Authority::Owner, pane: None, client: "recipe".into(), who: format!("recipe:{id}") };
-        let out = self.delegate(&recipe_caller, &r.reviewer_role, &goal, "Every finding names a file and what is wrong.", Some(&r.project), Some(id))?;
+        let recipe_caller = Caller {
+            authority: crate::daemon::Authority::Owner,
+            pane: None,
+            client: "recipe".into(),
+            who: format!("recipe:{id}"),
+        };
+        let out = self.delegate(
+            &recipe_caller,
+            &r.reviewer_role,
+            &goal,
+            "Every finding names a file and what is wrong.",
+            Some(&r.project),
+            Some(id),
+        )?;
         let task = out["task"].as_str().unwrap_or_default().to_string();
         // The recipe, not a pane, is waiting for this result.
-        let _ = self.db.with(|c| c.execute("UPDATE tasks SET requester=?2 WHERE id=?1", rusqlite::params![task, format!("recipe:{id}")]));
+        let _ = self.db.with(|c| {
+            c.execute(
+                "UPDATE tasks SET requester=?2 WHERE id=?1",
+                rusqlite::params![task, format!("recipe:{id}")],
+            )
+        });
         r.task = Some(task);
         r.phase = "reviewing".into();
         Ok(())
@@ -169,8 +224,21 @@ impl Daemon {
         r.phase = phase.into();
         r.note = Some(note.clone());
         self.recipe_save(id, r);
-        self.notify("needs_you", Some(&r.author_pane), Some(&r.project), "Review loop stopped and needs you", &note);
-        self.record("recipe.stopped", Some(&r.author_pane), Some(&r.project), None, None, json!({"id": id, "phase": phase, "note": note}));
+        self.notify(
+            "needs_you",
+            Some(&r.author_pane),
+            Some(&r.project),
+            "Review loop stopped and needs you",
+            &note,
+        );
+        self.record(
+            "recipe.stopped",
+            Some(&r.author_pane),
+            Some(&r.project),
+            None,
+            None,
+            json!({"id": id, "phase": phase, "note": note}),
+        );
     }
 
     /// Advance every active review loop by at most one step.
@@ -184,57 +252,98 @@ impl Daemon {
             })
             .unwrap_or_default();
         for id in active {
-            let Ok(mut r) = self.recipe_load(&id) else { continue };
-            if matches!(r.phase.as_str(), "reviewing" | "fixing") && now_ms().saturating_sub(r.started_ms) > r.max_minutes * 60_000 {
+            let Ok(mut r) = self.recipe_load(&id) else {
+                continue;
+            };
+            if matches!(r.phase.as_str(), "reviewing" | "fixing")
+                && now_ms().saturating_sub(r.started_ms) > r.max_minutes * 60_000
+            {
                 let m = r.max_minutes;
-                self.stop_and_ask(&id, &mut r, "limit", format!("The loop has run for more than {m} minutes."));
+                self.stop_and_ask(
+                    &id,
+                    &mut r,
+                    "limit",
+                    format!("The loop has run for more than {m} minutes."),
+                );
                 continue;
             }
             match r.phase.as_str() {
                 "reviewing" => {
                     let Some(task) = r.task.clone() else { continue };
-                    let Ok(t) = self.task_get(&task) else { continue };
+                    let Ok(t) = self.task_get(&task) else {
+                        continue;
+                    };
                     match t["state"].as_str() {
                         Some("completed") => {
                             let findings: Vec<String> = t["outputs"]["findings"]
                                 .as_array()
-                                .map(|a| a.iter().filter_map(|f| f.as_str().map(String::from)).collect())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|f| f.as_str().map(String::from))
+                                        .collect()
+                                })
                                 .unwrap_or_default();
                             self.review_done(&id, &mut r, findings).await;
                         }
                         Some("failed" | "cancelled") => {
-                            self.stop_and_ask(&id, &mut r, "failed", "The reviewer ended without a result.".into());
+                            self.stop_and_ask(
+                                &id,
+                                &mut r,
+                                "failed",
+                                "The reviewer ended without a result.".into(),
+                            );
                         }
                         _ => {}
                     }
                 }
                 "fixing" => {
                     let Some(task) = r.task.clone() else { continue };
-                    let Ok(t) = self.task_get(&task) else { continue };
+                    let Ok(t) = self.task_get(&task) else {
+                        continue;
+                    };
                     match t["state"].as_str() {
                         Some("completed") => {
                             let path = self.project_path(&r.project).unwrap_or_default();
                             r.commit = head(Path::new(&path));
                             r.round += 1;
                             if let Err(e) = self.review_round(&id, &mut r) {
-                                self.stop_and_ask(&id, &mut r, "failed", format!("Could not start the next review: {e}"));
+                                self.stop_and_ask(
+                                    &id,
+                                    &mut r,
+                                    "failed",
+                                    format!("Could not start the next review: {e}"),
+                                );
                             } else {
                                 self.recipe_save(&id, &r);
                             }
                         }
                         Some("failed" | "cancelled") => {
-                            self.stop_and_ask(&id, &mut r, "failed", "The author ended without fixing the findings.".into());
+                            self.stop_and_ask(
+                                &id,
+                                &mut r,
+                                "failed",
+                                "The author ended without fixing the findings.".into(),
+                            );
                         }
                         _ => {}
                     }
                 }
                 "awaiting_signoff" => {
                     if let Ok(s) = self.signoff_status(&r.project) {
-                        if s["valid"].as_bool() == Some(true) && s["commit"].as_str() == r.commit.as_deref() {
+                        if s["valid"].as_bool() == Some(true)
+                            && s["commit"].as_str() == r.commit.as_deref()
+                        {
                             r.phase = "done".into();
                             r.note = Some("signed off".into());
                             self.recipe_save(&id, &r);
-                            self.record("recipe.finished", Some(&r.author_pane), Some(&r.project), None, None, json!({"id": id, "rounds": r.round}));
+                            self.record(
+                                "recipe.finished",
+                                Some(&r.author_pane),
+                                Some(&r.project),
+                                None,
+                                None,
+                                json!({"id": id, "rounds": r.round}),
+                            );
                         }
                     }
                 }
@@ -249,22 +358,43 @@ impl Daemon {
             r.phase = "awaiting_signoff".into();
             r.note = Some(format!("Review clean after {} round(s). Waiting for your sign-off before anything is pushed.", r.round));
             self.recipe_save(id, r);
-            self.notify("needs_you", Some(&r.author_pane), Some(&r.project), "Review is clean: ready for your sign-off", r.note.as_deref().unwrap_or(""));
+            self.notify(
+                "needs_you",
+                Some(&r.author_pane),
+                Some(&r.project),
+                "Review is clean: ready for your sign-off",
+                r.note.as_deref().unwrap_or(""),
+            );
             return;
         }
         // Stall check: the same finding twice means the loop is not converging.
         if let Some(same) = repeated(&r.history, &findings) {
-            self.stop_and_ask(id, r, "stalled", format!("The reviewer raised the same finding twice: {same}"));
+            self.stop_and_ask(
+                id,
+                r,
+                "stalled",
+                format!("The reviewer raised the same finding twice: {same}"),
+            );
             return;
         }
-        r.history.push(findings.iter().map(|f| fingerprint(f)).collect());
+        r.history
+            .push(findings.iter().map(|f| fingerprint(f)).collect());
         if r.round >= r.max_rounds {
             let (rounds, n) = (r.max_rounds, findings.len());
-            self.stop_and_ask(id, r, "limit", format!("{rounds} review rounds are done and {n} finding(s) remain."));
+            self.stop_and_ask(
+                id,
+                r,
+                "limit",
+                format!("{rounds} review rounds are done and {n} finding(s) remain."),
+            );
             return;
         }
         // Hand the findings to the author as a task in its own pane.
-        let goal = format!("Fix the {} finding(s) from review round {} and commit the fix.", findings.len(), r.round);
+        let goal = format!(
+            "Fix the {} finding(s) from review round {} and commit the fix.",
+            findings.len(),
+            r.round
+        );
         let task = match self.task_create(NewTask {
             goal: goal.clone(),
             acceptance: "Every finding is fixed or answered, and the fix is committed.".into(),
@@ -291,14 +421,34 @@ impl Daemon {
             body.push_str(&format!("- {f}\n"));
         }
         body.push_str("\nWhen the fix is committed, report with the spandeck `task_result` tool (or run: spandeck task result --summary \"...\"). The reviewer then looks again.");
-        let recipe_caller = Caller { authority: crate::daemon::Authority::Owner, pane: None, client: "recipe".into(), who: format!("recipe:{id}") };
-        if let Err(e) = self.msg_send(&recipe_caller, &r.author_pane, "task", &body, json!([]), None, Some(task.clone())).await {
+        let recipe_caller = Caller {
+            authority: crate::daemon::Authority::Owner,
+            pane: None,
+            client: "recipe".into(),
+            who: format!("recipe:{id}"),
+        };
+        if let Err(e) = self
+            .msg_send(
+                &recipe_caller,
+                &r.author_pane,
+                "task",
+                &body,
+                json!([]),
+                None,
+                Some(task.clone()),
+            )
+            .await
+        {
             self.stop_and_ask(id, r, "failed", format!("Could not reach the author: {e}"));
             return;
         }
         r.task = Some(task);
         r.phase = "fixing".into();
-        r.note = Some(format!("Round {}: {} finding(s) sent to the author.", r.round, findings.len()));
+        r.note = Some(format!(
+            "Round {}: {} finding(s) sent to the author.",
+            r.round,
+            findings.len()
+        ));
         self.recipe_save(id, r);
     }
 }
@@ -310,7 +460,11 @@ mod tests {
     #[test]
     fn the_same_finding_twice_is_a_stall_whatever_the_punctuation() {
         let history = vec![vec![fingerprint("src/a.rs:10 — off-by-one in the loop")]];
-        assert!(repeated(&history, &["src/a.rs:10 off by one in the loop.".to_string()]).is_some());
+        assert!(repeated(
+            &history,
+            &["src/a.rs:10 off by one in the loop.".to_string()]
+        )
+        .is_some());
         assert!(repeated(&history, &["src/b.rs:4 missing null check".to_string()]).is_none());
         assert!(repeated(&[], &["anything".to_string()]).is_none());
     }

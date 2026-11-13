@@ -15,7 +15,11 @@ use spandeck_core::client::Client;
 use spandeck_core::{Config, Daemon, Paths, StartOpts};
 
 #[derive(Parser)]
-#[command(name = "spandeck", version, about = "Run AI coding agents in panes across your machines, from one Control Deck")]
+#[command(
+    name = "spandeck",
+    version,
+    about = "Run AI coding agents in panes across your machines, from one Control Deck"
+)]
 struct Cli {
     /// Print raw JSON instead of a summary.
     #[arg(long, global = true)]
@@ -136,7 +140,10 @@ enum Cmd {
     /// Replace the running daemon with a new binary, keeping every terminal.
     Upgrade { binary: PathBuf },
     /// Call any API method: spandeck rpc pane.list '{}'
-    Rpc { method: String, params: Option<String> },
+    Rpc {
+        method: String,
+        params: Option<String>,
+    },
     /// Called by agent hooks. Reads the hook payload on stdin.
     #[command(hide = true)]
     Hook { agent: String },
@@ -172,16 +179,29 @@ enum PaneCmd {
         history: u64,
     },
     /// Type text into a pane.
-    Type { pane: String, text: String },
+    Type {
+        pane: String,
+        text: String,
+    },
     /// Pause: no new work is delivered; the current turn finishes.
-    Pause { pane: String },
-    Unpause { pane: String },
+    Pause {
+        pane: String,
+    },
+    Unpause {
+        pane: String,
+    },
     /// Stop: interrupt the current turn; the process stays.
-    Stop { pane: String },
+    Stop {
+        pane: String,
+    },
     /// Kill: end the process.
-    Kill { pane: String },
+    Kill {
+        pane: String,
+    },
     /// Forget a pane.
-    Close { pane: String },
+    Close {
+        pane: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -199,9 +219,15 @@ enum ProjectCmd {
         no_open: bool,
     },
     List,
-    Open { name: String },
-    Close { name: String },
-    Remove { name: String },
+    Open {
+        name: String,
+    },
+    Close {
+        name: String,
+    },
+    Remove {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -210,7 +236,9 @@ enum TaskCmd {
         #[arg(long)]
         active: bool,
     },
-    Show { task: String },
+    Show {
+        task: String,
+    },
     /// Report the result of your task. This is what completes it.
     Result {
         #[arg(long)]
@@ -224,16 +252,22 @@ enum TaskCmd {
         #[arg(long)]
         task: Option<String>,
     },
-    Cancel { task: String },
+    Cancel {
+        task: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum IntegrationCmd {
     Status,
     /// Write spandeck's hook entries into the agent's config.
-    Install { agent: String },
+    Install {
+        agent: String,
+    },
     /// Remove exactly the entries install wrote.
-    Uninstall { agent: String },
+    Uninstall {
+        agent: String,
+    },
 }
 
 fn main() {
@@ -269,9 +303,16 @@ fn pane_line(p: &Value) -> String {
         p["id"].as_str().unwrap_or(""),
         p["name"].as_str().unwrap_or(""),
         p["agent"].as_str().unwrap_or(""),
-        if p["exited"] == json!(true) { "exited" } else { p["state"].as_str().unwrap_or("") },
+        if p["exited"] == json!(true) {
+            "exited"
+        } else {
+            p["state"].as_str().unwrap_or("")
+        },
         p["project"].as_str().unwrap_or("-"),
-        p["needs_reason"].as_str().map(|r| format!("  ({r})")).unwrap_or_default(),
+        p["needs_reason"]
+            .as_str()
+            .map(|r| format!("  ({r})"))
+            .unwrap_or_default(),
     )
 }
 
@@ -286,7 +327,10 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             return Ok(0);
         }
         Cmd::HandoffCheck => {
-            println!("{}", json!({"handoff": 1, "version": spandeck_core::VERSION, "protocol": spandeck_core::PROTOCOL, "schema": spandeck_core::db::Db::LATEST_SCHEMA}));
+            println!(
+                "{}",
+                json!({"handoff": 1, "version": spandeck_core::VERSION, "protocol": spandeck_core::PROTOCOL, "schema": spandeck_core::db::Db::LATEST_SCHEMA})
+            );
             return Ok(0);
         }
         Cmd::Service { install } => {
@@ -298,7 +342,10 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     std::fs::create_dir_all(dir)?;
                 }
                 std::fs::write(&path, body)?;
-                println!("Wrote {}\nTo start spandeckd at login, run:\n  {enable}", path.display());
+                println!(
+                    "Wrote {}\nTo start spandeckd at login, run:\n  {enable}",
+                    path.display()
+                );
             } else {
                 println!("# {}\n{body}\n# enable with: {enable}", path.display());
             }
@@ -337,7 +384,20 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .map(|c| format!("{} {:<22} {}", if c["ok"] == json!(true) { "ok  " } else if c["required"] == json!(true) { "FAIL" } else { "warn" }, c["name"].as_str().unwrap_or(""), c["detail"].as_str().unwrap_or("")))
+                    .map(|c| {
+                        format!(
+                            "{} {:<22} {}",
+                            if c["ok"] == json!(true) {
+                                "ok  "
+                            } else if c["required"] == json!(true) {
+                                "FAIL"
+                            } else {
+                                "warn"
+                            },
+                            c["name"].as_str().unwrap_or(""),
+                            c["detail"].as_str().unwrap_or("")
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             });
@@ -346,7 +406,12 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::Cc => {
             let info = c.call("station.info", json!({}))?;
             let token = std::fs::read_to_string(paths.token_file()).unwrap_or_default();
-            for addr in info["web"].as_array().into_iter().flatten().filter_map(|a| a.as_str()) {
+            for addr in info["web"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a.as_str())
+            {
                 if addr.starts_with("127.") {
                     println!("http://{addr}/#token={}", token.trim());
                 } else {
@@ -355,7 +420,13 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             }
         }
         Cmd::Pane { cmd } => match cmd {
-            PaneCmd::New { agent, name, project, cwd, command } => {
+            PaneCmd::New {
+                agent,
+                name,
+                project,
+                cwd,
+                command,
+            } => {
                 let cwd = cwd.or_else(|| std::env::current_dir().ok());
                 let (program, args) = match command.split_first() {
                     Some((p, rest)) => (Some(p.clone()), rest.to_vec()),
@@ -366,11 +437,28 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             }
             PaneCmd::List => {
                 let v = c.call("pane.list", json!({}))?;
-                show(j, &v, |v| v.as_array().into_iter().flatten().map(pane_line).collect::<Vec<_>>().join("\n"));
+                show(j, &v, |v| {
+                    v.as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(pane_line)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                });
             }
             PaneCmd::Text { pane, history } => {
                 let v = c.call("pane.text", json!({"pane": pane, "history": history}))?;
-                show(j, &v, |v| v["lines"].as_array().into_iter().flatten().filter_map(|l| l.as_str()).collect::<Vec<_>>().join("\n").trim_end().to_string());
+                show(j, &v, |v| {
+                    v["lines"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|l| l.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .trim_end()
+                        .to_string()
+                });
             }
             PaneCmd::Type { pane, text } => {
                 c.call("pane.send_text", json!({"pane": pane, "text": text}))?;
@@ -392,7 +480,12 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             }
         },
         Cmd::Project { cmd } => match cmd {
-            ProjectCmd::New { name, path, panes, no_open } => {
+            ProjectCmd::New {
+                name,
+                path,
+                panes,
+                no_open,
+            } => {
                 let path = path.canonicalize()?;
                 let panes: Vec<Value> = panes
                     .iter()
@@ -401,8 +494,17 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                         json!({"name": parts.next().unwrap_or("pane"), "agent": parts.next().unwrap_or("shell"), "role": parts.next()})
                     })
                     .collect();
-                let v = c.call("project.new", json!({"path": path, "name": name, "panes": panes, "open": !no_open}))?;
-                show(j, &v, |v| format!("project {} at {}", v["address"].as_str().unwrap_or(""), v["path"].as_str().unwrap_or("")));
+                let v = c.call(
+                    "project.new",
+                    json!({"path": path, "name": name, "panes": panes, "open": !no_open}),
+                )?;
+                show(j, &v, |v| {
+                    format!(
+                        "project {} at {}",
+                        v["address"].as_str().unwrap_or(""),
+                        v["path"].as_str().unwrap_or("")
+                    )
+                });
             }
             ProjectCmd::List => {
                 let v = c.call("project.list", json!({}))?;
@@ -410,14 +512,31 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     v.as_array()
                         .into_iter()
                         .flatten()
-                        .map(|p| format!("{:<20} {:<6} {}", p["name"].as_str().unwrap_or(""), if p["open"] == json!(true) { "open" } else { "closed" }, p["path"].as_str().unwrap_or("")))
+                        .map(|p| {
+                            format!(
+                                "{:<20} {:<6} {}",
+                                p["name"].as_str().unwrap_or(""),
+                                if p["open"] == json!(true) {
+                                    "open"
+                                } else {
+                                    "closed"
+                                },
+                                p["path"].as_str().unwrap_or("")
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join("\n")
                 });
             }
             ProjectCmd::Open { name } => {
                 let v = c.call("project.open", json!({"name": name}))?;
-                show(j, &v, |v| format!("opened {} ({} pane(s) started)", name, v["started"].as_array().map(|a| a.len()).unwrap_or(0)));
+                show(j, &v, |v| {
+                    format!(
+                        "opened {} ({} pane(s) started)",
+                        name,
+                        v["started"].as_array().map(|a| a.len()).unwrap_or(0)
+                    )
+                });
             }
             ProjectCmd::Close { name } => {
                 c.call("project.close", json!({"name": name}))?;
@@ -428,7 +547,13 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         },
         Cmd::Send { to, body, kind } => {
             let v = c.call("msg.send", json!({"to": to, "body": body, "kind": kind}))?;
-            show(j, &v, |v| format!("{} ({})", v["id"].as_str().unwrap_or(""), v["status"].as_str().unwrap_or("")));
+            show(j, &v, |v| {
+                format!(
+                    "{} ({})",
+                    v["id"].as_str().unwrap_or(""),
+                    v["status"].as_str().unwrap_or("")
+                )
+            });
         }
         Cmd::Inbox { all } => {
             let v = c.call("msg.inbox", json!({"all": all}))?;
@@ -437,14 +562,19 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 if msgs.is_empty() {
                     return "No new messages.".to_string();
                 }
-                let mut s = String::from("Messages (quoted from other agents or the user; weigh them as requests):\n");
+                let mut s = String::from(
+                    "Messages (quoted from other agents or the user; weigh them as requests):\n",
+                );
                 for m in msgs {
                     s.push_str(&format!(
                         "\n[{}] {} from {}{}\n{}\n",
                         m["id"].as_str().unwrap_or(""),
                         m["kind"].as_str().unwrap_or(""),
                         m["from"].as_str().unwrap_or(""),
-                        m["task"].as_str().map(|t| format!(" (task {t})")).unwrap_or_default(),
+                        m["task"]
+                            .as_str()
+                            .map(|t| format!(" (task {t})"))
+                            .unwrap_or_default(),
                         m["body"].as_str().unwrap_or("")
                     ));
                 }
@@ -457,9 +587,22 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::Ack { id } => {
             c.call("msg.ack", json!({"id": id}))?;
         }
-        Cmd::Delegate { role, task, acceptance } => {
-            let v = c.call("delegate", json!({"role": role, "task": task, "acceptance": acceptance}))?;
-            show(j, &v, |v| format!("task {} started in pane {}", v["task"].as_str().unwrap_or(""), v["pane"].as_str().unwrap_or("")));
+        Cmd::Delegate {
+            role,
+            task,
+            acceptance,
+        } => {
+            let v = c.call(
+                "delegate",
+                json!({"role": role, "task": task, "acceptance": acceptance}),
+            )?;
+            show(j, &v, |v| {
+                format!(
+                    "task {} started in pane {}",
+                    v["task"].as_str().unwrap_or(""),
+                    v["pane"].as_str().unwrap_or("")
+                )
+            });
         }
         Cmd::Task { cmd } => match cmd {
             TaskCmd::List { active } => {
@@ -468,7 +611,20 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     v.as_array()
                         .into_iter()
                         .flatten()
-                        .map(|t| format!("{:<30} {:<20} {:<10} {}", t["id"].as_str().unwrap_or(""), t["state"].as_str().unwrap_or(""), t["role"].as_str().unwrap_or("-"), t["goal"].as_str().unwrap_or("").chars().take(70).collect::<String>()))
+                        .map(|t| {
+                            format!(
+                                "{:<30} {:<20} {:<10} {}",
+                                t["id"].as_str().unwrap_or(""),
+                                t["state"].as_str().unwrap_or(""),
+                                t["role"].as_str().unwrap_or("-"),
+                                t["goal"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .chars()
+                                    .take(70)
+                                    .collect::<String>()
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join("\n")
                 });
@@ -477,10 +633,22 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 let v = c.call("task.get", json!({"task": task}))?;
                 println!("{}", serde_json::to_string_pretty(&v)?);
             }
-            TaskCmd::Result { summary, findings, report_file, failed, task } => {
+            TaskCmd::Result {
+                summary,
+                findings,
+                report_file,
+                failed,
+                task,
+            } => {
                 let report = report_file.map(std::fs::read_to_string).transpose()?;
                 let v = c.call("task.result", json!({"summary": summary, "findings": findings, "report": report, "failed": failed, "task": task}))?;
-                show(j, &v, |v| format!("task {} is {}", v["id"].as_str().unwrap_or(""), v["state"].as_str().unwrap_or("")));
+                show(j, &v, |v| {
+                    format!(
+                        "task {} is {}",
+                        v["id"].as_str().unwrap_or(""),
+                        v["state"].as_str().unwrap_or("")
+                    )
+                });
             }
             TaskCmd::Cancel { task } => {
                 c.call("task.cancel", json!({"task": task}))?;
@@ -499,8 +667,14 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                         "\n[{} · {} · {}{}] {} {}:\n  {}\n",
                         h["station"].as_str().unwrap_or(""),
                         h["ts"].as_str().unwrap_or("?"),
-                        h["commit"].as_str().map(|c| &c[..c.len().min(8)]).unwrap_or("no commit"),
-                        h["project"].as_str().map(|p| format!(" · {p}")).unwrap_or_default(),
+                        h["commit"]
+                            .as_str()
+                            .map(|c| &c[..c.len().min(8)])
+                            .unwrap_or("no commit"),
+                        h["project"]
+                            .as_str()
+                            .map(|p| format!(" · {p}"))
+                            .unwrap_or_default(),
                         h["role"].as_str().unwrap_or(""),
                         h["kind"].as_str().unwrap_or(""),
                         h["excerpt"].as_str().unwrap_or("").replace('\n', " ")
@@ -513,12 +687,25 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             c.call("note.add", json!({"text": text, "kind": kind}))?;
         }
         Cmd::Context { query } => {
-            let v = c.call("context.search", json!({"query": query.unwrap_or_default()}))?;
+            let v = c.call(
+                "context.search",
+                json!({"query": query.unwrap_or_default()}),
+            )?;
             show(j, &v, |v| {
                 v.as_array()
                     .into_iter()
                     .flatten()
-                    .map(|n| format!("[{}{}] {}", n["kind"].as_str().unwrap_or(""), n["author"].as_str().map(|a| format!(" by {a}")).unwrap_or_default(), n["text"].as_str().unwrap_or("")))
+                    .map(|n| {
+                        format!(
+                            "[{}{}] {}",
+                            n["kind"].as_str().unwrap_or(""),
+                            n["author"]
+                                .as_str()
+                                .map(|a| format!(" by {a}"))
+                                .unwrap_or_default(),
+                            n["text"].as_str().unwrap_or("")
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             });
@@ -530,15 +717,25 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Cmd::Signoff { project, note } => {
             let v = c.call("signoff.give", json!({"project": project, "note": note}))?;
-            show(j, &v, |v| format!("signed off commit {}", v["commit"].as_str().unwrap_or("")));
+            show(j, &v, |v| {
+                format!("signed off commit {}", v["commit"].as_str().unwrap_or(""))
+            });
         }
         Cmd::Review { pane, reviewer } => {
             let v = c.call("recipe.review", json!({"pane": pane, "reviewer": reviewer}))?;
-            show(j, &v, |v| format!("review loop {} started", v["id"].as_str().unwrap_or("")));
+            show(j, &v, |v| {
+                format!("review loop {} started", v["id"].as_str().unwrap_or(""))
+            });
         }
         Cmd::Diff { pane } => {
             let v = c.call("diff", json!({"pane": pane}))?;
-            show(j, &v, |v| format!("{}\n{}", v["stat"].as_str().unwrap_or(""), v["diff"].as_str().unwrap_or("")));
+            show(j, &v, |v| {
+                format!(
+                    "{}\n{}",
+                    v["stat"].as_str().unwrap_or(""),
+                    v["diff"].as_str().unwrap_or("")
+                )
+            });
         }
         Cmd::Orders { pane } => {
             let v = match pane {
@@ -548,13 +745,22 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         Cmd::StopAll { fleet } => {
-            let v = c.call("stop.all", json!({"scope": if fleet { "fleet" } else { "station" }}))?;
+            let v = c.call(
+                "stop.all",
+                json!({"scope": if fleet { "fleet" } else { "station" }}),
+            )?;
             show(j, &v, |v| {
                 v["stops"]
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .map(|s| format!("{:<16} {}", s["station"].as_str().unwrap_or(""), s["label"].as_str().unwrap_or("")))
+                    .map(|s| {
+                        format!(
+                            "{:<16} {}",
+                            s["station"].as_str().unwrap_or(""),
+                            s["label"].as_str().unwrap_or("")
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             });
@@ -566,7 +772,16 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .map(|s| format!("{:<18} {:<14} {:<8} working {}  need you {}", s["station"].as_str().unwrap_or(""), s["state"].as_str().unwrap_or(""), s["version"].as_str().unwrap_or(""), s["working"], s["needs_you"]))
+                    .map(|s| {
+                        format!(
+                            "{:<18} {:<14} {:<8} working {}  need you {}",
+                            s["station"].as_str().unwrap_or(""),
+                            s["state"].as_str().unwrap_or(""),
+                            s["version"].as_str().unwrap_or(""),
+                            s["working"],
+                            s["needs_you"]
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             });
@@ -574,24 +789,39 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::Integration { cmd } => {
             let v = match cmd {
                 IntegrationCmd::Status => c.call("integration.status", json!({}))?,
-                IntegrationCmd::Install { agent } => c.call("integration.install", json!({"agent": agent}))?,
-                IntegrationCmd::Uninstall { agent } => c.call("integration.uninstall", json!({"agent": agent}))?,
+                IntegrationCmd::Install { agent } => {
+                    c.call("integration.install", json!({"agent": agent}))?
+                }
+                IntegrationCmd::Uninstall { agent } => {
+                    c.call("integration.uninstall", json!({"agent": agent}))?
+                }
             };
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         Cmd::Upgrade { binary } => {
             let v = c.call("station.upgrade", json!({"binary": binary.canonicalize()?}))?;
-            show(j, &v, |v| format!("upgrading {} -> {}; terminals stay open", v["from"].as_str().unwrap_or(""), v["to"].as_str().unwrap_or("")));
+            show(j, &v, |v| {
+                format!(
+                    "upgrading {} -> {}; terminals stay open",
+                    v["from"].as_str().unwrap_or(""),
+                    v["to"].as_str().unwrap_or("")
+                )
+            });
         }
         Cmd::Rpc { method, params } => {
             let params: Value = match params {
-                Some(p) => serde_json::from_str(&p).map_err(|e| anyhow::anyhow!("params are not JSON: {e}"))?,
+                Some(p) => serde_json::from_str(&p)
+                    .map_err(|e| anyhow::anyhow!("params are not JSON: {e}"))?,
                 None => json!({}),
             };
             let v = c.call(&method, params)?;
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
-        Cmd::Daemon { .. } | Cmd::Hook { .. } | Cmd::Mcp | Cmd::HandoffCheck | Cmd::Service { .. } => unreachable!(),
+        Cmd::Daemon { .. }
+        | Cmd::Hook { .. }
+        | Cmd::Mcp
+        | Cmd::HandoffCheck
+        | Cmd::Service { .. } => unreachable!(),
     }
     Ok(0)
 }
@@ -607,8 +837,12 @@ fn hook_main(paths: &Paths, agent: &str) -> i32 {
     if std::io::stdin().read_to_string(&mut input).is_err() {
         return 0;
     }
-    let Ok(payload) = serde_json::from_str::<Value>(&input) else { return 0 };
-    let Ok(mut client) = Client::from_env(paths) else { return 0 };
+    let Ok(payload) = serde_json::from_str::<Value>(&input) else {
+        return 0;
+    };
+    let Ok(mut client) = Client::from_env(paths) else {
+        return 0;
+    };
     // A permission request may wait minutes for an answer from the phone.
     client.set_timeout(Some(Duration::from_secs(400)));
     match client.call("hook.ingest", json!({"agent": agent, "payload": payload})) {
@@ -640,17 +874,31 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
     std::env::set_var("SPANDECK_CONFIG_DIR", &paths.config_dir);
     std::fs::create_dir_all(&paths.state_dir)?;
 
-    let log_file = std::fs::OpenOptions::new().create(true).append(true).open(paths.log_file())?;
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(paths.log_file())?;
     use tracing_subscriber::prelude::*;
-    let filter = tracing_subscriber::EnvFilter::try_from_env("SPANDECK_LOG").unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let filter = tracing_subscriber::EnvFilter::try_from_env("SPANDECK_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer().json().with_writer(std::sync::Mutex::new(log_file)))
-        .with(tracing_subscriber::fmt::layer().compact().with_writer(std::io::stderr))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(std::sync::Mutex::new(log_file)),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .compact()
+                .with_writer(std::io::stderr),
+        )
         .init();
 
     let cfg = Config::load(&paths)?;
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async move {
         // Another daemon already answering on this socket?
         if handoff.is_none() && std::os::unix::net::UnixStream::connect(paths.socket()).is_ok() {

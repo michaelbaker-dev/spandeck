@@ -38,7 +38,15 @@ pub struct SpawnSpec {
 impl SpawnSpec {
     pub fn shell(cols: u16, rows: u16) -> Self {
         let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        SpawnSpec { program, args: vec![], cwd: None, env: vec![], env_remove: vec![], cols, rows }
+        SpawnSpec {
+            program,
+            args: vec![],
+            cwd: None,
+            env: vec![],
+            env_remove: vec![],
+            cols,
+            rows,
+        }
     }
 }
 
@@ -58,14 +66,23 @@ pub struct Pty {
 }
 
 fn winsize(cols: u16, rows: u16) -> Winsize {
-    Winsize { ws_row: rows.max(1), ws_col: cols.max(2), ws_xpixel: 0, ws_ypixel: 0 }
+    Winsize {
+        ws_row: rows.max(1),
+        ws_col: cols.max(2),
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    }
 }
 
 nix::ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 
 fn set_cloexec(fd: BorrowedFd<'_>, on: bool) -> io::Result<()> {
     let flags = FdFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFD)?);
-    let flags = if on { flags | FdFlag::FD_CLOEXEC } else { flags & !FdFlag::FD_CLOEXEC };
+    let flags = if on {
+        flags | FdFlag::FD_CLOEXEC
+    } else {
+        flags & !FdFlag::FD_CLOEXEC
+    };
     fcntl(fd, FcntlArg::F_SETFD(flags))?;
     Ok(())
 }
@@ -113,7 +130,10 @@ impl Pty {
         // upgrade, when no `Child` value exists any more).
         drop(child);
         drop(pair.slave);
-        Ok(Pty { master: pair.master, pid })
+        Ok(Pty {
+            master: pair.master,
+            pid,
+        })
     }
 
     /// Adopt a PTY that this process already owns (after an exec-in-place upgrade).
@@ -170,7 +190,11 @@ impl Pty {
 }
 
 fn wait_pid(pid: i32, block: bool) -> Option<ExitInfo> {
-    let flags = if block { None } else { Some(WaitPidFlag::WNOHANG) };
+    let flags = if block {
+        None
+    } else {
+        Some(WaitPidFlag::WNOHANG)
+    };
     loop {
         return match waitpid(Pid::from_raw(pid), flags) {
             Ok(WaitStatus::Exited(_, code)) => Some(ExitInfo::Code(code)),

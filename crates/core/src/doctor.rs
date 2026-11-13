@@ -7,8 +7,18 @@ use crate::daemon::Daemon;
 use crate::db::Db;
 
 fn version_of(program: &str) -> Option<String> {
-    let out = std::process::Command::new(program).arg("--version").output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").trim().to_string())
+    let out = std::process::Command::new(program)
+        .arg("--version")
+        .output()
+        .ok()?;
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    })
 }
 
 impl Daemon {
@@ -17,10 +27,31 @@ impl Daemon {
         let mut add = |name: &str, ok: bool, required: bool, detail: String| {
             checks.push(json!({"name": name, "ok": ok, "required": required, "detail": detail}));
         };
-        add("daemon", true, true, format!("spandeckd {} running as pid {}", crate::daemon::VERSION, std::process::id()));
+        add(
+            "daemon",
+            true,
+            true,
+            format!(
+                "spandeckd {} running as pid {}",
+                crate::daemon::VERSION,
+                std::process::id()
+            ),
+        );
         let schema = self.db.schema_version();
-        add("database", schema == Db::LATEST_SCHEMA, true, format!("schema {schema} of {}", Db::LATEST_SCHEMA));
-        add("git", version_of("git").is_some(), true, version_of("git").unwrap_or_else(|| "git not found: worktrees, checkpoints and sign-offs need it".into()));
+        add(
+            "database",
+            schema == Db::LATEST_SCHEMA,
+            true,
+            format!("schema {schema} of {}", Db::LATEST_SCHEMA),
+        );
+        add(
+            "git",
+            version_of("git").is_some(),
+            true,
+            version_of("git").unwrap_or_else(|| {
+                "git not found: worktrees, checkpoints and sign-offs need it".into()
+            }),
+        );
 
         let me = self.fleet.tailnet_self();
         add(
@@ -28,17 +59,43 @@ impl Daemon {
             me.is_some(),
             false,
             match &me {
-                Some(m) => format!("logged in as {} ({})", m.login, m.ips.first().cloned().unwrap_or_default()),
-                None => "Tailscale is not running or not logged in: this station cannot see the fleet".into(),
+                Some(m) => format!(
+                    "logged in as {} ({})",
+                    m.login,
+                    m.ips.first().cloned().unwrap_or_default()
+                ),
+                None => {
+                    "Tailscale is not running or not logged in: this station cannot see the fleet"
+                        .into()
+                }
             },
         );
         let web = self.web_addrs.lock().unwrap().clone();
-        add("control deck", !web.is_empty(), false, if web.is_empty() { "the web listener is not running".into() } else { format!("serving on {}", web.join(", ")) });
+        add(
+            "control deck",
+            !web.is_empty(),
+            false,
+            if web.is_empty() {
+                "the web listener is not running".into()
+            } else {
+                format!("serving on {}", web.join(", "))
+            },
+        );
 
         for kind in [AgentKind::Claude, AgentKind::Codex] {
-            let program = self.cfg.agents.get(kind.as_str()).and_then(|a| a.program.clone()).unwrap_or_else(|| kind.as_str().to_string());
+            let program = self
+                .cfg
+                .agents
+                .get(kind.as_str())
+                .and_then(|a| a.program.clone())
+                .unwrap_or_else(|| kind.as_str().to_string());
             let version = version_of(&program);
-            add(&format!("{} installed", kind.display()), version.is_some(), false, version.unwrap_or_else(|| format!("`{program}` not found on PATH")));
+            add(
+                &format!("{} installed", kind.display()),
+                version.is_some(),
+                false,
+                version.unwrap_or_else(|| format!("`{program}` not found on PATH")),
+            );
             if let Ok(st) = install::status(kind, &self.home) {
                 let detail = match (st.installed, st.outdated, kind) {
                     (true, true, _) => "hooks installed but out of date: run `spandeck integration install`".to_string(),
@@ -46,22 +103,53 @@ impl Daemon {
                     (false, _, AgentKind::Claude) => "not installed globally; panes spandeck starts are hooked at launch anyway".to_string(),
                     (false, _, _) => "not installed: run `spandeck integration install codex`, then trust the hooks in Codex with /hooks".to_string(),
                 };
-                add(&format!("{} hooks", kind.display()), st.installed && !st.outdated || kind == AgentKind::Claude, false, detail);
+                add(
+                    &format!("{} hooks", kind.display()),
+                    st.installed && !st.outdated || kind == AgentKind::Claude,
+                    false,
+                    detail,
+                );
             }
         }
-        let keep = self.cfg.keep_awake_cmd.clone().map(|c| c.first().cloned().unwrap_or_default()).unwrap_or_else(|| {
-            if cfg!(target_os = "macos") { "caffeinate".into() } else { "systemd-inhibit".into() }
-        });
-        let found = std::process::Command::new("sh").args(["-c", &format!("command -v {keep}")]).output().is_ok_and(|o| o.status.success());
-        add("keep-awake", found || !self.cfg.keep_awake, false, if found { format!("{keep} available") } else { format!("{keep} not found: the station may sleep while agents work") });
+        let keep = self
+            .cfg
+            .keep_awake_cmd
+            .clone()
+            .map(|c| c.first().cloned().unwrap_or_default())
+            .unwrap_or_else(|| {
+                if cfg!(target_os = "macos") {
+                    "caffeinate".into()
+                } else {
+                    "systemd-inhibit".into()
+                }
+            });
+        let found = std::process::Command::new("sh")
+            .args(["-c", &format!("command -v {keep}")])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        add(
+            "keep-awake",
+            found || !self.cfg.keep_awake,
+            false,
+            if found {
+                format!("{keep} available")
+            } else {
+                format!("{keep} not found: the station may sleep while agents work")
+            },
+        );
 
-        let ok = checks.iter().all(|c| c["ok"] == json!(true) || c["required"] == json!(false));
+        let ok = checks
+            .iter()
+            .all(|c| c["ok"] == json!(true) || c["required"] == json!(false));
         json!({"ok": ok, "station": self.station, "checks": checks})
     }
 }
 
 /// A systemd user unit (Linux) or launchd agent (macOS) that starts spandeckd at login.
-pub fn service_definition(exe: &std::path::Path, home: &std::path::Path) -> (std::path::PathBuf, String, String) {
+pub fn service_definition(
+    exe: &std::path::Path,
+    home: &std::path::Path,
+) -> (std::path::PathBuf, String, String) {
     let exe = exe.display();
     if cfg!(target_os = "macos") {
         let path = home.join("Library/LaunchAgents/dev.spandeck.spandeckd.plist");

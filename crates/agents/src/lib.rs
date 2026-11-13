@@ -84,13 +84,22 @@ impl HookDecision {
         Self::default()
     }
     pub fn deny(reason: impl Into<String>) -> Self {
-        HookDecision { deny: Some(reason.into()), ..Self::default() }
+        HookDecision {
+            deny: Some(reason.into()),
+            ..Self::default()
+        }
     }
     pub fn allow() -> Self {
-        HookDecision { allow: true, ..Self::default() }
+        HookDecision {
+            allow: true,
+            ..Self::default()
+        }
     }
     pub fn context(text: impl Into<String>) -> Self {
-        HookDecision { context: Some(text.into()), ..Self::default() }
+        HookDecision {
+            context: Some(text.into()),
+            ..Self::default()
+        }
     }
     pub fn is_none(&self) -> bool {
         *self == Self::default()

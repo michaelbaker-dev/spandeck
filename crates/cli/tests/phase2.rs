@@ -8,11 +8,22 @@ use common::*;
 use serde_json::{json, Value};
 
 fn http() -> reqwest::Client {
-    reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap()
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap()
 }
 
-async fn rpc(s: &Station, token: Option<&str>, origin: Option<&str>, host: Option<&str>, method: &str) -> (u16, Value) {
-    let mut req = http().post(s.url("/api/rpc")).json(&json!({"method": method, "params": {}}));
+async fn rpc(
+    s: &Station,
+    token: Option<&str>,
+    origin: Option<&str>,
+    host: Option<&str>,
+    method: &str,
+) -> (u16, Value) {
+    let mut req = http()
+        .post(s.url("/api/rpc"))
+        .json(&json!({"method": method, "params": {}}));
     if let Some(t) = token {
         req = req.bearer_auth(t);
     }
@@ -29,7 +40,9 @@ async fn rpc(s: &Station, token: Option<&str>, origin: Option<&str>, host: Optio
 
 #[tokio::test(flavor = "multi_thread")]
 async fn requests_without_a_token_or_from_another_origin_are_refused() {
-    let s = tokio::task::spawn_blocking(|| Station::start("alpha")).await.unwrap();
+    let s = tokio::task::spawn_blocking(|| Station::start("alpha"))
+        .await
+        .unwrap();
     let token = s.token();
     let good_origin = format!("http://127.0.0.1:{}", s.port);
 
@@ -39,13 +52,37 @@ async fn requests_without_a_token_or_from_another_origin_are_refused() {
 
     // No token, wrong token.
     assert_eq!(rpc(&s, None, None, None, "station.info").await.0, 401);
-    assert_eq!(rpc(&s, Some("0000"), None, None, "station.info").await.0, 401);
+    assert_eq!(
+        rpc(&s, Some("0000"), None, None, "station.info").await.0,
+        401
+    );
     // A page on another site calling this station (CSRF, DNS rebinding).
-    assert_eq!(rpc(&s, Some(&token), Some("http://evil.example"), None, "station.info").await.0, 403);
-    assert_eq!(rpc(&s, Some(&token), None, Some("evil.example"), "station.info").await.0, 403);
+    assert_eq!(
+        rpc(
+            &s,
+            Some(&token),
+            Some("http://evil.example"),
+            None,
+            "station.info"
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        rpc(&s, Some(&token), None, Some("evil.example"), "station.info")
+            .await
+            .0,
+        403
+    );
 
     // The station-to-station endpoint does not accept loopback callers or browsers.
-    let peer = http().post(s.url("/api/peer/rpc")).json(&json!({"method": "station.info", "from": "x"})).send().await.unwrap();
+    let peer = http()
+        .post(s.url("/api/peer/rpc"))
+        .json(&json!({"method": "station.info", "from": "x"}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(peer.status().as_u16(), 403);
 
     // An agent's own token works over HTTP too, with an agent's limits.
@@ -55,9 +92,17 @@ async fn requests_without_a_token_or_from_another_origin_are_refused() {
         .arg(format!("SELECT token FROM panes WHERE id='{pane}'"))
         .output()
         .unwrap();
-    let pane_token = String::from_utf8_lossy(&pane_token.stdout).trim().to_string();
-    assert_eq!(rpc(&s, Some(&pane_token), None, None, "pane.list").await.0, 200);
-    assert_eq!(rpc(&s, Some(&pane_token), None, None, "stop.all").await.0, 403);
+    let pane_token = String::from_utf8_lossy(&pane_token.stdout)
+        .trim()
+        .to_string();
+    assert_eq!(
+        rpc(&s, Some(&pane_token), None, None, "pane.list").await.0,
+        200
+    );
+    assert_eq!(
+        rpc(&s, Some(&pane_token), None, None, "stop.all").await.0,
+        403
+    );
     drop(tokio::task::spawn_blocking(move || drop(s)).await);
 }
 
@@ -65,29 +110,51 @@ async fn requests_without_a_token_or_from_another_origin_are_refused() {
 async fn a_websocket_must_authenticate_in_its_first_message() {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
-    let s = tokio::task::spawn_blocking(|| Station::start("alpha")).await.unwrap();
+    let s = tokio::task::spawn_blocking(|| Station::start("alpha"))
+        .await
+        .unwrap();
     let url = format!("ws://127.0.0.1:{}/api/ws", s.port);
 
     // Wrong token: told so, then nothing works.
     let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-    ws.send(Message::Text(json!({"auth": {"token": "nope"}}).to_string().into())).await.unwrap();
-    let hello: Value = serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    ws.send(Message::Text(
+        json!({"auth": {"token": "nope"}}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let hello: Value =
+        serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
     assert_eq!(hello["auth"]["ok"], json!(false));
 
     // A cross-origin page cannot even open the socket.
     let mut req = url.clone().into_client_request().unwrap();
-    req.headers_mut().insert("origin", "http://evil.example".parse().unwrap());
+    req.headers_mut()
+        .insert("origin", "http://evil.example".parse().unwrap());
     assert!(tokio_tungstenite::connect_async(req).await.is_err());
 
     // Right token: RPC and a pane stream on the one socket.
     let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-    ws.send(Message::Text(json!({"auth": {"token": s.token(), "client": "test-1"}}).to_string().into())).await.unwrap();
-    let hello: Value = serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    ws.send(Message::Text(
+        json!({"auth": {"token": s.token(), "client": "test-1"}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let hello: Value =
+        serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
     assert_eq!(hello["auth"]["ok"], json!(true));
     ws.send(Message::Text(json!({"id": 1, "method": "pane.spawn", "params": {"program": "/bin/sh", "cwd": s.root.join("home")}}).to_string().into())).await.unwrap();
-    let spawned: Value = serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    let spawned: Value =
+        serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
     let pane = spawned["result"]["id"].as_str().unwrap().to_string();
-    ws.send(Message::Text(json!({"id": 2, "method": "pane.attach", "params": {"pane": pane}}).to_string().into())).await.unwrap();
+    ws.send(Message::Text(
+        json!({"id": 2, "method": "pane.attach", "params": {"pane": pane}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
     let attached = loop {
         let m = ws.next().await.unwrap().unwrap();
         if let Ok(t) = m.to_text() {
@@ -122,25 +189,54 @@ use common::browser::Page;
 #[test]
 fn browser_opens_a_pane_types_splits_resizes_and_drops_a_file() {
     let s = Station::start("alpha");
-    let a = s.call("pane.spawn", json!({"program": "/bin/sh", "name": "one", "cwd": s.root.join("home")}))["id"].as_str().unwrap().to_string();
-    let b = s.call("pane.spawn", json!({"program": "/bin/sh", "name": "two", "cwd": s.root.join("home")}))["id"].as_str().unwrap().to_string();
+    let a = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "one", "cwd": s.root.join("home")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let b = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "two", "cwd": s.root.join("home")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let page = Page::open(&s, 1400, 900);
 
     // The token is taken out of the address bar once it has been stored.
-    page.wait("the fleet view", "document.querySelector('.tile.station') && !location.hash.includes('token')");
-    assert!(page.js("document.querySelector('.tile.station').innerText").as_str().unwrap().contains("alpha"));
+    page.wait(
+        "the fleet view",
+        "document.querySelector('.tile.station') && !location.hash.includes('token')",
+    );
+    assert!(page
+        .js("document.querySelector('.tile.station').innerText")
+        .as_str()
+        .unwrap()
+        .contains("alpha"));
 
     // Zoom: fleet -> station (the deck) -> pane. Every level has a URL.
     page.js("document.querySelector('.tile.station').click()");
-    page.wait("the deck", "location.hash === '#/s/alpha' && document.querySelectorAll('.pane-tile').length === 2");
+    page.wait(
+        "the deck",
+        "location.hash === '#/s/alpha' && document.querySelectorAll('.pane-tile').length === 2",
+    );
     page.js("[...document.querySelectorAll('.pane-tile')].find(t => t.innerText.includes('one')).click()");
-    page.wait("the pane view", &format!("location.hash === '#/s/alpha/p/{a}' && !!document.querySelector('.pane .xterm-rows')"));
+    page.wait(
+        "the pane view",
+        &format!(
+            "location.hash === '#/s/alpha/p/{a}' && !!document.querySelector('.pane .xterm-rows')"
+        ),
+    );
 
     // Type into the terminal through the browser.
     page.wait("terminal focus", "document.querySelector('.pane .xterm-helper-textarea') && (document.querySelector('.pane .xterm-helper-textarea').focus(), true)");
     page.tab.type_str("echo typed-$((20+3))").unwrap();
     page.tab.press_key("Enter").unwrap();
-    wait_for("typed text on screen", 15, || page.term_text().contains("typed-23").then_some(()));
+    wait_for("typed text on screen", 15, || {
+        page.term_text().contains("typed-23").then_some(())
+    });
     s.wait_text(&a, "typed-23");
 
     // The browser fitted the pane to its window and told the station.
@@ -148,20 +244,35 @@ fn browser_opens_a_pane_types_splits_resizes_and_drops_a_file() {
         let p = s.pane(&a);
         (p["cols"].as_u64().unwrap() > 120).then_some(p)
     });
-    assert_eq!(size["controller"].as_str().map(|c| c.starts_with("web-")), Some(true));
+    assert_eq!(
+        size["controller"].as_str().map(|c| c.starts_with("web-")),
+        Some(true)
+    );
 
     // Split: open the first pane in a workspace, then the second beside it.
     page.goto("/s/alpha");
-    page.wait("the deck again", "document.querySelectorAll('.pane-tile').length === 2");
+    page.wait(
+        "the deck again",
+        "document.querySelectorAll('.pane-tile').length === 2",
+    );
     page.js("[...document.querySelectorAll('.side-pane')].find(x => x.innerText.includes('one')).dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, clientX: 60, clientY: 120}))");
     page.wait("the right-click menu", "!!document.querySelector('.menu')");
     page.js("[...document.querySelectorAll('.menu-item')].find(i => i.innerText.includes('Open in workspace')).click()");
-    page.wait("one pane in the workspace", "document.querySelectorAll('.workspace .pane').length === 1");
+    page.wait(
+        "one pane in the workspace",
+        "document.querySelectorAll('.workspace .pane').length === 1",
+    );
     page.js("document.querySelector('.workspace .pane').dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, clientX: 600, clientY: 300}))");
     page.js("[...document.querySelectorAll('.menu-item')].find(i => i.innerText.includes('Split right')).click()");
-    page.wait("the pane picker", "!!document.querySelector('.dialog .list-row')");
+    page.wait(
+        "the pane picker",
+        "!!document.querySelector('.dialog .list-row')",
+    );
     page.js("[...document.querySelectorAll('.dialog .list-row')].find(r => r.innerText.includes('two')).click()");
-    page.wait("two panes side by side", "document.querySelectorAll('.workspace .split.row .pane').length === 2");
+    page.wait(
+        "two panes side by side",
+        "document.querySelectorAll('.workspace .split.row .pane').length === 2",
+    );
 
     // Drag the gutter: the split is resized and the panes are re-fitted.
     let before = s.pane(&b)["cols"].as_u64().unwrap();
@@ -173,7 +284,9 @@ fn browser_opens_a_pane_types_splits_resizes_and_drops_a_file() {
          window.dispatchEvent(new MouseEvent('mouseup', {{bubbles: true}})); return true; }})()",
         gx - 260.0
     ));
-    wait_for("the right pane to grow", 10, || (s.pane(&b)["cols"].as_u64().unwrap() > before + 10).then_some(()));
+    wait_for("the right pane to grow", 10, || {
+        (s.pane(&b)["cols"].as_u64().unwrap() > before + 10).then_some(())
+    });
 
     // Drop a file on a pane: the station writes it and types its path.
     page.js(
@@ -183,16 +296,43 @@ fn browser_opens_a_pane_types_splits_resizes_and_drops_a_file() {
     );
     // The path may wrap on a narrow pane, so compare without line breaks.
     let dir = s.root.join("state/drops").join(&a);
-    let file = wait_for("the dropped file on the station", 15, || std::fs::read_dir(&dir).ok()?.flatten().next().map(|e| e.path()));
-    assert!(file.file_name().unwrap().to_str().unwrap().ends_with("-shot_one.png"), "{file:?}");
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "spandeck drop test");
-    wait_for("its path typed into the pane", 15, || s.text(&a).replace('\n', "").contains(file.to_str().unwrap()).then_some(()));
+    let file = wait_for("the dropped file on the station", 15, || {
+        std::fs::read_dir(&dir)
+            .ok()?
+            .flatten()
+            .next()
+            .map(|e| e.path())
+    });
+    assert!(
+        file.file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .ends_with("-shot_one.png"),
+        "{file:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "spandeck drop test"
+    );
+    wait_for("its path typed into the pane", 15, || {
+        s.text(&a)
+            .replace('\n', "")
+            .contains(file.to_str().unwrap())
+            .then_some(())
+    });
 }
 
 #[test]
 fn a_second_browser_letterboxes_instead_of_resizing_the_pane() {
     let s = Station::start("alpha");
-    let a = s.call("pane.spawn", json!({"program": "/bin/sh", "name": "one", "cwd": s.root.join("home")}))["id"].as_str().unwrap().to_string();
+    let a = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "one", "cwd": s.root.join("home")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let big = Page::open(&s, 1500, 900);
     big.goto(&format!("/s/alpha/p/{a}"));
     big.wait("the pane", "!!document.querySelector('.pane .xterm-rows')");
@@ -211,5 +351,9 @@ fn a_second_browser_letterboxes_instead_of_resizing_the_pane() {
         (c < cols).then_some(c)
     });
     big.wait("the first browser to letterbox", "!!document.querySelector('.term-body.letterbox') && [...document.querySelectorAll('.strip button')].some(b => b.innerText === 'Take control')");
-    assert_eq!(s.pane(&a)["cols"].as_u64().unwrap(), small_cols, "the letterboxed client did not fight over the size");
+    assert_eq!(
+        s.pane(&a)["cols"].as_u64().unwrap(),
+        small_cols,
+        "the letterboxed client did not fight over the size"
+    );
 }

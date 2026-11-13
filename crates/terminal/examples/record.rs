@@ -12,8 +12,16 @@ use spandeck_terminal::{Pane, PaneEvent, SpawnSpec};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let split = args.iter().position(|a| a == "--").expect("-- before the program");
-    let (out, cols, rows, keys) = (&args[0], args[1].parse().unwrap(), args[2].parse().unwrap(), &args[3]);
+    let split = args
+        .iter()
+        .position(|a| a == "--")
+        .expect("-- before the program");
+    let (out, cols, rows, keys) = (
+        &args[0],
+        args[1].parse().unwrap(),
+        args[2].parse().unwrap(),
+        &args[3],
+    );
     let cmd = &args[split + 1..];
     let bytes = Arc::new(Mutex::new(Vec::<u8>::new()));
     let sink_bytes = bytes.clone();
@@ -21,7 +29,10 @@ fn main() {
         program: cmd[0].clone(),
         args: cmd[1..].to_vec(),
         cwd: std::env::current_dir().ok(),
-        env: vec![("LANG".into(), "C.UTF-8".into()), ("PS1".into(), "$ ".into())],
+        env: vec![
+            ("LANG".into(), "C.UTF-8".into()),
+            ("PS1".into(), "$ ".into()),
+        ],
         env_remove: vec![],
         cols,
         rows,

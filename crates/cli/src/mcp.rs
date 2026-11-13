@@ -10,9 +10,7 @@ use spandeck_core::client::Client;
 use spandeck_core::Paths;
 
 fn tools() -> Value {
-    let t = |name: &str, desc: &str, props: Value, required: &[&str]| {
-        json!({"name": name, "description": desc, "inputSchema": {"type": "object", "properties": props, "required": required}})
-    };
+    let t = |name: &str, desc: &str, props: Value, required: &[&str]| json!({"name": name, "description": desc, "inputSchema": {"type": "object", "properties": props, "required": required}});
     let str_ = |d: &str| json!({"type": "string", "description": d});
     json!([
         t("send", "Send a message to another agent or to the user. Messages are stored records, delivered to the recipient's inbox.",
@@ -80,7 +78,9 @@ pub fn run(paths: &Paths) -> anyhow::Result<()> {
     let mut out = std::io::stdout();
     for line in stdin.lock().lines() {
         let line = line?;
-        let Ok(req) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(req) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let id = req.get("id").cloned();
         let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
         let result: Option<Result<Value, (i64, String)>> = match method {
@@ -93,20 +93,32 @@ pub fn run(paths: &Paths) -> anyhow::Result<()> {
             "ping" => Some(Ok(json!({}))),
             "tools/list" => Some(Ok(json!({"tools": tools()}))),
             "tools/call" => {
-                let name = req.pointer("/params/name").and_then(|n| n.as_str()).unwrap_or("");
-                let args = req.pointer("/params/arguments").cloned().unwrap_or(json!({}));
+                let name = req
+                    .pointer("/params/name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+                let args = req
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or(json!({}));
                 Some(Ok(match call_tool(paths, name, &args) {
-                    Ok(v) => json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default()}], "isError": false}),
+                    Ok(v) => {
+                        json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default()}], "isError": false})
+                    }
                     Err(e) => json!({"content": [{"type": "text", "text": e}], "isError": true}),
                 }))
             }
             m if m.starts_with("notifications/") => None,
             _ => Some(Err((-32601, format!("method not found: {method}")))),
         };
-        let (Some(id), Some(result)) = (id, result) else { continue };
+        let (Some(id), Some(result)) = (id, result) else {
+            continue;
+        };
         let resp = match result {
             Ok(r) => json!({"jsonrpc": "2.0", "id": id, "result": r}),
-            Err((code, message)) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}),
+            Err((code, message)) => {
+                json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+            }
         };
         writeln!(out, "{resp}")?;
         out.flush()?;

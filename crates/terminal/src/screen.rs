@@ -196,9 +196,19 @@ impl StreamTracker {
                         b'r' if params.iter().all(|c| c.is_ascii_digit() || *c == b';') => {
                             let text = String::from_utf8_lossy(params);
                             let mut it = text.split(';');
-                            let top = it.next().and_then(|n| n.parse::<u16>().ok()).unwrap_or(1).max(1);
-                            let bottom = it.next().and_then(|n| n.parse::<u16>().ok()).filter(|b| *b > 0).unwrap_or(rows).min(rows);
-                            self.region = (top < bottom && !(top == 1 && bottom == rows)).then_some((top, bottom));
+                            let top = it
+                                .next()
+                                .and_then(|n| n.parse::<u16>().ok())
+                                .unwrap_or(1)
+                                .max(1);
+                            let bottom = it
+                                .next()
+                                .and_then(|n| n.parse::<u16>().ok())
+                                .filter(|b| *b > 0)
+                                .unwrap_or(rows)
+                                .min(rows);
+                            self.region = (top < bottom && !(top == 1 && bottom == rows))
+                                .then_some((top, bottom));
                         }
                         // Soft reset.
                         b'p' if params == b"!" => self.region = None,
@@ -258,13 +268,27 @@ impl Screen {
         let rows = rows.max(1);
         let listener = Listener::default();
         *listener.size.lock().unwrap() = (cols, rows);
-        let config = Config { scrolling_history: history, ..Config::default() };
+        let config = Config {
+            scrolling_history: history,
+            ..Config::default()
+        };
         let term = Term::new(
             config,
-            &Size { cols: cols as usize, rows: rows as usize },
+            &Size {
+                cols: cols as usize,
+                rows: rows as usize,
+            },
             listener.clone(),
         );
-        Screen { region: StreamTracker::default(), term, parser: Processor::new(), listener, cols, rows, title: String::new() }
+        Screen {
+            region: StreamTracker::default(),
+            term,
+            parser: Processor::new(),
+            listener,
+            cols,
+            rows,
+            title: String::new(),
+        }
     }
 
     pub fn cols(&self) -> u16 {
@@ -302,7 +326,10 @@ impl Screen {
         self.rows = rows;
         *self.listener.size.lock().unwrap() = (cols, rows);
         self.region.region = None;
-        self.term.resize(Size { cols: cols as usize, rows: rows as usize });
+        self.term.resize(Size {
+            cols: cols as usize,
+            rows: rows as usize,
+        });
     }
 
     pub fn info(&self) -> ScreenInfo {
@@ -324,7 +351,10 @@ impl Screen {
         let mut s = String::with_capacity(self.cols as usize);
         for col in 0..self.cols as usize {
             let cell = &grid[line][Column(col)];
-            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
                 continue;
             }
             s.push(if cell.c == '\0' { ' ' } else { cell.c });
@@ -339,7 +369,9 @@ impl Screen {
 
     /// The visible grid as text, one string per row, right-trimmed.
     pub fn lines(&self) -> Vec<String> {
-        (0..self.rows as i32).map(|i| self.line_text(Line(i))).collect()
+        (0..self.rows as i32)
+            .map(|i| self.line_text(Line(i)))
+            .collect()
     }
 
     /// The visible grid as one string. This is what golden tests compare.
@@ -350,7 +382,9 @@ impl Screen {
     /// Scrollback plus the visible grid as text, oldest line first.
     pub fn full_text(&self, max_history: usize) -> Vec<String> {
         let hist = self.term.grid().history_size().min(max_history) as i32;
-        (-hist..self.rows as i32).map(|i| self.line_text(Line(i))).collect()
+        (-hist..self.rows as i32)
+            .map(|i| self.line_text(Line(i)))
+            .collect()
     }
 
     /// Number of scrollback lines currently held.
@@ -455,12 +489,18 @@ impl Screen {
             push_str(&mut out, &format!("\x1b[{top};{bottom}r"));
         }
         let cursor = grid.cursor.point;
-        push_str(&mut out, &format!("\x1b[{};{}H", cursor.line.0.max(0) + 1, cursor.column.0 + 1));
+        push_str(
+            &mut out,
+            &format!("\x1b[{};{}H", cursor.line.0.max(0) + 1, cursor.column.0 + 1),
+        );
         if grid.cursor.input_needs_wrap {
             // The cursor sits past a full row, waiting to wrap. Addressing it
             // loses that, so rewrite the last cell to get the state back.
             let cell = &grid[cursor.line][cursor.column];
-            if !cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            if !cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
                 Pen::of(cell).emit(&mut out);
                 let mut buf = [0u8; 4];
                 let c = if cell.c == '\0' { ' ' } else { cell.c };
@@ -490,7 +530,10 @@ impl Screen {
         let mut buf = [0u8; 4];
         for col in 0..end {
             let cell = &row[Column(col)];
-            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
                 continue;
             }
             let want = Pen::of(cell);
@@ -517,7 +560,9 @@ fn push_str(out: &mut Vec<u8>, s: &str) {
 fn is_blank(cell: &Cell) -> bool {
     (cell.c == ' ' || cell.c == '\0')
         && cell.bg == Color::Named(NamedColor::Background)
-        && !cell.flags.intersects(Flags::INVERSE | Flags::ALL_UNDERLINES | Flags::STRIKEOUT)
+        && !cell
+            .flags
+            .intersects(Flags::INVERSE | Flags::ALL_UNDERLINES | Flags::STRIKEOUT)
         && cell.zerowidth().is_none()
 }
 
@@ -548,7 +593,11 @@ const STYLE_FLAGS: Flags = Flags::INVERSE
 
 impl Pen {
     fn of(cell: &Cell) -> Pen {
-        Pen { fg: cell.fg, bg: cell.bg, flags: cell.flags & STYLE_FLAGS }
+        Pen {
+            fg: cell.fg,
+            bg: cell.bg,
+            flags: cell.flags & STYLE_FLAGS,
+        }
     }
 
     fn emit(&self, out: &mut Vec<u8>) {
@@ -614,7 +663,14 @@ fn color_sgr(s: &mut String, color: Color, fg: bool) {
             let _ = write!(s, ";{};5;{}", if fg { 38 } else { 48 }, i);
         }
         Color::Spec(rgb) => {
-            let _ = write!(s, ";{};2;{};{};{}", if fg { 38 } else { 48 }, rgb.r, rgb.g, rgb.b);
+            let _ = write!(
+                s,
+                ";{};2;{};{};{}",
+                if fg { 38 } else { 48 },
+                rgb.r,
+                rgb.g,
+                rgb.b
+            );
         }
     }
 }
@@ -653,7 +709,11 @@ mod tests {
         a.feed(input);
         let before = (a.full_text(1000), a.info());
         let snap = a.snapshot_ansi(1000);
-        assert_eq!(before, (a.full_text(1000), a.info()), "taking a snapshot changed the screen");
+        assert_eq!(
+            before,
+            (a.full_text(1000), a.info()),
+            "taking a snapshot changed the screen"
+        );
         let mut b = Screen::new(cols, rows);
         b.feed(&snap);
         assert_eq!(a.full_text(1000), b.full_text(1000), "grid differs");

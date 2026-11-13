@@ -60,7 +60,11 @@ proptest! {
 #[test]
 fn only_a_running_task_can_complete() {
     for from in STATES {
-        assert_eq!(transition_allowed(from, "completed"), *from == "running", "{from} -> completed");
+        assert_eq!(
+            transition_allowed(from, "completed"),
+            *from == "running",
+            "{from} -> completed"
+        );
     }
     // A failed task keeps its resume information and can run again.
     assert!(transition_allowed("failed", "running"));

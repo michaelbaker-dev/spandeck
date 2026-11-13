@@ -5,6 +5,7 @@
 //!   - loopback: needs a token (an agent on this machine can reach loopback);
 //!   - a tailnet address that Tailscale says belongs to the same login: the user;
 //!   - anything else: refused.
+//!
 //! Tailscale Serve identity headers are never read.
 //!
 //! Every API request also passes an Origin and Host check, because browsers
@@ -54,17 +55,31 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
     if daemon.cfg.web_bind.is_empty() {
         ips.push(IpAddr::from([127, 0, 0, 1]));
         let fleet_daemon = daemon.clone();
-        let me = tokio::task::spawn_blocking(move || fleet_daemon.fleet.tailnet_self()).await.ok().flatten();
+        let me = tokio::task::spawn_blocking(move || fleet_daemon.fleet.tailnet_self())
+            .await
+            .ok()
+            .flatten();
         if let Some(me) = me {
-            ips.extend(me.ips.iter().filter_map(|i| i.parse::<IpAddr>().ok()).filter(|i| i.is_ipv4()));
+            ips.extend(
+                me.ips
+                    .iter()
+                    .filter_map(|i| i.parse::<IpAddr>().ok())
+                    .filter(|i| i.is_ipv4()),
+            );
         }
     } else {
         for b in &daemon.cfg.web_bind {
-            ips.push(b.parse().map_err(|_| anyhow::anyhow!("web_bind: {b} is not an IP address"))?);
+            ips.push(
+                b.parse()
+                    .map_err(|_| anyhow::anyhow!("web_bind: {b} is not an IP address"))?,
+            );
         }
     }
 
-    let web = Web { daemon: daemon.clone(), hosts: Arc::new(RwLock::new(vec![])) };
+    let web = Web {
+        daemon: daemon.clone(),
+        hosts: Arc::new(RwLock::new(vec![])),
+    };
     let app = Router::new()
         .route("/api/rpc", post(http_rpc))
         .route("/api/peer/rpc", post(peer_rpc))
@@ -85,12 +100,18 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
     if listeners.is_empty() {
         anyhow::bail!("could not listen on port {port} on any address");
     }
-    let bound: Vec<SocketAddr> = listeners.iter().filter_map(|l| l.local_addr().ok()).collect();
+    let bound: Vec<SocketAddr> = listeners
+        .iter()
+        .filter_map(|l| l.local_addr().ok())
+        .collect();
 
     let mut hosts = vec![];
     let dns = tokio::task::spawn_blocking(|| {
-        spandeck_core::fleet::tailscale_status()
-            .and_then(|s| s.pointer("/Self/DNSName").and_then(|d| d.as_str()).map(|d| d.trim_end_matches('.').to_lowercase()))
+        spandeck_core::fleet::tailscale_status().and_then(|s| {
+            s.pointer("/Self/DNSName")
+                .and_then(|d| d.as_str())
+                .map(|d| d.trim_end_matches('.').to_lowercase())
+        })
     })
     .await
     .ok()
@@ -98,7 +119,11 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
     for addr in &bound {
         let p = addr.port();
         hosts.push(format!("{}:{p}", addr.ip()));
-        for name in ["localhost".to_string(), daemon.station.to_lowercase(), spandeck_core::paths::hostname().to_lowercase()] {
+        for name in [
+            "localhost".to_string(),
+            daemon.station.to_lowercase(),
+            spandeck_core::paths::hostname().to_lowercase(),
+        ] {
             hosts.push(format!("{name}:{p}"));
         }
         if let Some(dns) = &dns {
@@ -113,7 +138,11 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
     for listener in listeners {
         let app = app.clone();
         tokio::spawn(async move {
-            let _ = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await;
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
         });
     }
     *daemon.web_addrs.lock().unwrap() = bound.iter().map(|a| a.to_string()).collect();
@@ -124,9 +153,14 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
 
 /// Host must be one of ours; Origin, when a browser sends one, must match it.
 fn origin_ok(web: &Web, headers: &HeaderMap) -> Result<(), (StatusCode, &'static str)> {
-    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).map(|h| h.to_lowercase());
-    let Some(host) = host else { return Err((StatusCode::BAD_REQUEST, "missing Host")) };
-    if !web.hosts.read().unwrap().iter().any(|h| *h == host) {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(|h| h.to_lowercase());
+    let Some(host) = host else {
+        return Err((StatusCode::BAD_REQUEST, "missing Host"));
+    };
+    if !web.hosts.read().unwrap().contains(&host) {
         return Err((StatusCode::FORBIDDEN, "this Host is not served here"));
     }
     if let Some(origin) = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
@@ -143,7 +177,9 @@ async fn identify(web: &Web, ip: IpAddr) -> Remote {
         return Remote::Loopback;
     }
     let d = web.daemon.clone();
-    tokio::task::spawn_blocking(move || d.fleet.identify(ip)).await.unwrap_or(Remote::Stranger(ip.to_string()))
+    tokio::task::spawn_blocking(move || d.fleet.identify(ip))
+        .await
+        .unwrap_or(Remote::Stranger(ip.to_string()))
 }
 
 fn bearer(headers: &HeaderMap) -> Option<String> {
@@ -158,30 +194,60 @@ fn client_id(headers: &HeaderMap, addr: &SocketAddr) -> String {
     headers
         .get("x-spandeck-client")
         .and_then(|h| h.to_str().ok())
-        .filter(|c| !c.is_empty() && c.len() <= 64 && c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-'))
+        .filter(|c| {
+            !c.is_empty()
+                && c.len() <= 64
+                && c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        })
         .map(|c| c.to_string())
         .unwrap_or_else(|| format!("web-{}", addr.ip()))
 }
 
 /// The user (or an agent with its pane token) calling the API.
-async fn caller(web: &Web, addr: &SocketAddr, headers: &HeaderMap, token: Option<String>) -> Result<Caller, (StatusCode, &'static str)> {
+async fn caller(
+    web: &Web,
+    addr: &SocketAddr,
+    headers: &HeaderMap,
+    token: Option<String>,
+) -> Result<Caller, (StatusCode, &'static str)> {
     let client = client_id(headers, addr);
     match identify(web, addr.ip()).await {
         Remote::Loopback => {
             // A trusted loopback station (tests only) speaks for the user.
             if web.daemon.fleet.trust_loopback_peers && headers.contains_key("x-spandeck-station") {
-                return Ok(Caller { authority: Authority::Owner, pane: None, client, who: "you".into() });
+                return Ok(Caller {
+                    authority: Authority::Owner,
+                    pane: None,
+                    client,
+                    who: "you".into(),
+                });
             }
-            let token = token.or_else(|| bearer(headers)).ok_or((StatusCode::UNAUTHORIZED, "a token is needed on localhost"))?;
-            web.daemon.caller_for_token(&token, &client).ok_or((StatusCode::UNAUTHORIZED, "wrong token"))
+            let token = token
+                .or_else(|| bearer(headers))
+                .ok_or((StatusCode::UNAUTHORIZED, "a token is needed on localhost"))?;
+            web.daemon
+                .caller_for_token(&token, &client)
+                .ok_or((StatusCode::UNAUTHORIZED, "wrong token"))
         }
-        Remote::Owner { .. } => Ok(Caller { authority: Authority::Owner, pane: None, client, who: "you".into() }),
-        Remote::Stranger(_) => Err((StatusCode::FORBIDDEN, "this device is not under your Tailscale login")),
+        Remote::Owner { .. } => Ok(Caller {
+            authority: Authority::Owner,
+            pane: None,
+            client,
+            who: "you".into(),
+        }),
+        Remote::Stranger(_) => Err((
+            StatusCode::FORBIDDEN,
+            "this device is not under your Tailscale login",
+        )),
     }
 }
 
 fn refuse(e: (StatusCode, &'static str)) -> axum::response::Response {
-    (e.0, Json(json!({"error": {"code": "denied", "message": e.1}}))).into_response()
+    (
+        e.0,
+        Json(json!({"error": {"code": "denied", "message": e.1}})),
+    )
+        .into_response()
 }
 
 // -------------------------------------------------------------------- HTTP
@@ -226,7 +292,11 @@ async fn peer_rpc(
     if headers.contains_key(header::ORIGIN) {
         return refuse((StatusCode::FORBIDDEN, "not for browsers"));
     }
-    let from = body.get("from").and_then(|f| f.as_str()).unwrap_or("?").to_string();
+    let from = body
+        .get("from")
+        .and_then(|f| f.as_str())
+        .unwrap_or("?")
+        .to_string();
     let trusted = match identify(&web, addr.ip()).await {
         Remote::Owner { .. } => true,
         Remote::Loopback => web.daemon.fleet.trust_loopback_peers,
@@ -237,7 +307,12 @@ async fn peer_rpc(
     }
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = body.get("params").cloned().unwrap_or(json!({}));
-    let who = Caller { authority: Authority::Peer, pane: None, client: format!("station:{from}"), who: from };
+    let who = Caller {
+        authority: Authority::Peer,
+        pane: None,
+        client: format!("station:{from}"),
+        who: from,
+    };
     match web.daemon.dispatch(&who, method, params).await {
         Ok(result) => Json(json!({"result": result})).into_response(),
         Err(e) => Json(json!({"error": error_json(&e)})).into_response(),
@@ -252,9 +327,16 @@ async fn asset(uri: Uri) -> Response<Body> {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
             let mut resp = Response::new(Body::from(file.data.into_owned()));
             let h = resp.headers_mut();
-            h.insert(header::CONTENT_TYPE, HeaderValue::from_str(mime.as_ref()).unwrap_or(HeaderValue::from_static("application/octet-stream")));
+            h.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(mime.as_ref())
+                    .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+            );
             h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-            h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+            h.insert(
+                "x-content-type-options",
+                HeaderValue::from_static("nosniff"),
+            );
             h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
             if path.ends_with(".html") {
                 h.insert(
@@ -286,14 +368,27 @@ async fn ws_upgrade(
         return refuse(e);
     }
     if matches!(identify(&web, addr.ip()).await, Remote::Stranger(_)) {
-        return refuse((StatusCode::FORBIDDEN, "this device is not under your Tailscale login"));
+        return refuse((
+            StatusCode::FORBIDDEN,
+            "this device is not under your Tailscale login",
+        ));
     }
-    ws.max_message_size(100 << 20).on_upgrade(move |socket| ws_session(web, addr, headers, socket))
+    ws.max_message_size(100 << 20)
+        .on_upgrade(move |socket| ws_session(web, addr, headers, socket))
 }
 
 enum Chan {
-    Local { pane: String, control: bool, task: tokio::task::JoinHandle<()> },
-    Remote { tx: mpsc::Sender<String>, peer_chan: u64, control: bool, task: tokio::task::JoinHandle<()> },
+    Local {
+        pane: String,
+        control: bool,
+        task: tokio::task::JoinHandle<()>,
+    },
+    Remote {
+        tx: mpsc::Sender<String>,
+        peer_chan: u64,
+        control: bool,
+        task: tokio::task::JoinHandle<()>,
+    },
 }
 
 fn frame(kind: u8, chan: u32, payload: &[u8]) -> Message {
@@ -307,7 +402,8 @@ fn frame(kind: u8, chan: u32, payload: &[u8]) -> Message {
 async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     // The token travels in the first message, never in a cookie or the URL.
-    let first = match tokio::time::timeout(std::time::Duration::from_secs(10), stream.next()).await {
+    let first = match tokio::time::timeout(std::time::Duration::from_secs(10), stream.next()).await
+    {
         Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<Value>(&t).unwrap_or(Value::Null),
         _ => return,
     };
@@ -316,15 +412,32 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     let mut who = match caller(&web, &addr, &headers, token).await {
         Ok(c) => c,
         Err((_, msg)) => {
-            let _ = sink.send(Message::Text(json!({"auth": {"ok": false, "message": msg}}).to_string().into())).await;
+            let _ = sink
+                .send(Message::Text(
+                    json!({"auth": {"ok": false, "message": msg}})
+                        .to_string()
+                        .into(),
+                ))
+                .await;
             return;
         }
     };
-    if let Some(c) = auth.get("client").and_then(|c| c.as_str()).filter(|c| !c.is_empty() && c.len() <= 64) {
-        who.client = c.chars().filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-').collect();
+    if let Some(c) = auth
+        .get("client")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty() && c.len() <= 64)
+    {
+        who.client = c
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+            .collect();
     }
     let hello = json!({"auth": {"ok": true, "station": web.daemon.station, "version": spandeck_core::VERSION, "client": who.client, "full": who.is_owner()}});
-    if sink.send(Message::Text(hello.to_string().into())).await.is_err() {
+    if sink
+        .send(Message::Text(hello.to_string().into()))
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -350,9 +463,15 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
             Message::Close(_) => break,
             _ => continue,
         };
-        let Ok(req) = serde_json::from_str::<Value>(&text) else { continue };
+        let Ok(req) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
         let id = req.get("id").cloned().unwrap_or(Value::Null);
-        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
+        let method = req
+            .get("method")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
         let params = req.get("params").cloned().unwrap_or(json!({}));
         let chan_of = |p: &Value| p.get("chan").and_then(|c| c.as_u64()).map(|c| c as u32);
 
@@ -363,20 +482,52 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                 } else {
                     let chan = next_chan;
                     next_chan += 1;
-                    let pane = params.get("pane").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                    let pane = params
+                        .get("pane")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let control = params.get("mode").and_then(|m| m.as_str()) != Some("watch");
-                    let station = params.get("station").and_then(|s| s.as_str()).filter(|s| *s != web.daemon.station).map(String::from);
+                    let station = params
+                        .get("station")
+                        .and_then(|s| s.as_str())
+                        .filter(|s| *s != web.daemon.station)
+                        .map(String::from);
                     match station {
                         None => match attach_local(&web.daemon, &pane, chan, out_tx.clone()) {
                             Ok((result, task)) => {
-                                chans.insert(chan, Chan::Local { pane: result["pane"].as_str().unwrap_or(&pane).to_string(), control, task });
+                                chans.insert(
+                                    chan,
+                                    Chan::Local {
+                                        pane: result["pane"].as_str().unwrap_or(&pane).to_string(),
+                                        control,
+                                        task,
+                                    },
+                                );
                                 Ok(result)
                             }
                             Err(e) => Err(error_json(&e)),
                         },
-                        Some(station) => match attach_remote(&web.daemon, &station, &pane, control, chan, out_tx.clone()).await {
+                        Some(station) => match attach_remote(
+                            &web.daemon,
+                            &station,
+                            &pane,
+                            control,
+                            chan,
+                            out_tx.clone(),
+                        )
+                        .await
+                        {
                             Ok((result, tx, peer_chan, task)) => {
-                                chans.insert(chan, Chan::Remote { tx, peer_chan, control, task });
+                                chans.insert(
+                                    chan,
+                                    Chan::Remote {
+                                        tx,
+                                        peer_chan,
+                                        control,
+                                        task,
+                                    },
+                                );
                                 Ok(result)
                             }
                             Err(e) => Err(json!({"code": "unreachable", "message": e})),
@@ -396,20 +547,36 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                 match chan_of(&params).and_then(|c| chans.get(&c)) {
                     Some(Chan::Local { pane, control, .. }) => {
                         if !control {
-                            Err(json!({"code": "denied", "message": "watching only: take control to type"}))
+                            Err(
+                                json!({"code": "denied", "message": "watching only: take control to type"}),
+                            )
                         } else {
                             let mut p = params.clone();
                             p["pane"] = json!(pane);
-                            web.daemon.dispatch(&who, &method, p).await.map_err(|e| error_json(&e))
+                            web.daemon
+                                .dispatch(&who, &method, p)
+                                .await
+                                .map_err(|e| error_json(&e))
                         }
                     }
-                    Some(Chan::Remote { tx, peer_chan, control, .. }) => {
+                    Some(Chan::Remote {
+                        tx,
+                        peer_chan,
+                        control,
+                        ..
+                    }) => {
                         if !control {
-                            Err(json!({"code": "denied", "message": "watching only: take control to type"}))
+                            Err(
+                                json!({"code": "denied", "message": "watching only: take control to type"}),
+                            )
                         } else {
                             let mut p = params.clone();
                             p["chan"] = json!(peer_chan);
-                            let _ = tx.send(json!({"id": null, "method": method, "params": p}).to_string()).await;
+                            let _ = tx
+                                .send(
+                                    json!({"id": null, "method": method, "params": p}).to_string(),
+                                )
+                                .await;
                             Ok(json!({"ok": true}))
                         }
                     }
@@ -432,7 +599,11 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                                 Err(RecvError::Lagged(n)) => json!({"events_lost": n}),
                                 Err(RecvError::Closed) => break,
                             };
-                            if tx.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            if tx
+                                .send(Message::Text(msg.to_string().into()))
+                                .await
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -440,7 +611,11 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                     Ok(json!({"subscribed": true}))
                 }
             }
-            _ => web.daemon.dispatch(&who, &method, params).await.map_err(|e| error_json(&e)),
+            _ => web
+                .daemon
+                .dispatch(&who, &method, params)
+                .await
+                .map_err(|e| error_json(&e)),
         };
         if id.is_null() {
             continue; // fire-and-forget (keystrokes)
@@ -449,7 +624,11 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
             Ok(result) => json!({"id": id, "result": result}),
             Err(error) => json!({"id": id, "error": error}),
         };
-        if out_tx.send(Message::Text(out.to_string().into())).await.is_err() {
+        if out_tx
+            .send(Message::Text(out.to_string().into()))
+            .await
+            .is_err()
+        {
             break;
         }
     }
@@ -468,7 +647,12 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
 type AttachResult = (Value, tokio::task::JoinHandle<()>);
 
 /// Attach to a pane on this station: a snapshot now, then the live stream.
-fn attach_local(daemon: &Daemon, pane: &str, chan: u32, out: mpsc::Sender<Message>) -> Result<AttachResult, spandeck_core::Error> {
+fn attach_local(
+    daemon: &Daemon,
+    pane: &str,
+    chan: u32,
+    out: mpsc::Sender<Message>,
+) -> Result<AttachResult, spandeck_core::Error> {
     let entry = daemon.pane(pane)?;
     let pane_id = entry.id.clone();
     let (snapshot, info, mut rx) = daemon.attach(&pane_id)?;
@@ -487,14 +671,22 @@ fn attach_local(daemon: &Daemon, pane: &str, chan: u32, out: mpsc::Sender<Messag
                     }
                 }
                 Ok(PaneEvent::Exited(info)) => {
-                    let _ = out.send(Message::Text(json!({"chan": chan, "exited": info}).to_string().into())).await;
+                    let _ = out
+                        .send(Message::Text(
+                            json!({"chan": chan, "exited": info}).to_string().into(),
+                        ))
+                        .await;
                 }
                 Ok(_) => {}
                 // This client fell behind: repaint it from the server's screen.
                 Err(RecvError::Lagged(_)) => match d.attach(&pane_id) {
                     Ok((snapshot, _, fresh)) => {
                         rx = fresh;
-                        if out.send(frame(FRAME_RESYNC, chan, &snapshot)).await.is_err() {
+                        if out
+                            .send(frame(FRAME_RESYNC, chan, &snapshot))
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -507,22 +699,50 @@ fn attach_local(daemon: &Daemon, pane: &str, chan: u32, out: mpsc::Sender<Messag
     Ok((result, task))
 }
 
-type RemoteAttach = (Value, mpsc::Sender<String>, u64, tokio::task::JoinHandle<()>);
+type RemoteAttach = (
+    Value,
+    mpsc::Sender<String>,
+    u64,
+    tokio::task::JoinHandle<()>,
+);
 
 /// Gateway: attach to a pane on another station and relay its stream, so the
 /// browser keeps a single connection to the station it opened.
-async fn attach_remote(daemon: &Daemon, station: &str, pane: &str, control: bool, chan: u32, out: mpsc::Sender<Message>) -> Result<RemoteAttach, String> {
+async fn attach_remote(
+    daemon: &Daemon,
+    station: &str,
+    pane: &str,
+    control: bool,
+    chan: u32,
+    out: mpsc::Sender<Message>,
+) -> Result<RemoteAttach, String> {
     use tungstenite::client::IntoClientRequest;
-    let peer = daemon.fleet.peer(station).ok_or_else(|| format!("station {station} is not in the fleet"))?;
-    let mut req = format!("ws://{}/api/ws", peer.addr).into_client_request().map_err(|e| e.to_string())?;
-    req.headers_mut().insert("x-spandeck-station", HeaderValue::from_str(&daemon.station).map_err(|e| e.to_string())?);
-    let (ws, _) = tokio::time::timeout(std::time::Duration::from_secs(4), tokio_tungstenite::connect_async(req))
-        .await
-        .map_err(|_| format!("{station} did not answer"))?
-        .map_err(|e| format!("{station} unreachable: {e}"))?;
+    let peer = daemon
+        .fleet
+        .peer(station)
+        .ok_or_else(|| format!("station {station} is not in the fleet"))?;
+    let mut req = format!("ws://{}/api/ws", peer.addr)
+        .into_client_request()
+        .map_err(|e| e.to_string())?;
+    req.headers_mut().insert(
+        "x-spandeck-station",
+        HeaderValue::from_str(&daemon.station).map_err(|e| e.to_string())?,
+    );
+    let (ws, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        tokio_tungstenite::connect_async(req),
+    )
+    .await
+    .map_err(|_| format!("{station} did not answer"))?
+    .map_err(|e| format!("{station} unreachable: {e}"))?;
     let (mut peer_sink, mut peer_stream) = ws.split();
     let send = |v: Value| tungstenite::Message::Text(v.to_string().into());
-    peer_sink.send(send(json!({"auth": {"client": format!("gw-{}", daemon.station)}}))).await.map_err(|e| e.to_string())?;
+    peer_sink
+        .send(send(
+            json!({"auth": {"client": format!("gw-{}", daemon.station)}}),
+        ))
+        .await
+        .map_err(|e| e.to_string())?;
     peer_sink
         .send(send(json!({"id": 1, "method": "pane.attach", "params": {"pane": pane, "mode": if control { "control" } else { "watch" }}})))
         .await

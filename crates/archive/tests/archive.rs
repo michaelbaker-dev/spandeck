@@ -16,7 +16,11 @@ const BOUNDARY: &str = r#"{"type":"system","subtype":"compact_boundary","timesta
 const SUMMARY: &str = r#"{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"Summary: we chose the zebra migration plan."}}"#;
 
 fn append(path: &std::path::Path, text: &str) {
-    let mut f = OpenOptions::new().create(true).append(true).open(path).unwrap();
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
     f.write_all(text.as_bytes()).unwrap();
 }
 
@@ -26,7 +30,13 @@ fn a_session_is_archived_line_for_line_as_it_grows() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("s1.jsonl");
     let a = Archive::memory().unwrap();
-    a.follow("s1", "claude", file.to_str().unwrap(), Some("proj"), Some("p-1"));
+    a.follow(
+        "s1",
+        "claude",
+        file.to_str().unwrap(),
+        Some("proj"),
+        Some("p-1"),
+    );
     assert_eq!(a.poll(), 0, "a missing file is not an error");
 
     let l1 = user("please add the quokka parser");
@@ -54,16 +64,40 @@ fn turns_before_a_compaction_remain_searchable() {
     let file = dir.path().join("s.jsonl");
     let a = Archive::memory().unwrap();
     a.follow("s", "claude", file.to_str().unwrap(), Some("proj"), None);
-    append(&file, &format!("{}\n{}\n", user("use the heron retry policy with three attempts"), assistant("ok")));
+    append(
+        &file,
+        &format!(
+            "{}\n{}\n",
+            user("use the heron retry policy with three attempts"),
+            assistant("ok")
+        ),
+    );
     a.poll();
-    append(&file, &format!("{BOUNDARY}\n{SUMMARY}\n{}\n", user("continue")));
+    append(
+        &file,
+        &format!("{BOUNDARY}\n{SUMMARY}\n{}\n", user("continue")),
+    );
     a.poll();
 
-    let hits = a.search("heron retry", &Scope { session: Some("s".into()), ..Default::default() }, 10);
+    let hits = a.search(
+        "heron retry",
+        &Scope {
+            session: Some("s".into()),
+            ..Default::default()
+        },
+        10,
+    );
     assert_eq!(hits.len(), 1);
     assert!(hits[0].excerpt.contains("heron"));
     assert_eq!(hits[0].ts.as_deref(), Some("2026-11-13T05:00:00Z"));
-    let comp = a.search("compaction", &Scope { session: Some("s".into()), ..Default::default() }, 10);
+    let comp = a.search(
+        "compaction",
+        &Scope {
+            session: Some("s".into()),
+            ..Default::default()
+        },
+        10,
+    );
     assert!(comp.iter().any(|h| h.kind == "compaction"));
 }
 
@@ -75,13 +109,27 @@ fn a_planted_secret_never_appears_in_search_results() {
     let a = Archive::memory().unwrap();
     a.follow("s", "claude", file.to_str().unwrap(), Some("proj"), None);
     let secret = "sk-ant-api03-PLANTEDsecretPLANTEDsecret0123456789";
-    append(&file, &format!("{}\n{}\n", user(&format!("deploy with the walrus key {secret} please")), tool_use(&format!("export ANTHROPIC_API_KEY={secret} && make walrus"))));
+    append(
+        &file,
+        &format!(
+            "{}\n{}\n",
+            user(&format!("deploy with the walrus key {secret} please")),
+            tool_use(&format!("export ANTHROPIC_API_KEY={secret} && make walrus"))
+        ),
+    );
     a.poll();
-    let all = Scope { all_projects: true, ..Default::default() };
+    let all = Scope {
+        all_projects: true,
+        ..Default::default()
+    };
     let hits = a.search("walrus", &all, 10);
     assert_eq!(hits.len(), 2);
     for h in &hits {
-        assert!(!h.excerpt.contains("PLANTED"), "secret leaked: {}", h.excerpt);
+        assert!(
+            !h.excerpt.contains("PLANTED"),
+            "secret leaked: {}",
+            h.excerpt
+        );
     }
     for h in a.around("s", 1, 5) {
         assert!(!h.excerpt.contains("PLANTED"));
@@ -97,17 +145,50 @@ fn scope_limits_what_an_agent_can_see() {
     for (id, project) in [("mine", "alpha"), ("teammate", "alpha"), ("other", "beta")] {
         let file = dir.path().join(format!("{id}.jsonl"));
         a.follow(id, "claude", file.to_str().unwrap(), Some(project), None);
-        append(&file, &format!("{}\n", user(&format!("the ocelot decision from {id}"))));
+        append(
+            &file,
+            &format!("{}\n", user(&format!("the ocelot decision from {id}"))),
+        );
     }
     a.poll();
-    let own = a.search("ocelot", &Scope { session: Some("mine".into()), ..Default::default() }, 10);
-    assert_eq!(own.iter().map(|h| h.session.as_str()).collect::<Vec<_>>(), vec!["mine"]);
-    let project = a.search("ocelot", &Scope { session: Some("mine".into()), project: Some("alpha".into()), ..Default::default() }, 10);
+    let own = a.search(
+        "ocelot",
+        &Scope {
+            session: Some("mine".into()),
+            ..Default::default()
+        },
+        10,
+    );
+    assert_eq!(
+        own.iter().map(|h| h.session.as_str()).collect::<Vec<_>>(),
+        vec!["mine"]
+    );
+    let project = a.search(
+        "ocelot",
+        &Scope {
+            session: Some("mine".into()),
+            project: Some("alpha".into()),
+            ..Default::default()
+        },
+        10,
+    );
     assert_eq!(project.len(), 2);
-    assert!(project.iter().all(|h| h.project.as_deref() == Some("alpha")));
-    let all = a.search("ocelot", &Scope { all_projects: true, ..Default::default() }, 10);
+    assert!(project
+        .iter()
+        .all(|h| h.project.as_deref() == Some("alpha")));
+    let all = a.search(
+        "ocelot",
+        &Scope {
+            all_projects: true,
+            ..Default::default()
+        },
+        10,
+    );
     assert_eq!(all.len(), 3);
-    assert!(a.search("ocelot", &Scope::default(), 10).is_empty(), "no scope, no results");
+    assert!(
+        a.search("ocelot", &Scope::default(), 10).is_empty(),
+        "no scope, no results"
+    );
 }
 
 #[test]
@@ -131,11 +212,25 @@ fn codex_rollout_lines_normalize() {
     let file = dir.path().join("rollout.jsonl");
     let a = Archive::memory().unwrap();
     a.follow("cx", "codex", file.to_str().unwrap(), Some("proj"), None);
-    append(&file, concat!(
-        r#"{"timestamp":"2026-11-13T05:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"review the pangolin diff"}]}}"#, "\n",
-        r#"{"timestamp":"2026-11-13T05:00:01Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"git\",\"diff\"]}"}}"#, "\n",
-        r#"{"timestamp":"2026-11-13T05:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The pangolin diff looks fine."}]}}"#, "\n"));
+    append(
+        &file,
+        concat!(
+            r#"{"timestamp":"2026-11-13T05:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"review the pangolin diff"}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-11-13T05:00:01Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"git\",\"diff\"]}"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-11-13T05:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The pangolin diff looks fine."}]}}"#,
+            "\n"
+        ),
+    );
     assert_eq!(a.poll(), 3);
-    let hits = a.search("pangolin", &Scope { project: Some("proj".into()), ..Default::default() }, 10);
+    let hits = a.search(
+        "pangolin",
+        &Scope {
+            project: Some("proj".into()),
+            ..Default::default()
+        },
+        10,
+    );
     assert_eq!(hits.len(), 2);
 }

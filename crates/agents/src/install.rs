@@ -74,7 +74,13 @@ fn takes_matcher(event: &str) -> bool {
 }
 
 fn hook_command(kind: AgentKind, bin: &str) -> String {
-    format!("'{}' hook {} {}{}", bin.replace('\'', "'\\''"), kind.as_str(), MARKER, HOOKS_VERSION)
+    format!(
+        "'{}' hook {} {}{}",
+        bin.replace('\'', "'\\''"),
+        kind.as_str(),
+        MARKER,
+        HOOKS_VERSION
+    )
 }
 
 /// The `hooks` object for an agent. Also used at launch time (`--settings`)
@@ -133,7 +139,10 @@ fn marker_version(command: &str) -> Option<u32> {
 }
 
 fn is_ours(handler: &Value) -> bool {
-    handler.get("command").and_then(|c| c.as_str()).is_some_and(|c| c.contains(MARKER))
+    handler
+        .get("command")
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| c.contains(MARKER))
 }
 
 /// Remove our handlers from a `hooks` object. Returns how many were removed.
@@ -141,7 +150,9 @@ fn strip_ours(hooks: &mut Map<String, Value>) -> usize {
     let mut removed = 0;
     let mut empty_events = Vec::new();
     for (event, groups) in hooks.iter_mut() {
-        let Some(groups) = groups.as_array_mut() else { continue };
+        let Some(groups) = groups.as_array_mut() else {
+            continue;
+        };
         for group in groups.iter_mut() {
             if let Some(handlers) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
                 let before = handlers.len();
@@ -149,7 +160,11 @@ fn strip_ours(hooks: &mut Map<String, Value>) -> usize {
                 removed += before - handlers.len();
             }
         }
-        groups.retain(|g| g.get("hooks").and_then(|h| h.as_array()).is_none_or(|h| !h.is_empty()));
+        groups.retain(|g| {
+            g.get("hooks")
+                .and_then(|h| h.as_array())
+                .is_none_or(|h| !h.is_empty())
+        });
         if groups.is_empty() {
             empty_events.push(event.clone());
         }
@@ -163,11 +178,15 @@ fn strip_ours(hooks: &mut Map<String, Value>) -> usize {
 pub fn install(kind: AgentKind, home: &Path, bin: &str) -> Result<Status> {
     let path = config_path(kind, home)?;
     let mut config = read_config(&path)?;
-    let root = config.as_object_mut().context("config root is not an object")?;
+    let root = config
+        .as_object_mut()
+        .context("config root is not an object")?;
     let hooks = root.entry("hooks").or_insert_with(|| json!({}));
     let hooks = hooks.as_object_mut().context("`hooks` is not an object")?;
     strip_ours(hooks);
-    let Value::Object(ours) = hooks_block(kind, bin) else { unreachable!() };
+    let Value::Object(ours) = hooks_block(kind, bin) else {
+        unreachable!()
+    };
     for (event, groups) in ours {
         let slot = hooks.entry(event).or_insert_with(|| json!([]));
         let slot = slot.as_array_mut().context("hook event is not an array")?;
@@ -203,8 +222,17 @@ pub fn status(kind: AgentKind, home: &Path) -> Result<Status> {
     if let Some(hooks) = config.get("hooks").and_then(|h| h.as_object()) {
         for groups in hooks.values() {
             for group in groups.as_array().into_iter().flatten() {
-                for handler in group.get("hooks").and_then(|h| h.as_array()).into_iter().flatten() {
-                    if let Some(v) = handler.get("command").and_then(|c| c.as_str()).and_then(marker_version) {
+                for handler in group
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(v) = handler
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .and_then(marker_version)
+                    {
                         version = Some(version.map_or(v, |cur| cur.min(v)));
                     }
                 }
@@ -214,7 +242,8 @@ pub fn status(kind: AgentKind, home: &Path) -> Result<Status> {
     let installed = version.is_some();
     let note = match (kind, installed) {
         (AgentKind::Codex, true) => Some(
-            "Codex runs a hook only after you trust it: open Codex and run /hooks once.".to_string(),
+            "Codex runs a hook only after you trust it: open Codex and run /hooks once."
+                .to_string(),
         ),
         _ => None,
     };
@@ -247,8 +276,15 @@ mod tests {
         assert!(st.installed && !st.outdated);
         assert_eq!(st.version, Some(HOOKS_VERSION));
         let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(after["hooks"]["Stop"].as_array().unwrap().len(), 2, "theirs + ours");
-        assert!(after["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap().contains("hook claude"));
+        assert_eq!(
+            after["hooks"]["Stop"].as_array().unwrap().len(),
+            2,
+            "theirs + ours"
+        );
+        assert!(after["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("hook claude"));
 
         // Installing twice does not duplicate.
         install(AgentKind::Claude, home.path(), "/usr/local/bin/spandeck").unwrap();
@@ -258,7 +294,10 @@ mod tests {
         let st = uninstall(AgentKind::Claude, home.path()).unwrap();
         assert!(!st.installed);
         let restored: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(restored, original, "uninstall removes exactly what install wrote");
+        assert_eq!(
+            restored, original,
+            "uninstall removes exactly what install wrote"
+        );
     }
 
     #[test]

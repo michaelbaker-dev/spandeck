@@ -1,0 +1,38 @@
+# A version tag builds the three targets and publishes a GitHub release.
+# v0.4.0-beta.1 is a pre-release (the beta channel); v0.4.0 is prod.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Handoff acceptance test (release gate)
+        run: cargo test -p spandeck-terminal --test handoff && cargo test -p spandeck --test phase1 handoff
+      - run: cargo build --release --bin spandeck --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          mkdir dist
+          tar -C target/${{ matrix.target }}/release -czf dist/spandeck-${{ github.ref_name }}-${{ matrix.target }}.tar.gz spandeck
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          prerelease: ${{ contains(github.ref_name, '-') }}

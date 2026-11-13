@@ -59,7 +59,10 @@ impl Adapter for Codex {
         if let Some(prompt) = &opts.prompt {
             args.push(prompt.clone());
         }
-        Launch { program: opts.program.clone().unwrap_or_else(|| "codex".into()), args }
+        Launch {
+            program: opts.program.clone().unwrap_or_else(|| "codex".into()),
+            args,
+        }
     }
 
     fn interrupt_keys(&self) -> &'static [u8] {

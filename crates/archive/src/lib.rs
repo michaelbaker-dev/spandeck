@@ -98,11 +98,20 @@ impl Archive {
             END;
             "#,
         )?;
-        Ok(Archive { conn: Mutex::new(conn) })
+        Ok(Archive {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Start (or keep) following a session file.
-    pub fn follow(&self, id: &str, agent: &str, path: &str, project: Option<&str>, pane: Option<&str>) {
+    pub fn follow(
+        &self,
+        id: &str,
+        agent: &str,
+        path: &str,
+        project: Option<&str>,
+        pane: Option<&str>,
+    ) {
         let conn = self.conn.lock().unwrap();
         let _ = conn.execute(
             "INSERT INTO sessions(id,agent,path,project,pane) VALUES(?1,?2,?3,?4,?5)
@@ -115,12 +124,17 @@ impl Archive {
     /// The commit the project is at; stamped on entries captured from now on.
     pub fn set_commit(&self, id: &str, commit: Option<&str>) {
         let conn = self.conn.lock().unwrap();
-        let _ = conn.execute("UPDATE sessions SET commit_sha=?2 WHERE id=?1", params![id, commit]);
+        let _ = conn.execute(
+            "UPDATE sessions SET commit_sha=?2 WHERE id=?1",
+            params![id, commit],
+        );
     }
 
     pub fn sessions(&self) -> Vec<SessionInfo> {
         let conn = self.conn.lock().unwrap();
-        let Ok(mut stmt) = conn.prepare("SELECT id,agent,path,project,pane,lines FROM sessions ORDER BY rowid") else {
+        let Ok(mut stmt) =
+            conn.prepare("SELECT id,agent,path,project,pane,lines FROM sessions ORDER BY rowid")
+        else {
             return vec![];
         };
         stmt.query_map([], |r| {
@@ -141,23 +155,53 @@ impl Archive {
     pub fn poll(&self) -> u64 {
         let targets: Vec<(String, String, String, i64, i64, Option<String>)> = {
             let conn = self.conn.lock().unwrap();
-            let Ok(mut stmt) = conn.prepare("SELECT id,agent,path,offset,lines,commit_sha FROM sessions WHERE active=1") else {
+            let Ok(mut stmt) = conn.prepare(
+                "SELECT id,agent,path,offset,lines,commit_sha FROM sessions WHERE active=1",
+            ) else {
                 return 0;
             };
-            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
-                .map(|rows| rows.filter_map(Result::ok).collect())
-                .unwrap_or_default()
+            stmt.query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
         };
         let mut added = 0;
         for (id, agent, path, offset, lines, commit) in targets {
-            added += self.poll_one(&id, &agent, &path, offset as u64, lines as u64, commit.as_deref());
+            added += self.poll_one(
+                &id,
+                &agent,
+                &path,
+                offset as u64,
+                lines as u64,
+                commit.as_deref(),
+            );
         }
         added
     }
 
-    fn poll_one(&self, id: &str, agent: &str, path: &str, offset: u64, lines: u64, commit: Option<&str>) -> u64 {
-        let Ok(mut file) = File::open(path) else { return 0 };
-        let Ok(len) = file.metadata().map(|m| m.len()) else { return 0 };
+    fn poll_one(
+        &self,
+        id: &str,
+        agent: &str,
+        path: &str,
+        offset: u64,
+        lines: u64,
+        commit: Option<&str>,
+    ) -> u64 {
+        let Ok(mut file) = File::open(path) else {
+            return 0;
+        };
+        let Ok(len) = file.metadata().map(|m| m.len()) else {
+            return 0;
+        };
         if len <= offset {
             return 0;
         }
@@ -169,7 +213,9 @@ impl Archive {
             return 0;
         }
         // Only complete lines; a half-written last line waits for the next poll.
-        let Some(last_nl) = buf.iter().rposition(|b| *b == b'\n') else { return 0 };
+        let Some(last_nl) = buf.iter().rposition(|b| *b == b'\n') else {
+            return 0;
+        };
         let complete = &buf[..=last_nl];
         let mut conn = self.conn.lock().unwrap();
         let Ok(tx) = conn.transaction() else { return 0 };
@@ -221,7 +267,8 @@ impl Archive {
     /// Raw lines exactly as written. Local use only: restore and resume.
     pub fn raw_lines(&self, session: &str) -> Vec<String> {
         let conn = self.conn.lock().unwrap();
-        let Ok(mut stmt) = conn.prepare("SELECT raw FROM raw WHERE session=?1 ORDER BY line") else {
+        let Ok(mut stmt) = conn.prepare("SELECT raw FROM raw WHERE session=?1 ORDER BY line")
+        else {
             return vec![];
         };
         stmt.query_map([session], |r| r.get(0))
@@ -234,7 +281,10 @@ impl Archive {
     pub fn restore(&self, session: &str) -> anyhow::Result<String> {
         let path: Option<String> = {
             let conn = self.conn.lock().unwrap();
-            conn.query_row("SELECT path FROM sessions WHERE id=?1", [session], |r| r.get(0)).optional()?
+            conn.query_row("SELECT path FROM sessions WHERE id=?1", [session], |r| {
+                r.get(0)
+            })
+            .optional()?
         };
         let path = path.ok_or_else(|| anyhow::anyhow!("no archived session {session}"))?;
         if Path::new(&path).exists() {
@@ -324,7 +374,11 @@ impl Archive {
             return vec![];
         };
         stmt.query_map(
-            params![session, line.saturating_sub(radius) as i64, (line + radius) as i64],
+            params![
+                session,
+                line.saturating_sub(radius) as i64,
+                (line + radius) as i64
+            ],
             |r| {
                 let text: String = r.get(8)?;
                 Ok(Hit {

@@ -44,7 +44,10 @@ fn main() {
         "run" => {
             let spec = SpawnSpec {
                 program: "/bin/sh".into(),
-                args: vec!["-c".into(), "i=0; while :; do echo tick-$i; i=$((i+1)); sleep 0.03; done".into()],
+                args: vec![
+                    "-c".into(),
+                    "i=0; while :; do echo tick-$i; i=$((i+1)); sleep 0.03; done".into(),
+                ],
                 cwd: None,
                 env: vec![],
                 env_remove: vec![],
@@ -54,7 +57,10 @@ fn main() {
             let pane = Pane::spawn(&spec, Box::new(|_| {})).expect("spawn");
             wait_for(&pane, "first ticks", |t| t.len() >= 15);
             let handoff = pane.prepare_handoff(5000).expect("prepare");
-            let state = State { daemon_pid: std::process::id(), pane: handoff };
+            let state = State {
+                daemon_pid: std::process::id(),
+                pane: handoff,
+            };
             std::fs::write(statefile, serde_json::to_vec(&state).unwrap()).unwrap();
             // Let output pile up unread in the kernel while "the upgrade happens".
             std::thread::sleep(Duration::from_millis(300));
@@ -66,7 +72,11 @@ fn main() {
         }
         "adopt" => {
             let state: State = serde_json::from_slice(&std::fs::read(statefile).unwrap()).unwrap();
-            assert_eq!(state.daemon_pid, std::process::id(), "exec-in-place keeps the pid");
+            assert_eq!(
+                state.daemon_pid,
+                std::process::id(),
+                "exec-in-place keeps the pid"
+            );
             // SAFETY: the fd was inherited across exec for exactly this purpose.
             let pane = unsafe { Pane::adopt(&state.pane, Box::new(|_| {})) }.expect("adopt");
             let before = ticks(&pane);
@@ -85,11 +95,22 @@ fn main() {
                 if let Some(e) = pane.exit_info() {
                     break e;
                 }
-                assert!(start.elapsed() < Duration::from_secs(5), "child did not exit");
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "child did not exit"
+                );
                 std::thread::sleep(Duration::from_millis(10));
             };
-            assert_eq!(exit, ExitInfo::Signal(15), "exit status collected by the new image");
-            println!("HANDOFF_OK ticks_before={} ticks_after={} exit={exit:?}", before.len(), after.len());
+            assert_eq!(
+                exit,
+                ExitInfo::Signal(15),
+                "exit status collected by the new image"
+            );
+            println!(
+                "HANDOFF_OK ticks_before={} ticks_after={} exit={exit:?}",
+                before.len(),
+                after.len()
+            );
         }
         _ => std::process::exit(64),
     }

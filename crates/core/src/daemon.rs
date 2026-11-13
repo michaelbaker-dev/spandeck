@@ -216,7 +216,12 @@ pub struct Caller {
 
 impl Caller {
     pub fn owner() -> Caller {
-        Caller { authority: Authority::Owner, pane: None, client: "local".into(), who: "you".into() }
+        Caller {
+            authority: Authority::Owner,
+            pane: None,
+            client: "local".into(),
+            who: "you".into(),
+        }
     }
     pub fn is_owner(&self) -> bool {
         self.authority == Authority::Owner
@@ -296,7 +301,8 @@ impl Daemon {
         std::fs::create_dir_all(&paths.config_dir)?;
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&paths.state_dir, std::fs::Permissions::from_mode(0o700));
+            let _ =
+                std::fs::set_permissions(&paths.state_dir, std::fs::Permissions::from_mode(0o700));
         }
         let db = Arc::new(Db::open(&paths.db())?);
         let archive = Archive::open(&paths.archive_db())?;
@@ -383,14 +389,14 @@ impl Daemon {
     async fn tick(&self, n: u64) {
         self.detect_screens();
         self.update_keep_awake();
-        if n % 2 == 0 {
+        if n.is_multiple_of(2) {
             let d = self.clone();
             let _ = tokio::task::spawn_blocking(move || d.archive.poll()).await;
             self.pump_mail();
         }
         self.pump_relay(n).await;
         self.pump_recipes().await;
-        if n % 4 == 0 {
+        if n.is_multiple_of(4) {
             self.pump_notifications().await;
         }
         if n % 20 == 1 {
@@ -416,9 +422,22 @@ impl Daemon {
     }
 
     /// Emit and write to the ship's log.
-    pub fn record(&self, kind: &str, pane: Option<&str>, project: Option<&str>, task: Option<&str>, actor: Option<&str>, data: Value) {
-        let ulid = format!("{}-{}", ulid::Ulid::generate().to_string().to_lowercase(), self.station);
-        self.db.log(&ulid, now_ms(), kind, pane, project, task, actor, &data);
+    pub fn record(
+        &self,
+        kind: &str,
+        pane: Option<&str>,
+        project: Option<&str>,
+        task: Option<&str>,
+        actor: Option<&str>,
+        data: Value,
+    ) {
+        let ulid = format!(
+            "{}-{}",
+            ulid::Ulid::generate().to_string().to_lowercase(),
+            self.station
+        );
+        self.db
+            .log(&ulid, now_ms(), kind, pane, project, task, actor, &data);
         self.emit(kind, pane, project, data);
     }
 
@@ -436,17 +455,28 @@ impl Daemon {
         }
         let mut by_name = panes.values().filter(|p| {
             let m = p.meta.lock().unwrap();
-            m.exit.is_none() && (m.name == bare || m.project.as_ref().is_some_and(|proj| format!("{proj}/{}", m.name) == bare))
+            m.exit.is_none()
+                && (m.name == bare
+                    || m.project
+                        .as_ref()
+                        .is_some_and(|proj| format!("{proj}/{}", m.name) == bare))
         });
         match (by_name.next(), by_name.next()) {
             (Some(p), None) => Ok(p.clone()),
-            (Some(_), Some(_)) => Err(invalid(format!("more than one pane is called {bare}; use its id"))),
+            (Some(_), Some(_)) => Err(invalid(format!(
+                "more than one pane is called {bare}; use its id"
+            ))),
             _ => Err(Error::NoPane(id.to_string())),
         }
     }
 
     pub fn pane_by_token(&self, token: &str) -> Option<Arc<PaneEntry>> {
-        self.panes.read().unwrap().values().find(|p| p.token == token).cloned()
+        self.panes
+            .read()
+            .unwrap()
+            .values()
+            .find(|p| p.token == token)
+            .cloned()
     }
 
     pub fn list_panes(&self) -> Vec<Arc<PaneEntry>> {
@@ -454,7 +484,10 @@ impl Daemon {
     }
 
     pub fn pane_views(&self) -> Vec<Value> {
-        self.list_panes().iter().map(|p| p.view(&self.station)).collect()
+        self.list_panes()
+            .iter()
+            .map(|p| p.view(&self.station))
+            .collect()
     }
 
     fn make_sink(&self, id: &str, tx: broadcast::Sender<PaneEvent>) -> spandeck_terminal::Sink {
@@ -485,11 +518,19 @@ impl Daemon {
         let rows = opts.rows.unwrap_or(32).clamp(1, 300);
 
         let mut agent = opts.agent.unwrap_or_else(|| {
-            opts.program.as_deref().map(kind_from_command).unwrap_or(AgentKind::Shell)
+            opts.program
+                .as_deref()
+                .map(kind_from_command)
+                .unwrap_or(AgentKind::Shell)
         });
         let (program, args) = match (adapter(agent), &opts.program) {
             (Some(a), _) => {
-                let cfg = self.cfg.agents.get(agent.as_str()).cloned().unwrap_or_default();
+                let cfg = self
+                    .cfg
+                    .agents
+                    .get(agent.as_str())
+                    .cloned()
+                    .unwrap_or_default();
                 let mut extra = cfg.args.clone();
                 extra.extend(self.integration_args(agent));
                 extra.extend(opts.extra_args.iter().cloned());
@@ -505,7 +546,10 @@ impl Daemon {
             (None, Some(p)) => (p.clone(), opts.args.clone()),
             (None, None) => {
                 agent = AgentKind::Shell;
-                (std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()), vec![])
+                (
+                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+                    vec![],
+                )
             }
         };
 
@@ -514,33 +558,65 @@ impl Daemon {
             return Err(invalid(format!("{} is not a directory", cwd.display())));
         }
         let mut env = opts.env.clone();
-        let exe_dir = self.exe.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        let exe_dir = self
+            .exe
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
         let path = std::env::var("PATH").unwrap_or_default();
         env.extend([
             ("SPANDECK_PANE".to_string(), id.clone()),
             ("SPANDECK_TOKEN".to_string(), token.clone()),
-            ("SPANDECK_SOCKET".to_string(), self.paths.socket().display().to_string()),
+            (
+                "SPANDECK_SOCKET".to_string(),
+                self.paths.socket().display().to_string(),
+            ),
             ("SPANDECK_BIN".to_string(), self.exe.display().to_string()),
             ("SPANDECK_STATION".to_string(), self.station.clone()),
-            ("PATH".to_string(), if exe_dir.is_empty() { path.clone() } else { format!("{path}:{exe_dir}") }),
+            (
+                "PATH".to_string(),
+                if exe_dir.is_empty() {
+                    path.clone()
+                } else {
+                    format!("{path}:{exe_dir}")
+                },
+            ),
         ]);
         if let Some(project) = &opts.project {
             env.push(("SPANDECK_PROJECT".to_string(), project.clone()));
         }
         // A daemon started from inside an agent session must not pass that
         // session's markers on: the agents in its panes are not its children.
-        let env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SSE_PORT", "CODEX_SANDBOX"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let spec = SpawnSpec { program, args, cwd: Some(cwd.clone()), env, env_remove, cols, rows };
+        let env_remove = [
+            "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SSE_PORT",
+            "CODEX_SANDBOX",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let spec = SpawnSpec {
+            program,
+            args,
+            cwd: Some(cwd.clone()),
+            env,
+            env_remove,
+            cols,
+            rows,
+        };
 
         let (tx, _) = broadcast::channel(1024);
         let term = Pane::spawn(&spec, self.make_sink(&id, tx.clone()))
             .map_err(|e| invalid(format!("could not start {}: {e}", spec.program)))?;
         let now = now_ms();
         let name = opts.name.clone().unwrap_or_else(|| {
-            if agent.is_agent() { agent.as_str().to_string() } else { "shell".to_string() }
+            if agent.is_agent() {
+                agent.as_str().to_string()
+            } else {
+                "shell".to_string()
+            }
         });
         let meta = PaneMeta {
             id: id.clone(),
@@ -571,8 +647,17 @@ impl Daemon {
             turn: TurnStats::default(),
             controller: None,
         };
-        let entry = Arc::new(PaneEntry { id: id.clone(), token, term, tx, meta: Mutex::new(meta) });
-        self.panes.write().unwrap().insert(id.clone(), entry.clone());
+        let entry = Arc::new(PaneEntry {
+            id: id.clone(),
+            token,
+            term,
+            tx,
+            meta: Mutex::new(meta),
+        });
+        self.panes
+            .write()
+            .unwrap()
+            .insert(id.clone(), entry.clone());
         self.save_pane(&entry);
         let m = entry.meta();
         self.record(
@@ -593,18 +678,26 @@ impl Daemon {
         match agent {
             AgentKind::Claude => {
                 let mut args = vec![];
-                let installed = install::status(agent, &self.home).map(|s| s.installed).unwrap_or(false);
+                let installed = install::status(agent, &self.home)
+                    .map(|s| s.installed)
+                    .unwrap_or(false);
                 if !installed {
                     args.push("--settings".to_string());
                     args.push(json!({"hooks": install::hooks_block(agent, &bin)}).to_string());
                 }
                 args.push("--mcp-config".to_string());
-                args.push(json!({"mcpServers": {"spandeck": {"command": bin, "args": ["mcp"]}}}).to_string());
+                args.push(
+                    json!({"mcpServers": {"spandeck": {"command": bin, "args": ["mcp"]}}})
+                        .to_string(),
+                );
                 args
             }
             AgentKind::Codex => vec![
                 "-c".to_string(),
-                format!("mcp_servers.spandeck.command={}", serde_json::to_string(&bin).unwrap_or_default()),
+                format!(
+                    "mcp_servers.spandeck.command={}",
+                    serde_json::to_string(&bin).unwrap_or_default()
+                ),
                 "-c".to_string(),
                 "mcp_servers.spandeck.args=[\"mcp\"]".to_string(),
             ],
@@ -714,7 +807,8 @@ impl Daemon {
             let lines = p.term.lines();
             match a.detect_screen(&lines) {
                 Some(state) => {
-                    let reason = (state == AgentState::NeedsYou).then(|| "waiting at a prompt".to_string());
+                    let reason =
+                        (state == AgentState::NeedsYou).then(|| "waiting at a prompt".to_string());
                     self.set_state(&p, state, reason);
                 }
                 None => {
@@ -729,9 +823,13 @@ impl Daemon {
     }
 
     /// A late joiner's view: a snapshot and a stream that starts exactly after it.
-    pub fn attach(&self, id: &str) -> Result<(Vec<u8>, ScreenInfo, broadcast::Receiver<PaneEvent>)> {
+    pub fn attach(
+        &self,
+        id: &str,
+    ) -> Result<(Vec<u8>, ScreenInfo, broadcast::Receiver<PaneEvent>)> {
         let p = self.pane(id)?;
-        Ok(p.term.with_screen(|screen| (screen.snapshot_ansi(2000), screen.info(), p.tx.subscribe())))
+        Ok(p.term
+            .with_screen(|screen| (screen.snapshot_ansi(2000), screen.info(), p.tx.subscribe())))
     }
 
     pub fn send_text(&self, id: &str, text: &str, enter: bool) -> Result<()> {
@@ -749,7 +847,12 @@ impl Daemon {
         let p = self.pane(id)?;
         p.term.resize(cols.clamp(2, 500), rows.clamp(1, 300))?;
         p.meta.lock().unwrap().controller = Some(client.to_string());
-        self.emit("pane.resized", Some(&p.id), None, json!({"cols": cols, "rows": rows, "controller": client}));
+        self.emit(
+            "pane.resized",
+            Some(&p.id),
+            None,
+            json!({"cols": cols, "rows": rows, "controller": client}),
+        );
         Ok(())
     }
 
@@ -763,7 +866,11 @@ impl Daemon {
         };
         self.save_pane(&p);
         self.record(
-            if paused { "pane.paused" } else { "pane.unpaused" },
+            if paused {
+                "pane.paused"
+            } else {
+                "pane.unpaused"
+            },
             Some(&p.id),
             meta.project.as_deref(),
             meta.task.as_deref(),
@@ -780,10 +887,19 @@ impl Daemon {
         if meta.exit.is_some() {
             return Ok(());
         }
-        let keys: &[u8] = adapter(meta.agent).map(|a| a.interrupt_keys()).unwrap_or(b"\x03");
+        let keys: &[u8] = adapter(meta.agent)
+            .map(|a| a.interrupt_keys())
+            .unwrap_or(b"\x03");
         p.term.write(keys)?;
         self.cancel_pane_approvals(&p.id);
-        self.record("pane.stopped", Some(&p.id), meta.project.as_deref(), meta.task.as_deref(), Some(by), json!({}));
+        self.record(
+            "pane.stopped",
+            Some(&p.id),
+            meta.project.as_deref(),
+            meta.task.as_deref(),
+            Some(by),
+            json!({}),
+        );
         // An interrupt while the model is thinking fires no hook at all. Confirm
         // from the screen: once the agent no longer shows itself as busy, the
         // turn is over.
@@ -823,7 +939,14 @@ impl Daemon {
                 }
             });
         }
-        self.record("pane.killed", Some(&p.id), meta.project.as_deref(), meta.task.as_deref(), Some(by), json!({}));
+        self.record(
+            "pane.killed",
+            Some(&p.id),
+            meta.project.as_deref(),
+            meta.task.as_deref(),
+            Some(by),
+            json!({}),
+        );
         Ok(())
     }
 
@@ -843,7 +966,14 @@ impl Daemon {
         });
         self.cancel_pane_approvals(&p.id);
         let m = p.meta();
-        self.record("pane.closed", Some(&p.id), m.project.as_deref(), m.task.as_deref(), Some(by), json!({}));
+        self.record(
+            "pane.closed",
+            Some(&p.id),
+            m.project.as_deref(),
+            m.task.as_deref(),
+            Some(by),
+            json!({}),
+        );
         Ok(())
     }
 
@@ -852,10 +982,20 @@ impl Daemon {
         let p = self.pane(id)?;
         let clean: String = name
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let clean = clean.trim_start_matches('.').to_string();
-        let clean = if clean.is_empty() { "file".to_string() } else { clean };
+        let clean = if clean.is_empty() {
+            "file".to_string()
+        } else {
+            clean
+        };
         if bytes.len() > 64 << 20 {
             return Err(invalid("file is larger than 64 MB"));
         }
@@ -864,15 +1004,26 @@ impl Daemon {
         let path = dir.join(format!("{}-{clean}", now_ms()));
         std::fs::write(&path, bytes)?;
         let shown = path.display().to_string();
-        p.term.write(format!("{} ", shell_quote(&shown)).as_bytes())?;
-        self.record("pane.file_dropped", Some(&p.id), None, None, None, json!({"name": clean, "bytes": bytes.len()}));
+        p.term
+            .write(format!("{} ", shell_quote(&shown)).as_bytes())?;
+        self.record(
+            "pane.file_dropped",
+            Some(&p.id),
+            None,
+            None,
+            None,
+            json!({"name": clean, "bytes": bytes.len()}),
+        );
         Ok(shown)
     }
 
     // ---------------------------------------------------------------- presence
 
     pub fn touch_presence(&self, client: &str) {
-        self.presence.lock().unwrap().insert(client.to_string(), now_ms());
+        self.presence
+            .lock()
+            .unwrap()
+            .insert(client.to_string(), now_ms());
     }
 
     /// Is the user at a keyboard on any full client right now?
@@ -899,7 +1050,11 @@ impl Daemon {
         }
         match (working, guard.is_some()) {
             (true, false) => {
-                let cmd = self.cfg.keep_awake_cmd.clone().unwrap_or_else(default_keep_awake_cmd);
+                let cmd = self
+                    .cfg
+                    .keep_awake_cmd
+                    .clone()
+                    .unwrap_or_else(default_keep_awake_cmd);
                 if let Some((prog, args)) = cmd.split_first() {
                     match std::process::Command::new(prog)
                         .args(args)
@@ -938,8 +1093,10 @@ impl Daemon {
         let rows: Vec<(String, String, String, Option<i64>)> = self
             .db
             .with(|c| {
-                let mut stmt = c.prepare("SELECT id, meta, token, pid FROM panes WHERE closed IS NULL")?;
-                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+                let mut stmt =
+                    c.prepare("SELECT id, meta, token, pid FROM panes WHERE closed IS NULL")?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
                 rows.collect()
             })
             .unwrap_or_default();
@@ -948,15 +1105,22 @@ impl Daemon {
             // terminal is lost, so end it before resuming the conversation.
             if let Some(pid) = pid.map(|p| p as i32).filter(|p| *p > 1) {
                 if is_our_child(pid) {
-                    let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid), Signal::SIGKILL);
+                    let _ =
+                        nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid), Signal::SIGKILL);
                     let _ = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(pid), None);
                 }
             }
-            let Ok(meta) = serde_json::from_str::<PaneMeta>(&meta) else { continue };
-            let resumable = meta.agent.is_agent() && meta.session_id.is_some() && meta.exit.is_none();
+            let Ok(meta) = serde_json::from_str::<PaneMeta>(&meta) else {
+                continue;
+            };
+            let resumable =
+                meta.agent.is_agent() && meta.session_id.is_some() && meta.exit.is_none();
             if !resumable {
                 let _ = self.db.with(|c| {
-                    c.execute("UPDATE panes SET closed=?2 WHERE id=?1", rusqlite::params![id, now_ms() as i64])
+                    c.execute(
+                        "UPDATE panes SET closed=?2 WHERE id=?1",
+                        rusqlite::params![id, now_ms() as i64],
+                    )
                 });
                 continue;
             }
@@ -991,7 +1155,10 @@ impl Daemon {
                 Err(e) => {
                     tracing::warn!(pane = %id, error = %e, "could not resume pane");
                     let _ = self.db.with(|c| {
-                        c.execute("UPDATE panes SET closed=?2 WHERE id=?1", rusqlite::params![id, now_ms() as i64])
+                        c.execute(
+                            "UPDATE panes SET closed=?2 WHERE id=?1",
+                            rusqlite::params![id, now_ms() as i64],
+                        )
                     });
                 }
             }
@@ -1015,8 +1182,14 @@ impl Daemon {
                 continue;
             }
             match p.term.prepare_handoff(2000) {
-                Ok(pty) => panes.push(HandoffPane { meta: p.meta(), token: p.token.clone(), pty }),
-                Err(e) => tracing::error!(pane = %p.id, error = %e, "pane could not be prepared for handoff"),
+                Ok(pty) => panes.push(HandoffPane {
+                    meta: p.meta(),
+                    token: p.token.clone(),
+                    pty,
+                }),
+                Err(e) => {
+                    tracing::error!(pane = %p.id, error = %e, "pane could not be prepared for handoff")
+                }
             }
         }
         HandoffState {
@@ -1031,7 +1204,10 @@ impl Daemon {
     /// Adopt panes described by a previous image. Returns false when the state
     /// was unusable, and the caller falls back to resume by session id.
     fn adopt_handoff(&self, file: &std::path::Path) -> bool {
-        let state: HandoffState = match std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+        let state: HandoffState = match std::fs::read(file)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+        {
             Some(s) => s,
             None => {
                 tracing::error!("handoff state unreadable; resuming agents by session id");
@@ -1052,7 +1228,13 @@ impl Daemon {
             // in the previous image of this same process.
             match unsafe { Pane::adopt(&hp.pty, self.make_sink(&id, tx.clone())) } {
                 Ok(term) => {
-                    let entry = Arc::new(PaneEntry { id: id.clone(), token: hp.token, term, tx, meta: Mutex::new(hp.meta) });
+                    let entry = Arc::new(PaneEntry {
+                        id: id.clone(),
+                        token: hp.token,
+                        term,
+                        tx,
+                        meta: Mutex::new(hp.meta),
+                    });
                     self.panes.write().unwrap().insert(id, entry.clone());
                     self.save_pane(&entry);
                     adopted += 1;
@@ -1082,7 +1264,13 @@ impl Daemon {
             let (tx, _) = broadcast::channel(1024);
             // SAFETY: descriptors created by prepare_handoff in this process.
             if let Ok(term) = unsafe { Pane::adopt(&hp.pty, self.make_sink(&id, tx.clone())) } {
-                let entry = Arc::new(PaneEntry { id: id.clone(), token: hp.token, term, tx, meta: Mutex::new(hp.meta) });
+                let entry = Arc::new(PaneEntry {
+                    id: id.clone(),
+                    token: hp.token,
+                    term,
+                    tx,
+                    meta: Mutex::new(hp.meta),
+                });
                 self.panes.write().unwrap().insert(id, entry);
             }
         }
@@ -1091,7 +1279,13 @@ impl Daemon {
     pub fn info(&self) -> Value {
         let panes = self.list_panes();
         let count = |s: AgentState| {
-            panes.iter().filter(|p| { let m = p.meta.lock().unwrap(); m.exit.is_none() && m.state == s }).count()
+            panes
+                .iter()
+                .filter(|p| {
+                    let m = p.meta.lock().unwrap();
+                    m.exit.is_none() && m.state == s
+                })
+                .count()
         };
         json!({
             "station": self.station,
@@ -1118,7 +1312,14 @@ fn default_keep_awake_cmd() -> Vec<String> {
     let v: &[&str] = if cfg!(target_os = "macos") {
         &["caffeinate", "-i"]
     } else {
-        &["systemd-inhibit", "--what=sleep:idle", "--who=spandeck", "--why=agents are working", "sleep", "infinity"]
+        &[
+            "systemd-inhibit",
+            "--what=sleep:idle",
+            "--who=spandeck",
+            "--why=agents are working",
+            "sleep",
+            "infinity",
+        ]
     };
     v.iter().map(|s| s.to_string()).collect()
 }
@@ -1139,7 +1340,10 @@ fn is_our_child(pid: i32) -> bool {
 }
 
 pub fn shell_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=:@%".contains(c)) {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:@%".contains(c))
+    {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
@@ -1149,6 +1353,11 @@ pub fn shell_quote(s: &str) -> String {
 pub fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
     f.write_all(contents.as_bytes())
 }
