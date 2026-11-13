@@ -37,7 +37,7 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - The host's Tailscale; no embedding.
 - v1 notifications: one inbox, browser notifications on connected clients, optional ntfy or webhook sink.
 - Backpressure: the PTY reader never waits for a client; slow clients are dropped and resynced from a snapshot.
-- Command is `spandeck`, short alias `span`.
+- Command is `spandeck`; the short command is `sd` (chosen by the user on 13 Nov 2026; note it shares a name with a find-and-replace tool some people install).
 - Local git only; no public repo until the trademark check is done.
 - One size per pane, set by whoever has control; others letterbox.
 

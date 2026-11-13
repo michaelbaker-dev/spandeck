@@ -9,6 +9,11 @@ description = "Always-running daemon and Control Deck for AI coding agents acros
 name = "spandeck"
 path = "src/main.rs"
 
+# The short command, as decided in the spec ("use sd"). Same program.
+[[bin]]
+name = "sd"
+path = "src/main.rs"
+
 # The scriptable test agent. Built with the CLI so scenario tests can run it;
 # release packaging ships only `spandeck`.
 [[bin]]
