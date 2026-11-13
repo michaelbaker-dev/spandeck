@@ -1,0 +1,13 @@
+[fake] session fake-01m7aabz6za3pn5tmps6tthkpx
+[fake] hook error: spandeckd has not run on this station yet. Start it with `spandeck daemon`.
+> hello agent
+[fake] got: hello agent
+[fake] hook error: spandeckd has not run on this station yet. Start it with `spandeck daemon`.
+[fake] hook error: spandeckd has not run on this station yet. Start it with `spandeck daemon`.
+[fake] turn done
+> second line
+[fake] got: second line
+[fake] hook error: spandeckd has not run on this station yet. Start it with `spandeck daemon`.
+[fake] hook error: spandeckd has not run on this station yet. Start it with `spandeck daemon`.
+[fake] turn done
+> 

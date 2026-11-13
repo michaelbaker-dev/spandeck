@@ -1,0 +1,25 @@
+---
+source: crates/terminal/tests/replay.rs
+expression: rendered
+---
+before
+after
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+--- cursor 2,0 visible=true alt=false title=""

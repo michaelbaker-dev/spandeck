@@ -1,0 +1,29 @@
+---
+source: crates/terminal/tests/replay.rs
+expression: rendered
+---
+  1 hello spandeckline 1
+  2 two lines
+  3 line 2
+  4 line 3
+  5 line 4
+  6 line 5
+  7 x
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+:set number
+--- cursor 1,12 visible=true alt=true title=""

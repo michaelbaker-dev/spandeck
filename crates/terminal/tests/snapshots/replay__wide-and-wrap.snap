@@ -1,0 +1,17 @@
+---
+source: crates/terminal/tests/replay.rs
+expression: rendered
+---
+| 名前 | 状態 |
+| 太郎 | ✅ 完了 |
+| 😀 emoji | ok |
+a very long line that wraps around the f
+orty column terminal more than once to c
+heck soft wrapping behaviour
+é combining
+bold underline red inverse orange
+
+
+
+
+--- cursor 8,0 visible=true alt=false title=""

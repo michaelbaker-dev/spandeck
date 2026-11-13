@@ -1,0 +1,41 @@
+---
+source: crates/terminal/tests/replay.rs
+expression: rendered
+---
+
+ ▐▛███▛█   Claude Code v2.1.323
+▝▜██████▀  Haiku 5.5 · Claude Ultra
+ ▝▝   ▝▝   /…/-home-user00-code-mterm/f79fb1f0-280a-43b3-9357-1471bf3cdc3f/scratchpad/rec2/demo2
+
+▎ [✻] [✻] [✻] · Share Claude Code and earn $10 in usage credits · /passes
+
+❯ say hi in three words
+
+● Hi there, friend!
+
+✻ Churned for 0s · done 11:24 AM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+           tmux detected · scroll with PgUp/PgDn · or add 'set -g mouse on' to ~/.tmux.conf for wheel scroll
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker · restart with CLAUDE_CODE_FORCE_…
+  ⏵⏵ auto mode on (shift+tab to cycle)
+--- cursor 32,2 visible=true alt=true title="✳ Three word greeting"

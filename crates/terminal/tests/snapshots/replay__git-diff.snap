@@ -1,0 +1,33 @@
+---
+source: crates/terminal/tests/replay.rs
+expression: rendered
+---
+ notes.md   | 2 ++
+ src/lib.rs | 2 ++
+ 2 files changed, 4 insertions(+)
+
+diff --git a/notes.md b/notes.md
+index 9c2a709..ab33529 100644
+--- a/notes.md
++++ b/notes.md
+@@ -2,3 +2,5 @@ line 1
+ line 2
+ line 3
+ line 4
++line 5
++x
+diff --git a/src/lib.rs b/src/lib.rs
+index 5d33cd9..bed289e 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2,3 +2,5 @@ fn f1() {}
+ fn f2() {}
+ fn f3() {}
+ fn f4() {}
++fn f5() {}
++y
+
+
+
+
+--- cursor 24,0 visible=true alt=false title=""

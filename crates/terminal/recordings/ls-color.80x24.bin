@@ -1,0 +1,12 @@
+total 32
+drwxrwxr-x 6 mbaker mbaker 4096 Nov 13 11:23 [0m[01;34m.[0m
+drwxrwxr-x 3 mbaker mbaker 4096 Nov 13 11:23 [01;34m..[0m
+drwxrwxr-x 8 mbaker mbaker 4096 Nov 13 11:23 [01;34m.git[0m
+-rw-rw-r-- 1 mbaker mbaker    0 Nov 13 11:23 [01;31ma.tar.gz[0m
+drwxrwxr-x 2 mbaker mbaker 4096 Nov 13 11:23 [01;34mbuild[0m
+drwxrwxr-x 2 mbaker mbaker 4096 Nov 13 11:23 [01;34mdir1[0m
+lrwxrwxrwx 1 mbaker mbaker    8 Nov 13 11:23 [01;36mlink[0m -> notes.md
+-rw-rw-r-- 1 mbaker mbaker  560 Nov 13 11:23 long.txt
+-rw-rw-r-- 1 mbaker mbaker   37 Nov 13 11:23 notes.md
+-rwxrwxr-x 1 mbaker mbaker    0 Nov 13 11:23 [01;32mrun.sh[0m
+drwxrwxr-x 2 mbaker mbaker 4096 Nov 13 11:23 [01;34msrc[0m

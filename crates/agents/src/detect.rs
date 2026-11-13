@@ -16,7 +16,9 @@ pub struct Rule {
 pub const CLAUDE_RULES: &[Rule] = &[
     Rule {
         state: AgentState::NeedsYou,
-        any: &["Do you want to proceed?", "Do you want to make this edit", "Do you want to create", "❯ 1. Yes", "Would you like to proceed"],
+        // The folder-trust prompt was seen on a real 2.1.323 session: a new
+        // directory blocks Claude Code until someone answers it.
+        any: &["Do you want to proceed?", "Do you want to make this edit", "Do you want to create", "❯ 1. Yes", "Would you like to proceed", "Yes, I trust this folder"],
         window: 16,
     },
     Rule { state: AgentState::Working, any: &["esc to interrupt", "ctrl+c to interrupt"], window: 8 },

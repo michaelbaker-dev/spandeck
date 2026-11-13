@@ -82,7 +82,162 @@ pub struct ScreenInfo {
     pub title: String,
 }
 
+/// Follows the byte stream beside the engine, for two things the engine does
+/// not expose:
+/// - the scroll region (`CSI t ; b r` sets it; a reset or resize clears it);
+/// - the bytes of a token that has started but not finished (half an escape
+///   sequence, half a UTF-8 character). A snapshot taken at that instant ends
+///   with those bytes, so the client's parser is left in the same state and
+///   the rest of the token, arriving on the live stream, completes it.
+#[derive(Default)]
+struct StreamTracker {
+    state: St,
+    pending: Vec<u8>,
+    utf8_left: u8,
+    region: Option<(u16, u16)>,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum St {
+    #[default]
+    Ground,
+    Esc,
+    EscInter,
+    Csi,
+    Str,
+    StrEsc,
+}
+
+impl StreamTracker {
+    fn feed(&mut self, bytes: &[u8], rows: u16) {
+        for &b in bytes {
+            self.byte(b, rows);
+        }
+    }
+
+    fn ground(&mut self) {
+        self.state = St::Ground;
+        self.pending.clear();
+        self.utf8_left = 0;
+    }
+
+    fn byte(&mut self, b: u8, rows: u16) {
+        match self.state {
+            St::Ground => {
+                if b == 0x1b {
+                    self.pending.clear();
+                    self.pending.push(b);
+                    self.utf8_left = 0;
+                    self.state = St::Esc;
+                } else if self.utf8_left > 0 && (0x80..0xc0).contains(&b) {
+                    self.pending.push(b);
+                    self.utf8_left -= 1;
+                    if self.utf8_left == 0 {
+                        self.pending.clear();
+                    }
+                } else {
+                    self.pending.clear();
+                    self.utf8_left = match b {
+                        0xc0..=0xdf => 1,
+                        0xe0..=0xef => 2,
+                        0xf0..=0xf7 => 3,
+                        _ => 0,
+                    };
+                    if self.utf8_left > 0 {
+                        self.pending.push(b);
+                    }
+                }
+            }
+            St::Esc => match b {
+                b'[' => {
+                    self.pending.push(b);
+                    self.state = St::Csi;
+                }
+                b']' | b'P' | b'^' | b'_' | b'X' => {
+                    self.pending.push(b);
+                    self.state = St::Str;
+                }
+                0x20..=0x2f => {
+                    self.pending.push(b);
+                    self.state = St::EscInter;
+                }
+                0x1b => {}
+                b'c' => {
+                    self.region = None;
+                    self.ground();
+                }
+                _ => self.ground(),
+            },
+            St::EscInter => match b {
+                0x20..=0x2f => self.pending.push(b),
+                0x1b => {
+                    self.pending.clear();
+                    self.pending.push(b);
+                    self.state = St::Esc;
+                }
+                _ => self.ground(),
+            },
+            St::Csi => match b {
+                0x20..=0x3f => {
+                    if self.pending.len() < 64 {
+                        self.pending.push(b);
+                    } else {
+                        self.ground();
+                    }
+                }
+                0x1b => {
+                    self.pending.clear();
+                    self.pending.push(b);
+                    self.state = St::Esc;
+                }
+                final_byte => {
+                    let params = &self.pending[2..];
+                    match final_byte {
+                        b'r' if params.iter().all(|c| c.is_ascii_digit() || *c == b';') => {
+                            let text = String::from_utf8_lossy(params);
+                            let mut it = text.split(';');
+                            let top = it.next().and_then(|n| n.parse::<u16>().ok()).unwrap_or(1).max(1);
+                            let bottom = it.next().and_then(|n| n.parse::<u16>().ok()).filter(|b| *b > 0).unwrap_or(rows).min(rows);
+                            self.region = (top < bottom && !(top == 1 && bottom == rows)).then_some((top, bottom));
+                        }
+                        // Soft reset.
+                        b'p' if params == b"!" => self.region = None,
+                        _ => {}
+                    }
+                    self.ground();
+                }
+            },
+            St::Str => match b {
+                0x07 => self.ground(),
+                0x1b => {
+                    self.pending.push(b);
+                    self.state = St::StrEsc;
+                }
+                _ => {
+                    if self.pending.len() < 8192 {
+                        self.pending.push(b);
+                    } else {
+                        self.ground();
+                    }
+                }
+            },
+            St::StrEsc => {
+                if b == b'\\' {
+                    self.ground();
+                } else {
+                    // The string was cut off by a new escape sequence.
+                    self.pending.clear();
+                    self.pending.push(0x1b);
+                    self.state = St::Esc;
+                    self.byte(b, rows);
+                }
+            }
+        }
+    }
+}
+
 pub struct Screen {
+    region: StreamTracker,
     term: Term<Listener>,
     parser: Processor,
     listener: Listener,
@@ -109,7 +264,7 @@ impl Screen {
             &Size { cols: cols as usize, rows: rows as usize },
             listener.clone(),
         );
-        Screen { term, parser: Processor::new(), listener, cols, rows, title: String::new() }
+        Screen { region: StreamTracker::default(), term, parser: Processor::new(), listener, cols, rows, title: String::new() }
     }
 
     pub fn cols(&self) -> u16 {
@@ -127,6 +282,7 @@ impl Screen {
     /// Feed PTY output. Returns what the terminal asked for.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<ScreenEvent> {
         self.parser.advance(&mut self.term, bytes);
+        self.region.feed(bytes, self.rows);
         let events = std::mem::take(&mut *self.listener.events.lock().unwrap());
         for ev in &events {
             if let ScreenEvent::Title(t) = ev {
@@ -145,6 +301,7 @@ impl Screen {
         self.cols = cols;
         self.rows = rows;
         *self.listener.size.lock().unwrap() = (cols, rows);
+        self.region.region = None;
         self.term.resize(Size { cols: cols as usize, rows: rows as usize });
     }
 
@@ -204,47 +361,34 @@ impl Screen {
     /// An escape-sequence program that reproduces this screen on a fresh
     /// terminal of the same size: scrollback (up to `max_history` lines),
     /// the grid with attributes, cursor, modes and title.
-    pub fn snapshot_ansi(&self, max_history: usize) -> Vec<u8> {
+    ///
+    /// While a full-screen program is open, both screens are carried: the
+    /// shell screen underneath first, then the alternate screen on top, so
+    /// leaving the program later shows what was there before.
+    pub fn snapshot_ansi(&mut self, max_history: usize) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::with_capacity(self.cols as usize * self.rows as usize * 2);
         let mode = *self.term.mode();
-        let grid = self.term.grid();
-        let alt = mode.contains(TermMode::ALT_SCREEN);
-
         // Full reset so a resync never inherits stale modes.
         out.extend_from_slice(b"\x1bc");
 
-        let mut pen = Pen::default();
-        if alt {
+        if mode.contains(TermMode::ALT_SCREEN) {
+            let alt = self.paint_active(true, 0, true);
+            // The engine only exposes the active grid: step out to read the
+            // primary screen, step back in, and put the alternate screen back
+            // (entering it clears it).
+            self.term.swap_alt();
+            let primary = self.paint_active(false, max_history, false);
+            self.term.swap_alt();
+            let mut restore: Processor = Processor::new();
+            restore.advance(&mut self.term, &alt);
+            self.listener.events.lock().unwrap().clear();
+
+            out.extend_from_slice(&primary);
             out.extend_from_slice(b"\x1b[?1049h\x1b[H\x1b[2J");
-            for row in 0..self.rows as i32 {
-                push_str(&mut out, &format!("\x1b[{};1H", row + 1));
-                self.paint_row(&mut out, Line(row), &mut pen);
-            }
+            out.extend_from_slice(&alt);
         } else {
-            let hist = grid.history_size().min(max_history) as i32;
-            let last = self.rows as i32 - 1;
-            for row in -hist..=last {
-                let wrapped = self.paint_row(&mut out, Line(row), &mut pen);
-                if row != last && !wrapped {
-                    if pen != Pen::default() {
-                        out.extend_from_slice(b"\x1b[0m");
-                        pen = Pen::default();
-                    }
-                    out.extend_from_slice(b"\r\n");
-                }
-            }
+            out.extend_from_slice(&self.paint_active(false, max_history, true));
         }
-
-        // Pen the application left active, so later output continues correctly.
-        let template = &grid.cursor.template;
-        let want = Pen::of(template);
-        want.emit(&mut out);
-
-        let cursor = grid.cursor.point;
-        push_str(
-            &mut out,
-            &format!("\x1b[{};{}H", cursor.line.0.max(0) + 1, cursor.column.0 + 1),
-        );
 
         for (flag, seq) in [
             (TermMode::APP_CURSOR, "\x1b[?1h"),
@@ -274,6 +418,57 @@ impl Screen {
             let clean: String = self.title.chars().filter(|c| !c.is_control()).collect();
             push_str(&mut out, &format!("\x1b]0;{clean}\x07"));
         }
+        // Last: whatever token the stream was in the middle of.
+        out.extend_from_slice(&self.region.pending);
+        out
+    }
+
+    /// Paint the active grid, then set the pen and cursor the application left.
+    /// `absolute` addresses each row (alternate screen); otherwise rows flow
+    /// from the top so scrollback lands in the client's scrollback.
+    fn paint_active(&self, absolute: bool, max_history: usize, with_region: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        let grid = self.term.grid();
+        let mut pen = Pen::default();
+        if absolute {
+            for row in 0..self.rows as i32 {
+                push_str(&mut out, &format!("\x1b[{};1H", row + 1));
+                self.paint_row(&mut out, Line(row), &mut pen);
+            }
+        } else {
+            let hist = grid.history_size().min(max_history) as i32;
+            let last = self.rows as i32 - 1;
+            for row in -hist..=last {
+                let wrapped = self.paint_row(&mut out, Line(row), &mut pen);
+                if row != last && !wrapped {
+                    if pen != Pen::default() {
+                        out.extend_from_slice(b"\x1b[0m");
+                        pen = Pen::default();
+                    }
+                    out.extend_from_slice(b"\r\n");
+                }
+            }
+        }
+        // The scroll region goes in after the rows (painting inside one would
+        // scroll it) and before the cursor (setting it homes the cursor).
+        if let (Some((top, bottom)), true) = (self.region.region, with_region) {
+            push_str(&mut out, &format!("\x1b[{top};{bottom}r"));
+        }
+        let cursor = grid.cursor.point;
+        push_str(&mut out, &format!("\x1b[{};{}H", cursor.line.0.max(0) + 1, cursor.column.0 + 1));
+        if grid.cursor.input_needs_wrap {
+            // The cursor sits past a full row, waiting to wrap. Addressing it
+            // loses that, so rewrite the last cell to get the state back.
+            let cell = &grid[cursor.line][cursor.column];
+            if !cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                Pen::of(cell).emit(&mut out);
+                let mut buf = [0u8; 4];
+                let c = if cell.c == '\0' { ' ' } else { cell.c };
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+        // Pen the application left active, so later output continues correctly.
+        Pen::of(&grid.cursor.template).emit(&mut out);
         out
     }
 
@@ -456,7 +651,9 @@ mod tests {
     fn assert_roundtrip(input: &[u8], cols: u16, rows: u16) {
         let mut a = Screen::new(cols, rows);
         a.feed(input);
+        let before = (a.full_text(1000), a.info());
         let snap = a.snapshot_ansi(1000);
+        assert_eq!(before, (a.full_text(1000), a.info()), "taking a snapshot changed the screen");
         let mut b = Screen::new(cols, rows);
         b.feed(&snap);
         assert_eq!(a.full_text(1000), b.full_text(1000), "grid differs");

@@ -1,0 +1,15 @@
+---
+source: crates/terminal/tests/replay.rs
+expression: rendered
+---
+[####################] 100% building
+done
+
+
+
+
+
+
+
+
+--- cursor 2,0 visible=true alt=false title=""

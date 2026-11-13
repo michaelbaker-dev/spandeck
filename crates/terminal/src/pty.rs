@@ -28,6 +28,9 @@ pub struct SpawnSpec {
     /// Added to the daemon's environment.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// Removed from the daemon's environment before `env` is applied.
+    #[serde(default)]
+    pub env_remove: Vec<String>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -35,7 +38,7 @@ pub struct SpawnSpec {
 impl SpawnSpec {
     pub fn shell(cols: u16, rows: u16) -> Self {
         let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        SpawnSpec { program, args: vec![], cwd: None, env: vec![], cols, rows }
+        SpawnSpec { program, args: vec![], cwd: None, env: vec![], env_remove: vec![], cols, rows }
     }
 }
 
@@ -78,6 +81,9 @@ impl Pty {
         cmd.args(&spec.args);
         if let Some(cwd) = &spec.cwd {
             cmd.current_dir(cwd);
+        }
+        for k in &spec.env_remove {
+            cmd.env_remove(k);
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");

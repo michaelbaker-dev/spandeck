@@ -1,0 +1,24 @@
+ notes.md   | 2 [32m++[m
+ src/lib.rs | 2 [32m++[m
+ 2 files changed, 4 insertions(+)
+
+[1mdiff --git a/notes.md b/notes.md[m
+[1mindex 9c2a709..ab33529 100644[m
+[1m--- a/notes.md[m
+[1m+++ b/notes.md[m
+[36m@@ -2,3 +2,5 @@[m [mline 1[m
+ line 2[m
+ line 3[m
+ line 4[m
+[32m+[m[32mline 5[m
+[32m+[m[32mx[m
+[1mdiff --git a/src/lib.rs b/src/lib.rs[m
+[1mindex 5d33cd9..bed289e 100644[m
+[1m--- a/src/lib.rs[m
+[1m+++ b/src/lib.rs[m
+[36m@@ -2,3 +2,5 @@[m [mfn f1() {}[m
+ fn f2() {}[m
+ fn f3() {}[m
+ fn f4() {}[m
+[32m+[m[32mfn f5() {}[m
+[32m+[m[32my[m

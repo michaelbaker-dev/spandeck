@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use spandeck_terminal::{ExitInfo, Pane, PaneEvent, SpawnSpec};
 
 fn sh(script: &str) -> SpawnSpec {
-    SpawnSpec { program: "/bin/sh".into(), args: vec!["-c".into(), script.into()], cwd: None, env: vec![], cols: 80, rows: 24 }
+    SpawnSpec { program: "/bin/sh".into(), args: vec!["-c".into(), script.into()], cwd: None, env: vec![], env_remove: vec![], cols: 80, rows: 24 }
 }
 
 fn wait_until(what: &str, f: impl Fn() -> bool) {

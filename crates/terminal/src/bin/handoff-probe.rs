@@ -47,6 +47,7 @@ fn main() {
                 args: vec!["-c".into(), "i=0; while :; do echo tick-$i; i=$((i+1)); sleep 0.03; done".into()],
                 cwd: None,
                 env: vec![],
+                env_remove: vec![],
                 cols: 40,
                 rows: 10,
             };

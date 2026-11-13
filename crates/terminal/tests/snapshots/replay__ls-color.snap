@@ -1,0 +1,29 @@
+---
+source: crates/terminal/tests/replay.rs
+expression: rendered
+---
+total 32
+drwxrwxr-x 6 mbaker mbaker 4096 Nov 13 11:23 .
+drwxrwxr-x 3 mbaker mbaker 4096 Nov 13 11:23 ..
+drwxrwxr-x 8 mbaker mbaker 4096 Nov 13 11:23 .git
+-rw-rw-r-- 1 mbaker mbaker    0 Nov 13 11:23 a.tar.gz
+drwxrwxr-x 2 mbaker mbaker 4096 Nov 13 11:23 build
+drwxrwxr-x 2 mbaker mbaker 4096 Nov 13 11:23 dir1
+lrwxrwxrwx 1 mbaker mbaker    8 Nov 13 11:23 link -> notes.md
+-rw-rw-r-- 1 mbaker mbaker  560 Nov 13 11:23 long.txt
+-rw-rw-r-- 1 mbaker mbaker   37 Nov 13 11:23 notes.md
+-rwxrwxr-x 1 mbaker mbaker    0 Nov 13 11:23 run.sh
+drwxrwxr-x 2 mbaker mbaker 4096 Nov 13 11:23 src
+
+
+
+
+
+
+
+
+
+
+
+
+--- cursor 12,0 visible=true alt=false title=""

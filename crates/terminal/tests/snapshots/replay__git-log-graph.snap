@@ -1,0 +1,35 @@
+---
+source: crates/terminal/tests/replay.rs
+expression: rendered
+---
+*   3631ae1 (HEAD -> main) Merge branch 'feature'
+|\
+| * 4063add (feature) feature work
+* | 642d634 main work
+|/
+* f8ef072 commit number 5: tweak parser
+* b2ec184 commit number 4: tweak parser
+* d7e031b commit number 3: tweak parser
+* 90733bd commit number 2: tweak parser
+* 94d533e commit number 1: tweak parser
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+--- cursor 10,0 visible=true alt=false title=""

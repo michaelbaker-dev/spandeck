@@ -197,8 +197,8 @@ impl Pane {
 
     /// Run `f` with the screen locked. Output cannot interleave while it runs,
     /// which is how a late joiner gets a snapshot and a clean stream cut point.
-    pub fn with_screen<R>(&self, f: impl FnOnce(&Screen) -> R) -> R {
-        f(&self.screen.lock().unwrap())
+    pub fn with_screen<R>(&self, f: impl FnOnce(&mut Screen) -> R) -> R {
+        f(&mut self.screen.lock().unwrap())
     }
 
     pub fn bytes_out(&self) -> u64 {
@@ -216,7 +216,7 @@ impl Pane {
         if let Some(h) = self.reader.lock().unwrap().take() {
             let _ = h.join();
         }
-        let screen = self.screen.lock().unwrap();
+        let mut screen = self.screen.lock().unwrap();
         let fd = {
             let w = self.writer.lock().unwrap();
             nix::unistd::dup(std::os::fd::AsFd::as_fd(&*w))?

@@ -1,0 +1,29 @@
+---
+source: crates/terminal/tests/replay.rs
+expression: rendered
+---
+>>> print("héllo ✓ 日本語")
+héllo ✓ 日本語
+>>> 1/0
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+ZeroDivisionError: division by zero
+>>>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+--- cursor 6,4 visible=true alt=false title=""

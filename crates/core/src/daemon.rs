@@ -527,7 +527,13 @@ impl Daemon {
         if let Some(project) = &opts.project {
             env.push(("SPANDECK_PROJECT".to_string(), project.clone()));
         }
-        let spec = SpawnSpec { program, args, cwd: Some(cwd.clone()), env, cols, rows };
+        // A daemon started from inside an agent session must not pass that
+        // session's markers on: the agents in its panes are not its children.
+        let env_remove = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SSE_PORT", "CODEX_SANDBOX"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let spec = SpawnSpec { program, args, cwd: Some(cwd.clone()), env, env_remove, cols, rows };
 
         let (tx, _) = broadcast::channel(1024);
         let term = Pane::spawn(&spec, self.make_sink(&id, tx.clone()))
