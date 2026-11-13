@@ -311,7 +311,7 @@ fn canary_stop_interrupts_a_real_claude_code_turn_and_the_process_stays() {
     let real_home = std::env::var("HOME").unwrap();
     let s = Station::start_with("canary", "", &[("HOME", &real_home)]);
     let work = s.git_repo("canary-stop");
-    let pane = s.call("pane.spawn", json!({"agent": "claude", "cwd": work, "args": ["--model", "haiku", "--allowedTools", "Bash(sleep:*)"]}))["id"].as_str().unwrap().to_string();
+    let pane = s.call("pane.spawn", json!({"agent": "claude", "cwd": work, "args": ["--model", "haiku", "--allowedTools", "Bash(python3:*)"]}))["id"].as_str().unwrap().to_string();
 
     // A new folder: Claude Code asks whether to trust it. spandeck sees that
     // from the screen alone (no hook has fired yet) and says the pane needs you.
@@ -327,12 +327,21 @@ fn canary_stop_interrupts_a_real_claude_code_turn_and_the_process_stays() {
 
     s.call(
         "pane.send_text",
-        json!({"pane": pane, "text": "Use the Bash tool to run exactly: sleep 90"}),
+        json!({"pane": pane, "text": "Use the Bash tool in the foreground to run exactly: python3 -c \"import time; time.sleep(90)\""}),
     );
-    wait_for("the turn to be working on the sleep", 90, || {
+    let start = std::time::Instant::now();
+    loop {
         let p = s.pane(&pane);
-        (p["state"] == json!("working") && p["tool"] == json!("Bash")).then_some(())
-    });
+        if p["state"] == json!("working") && p["tool"] == json!("Bash") {
+            break;
+        }
+        assert!(
+            start.elapsed().as_secs() < 60,
+            "the real agent never started the command; pane {p}\nscreen:\n{}",
+            s.text(&pane)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     let pid = s.pane(&pane)["pid"].clone();
 
     s.call("pane.stop", json!({"pane": pane}));
