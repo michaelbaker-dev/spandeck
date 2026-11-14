@@ -776,21 +776,70 @@ function paneView(st, id) {
   return h('div', { class: 'station-view' }, sidebar(st), h('main', { class: 'station-main zoomed' }, t.el));
 }
 
-// ---- phone: status, blockers, approvals, stop controls, read-only attach ----
+// ---- phone: status, blockers, approvals, stop controls, and a pane you can
+// talk to: a message box (typed or dictated) and the keys a phone lacks ----
+
+const PHONE_KEYS = [['Esc', '\x1b'], ['Tab', '\t'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['←', '\x1b[D'], ['→', '\x1b[C'], ['⏎', '\r'], ['^C', '\x03']];
+const KEY_NAMES = { '↑': 'Up', '↓': 'Down', '←': 'Left', '→': 'Right', '⏎': 'Enter', '^C': 'Control C' };
+const composers = new Map();
+const phoneFit = new Set();
+
+// Kept per pane, so a redraw does not throw away what you are writing.
+function composer(st, p) {
+  const key = `${st}/${p.id}`;
+  let c = composers.get(key);
+  if (c) return c;
+  const box = h('textarea', { class: 'composer-box', rows: 2, placeholder: p.agent === 'shell' ? 'Type a command' : 'Message the agent. You can dictate with the keyboard microphone.', 'aria-label': 'Message', enterkeyhint: 'send' });
+  const send = async () => {
+    // One message: line breaks would each be taken as Enter by the terminal.
+    const text = (p.agent === 'shell' ? box.value : box.value.replace(/\s*\n+\s*/g, ' ')).trim();
+    if (!text) return;
+    await rpc(st, 'pane.send_text', { pane: p.id, text, enter: true });
+    box.value = '';
+  };
+  const key1 = (bytes) => rpc(st, 'pane.input', { pane: p.id, data: bytes });
+  const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let listening = null;
+  const mic = Speech ? h('button', { type: 'button', class: 'mic', title: 'Dictate', 'aria-label': 'Dictate', 'aria-pressed': 'false' }, '🎤') : null;
+  if (mic) mic.onclick = () => {
+    if (listening) { listening.stop(); return; }
+    const rec = new Speech();
+    const before = box.value ? box.value.replace(/\s*$/, ' ') : '';
+    rec.lang = navigator.language || 'en-US';
+    rec.interimResults = true;
+    rec.continuous = true;
+    rec.onresult = (e) => { box.value = before + Array.from(e.results, r => r[0].transcript).join(''); };
+    rec.onerror = (e) => { if (e.error !== 'aborted' && e.error !== 'no-speech') toast(e.error === 'not-allowed' ? 'Dictation needs microphone permission, and the HTTPS address of this station.' : 'Dictation stopped: ' + e.error, 'error'); };
+    rec.onend = () => { listening = null; mic.classList.remove('on'); mic.setAttribute('aria-pressed', 'false'); };
+    try { rec.start(); listening = rec; mic.classList.add('on'); mic.setAttribute('aria-pressed', 'true'); }
+    catch (e) { toast('Dictation is not available here. Use the microphone on the keyboard.', 'error'); }
+  };
+  c = h('div', { class: 'composer' },
+    h('div', { class: 'keys', role: 'group', 'aria-label': 'Keys' }, PHONE_KEYS.map(([label, bytes]) => h('button', { type: 'button', class: 'key', 'aria-label': KEY_NAMES[label] || label, onclick: () => key1(bytes) }, label))),
+    h('form', { class: 'composer-row', onsubmit: (e) => { e.preventDefault(); send(); } }, box, mic, h('button', { class: 'primary', type: 'submit' }, 'Send')));
+  composers.set(key, c);
+  return c;
+}
 
 function phoneView() {
   const r = S.route;
   if (r.view === 'pane') {
     const p = findPane(r.station, r.pane);
     if (!p) return h('main', { class: 'phone' }, h('p', {}, 'That pane is gone.'), h('a', { href: '#/fleet' }, 'Back'));
-    const t = getTerm(r.station, p, 'phone', 'watch');
+    // Watching shows the pane at the size someone else set, shrunk to fit.
+    // Fitting resizes the pane to this screen, as a computer's deck would.
+    const fitKey = `${r.station}/${p.id}`;
+    const fitted = phoneFit.has(fitKey);
+    const t = fitted ? getTerm(r.station, p, 'phone-fit', 'control') : getTerm(r.station, p, 'phone', 'watch');
     return h('main', { class: 'phone phone-pane' },
-      h('div', { class: 'row' }, h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'), h('span', { class: 'grow' }),
+      h('div', { class: 'row' }, h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'),
+        p.exited ? null : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: () => { fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
+        h('span', { class: 'grow' }),
         h('button', { class: 'danger big', disabled: p.exited || !(p.state === 'working' || p.state === 'needs_you'), onclick: () => rpc(r.station, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')) }, 'Stop this turn')),
-      t.el, h('p', { class: 'muted small' }, 'Watching only. Use a computer to type.'));
+      t.el, p.exited ? h('p', { class: 'muted small' }, 'This pane has ended.') : composer(r.station, p));
   }
-  const all = S.fleet.stations.flatMap(s => liveAgents(s.station).filter(p => p.agent !== 'shell').map(p => ({ st: s.station, p })));
-  const blockers = all.filter(x => x.p.state === 'needs_you' || x.p.state === 'error');
+  const all = S.fleet.stations.flatMap(s => liveAgents(s.station).map(p => ({ st: s.station, p })));
+  const blockers = all.filter(x => x.p.agent !== 'shell' && (x.p.state === 'needs_you' || x.p.state === 'error'));
   const line = ({ st, p }) => h('a', { class: 'phone-row', href: paneUrl(st, p.id) }, dot(p), h('div', { class: 'grow' }, h('b', {}, p.name), h('span', { class: 'muted' }, ` · ${st}${p.project ? ' · ' + p.project : ''}`),
     h('div', { class: 'muted small' }, p.needs_reason || (p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}` : `${STATE_LABEL[stateOf(p)]} · ${ago(p.state_since_ms)}`))), '›');
   return h('main', { class: 'phone' },
@@ -799,6 +848,7 @@ function phoneView() {
     h('section', {}, h('h2', {}, 'Stations'),
       S.fleet.stations.map(s => h('div', { class: 'phone-station' },
         h('div', { class: 'row' }, h('span', { class: 'dot ' + (s.state === 'online' ? 'idle' : 'unreachable') }), h('b', {}, s.station), h('span', { class: 'muted' }, s.state === 'online' ? `${s.working ?? 0} working · ${s.needs_you ?? 0} need you` : s.state.replace('_', ' ')), h('span', { class: 'grow' }),
+          s.state === 'online' ? h('button', { onclick: () => newPaneDialog(s.station) }, 'New') : null,
           s.state === 'online' ? h('button', { class: 'danger', onclick: () => confirmBox(`Stop every agent on ${s.station}?`, 'Running turns are interrupted. Processes stay.', 'Stop', () => rpc(api.station, 'stop.all', { scope: s.self ? 'station' : s.station })) }, 'Stop') : null),
         all.filter(x => x.st === s.station).sort((a, b) => stateRank(a.p) - stateRank(b.p)).map(line)))),
     stopRows(),

@@ -19,7 +19,7 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - **Standing orders at five layers** (fleet, group, station, project, role), as guidance and as enforced rules.
 - **Review loop is the first recipe**: three rounds, stall check, sign-off before push.
 - **Activity strip on every pane.** Tree, timeline, heat view are v1.5.
-- **First phone experience is small**: status, blockers, approval requests, stop controls, read-only attach.
+- **Phone**: status, blockers, approval requests and stop controls; and, since 0.2 (the owner's request on 14 Nov 2026), talking to any pane: a message box that can be typed or dictated into, the keys a phone lacks, fitting the pane to the screen, and starting a pane. In the browser; no native app.
 - **Station-to-station SSH** uses short-lived certificates spandeck issues per task (v1.5, with cross-station delegation).
 - Not in v1: Windows, desktop shell, native iPhone app and widget, Officer of the Deck, usage and cost views, fleet updates and channels, common config, cross-station delegation, flow view, agent tree and timeline, OpenCode and Antigravity adapters.
 

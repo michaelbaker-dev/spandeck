@@ -2,6 +2,7 @@
 //! Done when: two daemons discover and trust each other with no setup; a stop
 //! sent to an unreachable station shows as unreachable, then is delivered on
 //! reconnect; no push arrives while you are at a keyboard.
+//! 0.2: a station joins on the owner's approval; a pane can be driven from a phone.
 mod common;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -396,36 +397,99 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     page.js("[...document.querySelectorAll('.approval button')].find(b => b.innerText === 'Allow').click()");
     s.wait_text(&asking, "[fake] permission: allow");
 
-    // Open the busy agent: watching only, with a stop control.
-    page.js("[...document.querySelectorAll('.phone-row')].find(r => r.innerText.includes('worker')).click()");
-    page.wait(
-        "the pane on the phone",
-        "!!document.querySelector('.phone-pane .xterm-rows')",
-    );
-    assert!(page
-        .js("document.querySelector('.phone-pane').innerText")
-        .as_str()
-        .unwrap()
-        .contains("Watching only"));
-    page.wait("terminal", "document.querySelector('.xterm-helper-textarea') && (document.querySelector('.xterm-helper-textarea').focus(), true)");
-    page.tab.type_str("typed-from-phone").unwrap();
+    // Open the busy agent: the terminal, and a stop control.
+    let open = |name: &str| {
+        page.goto("#/fleet");
+        page.wait(
+            "the list",
+            "!!document.querySelector('main.phone .phone-row')",
+        );
+        page.js(&format!("[...document.querySelectorAll('.phone-row')].find(r => r.innerText.includes('{name}')).click()"));
+        page.wait(
+            "the pane on the phone",
+            "!!document.querySelector('.phone-pane .xterm-rows') && !!document.querySelector('.phone-pane .composer-box')",
+        );
+    };
+    open("worker");
     page.js("[...document.querySelectorAll('.phone-pane button')].find(b => b.innerText === 'Stop this turn').click()");
     s.wait_text(&busy, "[fake] interrupted");
-    assert!(
-        !s.text(&busy).contains("typed-from-phone"),
-        "a watching client cannot type"
-    );
     let size = s.pane(&busy);
     assert_eq!(
         (size["cols"].as_u64(), size["controller"].is_null()),
         (Some(120), true),
-        "watching did not resize the pane"
+        "the phone did not resize the pane"
+    );
+
+    // 0.2 step 2: talk to an agent from the phone. Dictation fills the same
+    // box, so what is tested here is the box: it survives a redraw, and a
+    // message is sent as one line.
+    let talker = s.fake(json!({"steps": []}), json!({"name": "talker"}));
+    s.wait_text(&talker, "[fake] session");
+    open("talker");
+    let set = |text: &str| {
+        page.js(&format!(
+            "(document.querySelector('.composer-box').value = {}, true)",
+            json!(text)
+        ));
+    };
+    set("hello from\nmy phone");
+    std::thread::sleep(Duration::from_millis(3200));
+    assert_eq!(
+        page.js("document.querySelector('.composer-box').value"),
+        json!("hello from\nmy phone"),
+        "a redraw keeps what you were writing"
+    );
+    page.js("document.querySelector('.composer-row button[type=submit]').click()");
+    s.wait_text(&talker, "[fake] got: hello from my phone");
+    page.wait(
+        "the box to empty",
+        "document.querySelector('.composer-box').value === ''",
+    );
+
+    // A shell on the phone: run a command, interrupt it with the Ctrl-C key.
+    let sh = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "phone-sh", "cwd": s.root.join("home")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    open("phone-sh");
+    set("sleep 300");
+    page.js("document.querySelector('.composer-row button[type=submit]').click()");
+    page.wait(
+        "the box to empty",
+        "document.querySelector('.composer-box').value === ''",
+    );
+    std::thread::sleep(Duration::from_millis(400));
+    page.js(
+        "[...document.querySelectorAll('.composer .key')].find(b => b.innerText === '^C').click()",
+    );
+    set("echo back-$((40+2))");
+    page.js("document.querySelector('.composer-row button[type=submit]').click()");
+    s.wait_text(&sh, "back-42");
+
+    // Fitting the pane to the phone resizes it, which watching never does.
+    open("phone-sh");
+    page.js("[...document.querySelectorAll('.phone-pane button')].find(b => b.innerText === 'Fit to screen').click()");
+    wait_for("the pane to be resized to the phone", 10, || {
+        let p = s.pane(&sh);
+        (p["cols"].as_u64().is_some_and(|c| c < 80) && !p["controller"].is_null()).then_some(())
+    });
+
+    // And start something new from the phone.
+    page.goto("#/fleet");
+    page.wait(
+        "the list",
+        "!!document.querySelector('main.phone .phone-station')",
+    );
+    page.js("[...document.querySelectorAll('.phone-station button')].find(b => b.innerText === 'New').click()");
+    page.wait(
+        "the new pane dialog",
+        "!!document.querySelector('dialog select, .dialog select')",
     );
 }
 
-/// Live: Tailscale identity on this machine. A connection that arrives on the
-/// tailnet address is identified by whois, with no token.
-/// Run with `cargo test -- --ignored live_tailscale`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn live_tailscale_a_local_program_needs_a_token_and_stations_need_the_fleet_key() {

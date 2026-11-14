@@ -60,8 +60,26 @@ To add a second station, install spandeck on it and run `spandeck fleet --join <
 station>`, then approve the code on the first station. Stations under your Tailscale
 login see each other without this, but neither controls the other until you approve.
 
-For a phone, or any HTTPS need: `tailscale serve --bg 7391` and open the HTTPS name with
-the token from `spandeck cc` appended as `#token=…` once.
+## From your phone
+
+Open any station from a phone on your Tailscale account: `spandeck cc --qr` shows a QR
+code for it. Approve the phone once, as above. Then you can:
+
+- see every station and agent, answer approval requests, and stop a turn or the fleet;
+- open any pane and talk to it: type or dictate a message and press Send, with keys a
+  phone keyboard lacks (Esc, Tab, arrows, Enter, Ctrl-C);
+- press **Fit to screen** to resize the pane to the phone so the text is readable;
+- start a new agent or shell on any station with **New**.
+
+Dictation: the message box is an ordinary text field, so the microphone on the phone's
+keyboard works everywhere. The 🎤 button uses the browser's own speech recognition; it
+appears only where the browser offers it and needs the HTTPS address (below).
+
+For HTTPS: `tailscale serve --bg 7391`, then open the station's `https://` Tailscale name.
+
+A station can only be reached while it is awake. spandeck keeps it awake while an agent
+is working. To keep it awake whenever spandeckd runs, add `stay_awake = true` to
+`~/.config/spandeck/config.toml`.
 
 To update a station without losing its terminals: install the new release, then
 `spandeck upgrade ~/.local/bin/spandeck`.
@@ -90,7 +108,8 @@ To update a station without losing its terminals: install the new release, then
 - **More than one real station**: discovery, attach and the message relay are tested
   with several daemons on one machine and under network simulation, not yet between
   two physical machines.
-- **Phone**: tested in a phone-sized browser, not on a real phone.
+- **Phone**: tested in a phone-sized desktop browser, not on a real phone. Dictation
+  with the 🎤 button has not been tried on any device.
 
 ## Security
 

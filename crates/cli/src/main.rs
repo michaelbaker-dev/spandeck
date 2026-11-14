@@ -44,7 +44,11 @@ enum Cmd {
     /// Check this station's setup.
     Doctor,
     /// Print the Control Deck address (with the localhost token).
-    Cc,
+    Cc {
+        /// Also show a QR code to open the Control Deck on a phone.
+        #[arg(long)]
+        qr: bool,
+    },
     /// Work with panes.
     Pane {
         #[command(subcommand)]
@@ -417,7 +421,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             });
             return Ok(if v["ok"] == json!(true) { 0 } else { 1 });
         }
-        Cmd::Cc => {
+        Cmd::Cc { qr } => {
             let info = c.call("station.info", json!({}))?;
             let token = std::fs::read_to_string(paths.token_file()).unwrap_or_default();
             for addr in info["web"]
@@ -430,6 +434,31 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     println!("http://{addr}/#token={}", token.trim());
                 } else {
                     println!("http://{addr}/   (from your other devices on Tailscale)");
+                }
+            }
+            if qr {
+                // The address a phone can reach: the Tailscale one. It carries no
+                // token; the phone asks to sign in and you approve it here.
+                let phone = info["web"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| a.as_str())
+                    .find(|a| !a.starts_with("127."));
+                match phone {
+                    Some(addr) => {
+                        let url = format!("http://{addr}/");
+                        let code = qrcode::QrCode::new(url.as_bytes())?;
+                        println!(
+                            "\n{}\nScan with a phone on your Tailscale account: {url}\nIt shows a code; approve it here with: spandeck approve <code>",
+                            code.render::<qrcode::render::unicode::Dense1x2>()
+                                .quiet_zone(true)
+                                .build()
+                        );
+                    }
+                    None => println!(
+                        "\nNo Tailscale address to show a QR code for. Is Tailscale running?"
+                    ),
                 }
             }
         }

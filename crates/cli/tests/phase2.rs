@@ -457,6 +457,21 @@ fn screenshots_of_every_view() {
     let phone = Page::open(&s, 390, 844);
     phone.wait("phone", "!!document.querySelector('main.phone .approval')");
     shoot(&phone, "7-phone");
+    phone.goto(&format!("/s/spark2/p/{dev}"));
+    phone.wait(
+        "phone pane",
+        "!!document.querySelector('.phone-pane .composer-box')",
+    );
+    phone.js("(document.querySelector('.composer-box').value = 'run the tests and tell me what fails', true)");
+    shoot(&phone, "8-phone-pane");
+    let fresh = Page::open_signed_out(&s, 390, 844);
+    fresh.js("document.querySelector('main.login button').click()");
+    fresh.wait("code", "!!document.querySelector('.big-code')");
+    shoot(&fresh, "9-phone-sign-in");
+    phone.goto("/fleet");
+    phone.wait("access", "!!document.querySelector('.topbar')");
+    phone.js("[...document.querySelectorAll('.topbar button')].find(b => b.innerText.startsWith('Access'))?.click()");
+    shoot(&phone, "10-phone-access");
 }
 
 /// 0.2 step 1, done when: a program with no device token is refused; a

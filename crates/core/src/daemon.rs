@@ -1050,10 +1050,11 @@ impl Daemon {
         if !self.cfg.keep_awake {
             return;
         }
-        let working = self.list_panes().iter().any(|p| {
-            let m = p.meta.lock().unwrap();
-            m.exit.is_none() && m.state == AgentState::Working
-        });
+        let working = self.cfg.stay_awake
+            || self.list_panes().iter().any(|p| {
+                let m = p.meta.lock().unwrap();
+                m.exit.is_none() && m.state == AgentState::Working
+            });
         let mut guard = self.keep_awake.lock().unwrap();
         if let Some(child) = guard.as_mut() {
             if matches!(child.try_wait(), Ok(Some(_))) {

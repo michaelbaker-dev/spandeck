@@ -143,3 +143,13 @@ input, select, textarea { width: 100%; } textarea { resize: vertical; }
 /* Sign-in and access */
 .big-code { font: 600 2rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .18em; margin: .4rem 0; }
 .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }
+
+/* Phone: talk to a pane */
+.composer { display: flex; flex-direction: column; gap: 8px; position: sticky; bottom: 0; background: var(--bg, #111); padding: 8px 0 calc(4px + env(safe-area-inset-bottom)); }
+.composer .keys { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
+.composer .key { min-width: 0; min-height: 44px; padding: 0; font: 500 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.composer-row { display: flex; gap: 8px; align-items: flex-end; }
+.composer-box { flex: 1; min-height: 48px; max-height: 40dvh; font-size: 16px; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: inherit; resize: vertical; }
+.composer-row button { min-height: 48px; min-width: 56px; }
+.composer .mic.on { outline: 2px solid var(--bad, #e5484d); }
+.phone-pane .pane { min-height: 38dvh; }

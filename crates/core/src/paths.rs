@@ -116,6 +116,9 @@ pub struct Config {
     /// Addresses to listen on. Empty: localhost plus the tailnet address.
     pub web_bind: Vec<String>,
     pub keep_awake: bool,
+    /// Stay awake whenever spandeckd runs, not only while an agent works, so
+    /// the station can be reached from a phone at any time.
+    pub stay_awake: bool,
     /// Command that holds the machine awake while it runs. Default per OS.
     pub keep_awake_cmd: Option<Vec<String>>,
     /// You count as "at a keyboard" this long after your last input.
@@ -145,6 +148,7 @@ impl Default for Config {
             web_port: 7391,
             web_bind: vec![],
             keep_awake: true,
+            stay_awake: false,
             keep_awake_cmd: None,
             at_keyboard_secs: 120,
             approval_timeout_secs: 300,
