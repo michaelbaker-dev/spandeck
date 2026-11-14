@@ -3,12 +3,31 @@ Copyright 2026 the spandeck authors. Licensed under the Apache License, Version 
 
 Product marks
 
-The Control Deck shows the marks of Claude (Anthropic), Gemini (Google) and
-OpenCode beside panes that run those programs, to say which program a pane runs.
-They are trademarks of their owners. spandeck is not affiliated with, endorsed
-by or sponsored by any of them. The shapes are taken from Simple Icons
-(https://simpleicons.org), which publishes them under CC0-1.0; the trademarks
-remain with their owners and their brand guidelines apply.
+The Control Deck shows the marks of Claude (Anthropic), Codex (OpenAI), Gemini
+and Antigravity (Google), Grok (xAI) and OpenCode beside panes that run those
+programs, only to say which program a pane runs. They are trademarks of their
+owners. spandeck is not affiliated with, endorsed by or sponsored by any of
+them. The trademarks remain with their owners and their brand guidelines apply.
+
+Claude, Gemini, OpenCode: the shapes are taken from Simple Icons
+(https://simpleicons.org), which publishes them under CC0-1.0.
+
+Codex, Grok, Antigravity: each shape is taken from its owner's own website,
+fetched on 2026-11-14. These are not under an open licence. The path data is
+copied as published and only scaled to the icon's size.
+
+  Codex        https://chatgpt.com/cdn/assets/favicon-c80e01a96037.svg
+               The icon of OpenAI's Codex page, https://chatgpt.com/codex: the
+               OpenAI mark, which the Codex CLI also draws when it starts.
+               Shown in white, the file's own colour for dark backgrounds.
+  Grok         https://grok.com/images/favicon.svg
+               The two shapes of the mark in the file's own colour (#FCFCFC).
+               The dark tile the file puts behind them is left out, as is a
+               hairline outline in the same colour.
+  Antigravity  https://antigravity.google/assets/image/icons/sprite-icons.svg
+               The symbol named "antigravity": Google's one-colour form of the
+               mark, which that sheet draws in the colour of the text around
+               it. Shown in the deck's light grey.
 
 Bundled software
 
