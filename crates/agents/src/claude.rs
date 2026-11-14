@@ -114,9 +114,12 @@ pub(crate) fn normalize_claude_dialect(agent: AgentKind, p: &Value) -> Option<Ag
         ),
         "Notification" => {
             let ty = s(p, "notification_type").unwrap_or_default();
+            // "idle_prompt" only says the agent has been sitting at its prompt
+            // for a while. That is an agent with nothing to do, not one that
+            // needs the user: it was shown as "needs you" and it is not.
             let needs = matches!(
                 ty.as_str(),
-                "permission_prompt" | "idle_prompt" | "agent_needs_input" | "elicitation_dialog"
+                "permission_prompt" | "agent_needs_input" | "elicitation_dialog"
             );
             (
                 EventKind::Notification,
@@ -363,5 +366,28 @@ impl Adapter for FakeAgent {
 
     fn detect_screen(&self, lines: &[String]) -> Option<AgentState> {
         detect::detect(detect::FAKE_RULES, lines)
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+    use serde_json::json;
+
+    // A bug the owner reported: a Claude pane waiting at its prompt was shown
+    // as needing attention.
+    #[test]
+    fn sitting_at_the_prompt_is_not_needing_the_user() {
+        let state = |ty: &str| {
+            normalize_claude_dialect(
+                AgentKind::Claude,
+                &json!({"hook_event_name": "Notification", "session_id": "s", "notification_type": ty, "message": "m"}),
+            )
+            .unwrap()
+            .state
+        };
+        assert_eq!(state("idle_prompt"), None);
+        assert_eq!(state("permission_prompt"), Some(AgentState::NeedsYou));
+        assert_eq!(state("elicitation_dialog"), Some(AgentState::NeedsYou));
     }
 }
