@@ -266,11 +266,34 @@ impl Daemon {
         Some(candidates(&status, &stations))
     }
 
+    /// Whether this station may add machines: the config says so, or the
+    /// owner turned it on from the Control Deck (kept in the station's state).
+    pub fn add_enabled(&self) -> bool {
+        self.cfg.add_machines || self.db.kv_get("add.enabled").as_deref() == Some("1")
+    }
+
+    /// The owner's switch in the Control Deck. Only the owner reaches this
+    /// (it is on no agent or station list and is never forwarded), so the
+    /// click is the owner saying so, as the line in config.toml was.
+    pub fn add_enable(&self, on: bool, by: &str) -> Value {
+        self.db.kv_set("add.enabled", if on { "1" } else { "0" });
+        self.record(
+            "fleet.add_enabled",
+            None,
+            None,
+            None,
+            Some(by),
+            json!({"on": on, "station": self.station}),
+        );
+        json!({"enabled": self.add_enabled(), "by_config": self.cfg.add_machines})
+    }
+
     /// What the picker shows.
     pub fn add_candidates(&self) -> Value {
         let found = self.add_candidates_now();
         json!({
-            "enabled": self.cfg.add_machines,
+            "enabled": self.add_enabled(),
+            "by_config": self.cfg.add_machines,
             "station": self.station,
             "tailscale": found.is_some(),
             "machines": found.unwrap_or_default().iter().map(|c| json!({
@@ -385,9 +408,9 @@ impl Daemon {
         password: Option<Secret>,
         by: &str,
     ) -> Result<Value> {
-        if !self.cfg.add_machines {
+        if !self.add_enabled() {
             return Err(Error::Denied(
-                "adding a machine from the Control Deck is off on this station. Put add_machines = true in its config.toml and restart spandeck here.".into(),
+                "adding a machine is off on this station. Turn it on from the Add a machine tile, or put add_machines = true in its config.toml.".into(),
             ));
         }
         // The user name goes on a command line: letters, digits, dot, dash

@@ -1115,11 +1115,25 @@ exec env -i PATH={remote_bin}:/usr/bin:/bin HOME={c}/home SPANDECK_STATE_DIR={c}
         err.message
     );
     assert!(!at("seen/ssh").exists());
-    let cfg = a.root.join("config/config.toml");
-    let text = std::fs::read_to_string(&cfg).unwrap();
-    std::fs::write(&cfg, format!("add_machines = true\n{text}")).unwrap();
+    // The owner turns it on from the tile; an agent cannot, and it holds
+    // across a restart.
+    let pane = a.fake(json!({"steps": []}), json!({}));
+    assert_eq!(
+        a.call_as_pane(&pane, "fleet.add_enable", json!({"on": true}))
+            .unwrap_err()
+            .code,
+        "denied"
+    );
+    assert_eq!(
+        a.call("fleet.add_enable", json!({"on": true}))["enabled"],
+        json!(true)
+    );
     a.kill9();
     a.launch();
+    assert_eq!(
+        a.call("fleet.candidates", json!({}))["enabled"],
+        json!(true)
+    );
 
     // Everything the Control Deck is sent from here on.
     let events = Arc::new(std::sync::Mutex::new(String::new()));

@@ -1070,9 +1070,8 @@ function addMachineDialog() {
     if (!info) return [h('p', { class: 'muted' }, 'Looking for your machines…')];
     if (!info.enabled) return [
       h('p', {}, `Adding a machine is turned off on ${info.station}.`),
-      h('p', { class: 'muted' }, `It lets ${info.station} connect to another of your machines over SSH and install spandeck there, so it is off until you say so. To turn it on, put this line in ${info.station}'s config.toml and restart spandeck there:`),
-      h('pre', { class: 'add-log' }, 'add_machines = true'),
-      h('div', { class: 'row end' }, closeBtn())];
+      h('p', { class: 'muted' }, `Turning it on lets ${info.station} connect to another of your machines over SSH and install spandeck there, when you ask it to from this tile. Agents cannot do this, and other stations cannot ask ${info.station} to. You can turn it off again from this dialog.`),
+      h('div', { class: 'row end' }, closeBtn('Not now'), h('button', { class: 'primary', onclick: () => api.call('fleet.add_enable', { on: true }).then(() => { info = null; redraw(); load(); }).catch((e) => toast(e.message, 'error')) }, `Turn it on for ${info.station}`))];
     if (info.error || !info.tailscale) return [h('p', { class: 'warn-text' }, info.error || `Tailscale is not answering on ${info.station}, so your machines cannot be listed.`), h('div', { class: 'row end' }, closeBtn())];
     if (!info.machines.length) return [
       h('p', {}, 'No Mac or Linux machine under your Tailscale login is online that is not already a station.'),
@@ -1084,7 +1083,8 @@ function addMachineDialog() {
       h('div', { class: 'list' }, info.machines.map(x => h('button', { class: 'list-row add-machine' + (x.id === picked ? ' first' : ''), type: 'button', 'aria-pressed': x.id === picked, onclick: () => { picked = x.id; redraw(); user.focus(); } },
         h('b', {}, x.name), h('span', { class: 'muted' }, `${x.os} · ${x.address}`), x.tailscale_ssh ? h('span', { class: 'chip ok', title: 'Tailscale SSH is on there, so no password is needed' }, 'Tailscale SSH') : null))),
       m ? form(field(`Your user name on ${m.name}`, user, `${info.station} connects to ${m.name} over SSH as this user and runs the spandeck install script there. If Tailscale SSH or an SSH key already lets it in, no password is asked.`),
-        'Connect and install', () => { if (user.value.trim()) start(m.id, m.name); else user.focus(); }) : h('div', { class: 'row end' }, closeBtn('Cancel'))];
+        'Connect and install', () => { if (user.value.trim()) start(m.id, m.name); else user.focus(); }) : h('div', { class: 'row end' }, closeBtn('Cancel')),
+      info.by_config ? null : h('p', { class: 'muted' }, h('button', { type: 'button', onclick: () => api.call('fleet.add_enable', { on: false }).then(() => { info = null; redraw(); load(); }).catch((e) => toast(e.message, 'error')) }, `Turn adding machines off on ${info.station}`))];
   }
 
   function view(a) {

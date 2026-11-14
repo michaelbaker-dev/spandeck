@@ -154,9 +154,10 @@ The fleet screen ends in a tile with a plus sign: **Add a machine**. It installs
 on another of your machines and brings it into the fleet without you opening a terminal
 there.
 
-1. Turn it on once, on the station whose Control Deck you use: put `add_machines = true`
-   in `~/.config/spandeck/config.toml` and restart spandeck there. It is off by default
-   because it lets that station run commands on your other machines.
+1. Turn it on once, on the station whose Control Deck you use: click the tile and choose
+   **Turn it on**. It is off by default because it lets that station run commands on your
+   other machines; only you can turn it on, and you can turn it off again from the same
+   dialog. (`add_machines = true` in that station's `config.toml` does the same.)
 2. Click the tile and pick a machine. It lists the Mac and Linux machines under your
    Tailscale login that are online and not stations yet (no phones, Windows or tagged
    machines).

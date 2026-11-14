@@ -75,6 +75,7 @@ const NOT_FORWARDED: &[&str] = &[
     "fleet.add",
     "fleet.add_status",
     "fleet.add_cancel",
+    "fleet.add_enable",
 ];
 
 const READ_METHODS: &[&str] = &[
@@ -1017,6 +1018,10 @@ impl Daemon {
                 self.add_start(s(&params, "machine")?, s(&params, "user")?, password, by)?
             }
             "fleet.add_cancel" => self.add_cancel(by),
+            "fleet.add_enable" => self.add_enable(
+                params.get("on").and_then(|v| v.as_bool()) != Some(false),
+                by,
+            ),
 
             _ => return Err(Error::NotFound(format!("method {method}"))),
         })
