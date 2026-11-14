@@ -531,36 +531,78 @@ function commandDialog(st, pane) {
 }
 
 // MCP servers, skills and model defaults: set once, applied on every station.
-// Which agent programs each station has, at what version, and updating them.
+// Which agent programs each station has, whether each one starts, at what
+// version, and installing or updating them. Everything a program or a station
+// said (an error line, a path, a command) is put in as text.
 async function agentsPanel() {
   const stations = S.fleet.stations.filter(s => s.state === 'online').map(s => s.station);
   const load = () => Promise.all(stations.map(st => api.on(st, 'agents.status').then(rows => ({ st, rows })).catch(e => ({ st, rows: [], problem: e.message }))));
   let all = await load();
+  let open = true;
+  const picked = new Map();   // "station agent" -> the way to install the owner picked here
   dialog('Agent programs', (close) => {
     const body = h('div', {});
+    // A station that does not say (an older spandeck) only knows there or not.
+    const healthOf = (r) => r.health || (r.installed ? 'ok' : 'missing');
     const update = (st, agent) => rpc(st, 'agents.update', agent ? { agent } : {}).then((r) => {
       toast(r.started?.length ? `${st}: updating ${r.started.map(x => x.name).join(', ')}` : `${st}: nothing to update`);
-      setTimeout(redraw, 1500);
+      setTimeout(settle, 1500);
     });
-    const draw = () => body.replaceChildren(
-      h('p', { class: 'muted' }, 'An update restarts that program\'s agents and they go back to their conversations. An agent in the middle of a turn is restarted when it finishes, not interrupted. A program that is not installed is installed the first time you start a pane for it.'),
-      h('div', { class: 'row end' }, h('button', { class: 'primary', onclick: () => Promise.all(stations.map(st => update(st))) }, 'Update everything on every station')),
-      all.map(({ st, rows, problem }) => h('div', {},
-        h('div', { class: 'row' }, h('h3', {}, st), h('span', { class: 'grow' }), rows.some(r => r.installed && r.can_update !== false) ? h('button', { class: 'mini', onclick: () => update(st) }, 'Update all here') : null),
-        problem ? h('p', { class: 'warn-text' }, problem) : null,
-        h('div', { class: 'list' }, rows.map(r => h('div', { class: 'note row' },
-          paneIcon(r.agent), h('b', {}, r.name),
-          h('span', { class: r.installed ? '' : 'muted' }, r.installed ? (r.version || 'installed, version not read') : 'not installed'),
+    const wayOf = (st, r) => {
+      const ways = r.methods || [];
+      return ways.find(m => m.id === picked.get(st + ' ' + r.agent) && m.available) || ways.find(m => m.id === r.method) || ways.find(m => m.available);
+    };
+    const install = (st, r) => {
+      const way = wayOf(st, r), again = healthOf(r) !== 'missing';
+      if (!way) return;
+      dialog(`${again ? 'Reinstall' : 'Install'} ${r.name} on ${st}?`, (shut) => h('div', {},
+        h('p', {}, `This runs on ${st}, and is remembered as the way ${r.name} is installed there:`),
+        h('div', { class: 'note mono' }, way.command),
+        h('p', { class: 'muted' }, 'Whether it worked is judged by the program answering afterwards. Agents that are running are not restarted.'),
+        h('div', { class: 'row end' }, h('button', { onclick: shut }, 'Cancel'),
+          h('button', { class: 'primary', onclick: () => { shut(); rpc(st, 'agents.install', { agent: r.agent, method: way.id }).then(() => { toast(`${st}: installing ${r.name}`); setTimeout(settle, 800); }); } }, again ? 'Reinstall' : 'Install'))));
+    };
+    const status = (r) => {
+      const health = healthOf(r);
+      if (health === 'broken') return h('span', { class: 'chip bad' }, 'Installed but not working');
+      if (health === 'no_answer') return h('span', { class: 'warn-text', title: 'It was asked its version and did not answer in time. It was left running, not stopped. This is not known to be a fault.' }, 'installed · it did not answer when asked its version');
+      if (health === 'missing') return h('span', { class: 'muted' }, 'not installed');
+      return h('span', {}, r.version || 'installed, version not read');
+    };
+    const row = (st, r) => {
+      const health = healthOf(r), ways = r.methods || [], way = wayOf(st, r), busy = !!(r.updating || r.installing);
+      return h('div', { class: 'note agent-program', 'data-agent': r.agent, 'data-health': health },
+        h('div', { class: 'row', style: { flexWrap: 'wrap' } },
+          paneIcon(r.agent), h('b', {}, r.name), status(r),
           r.panes ? h('span', { class: 'muted' }, `· ${r.panes} running`) : null,
-          r.updating ? h('span', { class: 'chip warn' }, 'updating…') : null,
-          r.last_update && !r.updating ? h('span', { class: 'muted', title: r.last_update.message || '' }, r.last_update.ok ? `· updated ${ago(r.last_update.at_ms)} ago` : '· last update failed') : null,
+          r.installing ? h('span', { class: 'chip warn' }, 'installing…') : r.updating ? h('span', { class: 'chip warn' }, 'updating…') : null,
+          r.last_update && !busy ? h('span', { class: 'muted', title: r.last_update.message || '' }, r.last_update.ok ? `· updated ${ago(r.last_update.at_ms)} ago` : '· last update failed') : null,
+          r.last_install && !busy ? h('span', { class: r.last_install.ok ? 'muted' : 'warn-text', title: r.last_install.message || '' }, r.last_install.ok ? `· installed ${ago(r.last_install.at_ms)} ago` : '· the last install did not work') : null,
           h('span', { class: 'grow' }),
-          r.installed && r.can_update !== false ? h('button', { class: 'mini', disabled: !!r.updating, onclick: () => update(st, r.agent) }, 'Update') : null))))),
+          ways.length > 1 ? h('select', { 'aria-label': `How ${r.name} is installed on ${st}`, title: way ? way.command : '', disabled: busy, style: { width: 'auto', flex: 'none' },
+            onchange: (e) => { picked.set(st + ' ' + r.agent, e.target.value); draw(); } },
+            ways.map(m => h('option', { value: m.id, selected: way && m.id === way.id, disabled: !m.available }, m.available ? m.label : `${m.label} (not on this station)`))) : null,
+          way ? h('button', { class: health === 'broken' ? 'mini primary' : 'mini', disabled: busy, title: way.command, onclick: () => install(st, r) }, health === 'missing' ? 'Install' : 'Reinstall') : null,
+          (health === 'ok' || health === 'no_answer') && r.can_update !== false ? h('button', { class: 'mini', disabled: busy, onclick: () => update(st, r.agent) }, 'Update') : null),
+        health === 'broken' ? h('div', { class: 'agent-problem' },
+          h('div', { class: 'muted' }, 'Found at ', h('span', { class: 'mono' }, r.path || ''), '. When started it said:'),
+          h('div', { class: 'mono warn-text' }, r.problem || 'nothing'),
+          way ? h('div', { class: 'muted' }, 'Reinstall runs ', h('span', { class: 'mono' }, way.command)) : h('div', { class: 'muted' }, 'spandeck knows no install command for it.')) : null);
+    };
+    const draw = () => body.replaceChildren(
+      h('p', { class: 'muted' }, 'An update restarts that program\'s agents and they go back to their conversations. An agent in the middle of a turn is restarted when it finishes, not interrupted. A program that is not installed, or is installed but does not start, is installed the first time you start a pane for it, or here.'),
+      h('div', { class: 'row end' }, h('button', { class: 'primary', onclick: () => Promise.all(stations.map(st => update(st))) }, 'Update everything on every station')),
+      ...all.map(({ st, rows, problem }) => h('div', {},
+        h('div', { class: 'row' }, h('h3', {}, st), h('span', { class: 'grow' }), rows.some(r => ['ok', 'no_answer'].includes(healthOf(r)) && r.can_update !== false) ? h('button', { class: 'mini', onclick: () => update(st) }, 'Update all here') : null),
+        problem ? h('p', { class: 'warn-text' }, problem) : null,
+        h('div', { class: 'list' }, rows.map(r => row(st, r))))),
       h('div', { class: 'row end' }, h('button', { onclick: redraw }, 'Check again'), h('button', { onclick: close }, 'Close')));
-    const redraw = async () => { all = await load(); draw(); };
+    const redraw = async () => { all = await load(); if (open) draw(); };
+    // Look again until nothing is being installed or updated.
+    const settle = async () => { await redraw(); if (open && all.some(x => x.rows.some(r => r.installing || r.updating))) setTimeout(settle, 2000); };
     draw();
     return body;
-  });
+  }, { wide: true, onClose: () => { open = false; } });
 }
 
 async function setupPanel() {
@@ -615,7 +657,7 @@ async function setupPanel() {
         h('table', { class: 'table' },
           h('thead', {}, h('tr', {}, h('th', {}, 'Agent'), h('th', {}, 'Model'), h('th', {}, 'Effort'), h('th', {}, 'Installed here'), h('th', {}, 'Running here'))),
           h('tbody', {}, view.agents.map(a => h('tr', {}, h('td', {}, a.name), h('td', {}, def(a.agent, 'model', 'default')), h('td', {}, def(a.agent, 'effort', 'default')),
-            h('td', { class: 'muted' }, a.installed_version || 'not installed'),
+            h('td', { class: 'muted' }, a.installed_version || ({ missing: 'not installed', broken: 'installed but not working', no_answer: 'installed, version not known' })[a.health] || 'installed, version not read'),
             h('td', {}, a.running.length ? a.running.map(r => h('span', { class: 'chip ' + (r.state === 'needs_you' ? 'warn' : ''), title: r.needs_reason || '' }, r.name)) : h('span', { class: 'muted' }, 'none')))))),
         h('p', { class: 'muted small' }, 'Agents that are already running keep their settings. To change them now, use "Run a command in agents" (for example /model opus).'),
         h('div', { class: 'row end' },

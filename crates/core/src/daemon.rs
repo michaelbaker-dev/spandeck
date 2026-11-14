@@ -633,36 +633,60 @@ impl Daemon {
                     program: opts.program.clone().or(cfg.program),
                     session: new_session.clone(),
                 });
-                match self.find_program(&launch.program) {
-                    Some(path) => (path.display().to_string(), launch.args),
-                    // Not installed here: the pane installs it first, where
-                    // the user can watch, and then starts it.
-                    None => match self.agent_install_line(agent) {
-                        // Installing a program changes the station, and an
-                        // agent never gets to do that: only a pane the owner
-                        // asked for installs one.
-                        Some(_) if opts.parent_pane.is_some() => {
-                            return Err(invalid(format!(
-                                "{} is not installed on {} ({} was not found). A pane an agent asks for does not install software: the owner starts a {} pane once, which installs it",
-                                agent.display(),
-                                self.station,
-                                launch.program,
-                                agent.display()
-                            )))
-                        }
-                        Some(install) => {
-                            self.install_then_launch(agent, &launch.program, &install, launch.args)
-                        }
-                        None => {
-                            return Err(invalid(format!(
-                                "{} is not installed on {} ({} was not found), and spandeck knows no install command for it. Install it yourself, or set [agents.{}] program or install_cmd in config.toml",
-                                agent.display(),
-                                self.station,
-                                launch.program,
-                                agent.as_str()
-                            )))
-                        }
-                    },
+                use crate::agents::Found;
+                let found = self.program_for_start(agent, &launch.program);
+                // What is true of it, for a pane that cannot be started.
+                let what = match &found {
+                    Found::Broken { path, problem } => format!(
+                        "{} is installed on {} but does not start ({} said: {})",
+                        agent.display(),
+                        self.station,
+                        path.display(),
+                        problem
+                    ),
+                    _ => format!(
+                        "{} is not installed on {} (there is no {} in the folders spandeck looks in)",
+                        agent.display(),
+                        self.station,
+                        launch.program
+                    ),
+                };
+                let broken = match &found {
+                    Found::Broken { path, problem } => Some((path.as_path(), problem.as_str())),
+                    _ => None,
+                };
+                match (&found, self.agent_install_line(agent)) {
+                    (Found::Run(path), _) => (path.display().to_string(), launch.args),
+                    // Nothing to reinstall it with: it is started as it is,
+                    // and says for itself what is wrong.
+                    (Found::Broken { path, .. }, None) => {
+                        (path.display().to_string(), launch.args)
+                    }
+                    // Installing a program changes the station, and an
+                    // agent never gets to do that: only a pane the owner
+                    // asked for installs one.
+                    (_, Some(_)) if opts.parent_pane.is_some() => {
+                        return Err(invalid(format!(
+                            "{what}. A pane an agent asks for does not install software: the owner starts a {} pane once, which installs it",
+                            agent.display()
+                        )))
+                    }
+                    // Not installed here, or installed and not working: the
+                    // pane installs it first, where the user can watch, and
+                    // then starts it.
+                    (_, Some(install)) => self.install_then_launch(
+                        agent,
+                        &launch.program,
+                        &install,
+                        broken,
+                        launch.args,
+                    ),
+                    (_, None) => {
+                        return Err(invalid(format!(
+                            "{what}, and spandeck knows no install command for it. Install it yourself, or set [agents.{}] program or install_cmd in config.toml",
+                            agent.as_str()
+                        )))
+                    }
                 }
             }
             (None, Some(p)) => (p.clone(), opts.args.clone()),

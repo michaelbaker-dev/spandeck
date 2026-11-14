@@ -110,6 +110,43 @@ From the Control Deck, right-click a station (or use the commands on any station
 - A station that is off stays in the list as unreachable. One that does not start at
   login is marked; fix that with `spandeck service --install`.
 
+## Agent programs
+
+Right-click a station and choose **Agent programs and versions…** to see, for every
+station, each agent program (Claude Code, Codex, OpenCode, Antigravity), its version, and
+buttons to update or reinstall it. `spandeck doctor` shows the same on one station.
+
+- spandeck tells four cases apart: **not installed**; **installed** (it answered when
+  asked its version); **installed but not working** (it is there but exits with an error
+  or cannot be run, and its own error line is shown); and **installed, but it did not
+  answer** in five seconds (not known to be a fault; it is left running, never stopped).
+- When a program is in several folders, the first copy that answers is used, not the
+  first that exists. spandeck looks on `PATH`, then in `~/.local/bin`, `~/.opencode/bin`,
+  `~/.cargo/bin`, `/opt/homebrew/bin` and `/usr/local/bin`.
+- A pane started for a program that is not installed, or is installed but not working,
+  installs it first, in the pane: it says what was found, shows the command, and
+  Ctrl-C skips. Whether it worked is judged by the program answering afterwards.
+- **Reinstall** in the dialog does the same from the Control Deck. Where the vendor
+  supports it you can pick npm or Homebrew instead of the vendor's own install script,
+  if that tool is on the station; the pick is remembered per station and per agent, and
+  is what a pane uses too. Only you can do this: an agent cannot install or update.
+
+| Agent | Install script (the default) | npm | Homebrew |
+| --- | --- | --- | --- |
+| Claude Code | `curl -fsSL https://claude.ai/install.sh \| bash` | `npm install -g @anthropic-ai/claude-code@latest` | `brew install --cask claude-code` |
+| Codex | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | `npm install -g @openai/codex` | `brew install --cask codex` |
+| OpenCode | `curl -fsSL https://opencode.ai/v2/install \| bash` | `npm install -g @opencode/cli` | `brew install anomalyco/tap/opencode-v2` |
+| Antigravity | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | not offered | not offered |
+
+These were read from each vendor's documentation and the package registries on
+14 Nov 2026. To use another command on one station, set it in that station's
+`config.toml`; it then wins over everything:
+
+```toml
+[agents.codex]
+install_cmd = ["sh", "-c", "your command"]
+```
+
 ## Usage and cost
 
 Each agent pane shows the model in use and how full its context is, in the strip above

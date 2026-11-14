@@ -3,45 +3,9 @@
 use serde_json::{json, Value};
 use spandeck_agents::{install, AgentKind};
 
+use crate::agents::{Ended, Health};
 use crate::daemon::Daemon;
 use crate::db::Db;
-
-/// A program's own word for its version. It gets no terminal and nothing to
-/// read, and three seconds of our attention: on a Mac, `codex --version` run
-/// from the daemon never returned, and the station check hung with it.
-fn version_of(program: &str) -> Option<String> {
-    use std::io::Read;
-    let mut child = std::process::Command::new(program)
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let start = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if start.elapsed() < std::time::Duration::from_secs(3) => {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            _ => {
-                // Stop waiting, but never kill it: a program asked for its
-                // version may be in the middle of updating itself, and one
-                // killed there can be left without its own binary.
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
-                return None;
-            }
-        }
-    };
-    let mut out = String::new();
-    child.stdout.take()?.read_to_string(&mut out).ok()?;
-    status
-        .success()
-        .then(|| out.lines().next().unwrap_or("").trim().to_string())
-}
 
 impl Daemon {
     pub fn doctor(&self) -> Value {
@@ -85,14 +49,35 @@ impl Daemon {
                 "spandeckd does not start at login: after a reboot this station stays down until someone starts it. Run `spandeck service --install`".into()
             },
         );
-        add(
-            "git",
-            version_of("git").is_some(),
-            true,
-            version_of("git").unwrap_or_else(|| {
-                "git not found: worktrees, checkpoints and sign-offs need it".into()
-            }),
+        // Asked without a terminal and given three seconds: on a Mac a
+        // program asked its version from the daemon once never returned, and
+        // the station check hung with it. It is not killed, and not answering
+        // is not the same as not being there.
+        let git = self.run_captured(
+            &["git".to_string(), "--version".to_string()],
+            std::time::Duration::from_secs(3),
         );
+        let (git_ok, git_detail) = match git.ended {
+            Ended::Exited { ok: true } => {
+                (true, git.text.lines().next().unwrap_or("").trim().to_string())
+            }
+            Ended::NotRun { missing: true } => (
+                false,
+                "git is not installed: worktrees, checkpoints and sign-offs need it".into(),
+            ),
+            Ended::NoAnswer => (
+                true,
+                "git is installed but did not answer `git --version` within 3 seconds, so whether it works is not known".into(),
+            ),
+            Ended::Exited { ok: false } | Ended::NotRun { .. } => (
+                false,
+                format!(
+                    "git is installed but does not start: {}",
+                    spandeck_agents::catalogue::error_line(&git.text).unwrap_or_default()
+                ),
+            ),
+        };
+        add("git", git_ok, true, git_detail);
 
         let me = self.fleet.tailnet_self();
         add(
@@ -128,16 +113,31 @@ impl Daemon {
                 .agent_program(kind)
                 .unwrap_or_else(|| kind.as_str().to_string());
             let probe = self.agent_probe(kind, std::time::Duration::from_secs(60));
+            let at = probe
+                .path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
             add(
                 &format!("{} installed", kind.display()),
-                probe.path.is_some(),
+                matches!(probe.health, Health::Ok | Health::NoAnswer),
                 false,
-                match (&probe.path, &probe.version) {
-                    (Some(path), Some(v)) => format!("{v} at {}", path.display()),
-                    (Some(path), None) => format!("{} (version not read)", path.display()),
-                    (None, _) => {
-                        format!("`{program}` not found; a pane started for it installs it first")
+                match (probe.health, &probe.version) {
+                    (Health::Ok, Some(v)) => format!("{v} at {at}"),
+                    (Health::Ok, None) => {
+                        format!("{at} (it answered, but its version could not be read)")
                     }
+                    (Health::Missing, _) => format!(
+                        "not installed (there is no `{program}` in the folders spandeck looks in); a pane started for it installs it first"
+                    ),
+                    (Health::Broken, _) => format!(
+                        "installed at {at} but it does not start: {}. A pane started for it offers to reinstall it, or use Reinstall under Agent programs in the Control Deck",
+                        probe.problem.clone().unwrap_or_default()
+                    ),
+                    (Health::NoAnswer, _) => format!(
+                        "installed at {at}; it did not answer when asked its version within {} seconds, so whether it works is not known",
+                        crate::agents::VERSION_LIMIT.as_secs()
+                    ),
                 },
             );
             if let Ok(st) = install::status(kind, &self.home) {

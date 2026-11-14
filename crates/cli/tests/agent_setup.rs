@@ -469,13 +469,13 @@ fn a_missing_agent_is_installed_in_its_pane_and_then_started_with_spandecks_tool
     let source = script(
         t,
         "agent.src",
-        "for a in \"$@\"; do echo \"ARG<$a>\"; done\necho \"CONFIG<$OPENCODE_CONFIG_CONTENT>\"\necho AGENT-STARTED\nsleep 60",
+        "[ \"$1\" = --version ] && { echo 1.2.3; exit 0; }\nfor a in \"$@\"; do echo \"ARG<$a>\"; done\necho \"CONFIG<$OPENCODE_CONFIG_CONTENT>\"\necho AGENT-STARTED\nsleep 60",
     );
     let (opencode, agy) = (t.join("opencode"), t.join("agy"));
     let s = Station::start_with(
         "alpha",
         &format!(
-            "[agents.opencode]\nprogram = \"{}\"\ninstall_cmd = [\"cp\", \"{source}\", \"{}\"]\n[agents.antigravity]\nprogram = \"{}\"\ninstall_cmd = [\"sleep\", \"30\"]\n",
+            "[agents.opencode]\nprogram = \"{}\"\ninstall_cmd = [\"cp\", \"{source}\", \"{}\"]\n[agents.antigravity]\nprogram = \"{}\"\ninstall_cmd = [\"sh\", \"-c\", \"echo started-$((1+1)); sleep 30\"]\n",
             opencode.display(),
             opencode.display(),
             agy.display()
@@ -522,7 +522,11 @@ fn a_missing_agent_is_installed_in_its_pane_and_then_started_with_spandecks_tool
 
     // Ctrl-C skips the install: the pane ends, and says why.
     let pane = spawn("antigravity");
-    s.wait_text(&pane, "Press Ctrl-C to skip");
+    // Pressed once the installer is running: a Ctrl-C in the instant the
+    // shell is starting it is held until the installer ends.
+    assert!(s
+        .wait_text(&pane, "started-2")
+        .contains("Press Ctrl-C to skip"));
     s.call(
         "pane.send_text",
         json!({"pane": pane, "text": "\u{3}", "enter": false}),
@@ -550,6 +554,256 @@ fn a_missing_agent_is_installed_in_its_pane_and_then_started_with_spandecks_tool
         "{}",
         err.message
     );
+}
+
+/// What happened on the owner's Mac: `/opt/homebrew/bin/codex` was an old npm
+/// install whose real binary was gone. spandeck saw a file called `codex`,
+/// called Codex installed, and a new pane only printed `Error: spawn …
+/// ENOENT`. Earlier the same Mac's `codex --version` never answered, and
+/// spandeck said Codex was not found. So: a program that is there but does
+/// not start is told apart from one that is missing and from one that is
+/// slow to answer; a copy that answers is used before one that does not; a
+/// pane for a broken one offers a reinstall and then starts the copy that
+/// works; and reinstalling by a chosen way is the owner's to ask for.
+#[test]
+fn a_program_that_is_there_but_does_not_start_is_reinstalled_not_called_installed_or_missing() {
+    let tools = tempfile::tempdir().unwrap();
+    let t = tools.path();
+    let (first, second) = (t.join("first"), t.join("second"));
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let enoent = "echo 'node:internal/child_process:285'\necho 'Error: spawn /opt/homebrew/lib/vendor/aarch64-apple-darwin/codex/codex ENOENT' >&2\necho '    at ChildProcess._handle.onexit' >&2\nexit 1";
+    // Codex: the only copy does not start. A working one arrives later on
+    // the path, when the pane reinstalls it.
+    script(&first, "codex", enoent);
+    let good_codex = script(
+        t,
+        "codex.src",
+        "[ \"$1\" = --version ] && { echo codex-cli 9.9.9; exit 0; }\necho CODEX-STARTED\nsleep 60",
+    );
+    // OpenCode: the first copy on the path is broken, a later one works.
+    script(&first, "opencode", enoent);
+    script(&second, "opencode", "echo opencode v2.3.0");
+    // Antigravity: there, and slow to say its version.
+    script(&first, "agy", "sleep 8");
+    // A stand-in npm that only writes down what it was asked to do.
+    let npm_log = t.join("npm.log");
+    script(
+        &first,
+        "npm",
+        &format!("echo \"$@\" >> {}", npm_log.display()),
+    );
+    let path = format!("{}:{}:/usr/bin:/bin", first.display(), second.display());
+    let s = Station::start_with(
+        "alpha",
+        &format!(
+            "[agents.claude]\nprogram = \"{missing}\"\n[agents.codex]\ninstall_cmd = [\"cp\", \"{good_codex}\", \"{to}\"]\n",
+            missing = t.join("missing").display(),
+            to = second.join("codex").display(),
+        ),
+        &[("PATH", &path)],
+    );
+    let row = |agent: &str| {
+        s.call("agents.status", json!({}))
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["agent"] == json!(agent))
+            .unwrap_or_else(|| panic!("no row for {agent}"))
+            .clone()
+    };
+
+    // The four cases, each called what it is.
+    let codex = row("codex");
+    assert_eq!(
+        (&codex["health"], &codex["installed"], &codex["version"]),
+        (&json!("broken"), &json!(true), &Value::Null),
+        "{codex}"
+    );
+    let problem = codex["problem"].as_str().unwrap();
+    assert!(
+        problem.starts_with("Error: spawn") && problem.ends_with("ENOENT"),
+        "the program's own error line: {problem}"
+    );
+    let opencode = row("opencode");
+    assert_eq!(
+        (&opencode["health"], &opencode["version"], &opencode["path"]),
+        (
+            &json!("ok"),
+            &json!("2.3.0"),
+            &json!(second.join("opencode"))
+        ),
+        "the copy that answers is used, not the first that exists: {opencode}"
+    );
+    let agy = row("antigravity");
+    assert_eq!(
+        (&agy["health"], &agy["installed"], &agy["problem"]),
+        (&json!("no_answer"), &json!(true), &Value::Null),
+        "{agy}"
+    );
+    assert_eq!(row("claude")["health"], json!("missing"));
+    // The slow one was left to finish: it is never killed.
+    let alive = std::process::Command::new("pgrep")
+        .args(["-f", &format!("{} --version", first.join("agy").display())])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(alive.success(), "the slow program was stopped");
+
+    // `spandeck doctor` says the same.
+    let checks = s.call("station.doctor", json!({}))["checks"].clone();
+    let detail = |name: &str| {
+        let c = checks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == json!(name))
+            .unwrap_or_else(|| panic!("no check {name}"));
+        (
+            c["ok"] == json!(true),
+            c["detail"].as_str().unwrap().to_string(),
+        )
+    };
+    let (ok, said) = detail("Codex installed");
+    assert!(
+        !ok && said.contains("does not start") && said.contains("ENOENT"),
+        "{said}"
+    );
+    let (ok, said) = detail("Antigravity installed");
+    assert!(ok && said.contains("did not answer"), "{said}");
+    let (ok, said) = detail("Claude Code installed");
+    assert!(!ok && said.starts_with("not installed"), "{said}");
+
+    // The ways to install: the vendor's script unless the owner chose
+    // another; one whose tool is here is offered.
+    let ways = opencode["methods"].as_array().unwrap();
+    let way = |id: &str| ways.iter().find(|m| m["id"] == json!(id)).unwrap();
+    assert_eq!(opencode["method"], json!("script"));
+    assert_eq!(way("npm")["available"], json!(true));
+    assert_eq!(way("brew")["available"], json!(false));
+
+    // A pane for the broken one says what was found and what it said, shows
+    // the command, runs it, and starts the copy that answers.
+    let home = s.root.join("home");
+    let pane = s.call("pane.spawn", json!({"agent": "codex", "cwd": home}))["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let screen = s.wait_text(&pane, "CODEX-STARTED");
+    let flat = screen.replace('\n', "");
+    assert!(
+        screen.contains("Codex is installed on this station but does not start")
+            && flat.contains(&format!("found:   {}", first.join("codex").display()))
+            && flat.contains("it said: Error: spawn")
+            && flat.contains(&format!(
+                "cp {good_codex} {}",
+                second.join("codex").display()
+            )),
+        "{screen}"
+    );
+    let codex = row("codex");
+    assert_eq!(
+        (&codex["health"], &codex["version"], &codex["path"]),
+        (&json!("ok"), &json!("9.9.9"), &json!(second.join("codex"))),
+        "{codex}"
+    );
+
+    // Reinstalling is the owner's to ask for, never an agent's. The way the
+    // owner picks is run and remembered for this station.
+    let err = s
+        .call_as_pane(&pane, "agents.install", json!({"agent": "opencode"}))
+        .unwrap_err();
+    assert_eq!(err.code, "denied");
+    let err = s
+        .try_call(
+            "agents.install",
+            json!({"agent": "opencode", "method": "brew"}),
+        )
+        .unwrap_err();
+    assert!(
+        err.message.contains("Homebrew is not on alpha"),
+        "{}",
+        err.message
+    );
+    let started = s.call(
+        "agents.install",
+        json!({"agent": "opencode", "method": "npm"}),
+    );
+    assert_eq!(started["command"], json!("npm install -g @opencode/cli"));
+    let done = wait_for("the install to finish", 20, || {
+        s.log("agents.installed").first().cloned()
+    });
+    assert_eq!(
+        (&done["data"]["ok"], &done["data"]["method"]),
+        (&json!(true), &json!("npm")),
+        "{done}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&npm_log).unwrap().trim(),
+        "install -g @opencode/cli"
+    );
+    assert_eq!(row("opencode")["method"], json!("npm"));
+}
+
+/// Not a test of behaviour: writes screenshots of the Agent programs dialog
+/// for a human to look at, with a program in each of the four cases.
+/// `SPANDECK_SHOTS=/some/dir cargo test --test agent_setup -- --ignored screenshots`
+/// Nothing is installed: the confirmation is shown and cancelled.
+#[test]
+#[ignore]
+fn screenshots_of_agent_programs() {
+    use common::browser::Page;
+    use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png;
+    let dir =
+        std::path::PathBuf::from(std::env::var("SPANDECK_SHOTS").expect("set SPANDECK_SHOTS"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tools = tempfile::tempdir().unwrap();
+    let t = tools.path();
+    let (first, second) = (t.join("first"), t.join("second"));
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    // What a program says is shown as text, markup and all.
+    let enoent = "echo 'Error: spawn /opt/homebrew/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex ENOENT <b id=injected>not markup</b>' >&2\nexit 1";
+    script(&first, "codex", enoent);
+    script(&first, "opencode", enoent);
+    script(&second, "opencode", "echo opencode v2.3.0");
+    script(&first, "agy", "sleep 8");
+    script(&first, "npm", "true");
+    let path = format!("{}:{}:/usr/bin:/bin", first.display(), second.display());
+    let s = Station::start_with(
+        "m4-macbook",
+        &format!(
+            "[agents.claude]\nprogram = \"{}\"\n",
+            t.join("missing").display()
+        ),
+        &[("PATH", &path)],
+    );
+    let shoot = |page: &Page, name: &str| {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let png = page.tab.capture_screenshot(Png, None, None, true).unwrap();
+        std::fs::write(dir.join(format!("{name}.png")), png).unwrap();
+    };
+    let page = Page::open(&s, 1200, 760);
+    page.right_click("document.querySelector('.tile.station')");
+    page.choose("Agent programs and versions");
+    page.wait(
+        "the four cases",
+        "['broken', 'ok', 'no_answer', 'missing'].every(c => document.querySelector(`.agent-program[data-health=${c}]`))",
+    );
+    assert_eq!(
+        page.js("!document.querySelector('#injected') && document.querySelector('.agent-problem').innerText.includes('<b id=injected>')"),
+        json!(true),
+        "a program's error line became markup"
+    );
+    shoot(&page, "agent-programs");
+    page.js("[...document.querySelectorAll('.agent-program[data-agent=codex] button')].find(b => b.innerText === 'Reinstall').click()");
+    page.wait(
+        "the confirmation",
+        "[...document.querySelectorAll('.dialog h2')].some(x => x.innerText.startsWith('Reinstall Codex'))",
+    );
+    shoot(&page, "agent-programs-reinstall");
+    page.js("[...document.querySelectorAll('.dialog')].pop().querySelector('button:not(.primary):not(.icon-btn)').click()");
+    assert!(s.log("agents.installed").is_empty());
 }
 
 /// The owner: "show the version of any agent and have a way to update them
@@ -608,10 +862,9 @@ fn an_update_shows_the_new_version_and_restarts_each_pane_into_its_conversation(
     // The fleet view gets the same from station.info, with no extra call.
     let brief = s.call("station.info", json!({}))["agents"].clone();
     assert!(
-        brief
-            .as_array()
-            .unwrap()
-            .contains(&json!({"agent": "fake", "installed": true, "version": "1.0.0"})),
+        brief.as_array().unwrap().contains(
+            &json!({"agent": "fake", "installed": true, "health": "ok", "version": "1.0.0"})
+        ),
         "{brief}"
     );
 
