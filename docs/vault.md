@@ -23,9 +23,19 @@ A Control Deck that opens on a station that found a vault and is not connected o
 connect it, once, in a bar at the top. **Not now** is remembered by the station; the Vault
 screen has **Remind me again**.
 
-Once connected, the station talks to the vault that issued its token. If the vault moves
-to another address, the station looks for it among your machines when the old address
-stops answering, follows the one that still accepts its token, and tells you it did.
+Once connected, the station shows its token only to the address that issued it. If the
+vault moves, the station notices an AgentVault at the new address when the old one stops
+answering, says "The vault seems to have moved to ...", and offers **Reconnect**: you
+approve once more at the vault. It does not try its token at the new address.
+
+To let stations follow a move by themselves, turn it on per station. The station then
+tries its token at an AgentVault it finds on your machines once the old address stops
+answering, follows the one that accepts it, and tells you:
+
+```toml
+[vault]
+follow_moves = true   # default false
+```
 
 The station now holds a token named `spandeck:<machine name>`. It is saved in spandeck's
 state folder, readable only by you. It can list keys and send requests through the vault,
@@ -59,7 +69,7 @@ press **Check again** on the Vault screen. The screen lists each check per stati
 
 | Check | What is looked at | Repaired without you |
 | --- | --- | --- |
-| Vault address | AgentVault answers at the address the station has | A vault that moved is found again |
+| Vault address | AgentVault answers at the address the station has | Only with `follow_moves = true`: a vault that moved is followed. Otherwise **Reconnect** |
 | Vault unlocked | The vault says it is unlocked | No: unlock it on the vault's page |
 | Station token | The vault accepts the token, and has it tied to a machine | A token overdue for rotation is swapped. A revoked one is not: **Reconnect**, and approve at the vault |
 | Keys for agents | The token can list keys, as an agent's `vault_list` does | No |

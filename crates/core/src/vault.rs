@@ -29,6 +29,12 @@ pub struct VaultConfig {
     /// More addresses to ask when looking for the vault, beside the machines
     /// Tailscale lists: for a vault discovery cannot see, and tests.
     pub search: Vec<String>,
+    /// Let a connected station follow a vault that moved, by trying its token
+    /// at another AgentVault on the owner's machines once the address that
+    /// issued it stops answering. Off unless the owner turns it on: without
+    /// it a station shows its token to no address but the one that issued
+    /// it, and a move is put right by the owner connecting again.
+    pub follow_moves: bool,
 }
 
 impl Default for VaultConfig {
@@ -37,6 +43,7 @@ impl Default for VaultConfig {
             enabled: true,
             url: None,
             search: vec![],
+            follow_moves: false,
         }
     }
 }
@@ -281,7 +288,7 @@ impl Daemon {
         } else if self.cfg.vault.url.is_some() {
             out.push(Check::bad("address", ADDRESS, "unreachable", format!("Nothing answers as AgentVault at {url}, the address set in config.toml: correct `[vault] url`, or remove it so spandeck finds the vault itself."), act_check()));
         } else if let Some(other) = seen.elsewhere.as_deref().filter(|_| connected) {
-            out.push(Check::bad("address", ADDRESS, "replaced", format!("The vault this station was connected to, at {url}, is not answering, and the AgentVault now at {other} does not know this station's token: connect the station to it."), act_connect("Reconnect")));
+            out.push(Check::bad("address", ADDRESS, "moved", format!("The vault seems to have moved to {other}: the one this station was connected to, at {url}, is not answering. Reconnect to approve this station at {other}."), act_connect("Reconnect")));
         } else {
             out.push(Check::bad("address", ADDRESS, "unreachable", format!("The vault at {url} is not answering: check that AgentVault is running on that machine and that Tailscale is connected."), act_check()));
         }
@@ -313,7 +320,7 @@ impl Daemon {
                 (true, Some(false), Some("other_machine")) => out.push(Check::bad("token", TOKEN, "other_machine", "The vault refuses this station's token from this machine: it is tied to another one. Connect the station again.".into(), again)),
                 (true, Some(false), Some("overdue")) => out.push(Check::bad("token", TOKEN, "overdue", "The token is overdue for rotation and the vault would not swap it. Connect the station again.".into(), again)),
                 (true, Some(false), _) => out.push(Check::bad("token", TOKEN, "refused", "The vault no longer accepts this station's token: it was revoked or replaced. Connect the station again.".into(), again)),
-                (true, Some(true), Some("unpinned")) => out.push(Check::bad("token", TOKEN, "unpinned", "The token works, but the vault has not tied it to this machine, so it would work from any machine. Connect the station again for one that is.".into(), again)),
+                (true, Some(true), Some("unpinned")) => out.push(Check::bad("token", TOKEN, "unpinned", "The token works from any machine: the vault has not tied it to this one. Connect the station again for one that is.".into(), again)),
                 (true, Some(true), _) => out.push(Check::ok(
                     "token",
                     TOKEN,
@@ -484,15 +491,20 @@ impl Daemon {
                     .vault_probe(&pinned)
                     .await
                     .map(|body| (pinned.clone(), body));
-                // It stopped answering there. Look for it where a vault is
-                // looked for the first time: the vault that moved is the one
-                // that still knows this station's token. Any other gets
-                // nothing more from this station until the owner approves.
+                // It stopped answering there. Another AgentVault among the
+                // owner's machines may be the same vault, moved. The token
+                // is never shown to it: the owner is told, and connects the
+                // station again. Only with `follow_moves` is the token tried
+                // there, and the vault that still knows it followed.
                 if found.is_none() {
                     for base in candidates.iter().filter(|c| **c != pinned) {
                         let Some(body) = self.vault_probe(base).await else {
                             continue;
                         };
+                        if !self.cfg.vault.follow_moves {
+                            elsewhere.get_or_insert(base.clone());
+                            continue;
+                        }
                         let knows = tokio::time::timeout(
                             Duration::from_millis(3000),
                             self.vault_get(base, "/v1/tokens/self", Some(&token)),
@@ -785,6 +797,7 @@ impl Daemon {
                 continue;
             }
             let title = match c.id {
+                "address" if trouble == "moved" => "The vault seems to have moved",
                 "address" => "The vault is not answering",
                 "lock" => "The vault is locked",
                 "token" if trouble == "unpinned" => {
@@ -794,7 +807,19 @@ impl Daemon {
                 "keys" => "The vault did not list its keys",
                 _ => "Agents cannot reach the vault from their panes",
             };
-            self.notify("error", None, None, title, &c.detail);
+            // The title has said what is wrong; the note goes on to what
+            // to do about it, which these checks put after a colon.
+            let body = match c.detail.split_once(": ") {
+                Some((_, rest)) if matches!(c.id, "address" | "lock" | "token") => {
+                    let mut chars = rest.chars();
+                    chars
+                        .next()
+                        .map(|f| f.to_uppercase().chain(chars).collect::<String>())
+                        .unwrap_or_default()
+                }
+                _ => c.detail.clone(),
+            };
+            self.notify("error", None, None, title, &body);
             self.record(
                 "vault.alert",
                 None,

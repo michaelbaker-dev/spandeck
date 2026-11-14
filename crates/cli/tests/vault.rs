@@ -672,25 +672,41 @@ fn the_station_checks_the_chain_repairs_what_it_can_and_says_what_is_left() {
     vault.set_unlocked(true);
     assert_eq!(s.call("vault.check", json!({}))["health"], json!("ok"));
 
-    // The vault moved: the station finds it again and carries on with the
-    // token it has. No new token is asked for.
+    // The vault moved. The station sees an AgentVault at another address and
+    // does not show it the token: the owner is told, and connects again.
+    let shown = vault.inner.lock().unwrap().presented.len();
     let vault = vault.moved(spare);
+    let v = s.call("vault.check", json!({}));
+    let address = check(&v, "address");
+    assert_eq!(
+        (&v["health"], &address["action"]["label"]),
+        (&json!("problem"), &json!("Reconnect")),
+        "{v}"
+    );
+    assert!(
+        address["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("The vault seems to have moved to {}", vault.url())),
+        "{v}"
+    );
+    s.call("vault.check", json!({}));
+    s.call("vault.refresh", json!({}));
+    assert_eq!(
+        vault.inner.lock().unwrap().presented.len(),
+        shown,
+        "the token was never shown to the new address"
+    );
+    assert_eq!(vault.issued(), vec![token.clone()]);
+    // Reconnect is the ordinary approval, at the vault that answers now.
+    let token = connect(&s, &vault);
     let v = s.call("vault.check", json!({}));
     assert_eq!(
         (&v["health"], v["url"].as_str()),
         (&json!("ok"), Some(vault.url().as_str())),
         "{v}"
     );
-    assert!(check(&v, "address")["detail"]
-        .as_str()
-        .unwrap()
-        .contains("moved"));
-    s.call(
-        "vault.call",
-        json!({"name": "OPENAI_API_KEY", "path": "/v1/models"}),
-    );
-    assert_eq!(vault.calls()[0]["token"], json!(token.clone()));
-    assert_eq!(vault.issued(), vec![token.clone()]);
+    assert_eq!(vault.issued().len(), 2);
 
     // The vault is not answering anywhere: nothing to repair, said plainly.
     vault.answer(false);
@@ -739,11 +755,48 @@ fn the_station_checks_the_chain_repairs_what_it_can_and_says_what_is_left() {
     s.call("vault.check", json!({}));
     s.call("vault.refresh", json!({}));
     assert_eq!(alerts(&s, "vault token was refused"), 1);
-    assert_eq!(vault.issued(), vec![token.clone()]);
+    assert_eq!(vault.issued().len(), 2);
     assert_eq!(
         std::fs::read_to_string(s.root.join("state/vault.token")).unwrap(),
         token
     );
+}
+
+/// `[vault] follow_moves = true`, the owner's choice: a station follows a
+/// vault that moved, with the token it has.
+#[test]
+fn a_station_told_to_follow_moves_finds_its_vault_again_with_the_same_token() {
+    let vault = FakeVault::start();
+    let spare = free_port();
+    let s = Station::start_with(
+        "alpha",
+        &format!(
+            "{}follow_moves = true\n",
+            FakeVault::search(&[vault.port, spare])
+        ),
+        &[],
+    );
+    wait_for("the vault to be found", 10, || {
+        (s.call("vault.refresh", json!({}))["found"] == json!(true)).then_some(())
+    });
+    let token = connect(&s, &vault);
+    let vault = vault.moved(spare);
+    let v = s.call("vault.check", json!({}));
+    assert_eq!(
+        (&v["health"], v["url"].as_str()),
+        (&json!("ok"), Some(vault.url().as_str())),
+        "{v}"
+    );
+    assert!(check(&v, "address")["detail"]
+        .as_str()
+        .unwrap()
+        .contains("spandeck followed it"));
+    s.call(
+        "vault.call",
+        json!({"name": "OPENAI_API_KEY", "path": "/v1/models"}),
+    );
+    assert_eq!(vault.calls()[0]["token"], json!(token.clone()));
+    assert_eq!(vault.issued(), vec![token]);
 }
 
 /// With `[vault]` turned off the station looks for no vault and says nothing

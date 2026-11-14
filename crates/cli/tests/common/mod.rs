@@ -668,6 +668,8 @@ pub mod fake_vault {
         pub calls: Vec<Value>,
         pub reports: Vec<String>,
         pub issued: Vec<String>,
+        /// Every token any caller has shown this vault, at whatever address.
+        pub presented: Vec<String>,
         pub port: u16,
         /// What the vault says its version is, when a test wants to choose.
         pub version: Option<String>,
@@ -699,6 +701,7 @@ pub mod fake_vault {
         allow_overdue: bool,
     ) -> Result<String, (StatusCode, Json<Value>)> {
         let t = bearer(h);
+        s.presented.push(t.clone());
         let Some(tok) = s.tokens.get(&t) else {
             return Err((
                 StatusCode::UNAUTHORIZED,

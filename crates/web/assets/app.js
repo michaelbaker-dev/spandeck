@@ -668,8 +668,9 @@ async function vaultAtOpen() {
 let vaultPromptBox = null;
 function vaultPrompt(stations, url) {
   const who = stations.length === 1 ? `${stations[0]} is` : `${stations.slice(0, -1).join(', ')} and ${stations[stations.length - 1]} are`;
-  const gone = () => { if (vaultPromptBox) vaultPromptBox.remove(); vaultPromptBox = null; };
-  gone();
+  // The bar is part of the page, between the top bar and the view, so it
+  // covers nothing: render() puts it there.
+  const gone = () => { vaultPromptBox = null; render(); };
   vaultPromptBox = h('div', { class: 'vault-prompt', role: 'region', 'aria-label': 'Connect to your vault', dataset: { stations: stations.join(',') } },
     h('div', { class: 'grow' },
       h('b', {}, 'Your AgentVault is on the network'),
@@ -680,13 +681,13 @@ function vaultPrompt(stations, url) {
       Promise.all(stations.map(st => api.on(st, 'vault.prompt', { dismissed: true }).catch(() => {}))).then(() => refreshSoon());
       toast('You can connect at any time from the Vault screen.');
     } }, 'Not now'));
-  document.body.append(vaultPromptBox);
+  render();
 }
 // The bar goes once none of its stations needs it: connected from elsewhere, say.
 function vaultPromptSync() {
   if (!vaultPromptBox) return;
   const names = vaultPromptBox.dataset.stations.split(',');
-  if (!S.fleet.stations.some(s => names.includes(s.station) && s.vault?.prompt)) { vaultPromptBox.remove(); vaultPromptBox = null; }
+  if (!S.fleet.stations.some(s => names.includes(s.station) && s.vault?.prompt)) vaultPromptBox = null;
 }
 
 // The one thing that fixes a failed check. `a` is the station's data: its
@@ -2108,8 +2109,9 @@ function render() {
   if (!layCtx) arranging = null;
   // A view that is already on the page stays attached: replacing it would
   // take the keyboard away from whatever is being typed into.
-  if (root.children.length === 2 && root.children[1] === main) root.replaceChild(topbar(), root.children[0]);
-  else root.replaceChildren(topbar(), main);
+  const kids = vaultPromptBox ? [vaultPromptBox, main] : [main];
+  if (root.children.length === kids.length + 1 && kids.every((k, i) => root.children[i + 1] === k)) root.replaceChild(topbar(), root.children[0]);
+  else root.replaceChildren(topbar(), ...kids);
   const side = document.querySelector('.sidebar');
   if (side && sideTop) side.scrollTop = sideTop;
   for (const [key, t] of S.terms) {
@@ -2135,9 +2137,9 @@ function update() {
   const active = document.activeElement;
   const typing = active && active.closest && active.closest('.dialog');
   const focusedTerm = [...S.terms.values()].find(t => t.el.contains(active));
+  vaultPromptSync();
   render();
   if (focusedTerm && !typing) focusedTerm.focus();
-  vaultPromptSync();
   // How many times the page was redrawn for new data. Nothing in the deck
   // reads it; a test waits on it instead of sleeping through a redraw.
   root.dataset.draws = String(++draws);
