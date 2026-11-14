@@ -278,7 +278,9 @@ impl Daemon {
         let Ok((status, me)) = self.vault_get(&base, "/v1/tokens/self", Some(&token)).await else {
             return;
         };
-        let overdue = me.get("overdue").and_then(|o| o.as_bool()).unwrap_or(false);
+        // The vault says why it refused in `code`; act on that, not on the text.
+        let overdue =
+            status == 403 && me.get("code").and_then(|c| c.as_str()) == Some("token_overdue");
         let mut notes: Vec<(&str, String)> = vec![];
         {
             let mut seen = self.vault.seen.lock().unwrap();
@@ -507,10 +509,15 @@ impl Daemon {
                 .fleet
                 .http
                 .get(format!("{base}/v1/token-requests/{id}"))
-                .header("x-agentvault-collect-code", &code)
+                .header("x-collect-code", &code)
                 .send()
                 .await;
             let Ok(resp) = resp else { continue };
+            // The vault forgets a request once it is collected, and all of them
+            // when it restarts.
+            if resp.status().as_u16() == 404 {
+                break "forgotten by the vault (it may have restarted); press Connect again";
+            }
             let body: Value = resp.json().await.unwrap_or(Value::Null);
             if let Some(token) = body.get("token").and_then(|t| t.as_str()) {
                 if self.vault_save_token(token).is_err() {
@@ -730,9 +737,8 @@ impl Daemon {
             .to_string();
         let bytes = resp.bytes().await.map_err(|e| invalid(e.to_string()))?;
         // The vault's own "locked" answer is not the provider's: say so plainly.
-        if status == 503
-            && String::from_utf8_lossy(&bytes[..bytes.len().min(400)]).contains("locked")
-        {
+        let head = String::from_utf8_lossy(&bytes[..bytes.len().min(400)]).to_lowercase();
+        if status == 503 && (head.contains("sealed") || head.contains("locked")) {
             let mut seen = self.vault.seen.lock().unwrap();
             seen.unlocked = false;
             return Err(invalid(
@@ -778,7 +784,7 @@ impl Daemon {
             .http
             .post(format!("{base}/v1/attention/report"))
             .bearer_auth(&token)
-            .json(&json!({"value": value, "where": format!("{seen_in} on {}", self.station), "found_ms": now_ms()}))
+            .json(&json!({"value": value, "place": seen_in.chars().take(40).collect::<String>()}))
             .send()
             .await
             .is_ok();

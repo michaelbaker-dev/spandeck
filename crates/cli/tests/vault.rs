@@ -511,7 +511,7 @@ fn the_control_deck_connects_a_station_through_a_pop_up_on_the_vault() {
         opened[1]
             .as_str()
             .unwrap()
-            .starts_with(&format!("{}/approve/", vault.url())),
+            .starts_with(&format!("{}/#/approve/", vault.url())),
         "{opened}"
     );
     assert!(

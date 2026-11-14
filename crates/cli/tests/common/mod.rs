@@ -524,6 +524,7 @@ pub mod fake_vault {
         pub calls: Vec<Value>,
         pub reports: Vec<String>,
         pub issued: Vec<String>,
+        pub port: u16,
         n: u32,
     }
 
@@ -559,13 +560,15 @@ pub mod fake_vault {
         if tok.retired {
             return Err((
                 StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "token was replaced"})),
+                Json(json!({"error": "token was replaced", "code": "token_replaced"})),
             ));
         }
         if tok.overdue && !allow_overdue {
             return Err((
                 StatusCode::FORBIDDEN,
-                Json(json!({"error": "token is overdue for rotation", "overdue": true})),
+                Json(
+                    json!({"error": "this token is overdue for rotation; rotate it first", "code": "token_overdue"}),
+                ),
             ));
         }
         if let Some(old) = tok.replaces.clone() {
@@ -581,7 +584,9 @@ pub mod fake_vault {
     async fn status(State(s): State<S>) -> Json<Value> {
         let s = s.lock().unwrap();
         if s.service {
-            Json(json!({"service": "agentvault", "version": "0.1.0-fake", "unlocked": s.unlocked}))
+            Json(
+                json!({"service": "agentvault", "version": "0.1.0-fake", "initialized": true, "sealed": !s.unlocked}),
+            )
         } else {
             Json(json!({"version": "something else"}))
         }
@@ -599,7 +604,7 @@ pub mod fake_vault {
         s.requests
             .insert(id.clone(), (code.clone(), station, "pending".into(), false));
         Json(
-            json!({"request_id": id, "approve_url": format!("/approve/{id}"), "collect_code": code, "expires_at": 0}),
+            json!({"request_id": id, "approve_url": format!("http://127.0.0.1:{}/#/approve/{id}", s.port), "collect_code": code, "expires_at": 0}),
         )
     }
 
@@ -616,7 +621,7 @@ pub mod fake_vault {
     ) -> (StatusCode, Json<Value>) {
         let mut s = s.lock().unwrap();
         let code = h
-            .get("x-agentvault-collect-code")
+            .get("x-collect-code")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
@@ -653,7 +658,10 @@ pub mod fake_vault {
                     ),
                 )
             }
-            ("approved", true) => (StatusCode::GONE, Json(json!({"status": "collected"}))),
+            ("approved", true) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "no such request; it may have expired, so ask again"})),
+            ),
             (other, _) => (StatusCode::OK, Json(json!({"status": other}))),
         }
     }
@@ -729,7 +737,9 @@ pub mod fake_vault {
         if !s.unlocked {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error": "vault is locked"})),
+                Json(
+                    json!({"error": "vault is sealed: sign in to the web interface to unlock it"}),
+                ),
             );
         }
         if let Err(e) = auth(&mut s, &h, false) {
@@ -737,11 +747,11 @@ pub mod fake_vault {
         }
         (
             StatusCode::OK,
-            Json(json!([
+            Json(json!({"secrets": [
                 {"name": "OPENAI_API_KEY", "description": "OpenAI key for the demo project", "provider": "openai", "risk": "medium"},
                 {"name": "OPENAI_ORG", "description": "OpenAI organisation id", "provider": "openai", "risk": "low"},
                 {"name": "GITHUB_TOKEN", "description": "GitHub token", "provider": "github", "risk": "high"}
-            ])),
+            ]})),
         )
     }
 
@@ -773,7 +783,9 @@ pub mod fake_vault {
         if !s.unlocked {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error": "vault is locked"})),
+                Json(
+                    json!({"error": "vault is sealed: sign in to the web interface to unlock it"}),
+                ),
             );
         }
         let t = match auth(&mut s, &h, false) {
@@ -804,7 +816,7 @@ pub mod fake_vault {
         s.reports
             .push(body["value"].as_str().unwrap_or("").to_string());
         // Always the same reply: a report never says whether it matched.
-        (StatusCode::OK, Json(json!({"received": true})))
+        (StatusCode::ACCEPTED, Json(json!({"received": true})))
     }
 
     impl FakeVault {
@@ -817,6 +829,7 @@ pub mod fake_vault {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let port = listener.local_addr().unwrap().port();
+            inner.lock().unwrap().port = port;
             let app = Router::new()
                 .route("/v1/status", get(status))
                 .route("/v1/token-requests", post(open_request))
