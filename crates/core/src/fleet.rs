@@ -456,6 +456,7 @@ impl Daemon {
             self.emit("fleet.updated", None, None, json!({}));
         }
         self.setup_sync().await;
+        self.deck_sync().await;
     }
 
     pub fn fleet_view(&self) -> Value {

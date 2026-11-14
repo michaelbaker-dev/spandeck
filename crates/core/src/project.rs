@@ -92,15 +92,28 @@ pub struct Layout {
 }
 
 /// A pane, or two parts side by side (`row`) or one above the other (`col`).
+/// A leaf names any pane: one with a name in a project, or one with no
+/// project by its id; on this station or another.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
+#[serde(untagged, try_from = "RawNode")]
 pub enum LayoutNode {
     Pane {
         /// The pane's name in its project.
         pane: String,
-        /// Another project's pane shown here as a guest. Empty: this project.
+        /// Another project's pane shown here as a guest. Empty: the layout's
+        /// own project.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
+        /// Empty: the station the layout is stored on, or, for a layout kept
+        /// by the whole fleet, the station it is being viewed from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        station: Option<String>,
+    },
+    /// A pane that is in no project.
+    PaneId {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        station: Option<String>,
     },
     Split {
         dir: String,
@@ -111,18 +124,76 @@ pub enum LayoutNode {
     },
 }
 
+/// A node as written. Which kind it is follows from the keys it has, so a
+/// leaf that names a pane both ways is refused instead of half read.
+#[derive(Deserialize)]
+struct RawNode {
+    pane: Option<String>,
+    id: Option<String>,
+    project: Option<String>,
+    station: Option<String>,
+    dir: Option<String>,
+    ratio: Option<u16>,
+    a: Option<Box<LayoutNode>>,
+    b: Option<Box<LayoutNode>>,
+}
+
+impl TryFrom<RawNode> for LayoutNode {
+    type Error = String;
+    fn try_from(n: RawNode) -> std::result::Result<LayoutNode, String> {
+        let split = n.dir.is_some() || n.ratio.is_some() || n.a.is_some() || n.b.is_some();
+        match (n.pane, n.id, split) {
+            (None, None, true) => match (n.dir, n.ratio, n.a, n.b) {
+                (Some(dir), Some(ratio), Some(a), Some(b)) => {
+                    Ok(LayoutNode::Split { dir, ratio, a, b })
+                }
+                _ => Err("a split needs dir, ratio, a and b".into()),
+            },
+            (Some(pane), None, false) => Ok(LayoutNode::Pane {
+                pane,
+                project: n.project,
+                station: n.station,
+            }),
+            (None, Some(_), false) if n.project.is_some() => {
+                Err("a pane named by id is in no project; name it by pane and project".into())
+            }
+            (None, Some(id), false) => Ok(LayoutNode::PaneId {
+                id,
+                station: n.station,
+            }),
+            _ => Err(
+                "a layout part is a split, or one pane: by pane (a name) or by id, not both".into(),
+            ),
+        }
+    }
+}
+
 impl LayoutNode {
-    /// (leaves, depth), or why this is not a layout.
+    /// The number of panes, or why this is not a layout.
     fn check(&self, depth: u32) -> std::result::Result<u32, String> {
         if depth > 8 {
             return Err("a layout is at most 8 splits deep".into());
         }
+        let station_ok = |station: &Option<String>| match station.as_deref() {
+            Some(s) if !valid_name(s) => Err(format!("{s:?} is not a station name")),
+            _ => Ok(1),
+        };
         match self {
-            LayoutNode::Pane { pane, project } => {
+            LayoutNode::Pane {
+                pane,
+                project,
+                station,
+            } => {
                 if !valid_name(pane) || project.as_deref().is_some_and(|p| !valid_name(p)) {
                     return Err(format!("{pane:?} is not a pane name"));
                 }
-                Ok(1)
+                station_ok(station)
+            }
+            LayoutNode::PaneId { id, station } => {
+                if !valid_name(id) {
+                    return Err(format!("{id:?} is not a pane id"));
+                }
+                station_ok(station)
             }
             LayoutNode::Split { dir, ratio, a, b } => {
                 if dir != "row" && dir != "col" {
@@ -134,6 +205,21 @@ impl LayoutNode {
                 Ok(a.check(depth + 1)? + b.check(depth + 1)?)
             }
         }
+    }
+}
+
+impl Layout {
+    /// Why this cannot be saved, if it cannot.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if !valid_name(&self.name) {
+            return Err("layout names use letters, digits, - _ . only".into());
+        }
+        if let Some(tree) = &self.tree {
+            if tree.check(0)? > 16 {
+                return Err("a layout holds at most 16 panes".into());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -188,7 +274,7 @@ impl ProjectFile {
     }
 }
 
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name
@@ -379,15 +465,7 @@ impl Daemon {
 
     /// Save (or replace) one of a project's layouts in its project file.
     pub fn project_layout_save(&self, project: &str, layout: Layout, by: &str) -> Result<Value> {
-        if !valid_name(&layout.name) {
-            return Err(invalid("layout names use letters, digits, - _ . only"));
-        }
-        if let Some(tree) = &layout.tree {
-            let leaves = tree.check(0).map_err(invalid)?;
-            if leaves > 16 {
-                return Err(invalid("a layout holds at most 16 panes"));
-            }
-        }
+        layout.validate().map_err(invalid)?;
         let (path, mut file) = self.project_file(project)?;
         match file.layouts.iter_mut().find(|l| l.name == layout.name) {
             Some(existing) => {
@@ -579,5 +657,51 @@ impl Daemon {
             json!({}),
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A layout holds any pane (the owner's rule, 14 Nov 2026), and project
+    /// files written before that rule still load and are written back as
+    /// they were.
+    #[test]
+    fn a_project_file_keeps_old_layout_leaves_and_takes_the_new_ones() {
+        let old = "name = \"api\"\n\n[review]\nsignoff_before_push = false\n\n[recall]\ncross_project = false\n\n[vault]\n\n\
+                   [[layout]]\nname = \"build\"\n\n[layout.tree]\ndir = \"row\"\nratio = 600\n\n\
+                   [layout.tree.a]\npane = \"dev\"\n\n[layout.tree.b]\npane = \"logs\"\nproject = \"ops\"\n";
+        let file: ProjectFile = toml::from_str(old).unwrap();
+        assert_eq!(toml::to_string_pretty(&file).unwrap(), old);
+
+        let new = "name = \"api\"\n[[layout]]\nname = \"all\"\n[layout.tree]\ndir = \"col\"\nratio = 500\n\
+                   [layout.tree.a]\npane = \"dev\"\nproject = \"ops\"\nstation = \"spark2\"\n\
+                   [layout.tree.b]\nid = \"p-01abc\"\nstation = \"spark2\"\n";
+        let file: ProjectFile = toml::from_str(new).unwrap();
+        assert_eq!(file.layouts[0].validate(), Ok(()));
+        let again: ProjectFile = toml::from_str(&toml::to_string_pretty(&file).unwrap()).unwrap();
+        assert_eq!(again, file);
+        let Some(LayoutNode::Split { a, b, .. }) = &file.layouts[0].tree else {
+            panic!("not a split: {file:?}");
+        };
+        assert_eq!(
+            (&**a, &**b),
+            (
+                &LayoutNode::Pane {
+                    pane: "dev".into(),
+                    project: Some("ops".into()),
+                    station: Some("spark2".into())
+                },
+                &LayoutNode::PaneId {
+                    id: "p-01abc".into(),
+                    station: Some("spark2".into())
+                }
+            )
+        );
+
+        // A leaf names its pane one way.
+        let both = "name = \"api\"\n[[layout]]\nname = \"x\"\n[layout.tree]\npane = \"dev\"\nid = \"p-1\"\n";
+        assert!(toml::from_str::<ProjectFile>(both).is_err());
     }
 }

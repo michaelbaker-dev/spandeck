@@ -16,11 +16,13 @@
 //!   fleet     discovery over Tailscale, trust, peer calls, stop-all
 //!   notify    the inbox and push rules
 //!   setup     fleet-wide agent setup: MCP servers, skills, model defaults
+//!   deck      fleet-wide deck document: global layouts and pins
 //!   vault     AgentVault: station token, key use through the vault's proxy
 
 pub mod client;
 pub mod daemon;
 pub mod db;
+pub mod deck;
 pub mod doctor;
 pub mod fleet;
 pub mod git;

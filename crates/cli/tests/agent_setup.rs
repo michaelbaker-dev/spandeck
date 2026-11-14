@@ -1,6 +1,7 @@
 //! Agent setup: MCP servers, skills and model defaults set once in the
 //! Control Deck and applied to every agent on every station; and running a
-//! command in agents from the deck.
+//! command in agents from the deck. And the other document every station
+//! shares: the deck's global layouts and pins.
 mod common;
 use common::*;
 use serde_json::{json, Value};
@@ -307,4 +308,140 @@ fn the_control_deck_edits_the_setup_and_runs_a_command_in_an_agent() {
               [...document.querySelectorAll('.dialog button')].find(b => b.innerText === 'Run and open the terminal').click(); return true; })()");
     s.wait_text(&pane, "[fake] got: /login");
     page.wait("the agent's terminal", &format!("location.hash === '#/s/alpha/p/{pane}' && !!document.querySelector('.pane .xterm-rows')"));
+}
+
+// ---------------------------------------------------------------- the deck
+// The owner's rule (14 Nov 2026): "every station has the exact same left
+// window". Global layouts and pins are one document on every station, kept
+// the same the way the agent setup is.
+
+fn everything() -> Value {
+    json!({"name": "everything", "lines": true, "tree": {"dir": "row", "ratio": 500,
+        "a": {"pane": "build", "project": "api", "station": "bravo"},
+        "b": {"dir": "col", "ratio": 400, "a": {"id": "p-01abc"}, "b": {"id": "p-01abd", "station": "alpha"}}}})
+}
+
+#[test]
+fn global_layouts_and_pins_are_the_same_on_every_station_and_only_the_owner_changes_them() {
+    let (a, b) = Station::pair();
+    let saved = a.call("deck.layout.save", json!({"layout": everything()}));
+    assert_eq!(saved, json!({"layout": "everything", "changed": true}));
+    assert_eq!(
+        a.call("deck.layout.save", json!({"layout": everything()}))["changed"],
+        json!(false)
+    );
+    let pins = [
+        json!({"kind": "pane", "station": "bravo", "id": "p-01abc"}),
+        json!({"kind": "layout", "name": "everything"}),
+        json!({"kind": "layout", "station": "bravo", "project": "api", "name": "build"}),
+    ];
+    for pin in &pins {
+        a.call("deck.pin", json!({"pin": pin}));
+    }
+    // Pinning twice pins once.
+    assert_eq!(a.call("deck.pin", json!({"pin": pins[0]})), json!(pins));
+
+    let same_on_both = |what: &str| {
+        wait_for(what, 15, || {
+            let (mine, theirs) = (a.call("deck.get", json!({})), b.call("deck.get", json!({})));
+            (mine == theirs).then_some(theirs)
+        })
+    };
+    let deck = same_on_both("bravo to have the same deck");
+    assert_eq!(deck["layouts"], json!([everything()]));
+    assert_eq!(deck["pins"], json!(pins));
+    assert!(b
+        .log("deck.received")
+        .iter()
+        .any(|e| e["actor"] == json!("alpha")));
+
+    // A change made on the other station comes back the same way. Removing a
+    // global layout unpins it, and nothing else.
+    b.call("deck.unpin", json!({"pin": pins[0]}));
+    assert_eq!(
+        b.call("deck.layout.remove", json!({"layout": "everything"})),
+        json!({"removed": "everything"})
+    );
+    let deck = same_on_both("alpha to have bravo's changes");
+    assert_eq!(
+        (&deck["layouts"], &deck["pins"]),
+        (&json!([]), &json!([pins[2]]))
+    );
+
+    // An agent changes none of it, and cannot stand in for a station.
+    let agent = a.fake(json!({"steps": []}), json!({}));
+    a.wait_text(&agent, "[fake] session");
+    for (method, params) in [
+        ("deck.layout.save", json!({"layout": everything()})),
+        ("deck.pin", json!({"pin": pins[0]})),
+        ("deck.unpin", json!({"pin": pins[2]})),
+        ("deck.layout.remove", json!({"layout": "everything"})),
+        (
+            "deck.push",
+            json!({"deck": {"updated_ms": u64::MAX, "pins": [pins[0]]}}),
+        ),
+    ] {
+        assert_eq!(
+            a.call_as_pane(&agent, method, params).unwrap_err().code,
+            "denied",
+            "{method}"
+        );
+    }
+    // Nor does the owner's own token push a whole document past the change path.
+    assert_eq!(
+        a.try_call("deck.push", json!({"deck": {"updated_ms": u64::MAX}}))
+            .unwrap_err()
+            .code,
+        "denied"
+    );
+
+    // What is not a layout or a pin is refused and changes nothing.
+    let bad = |layout: Value| {
+        a.try_call("deck.layout.save", json!({"layout": layout}))
+            .unwrap_err()
+            .message
+    };
+    assert!(bad(json!({"name": "x", "tree": {"pane": "build", "id": "p-1"}})).contains("not both"));
+    assert!(
+        bad(json!({"name": "x", "tree": {"id": "p-1", "project": "api"}})).contains("no project")
+    );
+    assert!(
+        bad(json!({"name": "x", "tree": {"pane": "build", "station": "no such/station"}}))
+            .contains("station name")
+    );
+    assert!(bad(json!({"name": "../x"})).contains("layout names"));
+    assert!(a
+        .try_call(
+            "deck.pin",
+            json!({"pin": {"kind": "layout", "project": "api", "name": "build"}})
+        )
+        .unwrap_err()
+        .message
+        .contains("names its station and its project"));
+    assert_eq!(a.call("deck.get", json!({})), deck);
+}
+
+#[test]
+fn a_station_that_was_away_gets_the_deck_when_it_is_seen_again() {
+    let (a, mut b) = Station::pair();
+    b.kill9();
+    wait_for("bravo to be seen as unreachable", 20, || {
+        let v = a.call("fleet.refresh", json!({}));
+        v["stations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["station"] == json!("bravo") && s["state"] == json!("unreachable"))
+            .then_some(())
+    });
+    a.call("deck.layout.save", json!({"layout": everything()}));
+    a.call(
+        "deck.pin",
+        json!({"pin": {"kind": "layout", "name": "everything"}}),
+    );
+    b.launch();
+    wait_for("bravo to receive the deck", 30, || {
+        a.call("fleet.refresh", json!({}));
+        (b.try_call("deck.get", json!({})).ok()? == a.call("deck.get", json!({}))).then_some(())
+    });
 }

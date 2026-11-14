@@ -53,6 +53,7 @@ const AGENT_METHODS: &[&str] = &[
 /// user's own request from a Control Deck opened on that station.
 const PEER_METHODS: &[&str] = &[
     "setup.push",
+    "deck.push",
     "station.info",
     "relay.accept",
     "stop.apply",
@@ -90,6 +91,7 @@ const READ_METHODS: &[&str] = &[
     "integration.status",
     "archive.sessions",
     "setup.get",
+    "deck.get",
     "vault.status",
     "trust.status",
 ];
@@ -281,13 +283,9 @@ impl Daemon {
                 self.resize(s(&params, "pane")?, cols, rows, &caller.client)?;
                 json!({"ok": true})
             }
-            "pane.rename" => {
-                let pane = self.pane(s(&params, "pane")?)?;
-                pane.meta.lock().unwrap().name = s(&params, "name")?.to_string();
-                self.save_pane(&pane);
-                self.emit("pane.updated", Some(&pane.id), None, json!({}));
-                pane.view(&self.station)
-            }
+            "pane.rename" => self
+                .rename_pane(s(&params, "pane")?, s(&params, "name")?)?
+                .view(&self.station),
             "pane.set" => {
                 let pane = self.pane(s(&params, "pane")?)?;
                 {
@@ -541,7 +539,9 @@ impl Daemon {
                 let env: crate::relay::Envelope = p(params
                     .get("envelope")
                     .ok_or_else(|| invalid("missing envelope"))?)?;
-                json!(self.relay_accept(&env))
+                // The station a message came from is the one that signed the call.
+                let from = (caller.authority == Authority::Peer).then_some(by);
+                json!(self.relay_accept(&env, from))
             }
 
             // --------------------------------------------------------- tasks
@@ -849,6 +849,36 @@ impl Daemon {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
                 self.setup_set(setup, by, fleet).await?
+            }
+            // ------------------------------------------------------ the deck
+            // Global layouts and pins, the same on every station. The owner's
+            // alone: neither the agents' list nor the peers' has a method
+            // that changes them.
+            "deck.get" => json!(self.deck()),
+            "deck.layout.save" => {
+                let layout: crate::project::Layout = p(params
+                    .get("layout")
+                    .ok_or_else(|| invalid("missing layout"))?)?;
+                self.deck_layout_save(layout, by)?
+            }
+            "deck.layout.remove" => self.deck_layout_remove(s(&params, "layout")?, by)?,
+            "deck.pin" | "deck.unpin" => {
+                let pin: crate::deck::Pin =
+                    p(params.get("pin").ok_or_else(|| invalid("missing pin"))?)?;
+                self.deck_pin(pin, method == "deck.pin", by)?
+            }
+            // A station offering its copy of the document; the newer is kept.
+            // What it carries was written by the owner's change path on some
+            // station, so only a station's own signed call is taken.
+            "deck.push" => {
+                if caller.authority != Authority::Peer {
+                    return Err(Error::Denied(
+                        "deck.push is for another station; use deck.layout.save or deck.pin".into(),
+                    ));
+                }
+                let deck: crate::deck::Deck =
+                    p(params.get("deck").ok_or_else(|| invalid("missing deck"))?)?;
+                self.deck_push(deck, by)?
             }
             "setup.push" => {
                 let setup: crate::setup::AgentSetup = p(params

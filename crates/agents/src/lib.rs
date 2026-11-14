@@ -196,10 +196,54 @@ pub fn kind_from_command(program: &str) -> AgentKind {
     }
 }
 
+/// Which picture stands for a pane. Agents spandeck has an adapter for are
+/// known by their kind; any other program by its name, since a few agents
+/// (Gemini, Grok, OpenCode) run in a pane with no adapter yet.
+pub fn icon(kind: AgentKind, program: &str) -> &'static str {
+    match kind {
+        AgentKind::Claude => "claude",
+        AgentKind::Codex => "codex",
+        AgentKind::Fake => "agent",
+        AgentKind::Shell => match program.rsplit('/').next().unwrap_or(program) {
+            "gemini" => "gemini",
+            "grok" => "grok",
+            "opencode" => "opencode",
+            _ => "shell",
+        },
+    }
+}
+
 /// The enforcement table (Phase 7), one row per agent kind.
 pub fn enforcement_table() -> Vec<(AgentKind, Capabilities)> {
     [AgentKind::Claude, AgentKind::Codex]
         .into_iter()
         .filter_map(|k| adapter(k).map(|a| (k, a.capabilities())))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Control Deck draws a pane's icon from this (the pane view's
+    /// `icon`); its seven values are the contract with the deck.
+    #[test]
+    fn a_pane_icon_comes_from_the_agent_kind_or_else_the_program_name() {
+        for (kind, program, want) in [
+            (AgentKind::Claude, "/opt/wrappers/my-launcher", "claude"),
+            (AgentKind::Codex, "/bin/sh", "codex"),
+            (AgentKind::Fake, "spandeck-fake-agent", "agent"),
+            (AgentKind::Shell, "/usr/local/bin/gemini", "gemini"),
+            (AgentKind::Shell, "grok", "grok"),
+            (
+                AgentKind::Shell,
+                "/home/me/.opencode/bin/opencode",
+                "opencode",
+            ),
+            (AgentKind::Shell, "/bin/zsh", "shell"),
+            (AgentKind::Shell, "gemini-wrapper", "shell"),
+        ] {
+            assert_eq!(icon(kind, program), want, "{kind:?} {program}");
+        }
+    }
 }

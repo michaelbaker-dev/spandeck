@@ -4,6 +4,77 @@ mod common;
 use common::*;
 use serde_json::json;
 
+/// Pane names are unique (the owner's rule, 14 Nov 2026: "if panes are the
+/// same name it messes up the layout, we should not allow creating duplicate
+/// pane names"): within a project, and among the panes with no project.
+#[test]
+fn a_pane_name_is_used_once_in_a_project_and_once_outside_any() {
+    let s = Station::start("alpha");
+    let repo = s.git_repo("proj");
+    s.call(
+        "project.new",
+        json!({"path": repo, "name": "proj", "panes": [{"name": "build", "agent": "shell"}], "open": true}),
+    );
+    let spawn = |extra: serde_json::Value| {
+        let mut params = json!({"program": "/bin/sh", "cwd": s.root.join("home")});
+        for (k, v) in extra.as_object().unwrap() {
+            params[k] = v.clone();
+        }
+        s.try_call("pane.spawn", params)
+    };
+
+    // A name somebody chose: refused when taken, with the name and the place.
+    let first = spawn(json!({"name": "logs"})).unwrap();
+    let refused = spawn(json!({"name": "logs"})).unwrap_err();
+    assert_eq!(refused.code, "invalid");
+    assert!(
+        refused.message.contains("\"logs\"")
+            && refused.message.contains("no project")
+            && refused.message.contains("choose another name"),
+        "{}",
+        refused.message
+    );
+    let refused = spawn(json!({"name": "build", "project": "proj"})).unwrap_err();
+    assert!(
+        refused.message.contains("in project proj"),
+        "{}",
+        refused.message
+    );
+    // The same name in another place is another pane.
+    let guest = spawn(json!({"name": "logs", "project": "proj"})).unwrap();
+    assert_eq!(guest["name"], json!("logs"));
+
+    // A name nobody chose is numbered.
+    let names: Vec<String> = (0..3)
+        .map(|_| {
+            spawn(json!({})).unwrap()["name"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(names, ["shell", "shell-2", "shell-3"]);
+
+    // Renaming follows the same rule, and a pane may keep its own name.
+    let rename = |name: &str| s.try_call("pane.rename", json!({"pane": first["id"], "name": name}));
+    assert!(rename("shell-2")
+        .unwrap_err()
+        .message
+        .contains("choose another name"));
+    assert_eq!(rename("logs").unwrap()["name"], json!("logs"));
+    assert_eq!(rename("tail").unwrap()["name"], json!("tail"));
+
+    // A pane restarted in place is still itself, and a project still reopens.
+    let again = s.call("pane.restart", json!({"pane": guest["id"]}));
+    assert_eq!(
+        (&again["id"], &again["name"]),
+        (&guest["id"], &json!("logs"))
+    );
+    s.call("project.close", json!({"name": "proj"}));
+    let reopened = s.call("project.open", json!({"name": "proj"}));
+    assert_eq!(reopened["started"][0]["slot"], json!("build"));
+}
+
 #[test]
 fn a_project_created_closed_and_reopened_restores_its_panes_and_agents() {
     let s = Station::start("alpha");

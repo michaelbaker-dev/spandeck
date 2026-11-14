@@ -12,10 +12,12 @@ use crate::relay::{split_address, MessageStore, NewMessage, TaskAuth, TASK_AUTH_
 
 const ROUTE_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 
+fn not_linked_text(own: &str, other: &str) -> String {
+    format!("project {other} is not linked with {own}; only the owner can link two projects")
+}
+
 fn not_linked(own: &str, other: &str) -> Error {
-    Error::Denied(format!(
-        "project {other} is not linked with {own}; only the owner can link two projects"
-    ))
+    Error::Denied(not_linked_text(own, other))
 }
 
 impl Daemon {
@@ -368,7 +370,39 @@ impl Daemon {
     }
 
     /// A message arriving from another station.
-    pub fn relay_accept(&self, env: &crate::relay::Envelope) -> crate::relay::RelayAck {
+    ///
+    /// An agent reaches its own project and a project linked to it, here as
+    /// on its own station: the sending station cannot know which project a
+    /// pane addressed by bare name is in, so this one checks. The envelope's
+    /// `project` is the sender's, and is set only when the sender is a pane
+    /// in a project; the owner's messages and those of panes with no project
+    /// carry none and are taken as before. `from` is the station whose
+    /// signed call this is.
+    pub fn relay_accept(
+        &self,
+        env: &crate::relay::Envelope,
+        from: Option<&str>,
+    ) -> crate::relay::RelayAck {
+        let (name, _) = split_address(&env.recipient);
+        let from = from.or(split_address(&env.sender).1).unwrap_or_default();
+        let theirs = self
+            .pane(name)
+            .ok()
+            .and_then(|p| p.meta.lock().unwrap().project.clone());
+        if let (Some(own), Some(theirs)) = (&env.project, &theirs) {
+            // Not asked again for a message already taken: a duplicate must
+            // be acknowledged whatever has changed since.
+            if own != theirs
+                && !self.linked(theirs, own, from)
+                && self.mail().get(&env.id).is_none()
+            {
+                return crate::relay::RelayAck {
+                    received: false,
+                    duplicate: false,
+                    refused: Some(not_linked_text(own, theirs)),
+                };
+            }
+        }
         let ack = self.mail().accept(env, now_ms());
         if ack.received && !ack.duplicate {
             self.record(

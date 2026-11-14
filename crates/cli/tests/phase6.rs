@@ -1126,6 +1126,42 @@ fn a_link_between_stations_is_known_on_both_and_carries_messages_and_findings() 
         assert_eq!(s.call("approval.list", json!({"all": true})), json!([]));
     }
 
+    // The link opens vault and nothing else on bravo. A pane of another
+    // project there, addressed by its bare name, passes alpha's route
+    // approval (alpha cannot know its project) and is refused by bravo.
+    let ledger = project(&b, "ledger", &[], "");
+    let clerk = agent(&b, "ledger", &ledger, "clerk", json!({"steps": []}));
+    b.wait_text(&clerk, "[fake] session");
+    let sent = std::thread::scope(|t| {
+        let send = t.spawn(|| {
+            a.call_as_pane(
+                &pilot,
+                "msg.send",
+                json!({"to": "clerk@bravo", "body": "what is in the ledger?"}),
+            )
+            .unwrap()
+        });
+        let route = wait_for("the route approval", 15, || {
+            a.call("approval.list", json!({}))
+                .as_array()?
+                .first()
+                .cloned()
+        });
+        a.call("approval.answer", json!({"id": route["id"], "allow": true}));
+        send.join().unwrap()
+    });
+    let status = wait_for("bravo to answer", 15, || {
+        let m = a.call("msg.thread", json!({"thread": sent["thread"]}));
+        m[0]["status"]
+            .as_str()
+            .filter(|s| *s != "queued")
+            .map(String::from)
+    });
+    assert_eq!(
+        status,
+        "refused: project ledger is not linked with deck; only the owner can link two projects"
+    );
+
     // A finding posted on bravo is found from alpha.
     b.call_as_pane(
         &keeper,

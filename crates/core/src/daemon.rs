@@ -177,6 +177,7 @@ impl PaneEntry {
             "subagents": m.subagents,
             "last_output_ms": self.term.last_output_ms(), "pid": self.term.pid(),
             "program": m.spec.program,
+            "icon": spandeck_agents::icon(m.agent, &m.spec.program),
         })
     }
 }
@@ -276,6 +277,8 @@ pub struct Inner {
     pub trust: Arc<crate::trust::TrustState>,
     pub web_addrs: Mutex<Vec<String>>,
     pub vault: crate::vault::VaultState,
+    /// Held while the deck document is read, changed and written back.
+    pub(crate) deck_lock: Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -362,6 +365,7 @@ impl Daemon {
             seq: AtomicU64::new(0),
             web_addrs: Mutex::new(vec![]),
             vault: Default::default(),
+            deck_lock: Mutex::new(()),
         }));
         let _ = std::fs::write(daemon.paths.pid_file(), std::process::id().to_string());
 
@@ -669,16 +673,38 @@ impl Daemon {
         // is in it, so that first call waits instead of being refused.
         // (It was refused, now and then, and the agent's session id was lost.)
         let mut panes = self.panes.write().unwrap();
+        // A name belongs to one live pane in its project (or among the panes
+        // with no project). A name the caller chose is refused when taken; a
+        // name nobody chose gets a number. A pane being brought back under
+        // its own id (restart, recovery) is never refused: it gets a number.
+        let project = opts.project.as_deref();
+        let name = match &opts.name {
+            Some(name) if opts.id.is_none() => {
+                if name_taken(&panes, name, project, &id) {
+                    return Err(name_in_use(name, project, &self.station));
+                }
+                name.clone()
+            }
+            chosen => {
+                let base = chosen.clone().unwrap_or_else(|| {
+                    if agent.is_agent() {
+                        agent.as_str().to_string()
+                    } else {
+                        "shell".to_string()
+                    }
+                });
+                let mut name = base.clone();
+                let mut n = 1;
+                while name_taken(&panes, &name, project, &id) {
+                    n += 1;
+                    name = format!("{base}-{n}");
+                }
+                name
+            }
+        };
         let term = Pane::spawn(&spec, self.make_sink(&id, tx.clone()))
             .map_err(|e| invalid(format!("could not start {}: {e}", spec.program)))?;
         let now = now_ms();
-        let name = opts.name.clone().unwrap_or_else(|| {
-            if agent.is_agent() {
-                agent.as_str().to_string()
-            } else {
-                "shell".to_string()
-            }
-        });
         let meta = PaneMeta {
             id: id.clone(),
             name,
@@ -729,6 +755,30 @@ impl Daemon {
             json!({"name": m.name, "agent": m.agent, "resumed": opts.resume.is_some()}),
         );
         Ok(entry)
+    }
+
+    /// Give a pane another name. Refused when a live pane in the same project
+    /// (or, with no project, another pane with none) already has it.
+    pub fn rename_pane(&self, id: &str, name: &str) -> Result<Arc<PaneEntry>> {
+        let pane = self.pane(id)?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(invalid("a pane needs a name"));
+        }
+        {
+            // Held alone across the check and the change, as when a pane is
+            // started, so two renames cannot both find the name free.
+            #[allow(clippy::readonly_write_lock)]
+            let panes = self.panes.write().unwrap();
+            let project = pane.meta.lock().unwrap().project.clone();
+            if name_taken(&panes, name, project.as_deref(), &pane.id) {
+                return Err(name_in_use(name, project.as_deref(), &self.station));
+            }
+            pane.meta.lock().unwrap().name = name.to_string();
+        }
+        self.save_pane(&pane);
+        self.emit("pane.updated", Some(&pane.id), None, json!({}));
+        Ok(pane)
     }
 
     /// Arguments that wire an agent to this daemon at launch, so a pane
@@ -1606,9 +1656,34 @@ impl Daemon {
             "service": crate::doctor::service_installed(&self.home),
             "codex_sandbox_blocked": crate::doctor::codex_sandbox_blocked(&self.home),
             "setup": {"updated_ms": self.setup().updated_ms},
+            "deck": {"updated_ms": self.deck().updated_ms},
             "vault": self.vault_view(),
         })
     }
+}
+
+/// Does a live pane other than `except` have this name in this project (or,
+/// with no project, among the panes that have none)?
+fn name_taken(
+    panes: &BTreeMap<String, Arc<PaneEntry>>,
+    name: &str,
+    project: Option<&str>,
+    except: &str,
+) -> bool {
+    panes.values().any(|p| {
+        let m = p.meta.lock().unwrap();
+        m.id != except && m.exit.is_none() && m.name == name && m.project.as_deref() == project
+    })
+}
+
+fn name_in_use(name: &str, project: Option<&str>, station: &str) -> Error {
+    let place = match project {
+        Some(project) => format!("in project {project}"),
+        None => "among the panes with no project".to_string(),
+    };
+    invalid(format!(
+        "a pane called {name:?} is already running {place} on {station}; choose another name"
+    ))
 }
 
 fn default_keep_awake_cmd() -> Vec<String> {
