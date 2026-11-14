@@ -680,7 +680,12 @@ fn a_program_that_is_there_but_does_not_start_is_reinstalled_not_called_installe
     let way = |id: &str| ways.iter().find(|m| m["id"] == json!(id)).unwrap();
     assert_eq!(opencode["method"], json!("script"));
     assert_eq!(way("npm")["available"], json!(true));
-    assert_eq!(way("brew")["available"], json!(false));
+    // Homebrew is looked for in its usual folders as well as on the path, so
+    // a machine that really has it (the Mac CI runner does) says so.
+    let brew_here = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+        .iter()
+        .any(|p| std::path::Path::new(p).exists());
+    assert_eq!(way("brew")["available"], json!(brew_here));
 
     // A pane for the broken one says what was found and what it said, shows
     // the command, runs it, and starts the copy that answers.
@@ -714,17 +719,19 @@ fn a_program_that_is_there_but_does_not_start_is_reinstalled_not_called_installe
         .call_as_pane(&pane, "agents.install", json!({"agent": "opencode"}))
         .unwrap_err();
     assert_eq!(err.code, "denied");
-    let err = s
-        .try_call(
-            "agents.install",
-            json!({"agent": "opencode", "method": "brew"}),
-        )
-        .unwrap_err();
-    assert!(
-        err.message.contains("Homebrew is not on alpha"),
-        "{}",
-        err.message
-    );
+    if !brew_here {
+        let err = s
+            .try_call(
+                "agents.install",
+                json!({"agent": "opencode", "method": "brew"}),
+            )
+            .unwrap_err();
+        assert!(
+            err.message.contains("Homebrew is not on alpha"),
+            "{}",
+            err.message
+        );
+    }
     let started = s.call(
         "agents.install",
         json!({"agent": "opencode", "method": "npm"}),
