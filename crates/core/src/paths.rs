@@ -90,6 +90,10 @@ impl Paths {
     pub fn worktrees_dir(&self) -> PathBuf {
         self.state_dir.join("worktrees")
     }
+    /// The model price list as last fetched.
+    pub fn prices_file(&self) -> PathBuf {
+        self.state_dir.join("prices.json")
+    }
     pub fn config_file(&self) -> PathBuf {
         self.config_dir.join("config.toml")
     }
@@ -166,6 +170,8 @@ pub struct Config {
     /// Where wake-on-LAN packets are sent. Default: 255.255.255.255.
     pub wake_broadcast: Option<String>,
     pub update: UpdateConfig,
+    /// Model list prices for cost estimates: fetched automatically.
+    pub prices: crate::prices::PricesConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -211,6 +217,7 @@ impl Default for Config {
             remote_start_cmd: None,
             wake_broadcast: None,
             update: UpdateConfig::default(),
+            prices: Default::default(),
         }
     }
 }

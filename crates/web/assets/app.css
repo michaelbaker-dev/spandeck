@@ -280,3 +280,21 @@ button.agent-row:hover { border-color: var(--blue); }
 .phone-watch .watch-feed { max-width: none; overflow: visible; }
 #app.kbd .phone-layout > .lay-title, #app.kbd .phone-layout > .lay-map, #app.kbd .phone-layout > .lay-nav { display: none; }
 .lay-title select { font-size: 14px; min-height: 44px; }
+
+/* Usage: the model and a context gauge in the strip, and the two dialogs. */
+.usage-model, .usage-ctx { color: var(--muted); font-size: 12px; overflow: hidden; min-width: 0; white-space: nowrap; }
+.usage-model { flex: 0 1000 auto; } .usage-ctx { flex: 0 900 auto; display: inline-flex; align-items: center; gap: 5px; }
+.usage-model[role=button], .usage-ctx[role=button] { cursor: pointer; } .usage-model[role=button]:hover, .usage-ctx[role=button]:hover { color: var(--text); }
+.gauge { flex: none; width: 34px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; display: inline-block; }
+.gauge i { display: block; height: 100%; background: var(--blue); }
+.usage-ctx.high .gauge i { background: var(--amber); } .usage-ctx.full .gauge i { background: var(--red); } .usage-ctx.full { color: var(--red); }
+.tile-usage { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.fact { display: flex; flex-direction: column; gap: 2px; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; min-width: 0; }
+.fact span { font-size: 11px; } .fact b { overflow-wrap: anywhere; }
+.table-wrap { overflow-x: auto; } .usage-table { font-size: 12px; } .usage-table th, .usage-table td { padding: 4px 6px; }
+.usage-table .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; } .usage-table td:first-child { overflow-wrap: anywhere; }
+.usage-dialog { display: flex; flex-direction: column; gap: 8px; } .usage-dialog h3 { margin: 8px 0 0; } .usage-dialog p { margin: 0; }
+.phone-pane > .row { flex-wrap: wrap; }
+.phone-usage { order: 9; flex: 1 0 100%; display: block; text-align: left; font-size: 12px; color: var(--text); background: none; border: none; padding: 0 2px; min-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-table.both { table-layout: fixed; } .usage-table.both th:first-child { width: 32%; }

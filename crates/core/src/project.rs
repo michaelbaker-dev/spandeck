@@ -532,7 +532,7 @@ impl Daemon {
             .list_panes()
             .iter()
             .filter(|p| p.meta.lock().unwrap().project.as_deref() == Some(name))
-            .map(|p| p.view(&self.station))
+            .map(|p| self.pane_view(p))
             .collect();
         Ok(json!({
             "name": name, "station": self.station, "address": format!("{name}@{}", self.station),

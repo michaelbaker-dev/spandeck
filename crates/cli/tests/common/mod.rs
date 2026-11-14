@@ -164,10 +164,17 @@ impl Station {
                 .unwrap_or(extra.len());
             (vec![&extra[..idx]], vec![&extra[idx..]])
         };
+        // No test fetches the real price list: a test that wants prices
+        // names a local one (`fake_prices`).
+        let prices = if extra.contains("prices.") {
+            ""
+        } else {
+            "prices.auto = false\n"
+        };
         std::fs::write(
             root.join("config/config.toml"),
             format!(
-                "station = \"{name}\"\nweb_port = {port}\nweb_bind = [\"127.0.0.1\"]\ndiscovery = false\nkeep_awake_cmd = [\"sleep\", \"300\"]\n{}\n[agents.fake]\nprogram = \"{FAKE}\"\n{}\n",
+                "station = \"{name}\"\nweb_port = {port}\nweb_bind = [\"127.0.0.1\"]\ndiscovery = false\nkeep_awake_cmd = [\"sleep\", \"300\"]\n{prices}{}\n[agents.fake]\nprogram = \"{FAKE}\"\n{}\n",
                 top.join(""),
                 tables
                     .join("")
@@ -1157,6 +1164,46 @@ pub mod fake_releases {
                 });
             });
             Releases { port }
+        }
+    }
+}
+
+/// A stand-in for the public model price list: the fixture catalogue, served
+/// on localhost. No test reaches the real one.
+pub mod fake_prices {
+    use std::io::{Read, Write};
+
+    pub const CATALOGUE: &str = include_str!("../../../core/fixtures/prices/models-dev.json");
+
+    pub struct Prices {
+        pub port: u16,
+    }
+
+    impl Prices {
+        pub fn url(&self) -> String {
+            format!("http://127.0.0.1:{}/api.json", self.port)
+        }
+
+        /// `prices.url` for a station's config.
+        pub fn config(&self) -> String {
+            format!("prices.url = \"{}\"\n", self.url())
+        }
+
+        pub fn start() -> Prices {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                for mut s in listener.incoming().flatten() {
+                    let mut buf = [0u8; 4096];
+                    let _ = s.read(&mut buf);
+                    let _ = write!(
+                        s,
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{CATALOGUE}",
+                        CATALOGUE.len()
+                    );
+                }
+            });
+            Prices { port }
         }
     }
 }

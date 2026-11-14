@@ -4,7 +4,7 @@
 // control fits the pane to its view and tells the station. Anyone else shows
 // the pane at its real size, scaled down and letterboxed.
 
-import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText } from './ui.js';
+import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge } from './ui.js';
 import { paneIcon, iconName } from './icons.js';
 
 const THEME = {
@@ -294,6 +294,8 @@ export class PaneTerm {
       h('span', { class: 'strip-activity' }, activity),
       p.needs_reason && s === 'needs_you' ? h('span', { class: 'strip-reason', title: p.needs_reason }, p.needs_reason) : null,
       h('span', { class: 'grow' }),
+      // The model and how full its context is. The first things a narrow strip drops.
+      ...usageGauge(p.usage, this.opts.onUsage ? () => this.opts.onUsage(this) : null),
       p.paused ? h('span', { class: 'chip warn' }, 'paused') : null,
       p.task ? h('span', { class: 'chip', title: 'Working on task ' + p.task }, 'task') : null,
       this.mode === 'watch' ? h('span', { class: 'chip' }, 'watching') : null,

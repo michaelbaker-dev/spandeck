@@ -288,6 +288,7 @@ pub struct Inner {
     pub(crate) deck_lock: Mutex<()>,
     /// Agent programs: versions read, updates running, restarts owed.
     pub(crate) agents: crate::agents::AgentsState,
+    pub(crate) prices: crate::prices::PricesState,
 }
 
 #[derive(Clone)]
@@ -376,7 +377,9 @@ impl Daemon {
             vault: Default::default(),
             deck_lock: Mutex::new(()),
             agents: Default::default(),
+            prices: Default::default(),
         }));
+        daemon.prices_load();
         let _ = std::fs::write(daemon.paths.pid_file(), std::process::id().to_string());
 
         let adopted = match opts.handoff {
@@ -448,9 +451,19 @@ impl Daemon {
         if n % 1200 == 20 {
             self.agents_refresh();
         }
+        // The price list: soon after start, then looked at every minute and
+        // fetched when it is a day old.
+        if n % 120 == 4 {
+            self.prices_refresh();
+        }
         if n.is_multiple_of(2) {
             let d = self.clone();
-            let _ = tokio::task::spawn_blocking(move || d.archive.poll()).await;
+            let changed = tokio::task::spawn_blocking(move || {
+                d.archive.poll();
+                d.archive.poll_usage(now_ms())
+            })
+            .await;
+            self.usage_changed(&changed.unwrap_or_default());
             self.pump_mail();
         }
         self.pump_relay(n).await;
@@ -550,7 +563,7 @@ impl Daemon {
     pub fn pane_views(&self) -> Vec<Value> {
         self.list_panes()
             .iter()
-            .map(|p| p.view(&self.station))
+            .map(|p| self.pane_view(p))
             .collect()
     }
 

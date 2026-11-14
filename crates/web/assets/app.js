@@ -11,7 +11,7 @@
 
 import { Api } from './api.js';
 import { PaneTerm } from './term.js';
-import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText } from './ui.js';
+import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText } from './ui.js';
 import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
 
 const api = new Api();
@@ -192,6 +192,7 @@ function paneMenu(e, st, p, where, term) {
     agent && { label: p.watch ? 'Stop notifying when it finishes' : 'Notify me when it finishes', action: act('pane.set', { watch: !p.watch }) },
     { label: p.muted ? 'Unmute notifications' : 'Mute notifications', action: act('pane.set', { muted: !p.muted }) },
     '-',
+    agent && { label: 'Usage', action: () => usageDialog(st, p) },
     { label: 'Show changes (diff)', action: () => diffPanel(st, p) },
     agent && { label: 'Standing orders for this pane', action: () => ordersPanel(st, p) },
     agent && p.project && alive && { label: 'Start a review loop on its work', action: () => rpc(st, 'recipe.review', { pane: p.id }).then(() => toast('Review loop started')) },
@@ -454,6 +455,7 @@ function palette() {
     { label: 'New project…', run: () => newProjectDialog(S.route.station || api.station) },
     { label: 'Approval requests', run: approvalsPanel },
     { label: 'Inbox', run: inboxPanel },
+    { label: 'Usage: tokens and estimated cost', run: fleetUsageDialog },
     { label: 'Stop every agent on this station', run: () => rpc(api.station, 'stop.all', { scope: 'station' }) },
     { label: 'Check this station (doctor)', run: doctorPanel },
     { label: 'Agent setup: MCP servers, skills, models', run: setupPanel },
@@ -701,6 +703,102 @@ function vaultPanel() {
 
 // -------------------------------------------------------------------- views
 
+// ---- usage ----
+// Token counts are what each agent wrote in its own session data. A cost is
+// an estimate at list prices and is always called that: a subscription is
+// not billed per token.
+
+const tokCell = (n) => h('td', { class: 'num', title: exact(n) + ' tokens' }, fmtTokens(n));
+const costCell = (c, tokens) => h('td', { class: 'num', title: c === null || c === undefined ? (tokens ? 'No price for this in the list' : '') : `$${c.toFixed(4)} at list prices` }, c === null || c === undefined ? (tokens ? 'no price' : '—') : fmtCost(c));
+const listHost = (src) => { try { return new URL(src).host; } catch (e) { return src; } };
+
+function priceNote(src, fetchedMs, unpriced) {
+  const missing = [...new Set(unpriced || [])];
+  return h('p', { class: 'muted small price-note' },
+    src ? `Cost is an estimate at list prices from ${listHost(src)}, fetched ${new Date(fetchedMs).toLocaleDateString()}. What you actually pay depends on your plan.`
+      : 'Cost is not estimated: the price list has not been fetched yet. spandeck fetches it by itself, once a day, when the station can reach the internet.',
+    src && missing.length ? ' ' + missing.map(m => `No price for ${m}.`).join(' ') : null);
+}
+
+function modelTable(rows) {
+  return h('div', { class: 'table-wrap' }, h('table', { class: 'table usage-table' },
+    h('thead', {}, h('tr', {}, h('th', {}, 'Model'), h('th', { class: 'num' }, 'In'), h('th', { class: 'num' }, 'Out'), h('th', { class: 'num', title: 'Read from the cache / written to it' }, 'Cache'), h('th', { class: 'num', title: 'Estimate at list prices' }, 'Est. cost'))),
+    h('tbody', {}, rows.map(m => h('tr', {},
+      h('td', { title: m.provider ? `${m.model} (${m.provider})` : m.model }, m.model), tokCell(m.input_tokens), tokCell(m.output_tokens),
+      h('td', { class: 'num', title: `${exact(m.cache_read_tokens)} read, ${exact(m.cache_write_tokens)} written` }, `${fmtTokens(m.cache_read_tokens)} / ${fmtTokens(m.cache_write_tokens)}`),
+      costCell(m.cost_estimate, m.total_tokens))))));
+}
+
+async function usageDialog(st, p) {
+  let pane = p;
+  try { pane = await api.on(st, 'pane.get', { pane: p.id }); } catch (e) { /* show what the list had */ }
+  const u = pane.usage;
+  const fact = (label, value, title) => h('div', { class: 'fact', title }, h('span', { class: 'muted' }, label), h('b', {}, value));
+  dialog(`Usage · ${p.name}`, (close) => {
+    if (!u || u.total_tokens === null || u.total_tokens === undefined) {
+      return h('div', { class: 'usage-dialog' },
+        h('p', {}, !u ? 'A shell has no usage.' : u.note === 'not reported by this agent' ? `Not reported by this agent. ${p.agent_name} keeps no usage that spandeck can read.` : 'Nothing reported yet. The numbers appear after the agent\'s first reply.'),
+        h('div', { class: 'row end' }, h('button', { onclick: close }, 'Close')));
+    }
+    const share = u.total_tokens ? Math.round(u.subagent_tokens * 100 / u.total_tokens) : 0;
+    return h('div', { class: 'usage-dialog' },
+      h('div', { class: 'facts' },
+        fact('Model in use now', u.model || 'unknown', u.provider ? `Served by ${u.provider}` : ''),
+        fact('Context', u.context_tokens === null ? 'unknown' : u.context_window ? `${fmtTokens(u.context_tokens)} of ${fmtTokens(u.context_window)} (${u.context_pct}%)` : `${fmtTokens(u.context_tokens)} tokens`,
+          u.context_tokens === null ? '' : `${exact(u.context_tokens)} tokens in the last model call` + (u.context_window ? `, of a window of ${exact(u.context_window)} (from the ${u.context_window_source})` : '; this model\'s window is not known')),
+        fact('Input', fmtTokens(u.input_tokens), exact(u.input_tokens) + ' tokens'),
+        fact('Output', fmtTokens(u.output_tokens), exact(u.output_tokens) + ' tokens'),
+        fact('Cache read', fmtTokens(u.cache_read_tokens), exact(u.cache_read_tokens) + ' tokens'),
+        fact('Cache write', fmtTokens(u.cache_write_tokens), exact(u.cache_write_tokens) + ' tokens'),
+        fact('Total', fmtTokens(u.total_tokens), exact(u.total_tokens) + ' tokens'),
+        fact('Turns', u.turns === null ? 'not recorded' : String(u.turns), 'Prompts in this conversation'),
+        fact('Estimated cost', u.price_source ? (u.cost_estimate === null ? 'no price' : fmtCost(u.cost_estimate)) : 'not yet', u.cost_estimate === null ? '' : `$${u.cost_estimate.toFixed(4)} at list prices`)),
+      h('h3', {}, 'By model'),
+      modelTable(u.by_model || []),
+      h('p', { class: 'muted small' }, u.subagent_tokens ? `Sub-agents used ${fmtTokens(u.subagent_tokens)} of the total (${share}%), counted under the model that ran them.` : 'No sub-agent usage in this conversation.'),
+      priceNote(u.price_source, u.price_fetched_ms, u.unpriced_models),
+      u.reported_cost_usd !== null && u.reported_cost_usd !== undefined ? h('p', { class: 'muted small' }, `${p.agent_name}'s own figure, when it last wrote one: ${fmtCost(u.reported_cost_usd)}.`) : null,
+      h('p', { class: 'muted small' }, `From the ${u.source || 'session data'}` + (u.updated_ms ? ` · last updated ${ago(u.updated_ms)} ago` : '') + '. A new conversation starts from zero.'),
+      h('div', { class: 'row end' }, h('button', { onclick: close }, 'Close')));
+  });
+}
+
+async function fleetUsageDialog() {
+  const from = new Date().setHours(0, 0, 0, 0);
+  const stations = onlineStations();
+  const away = S.fleet.stations.filter(s => s.state !== 'online').map(s => s.station);
+  const all = await Promise.all(stations.map(st => api.on(st, 'usage.summary', { today_from_ms: from }).then(sum => ({ st, sum })).catch(e => ({ st, problem: e.message }))));
+  const both = (name, row, title) => h('tr', {}, h('td', { title: title || name }, name),
+    tokCell(row.today.total_tokens), costCell(row.today.cost_estimate, row.today.total_tokens), tokCell(row.all.total_tokens), costCell(row.all.cost_estimate, row.all.total_tokens));
+  const table = (first, rows) => h('div', { class: 'table-wrap' }, h('table', { class: 'table usage-table both' },
+    h('thead', {}, h('tr', {}, h('th', {}, first), h('th', { class: 'num' }, 'Today'), h('th', { class: 'num', title: 'Estimate at list prices' }, 'Est. cost'), h('th', { class: 'num' }, 'All time'), h('th', { class: 'num', title: 'Estimate at list prices' }, 'Est. cost'))),
+    h('tbody', {}, rows)));
+  // The same model on several stations is one line for the fleet.
+  const models = new Map();
+  const add = (a, b) => (a === null || a === undefined) ? b : (b === null || b === undefined) ? a : a + b;
+  for (const { sum } of all) for (const when of sum ? ['today', 'all'] : []) for (const m of sum[when].by_model) {
+    const key = `${m.provider || ''}/${m.model}`;
+    const row = models.get(key) || { model: m.model, provider: m.provider, today: { total_tokens: 0, cost_estimate: null }, all: { total_tokens: 0, cost_estimate: null } };
+    row[when].total_tokens += m.total_tokens;
+    row[when].cost_estimate = add(row[when].cost_estimate, m.cost_estimate);
+    models.set(key, row);
+  }
+  const byModel = [...models.values()].sort((a, b) => b.all.total_tokens - a.all.total_tokens);
+  const first = all.find(x => x.sum);
+  dialog('Usage', (close) => h('div', { class: 'usage-dialog' },
+    h('p', { class: 'muted small' }, 'Tokens each agent reported in its own session data, since spandeck began following it. Today is since midnight here.'),
+    h('h3', {}, 'By model, whole fleet'),
+    byModel.length ? table('Model', byModel.map(m => both(m.model, m, m.provider ? `${m.model} (${m.provider})` : m.model))) : h('p', { class: 'muted' }, 'No agent has reported any usage yet.'),
+    all.map(({ st, sum, problem }) => h('div', { class: 'usage-station' },
+      h('h3', {}, st),
+      problem ? h('p', { class: 'warn-text' }, problem) : [
+        table('Project', [both('Everything on ' + st, sum), ...sum.projects.map(pr => both(pr.project || 'No project', pr))]),
+        sum.panes.length ? table('Pane', sum.panes.map(pn => both(pn.name || pn.pane, pn, `${pn.name || pn.pane} · ${pn.agent}${pn.project ? ' · ' + pn.project : ''}${pn.live ? '' : ' · closed'}`))) : null])),
+    away.length ? h('p', { class: 'muted small' }, `Not counted, because ${away.length === 1 ? 'it is' : 'they are'} not reachable: ${away.join(', ')}.`) : null,
+    first ? priceNote(first.sum.price_source, first.sum.price_fetched_ms, all.flatMap(x => x.sum ? x.sum.all.unpriced_models : [])) : null,
+    h('div', { class: 'row end' }, h('button', { onclick: close }, 'Close'))), { wide: true });
+}
+
 function topbar() {
   const r = S.route;
   const needs = S.fleet.stations.flatMap(s => liveAgents(s.station)).filter(p => p.state === 'needs_you').length;
@@ -723,6 +821,7 @@ function topbar() {
     h('button', { class: S.approvals.length ? 'attn' : '', onclick: approvalsPanel }, 'Approvals', S.approvals.length ? h('span', { class: 'count' }, S.approvals.length) : null),
     h('button', { onclick: inboxPanel }, 'Inbox', unread ? h('span', { class: 'count' }, unread) : null),
     (S.trust?.requests?.length || S.trust?.outgoing) || !isPhone() ? h('button', { class: S.trust?.requests?.length ? 'attn' : '', onclick: trustPanel, title: 'Stations and browsers allowed to control your fleet' }, 'Access', S.trust?.requests?.length ? h('span', { class: 'count' }, S.trust.requests.length) : null) : null,
+    isPhone() ? null : h('button', { onclick: fleetUsageDialog, title: 'Tokens and estimated cost, per station, project, pane and model' }, 'Usage'),
     isPhone() ? null : h('button', { onclick: setupPanel, title: 'MCP servers, skills and model defaults for every agent' }, 'Agent setup'),
     isPhone() || !S.fleet.stations.some(x => x.vault?.found) ? null : h('button', { class: S.fleet.stations.some(x => x.state === 'online' && ['not_connected', 'token_rejected', 'locked'].includes(x.vault?.state)) ? 'attn' : '', onclick: vaultPanel, title: 'AgentVault: keys for agents without handing over keys' }, 'Vault'),
     h('button', { class: 'danger', onclick: stopAllMenu, title: 'Interrupt running agent turns' }, 'Stop all'),
@@ -748,6 +847,7 @@ function stationMenu(e, s) {
     up && { label: 'New project here…', action: () => newProjectDialog(s.station) },
     up && { label: 'Check this station', action: () => doctorPanel(s.station) },
     { label: 'Agent programs and versions…', action: agentsPanel },
+    { label: 'Usage: tokens and estimated cost…', action: fleetUsageDialog },
     s.state === 'not_linked' && { label: `Join ${s.station}'s fleet…`, action: () => joinFleet(s.station) },
     up && { label: 'Restart spandeck here (keeps terminals)', action: () => confirmBox(`Restart spandeck on ${s.station}?`, 'Every terminal and agent keeps running. If it does not come back healthy, the restart is undone.', 'Restart', () => rpc(s.station, 'station.restart', {}).then(() => toast(`${s.station} is restarting`))) },
     up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`))) },
@@ -801,6 +901,7 @@ function paneTile(st, p) {
     h('div', { class: 'tile-head' }, dot(p), paneMark(p), h('b', {}, p.name), p.agent !== 'shell' ? h('span', { class: 'chip' }, p.agent_name) : null, h('span', { class: 'grow' }),
       h('span', { class: 'muted' }, p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}` : `${STATE_LABEL[stateOf(p)] || stateOf(p)} · ${ago(p.state_since_ms)}`)),
     p.needs_reason ? h('div', { class: 'needs-line' }, p.needs_reason) : null,
+    usageBrief(p.usage) ? h('div', { class: 'muted small tile-usage', title: usageTitle(p.usage) }, [usageBrief(p.usage), p.usage.total_tokens ? fmtTokens(p.usage.total_tokens) + ' tokens' : '', p.usage.cost_estimate !== null && p.usage.cost_estimate !== undefined ? 'est. ' + fmtCost(p.usage.cost_estimate) : ''].filter(Boolean).join(' · ')) : null,
     h('pre', { class: 'thumb', dataset: { key } }, thumbText(thumbs.get(key) || [])));
 }
 
@@ -920,7 +1021,7 @@ function getTerm(st, p, where, mode) {
   const key = `${where}:${st}/${p.id}`;
   let t = S.terms.get(key);
   if (!t) {
-    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where, term), onFocus: (term) => { S.focused = `${st}/${term.pane.id}`; } });
+    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where, term), onUsage: (term) => usageDialog(st, term.pane), onFocus: (term) => { S.focused = `${st}/${term.pane.id}`; } });
     S.terms.set(key, t);
     t._fresh = true;
   } else t.update(p);
@@ -939,7 +1040,7 @@ function agentRows(st, p, depth = 0, seen = new Set()) {
   for (const c of panesOf(st).filter(x => x.parent_pane === p.id && !x.exited)) {
     const task = (S.tasks.get(st) || []).find(t => t.id === c.task);
     // Beside this one when a layout is on screen, else on its own.
-    rows.push({ depth, name: c.name, detail: task ? `${c.role || 'helper'} · ${task.goal.slice(0, 60)}` : (c.role || 'helper'), state: stateOf(c),
+    rows.push({ depth, name: c.name, detail: [usageBrief(c.usage), task ? `${c.role || 'helper'} · ${task.goal.slice(0, 60)}` : (c.role || 'helper')].filter(Boolean).join(' · '), state: stateOf(c),
       activity: c.tool ? `${c.tool} · ${ago(c.tool_since_ms)}` : (STATE_LABEL[stateOf(c)] || stateOf(c)), open: () => (layCtx && !layCtx.has(st, c) ? addToLayout(layCtx.lay, st, c, 'row') : go(paneUrl(st, c.id))) });
     rows.push(...agentRows(st, c, depth + 1, seen));
   }
@@ -1787,11 +1888,14 @@ function phonePaneView(st, id) {
   // The bar is rebuilt only when what it shows changes. Rebuilding it on
   // every redraw made the phone put a focus ring on a button at each touch.
   const canStop = !p.exited && (p.state === 'working' || p.state === 'needs_you');
-  const sig = `${fitted}|${p.exited}|${canStop}`;
+  const pu = p.usage;
+  const brief = pu && pu.model ? [pu.model.replace(/^.*\//, ''), contextText(pu) ? 'context ' + contextText(pu) : '', fmtTokens(pu.total_tokens) + ' tokens', pu.cost_estimate !== null && pu.cost_estimate !== undefined ? 'est. ' + fmtCost(pu.cost_estimate) : ''].filter(Boolean).join(' · ') : '';
+  const sig = `${fitted}|${p.exited}|${canStop}|${brief}`;
   if (v.sig !== sig) {
     v.sig = sig;
     v.head.replaceChildren(h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'),
       p.exited ? '' : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: (e) => { e.currentTarget.blur(); fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
+      brief ? h('button', { class: 'phone-usage', title: usageTitle(p.usage), 'aria-label': `Usage: ${brief}`, onclick: (e) => { e.currentTarget.blur(); usageDialog(st, p); } }, brief, h('span', { class: 'muted' }, ' ›')) : null,
       h('span', { class: 'grow' }),
       h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(st, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn'));
   }
@@ -1846,6 +1950,7 @@ function phoneList() {
     h('section', {}, h('h2', {}, 'Stations'), stationsByName().map(station)),
     globals.length ? h('section', { class: 'phone-layouts' }, h('h2', {}, 'Layouts'), globals.map(x => layRow(x, 'every station'))) : null,
     stopRows(),
+    h('section', {}, h('button', { class: 'wide', onclick: fleetUsageDialog }, 'Usage: tokens and estimated cost')),
     h('section', {}, h('button', { class: 'danger big wide', onclick: () => confirmBox('Stop the whole fleet?', 'Every running agent turn on every station is interrupted.', 'Stop everything', () => rpc(api.station, 'stop.all', { scope: 'fleet' })) }, 'Stop every agent in the fleet')));
 }
 
