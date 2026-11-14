@@ -1304,6 +1304,8 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
         tracing::info!(station = %daemon.station, version = spandeck_core::VERSION, socket = %daemon.paths.socket().display(), "spandeckd ready");
 
         sys::shutdown_signal().await?;
+        // Asked to stop, not replaced: the panes end with the station.
+        daemon.stop_pane_host();
         tracing::info!("spandeckd stopping");
         let _ = std::fs::remove_file(daemon.paths.socket());
         Ok(0)

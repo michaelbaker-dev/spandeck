@@ -41,10 +41,6 @@ fn the_api_refuses_a_missing_or_wrong_token() {
 
 /// Done when: a fake agent survives an upgrade by handoff.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "tests exec-in-place live handoff; Windows restarts panes instead (tests/windows.rs)"
-)]
 fn a_fake_agent_survives_an_upgrade_by_live_handoff() {
     let s = Station::start("alpha");
     let pane = s.fake(
@@ -60,10 +56,9 @@ fn a_fake_agent_survives_an_upgrade_by_live_handoff() {
         let i = s.try_call("station.info", json!({})).ok()?;
         (i["started_ms"] != before["started_ms"]).then_some(i)
     });
-    assert_eq!(
-        after["pid"], before["pid"],
-        "same process: the image was replaced in place"
-    );
+    // Unix: the image was replaced in place. Windows: a new process, and
+    // the panes stayed in the pane host.
+    assert_eq!(after["pid"] == before["pid"], UPGRADE_KEEPS_PID);
 
     let p = s.pane(&pane);
     assert_eq!(p["exited"], json!(false));
@@ -85,7 +80,7 @@ fn a_fake_agent_survives_an_upgrade_by_live_handoff() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "tests exec-in-place live handoff; Windows restarts panes instead (tests/windows.rs)"
+    ignore = "uses a shell script as the new binary, or a tar.gz release"
 )]
 fn a_failed_handoff_falls_back_to_resume_by_session_id() {
     let s = Station::start("alpha");
@@ -151,10 +146,6 @@ fn after_a_daemon_crash_agents_resume_and_shells_do_not() {
 /// Guarantee (Upgrades): after an upgrade, a health check, and rollback to
 /// the previous binary if it fails. The terminals survive both swaps.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "tests exec-in-place live handoff; Windows restarts panes instead (tests/windows.rs)"
-)]
 fn an_upgrade_that_fails_its_health_check_goes_back_and_keeps_every_terminal() {
     // The switch makes the new image report itself unhealthy. It is read
     // only by an image started by an upgrade, and only in debug builds.
@@ -181,7 +172,7 @@ fn an_upgrade_that_fails_its_health_check_goes_back_and_keeps_every_terminal() {
         "{said}"
     );
     let after = s.call("station.info", json!({}));
-    assert_eq!(after["pid"], before["pid"], "still the same process");
+    assert_eq!(after["pid"] == before["pid"], UPGRADE_KEEPS_PID);
     // The terminal went there and back: same child, old output, still usable.
     let p = s.pane(&pane);
     assert_eq!(p["pid"], pane_pid);
@@ -202,7 +193,7 @@ fn an_upgrade_that_fails_its_health_check_goes_back_and_keeps_every_terminal() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "tests exec-in-place live handoff; Windows restarts panes instead (tests/windows.rs)"
+    ignore = "uses a shell script as the new binary, or a tar.gz release"
 )]
 fn a_station_updates_to_a_release_only_if_the_download_matches_its_checksum() {
     use common::fake_releases::{Releases, TAG};
@@ -239,7 +230,7 @@ fn a_station_updates_to_a_release_only_if_the_download_matches_its_checksum() {
         let i = s.try_call("station.info", json!({})).ok()?;
         (i["started_ms"] != before["started_ms"]).then_some(i)
     });
-    assert_eq!(after["pid"], before["pid"]);
+    assert_eq!(after["pid"] == before["pid"], UPGRADE_KEEPS_PID);
     assert_eq!(s.pane(&pane)["pid"], pane_pid);
     assert!(s.text(&pane).contains("before-update marker"));
     // It runs the downloaded file, not the one it was started from.
@@ -295,10 +286,6 @@ fn a_pane_is_restarted_in_place_and_the_agent_resumes_its_conversation() {
 
 /// 0.2: a restart keeps every terminal.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "tests exec-in-place live handoff; Windows restarts panes instead (tests/windows.rs)"
-)]
 fn a_restart_keeps_every_terminal() {
     let s = Station::start("alpha");
     let pane = s.fake(
@@ -313,7 +300,7 @@ fn a_restart_keeps_every_terminal() {
         let i = s.try_call("station.info", json!({})).ok()?;
         (i["started_ms"] != before["started_ms"]).then_some(i)
     });
-    assert_eq!(after["pid"], before["pid"]);
+    assert_eq!(after["pid"] == before["pid"], UPGRADE_KEEPS_PID);
     assert_eq!(s.pane(&pane)["pid"], pane_pid);
     s.call(
         "pane.send_text",

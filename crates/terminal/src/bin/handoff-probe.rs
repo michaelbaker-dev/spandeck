@@ -37,7 +37,7 @@ fn wait_for(pane: &Pane, what: &str, pred: impl Fn(&[u64]) -> bool) -> Vec<u64> 
 }
 
 fn main() {
-    if !spandeck_terminal::sys::LIVE_HANDOFF {
+    if !spandeck_terminal::sys::LOCAL_HANDOFF {
         eprintln!("this system has no live handoff");
         std::process::exit(64);
     }

@@ -55,8 +55,12 @@ use windows_sys::Win32::System::Threading::{
 use super::cmdline;
 use crate::pty::{ExitInfo, Signal, SpawnSpec};
 
-/// An upgrade starts a new daemon process; panes are restarted, not kept.
-pub const LIVE_HANDOFF: bool = false;
+/// A terminal in this process cannot be handed to the next daemon: a
+/// pseudoconsole belongs to the process that made it.
+pub const LOCAL_HANDOFF: bool = false;
+
+/// So panes live in the pane host, a process that outlives the daemon.
+pub const PANE_HOST: bool = true;
 
 fn wide(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(std::iter::once(0)).collect()
@@ -961,7 +965,7 @@ pub fn replace_file(new: &Path, to: &Path) -> io::Result<()> {
 // ---------------------------------------------------------------- processes
 
 /// Start `cmd` as the daemon that takes over from this one, then end this
-/// process (and with it every pane's program: their jobs close). The new
+/// process. The panes are in the pane host and stay as they are. The new
 /// daemon is told to wait for this process to be gone (`SPANDECK_WAIT_PID`)
 /// before it opens the pipe and the database. Returns only if the new
 /// program could not be started.
@@ -977,7 +981,28 @@ pub fn replace_process(cmd: &mut Command) -> io::Error {
     }
 }
 
-/// Nothing to do: a pane's program is in a job that ended with the daemon
+/// Start a program that goes on after this one ends, with no console: out
+/// of this process's job where that is allowed (the Task Scheduler runs a
+/// task in one), so ending the daemon's task does not end it.
+pub fn spawn_detached(cmd: &mut Command) -> io::Result<()> {
+    use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
+    cmd.creation_flags(flags | CREATE_BREAKAWAY_FROM_JOB);
+    if cmd.spawn().is_ok() {
+        return Ok(());
+    }
+    // A job that does not allow leaving it refuses the flag.
+    cmd.creation_flags(flags);
+    cmd.spawn().map(|_| ())
+}
+
+/// The upgraded daemon is a new process.
+pub const UPGRADE_KEEPS_PID: bool = false;
+
+/// Nothing to do: a pane's program is in a job that ended with the process
 /// that started it.
 pub fn end_leftover_child(_pid: i32) {}
 

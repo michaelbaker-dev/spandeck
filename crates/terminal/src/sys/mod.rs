@@ -3,12 +3,14 @@
 //!
 //! `unix.rs` and `windows.rs` each provide the same items:
 //!
-//!   terminals     `Pty`, `PtyReader`, `PtyWriter`, `pid_alive`, `LIVE_HANDOFF`
+//!   terminals     `Pty`, `PtyReader`, `PtyWriter`, `pid_alive`, `LOCAL_HANDOFF`,
+//!                 `PANE_HOST`
 //!   local socket  `local::{Listener, Stream, Conn, connect, pipe_name}`
 //!   files         `write_private`, `private_dir`, `is_executable`,
 //!                 `executable_names`, `default_dirs`, `replace_file`,
 //!                 `set_executable`, `file_mode`
-//!   processes     `replace_process`, `end_leftover_child`, `close_inherited`,
+//!   processes     `replace_process`, `UPGRADE_KEEPS_PID`, `spawn_detached`,
+//!                 `end_leftover_child`, `close_inherited`,
 //!                 `wait_for_exit`, `shutdown_signal`, `no_window`, `ignore_interrupt`,
 //!                 `interrupted`
 //!   the machine   `hostname`, `load_average`, `random_bytes`, `keep_awake_cmd`,

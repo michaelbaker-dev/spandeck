@@ -24,6 +24,12 @@ path = "src/bin/fake_agent.rs"
 # Windows only in practice: the program the log-on task runs. It has no
 # console window and starts `spandeck daemon` without one (DECISIONS.md,
 # "Windows"). Built everywhere so it cannot rot; shipped in the Windows zip.
+# The pane host: owns the terminals so they outlive the daemon. Used on
+# Windows, where the daemon cannot keep them through its own upgrade.
+[[bin]]
+name = "spandeck-pane-host"
+path = "src/bin/pane_host.rs"
+
 [[bin]]
 name = "spandeckd"
 path = "src/bin/spandeckd.rs"

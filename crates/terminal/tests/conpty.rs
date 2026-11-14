@@ -100,22 +100,27 @@ fn env_and_cwd_are_applied() {
 }
 
 /// npm installs agents as `.cmd` files. One must start by its bare name, and
-/// an argument must arrive whole, not be run by cmd.exe.
+/// each argument must reach the script whole and still quoted, so that
+/// `cmd.exe` reads `&` in it as text. (The script prints `%1`, as npm's own
+/// launchers pass `%*` on. A script that strips the quotes itself with
+/// `%~1` and then uses the result unquoted runs what is in it: that is the
+/// script's doing, and no way of calling it can prevent it.)
 #[test]
 fn a_cmd_file_is_found_by_name_and_gets_its_arguments_whole() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("fakeagent.cmd"),
-        "@echo off\r\necho one=[%~1] two=[%~2]\r\nping -n 10 127.0.0.1 >nul\r\n",
+        "@echo off\r\necho one=[%1] two=[%2] three=[%3]\r\nping -n 10 127.0.0.1 >nul\r\n",
     )
     .unwrap();
-    let mut s = spec("fakeagent", &["a&echo INJECTED", "c d"]);
+    let mut s = spec("fakeagent", &["a&echo INJECTED", "c d", "100%PATH%"]);
     let path = std::env::var("PATH").unwrap_or_default();
     s.env
         .push(("PATH".into(), format!("{};{path}", dir.path().display())));
     let pane = Pane::spawn(&s, Box::new(|_| {})).unwrap();
     wait_until(&pane, "arguments", || {
-        pane.text().contains("one=[a&echo INJECTED] two=[c d]")
+        pane.text()
+            .contains(r#"one=["a&echo INJECTED"] two=["c d"] three=["100%PATH%"]"#)
     });
     assert!(!pane.text().lines().any(|l| l.trim() == "INJECTED"));
 }
@@ -125,24 +130,22 @@ fn a_cmd_file_is_found_by_name_and_gets_its_arguments_whole() {
 fn kill_ends_the_whole_tree() {
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("alive.txt");
-    // The inner cmd keeps touching a file for as long as it lives.
-    let inner = format!(
-        "for /l %i in (1,1,200) do @(echo x>\"{}\"& ping -n 2 127.0.0.1 >nul)",
-        marker.display()
-    );
-    let pane = Pane::spawn(
-        &cmd(&format!(
-            "start /b cmd /d /c \"{inner}\"& ping -n 60 127.0.0.1 >nul"
-        )),
-        Box::new(|_| {}),
+    // A second cmd, started by the pane's, that keeps writing a file for as
+    // long as it lives.
+    std::fs::write(
+        dir.path().join("inner.cmd"),
+        "@echo off\r\n:again\r\necho x>alive.txt\r\nping -n 2 127.0.0.1 >nul\r\ngoto again\r\n",
     )
     .unwrap();
+    let mut s = cmd("start /b inner.cmd& ping -n 60 127.0.0.1 >nul");
+    s.cwd = Some(dir.path().to_path_buf());
+    let pane = Pane::spawn(&s, Box::new(|_| {})).unwrap();
     wait_until(&pane, "the grandchild is running", || marker.exists());
     pane.signal(Signal::Kill).unwrap();
     wait_until(&pane, "exit after kill", || pane.exit_info().is_some());
     std::thread::sleep(Duration::from_millis(500));
     let _ = std::fs::remove_file(&marker);
-    std::thread::sleep(Duration::from_secs(3));
+    std::thread::sleep(Duration::from_secs(4));
     assert!(
         !marker.exists(),
         "a program the pane started outlived the pane's job"
@@ -171,5 +174,7 @@ fn output_flood_does_not_stall() {
         assert!(start.elapsed() < Duration::from_secs(120), "flood stalled");
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(pane.bytes_out() >= 1_000_000);
+    // A pseudoconsole sends what the screen needs, not every byte written,
+    // so there is no byte count to hold it to: the flood ending is the test.
+    assert!(pane.bytes_out() > 0);
 }

@@ -12,6 +12,8 @@ use spandeck_core::Paths;
 
 pub const SPANDECK: &str = env!("CARGO_BIN_EXE_spandeck");
 pub const FAKE: &str = env!("CARGO_BIN_EXE_spandeck-fake-agent");
+/// Unix: an upgraded daemon is the same process. Windows: a new one.
+pub const UPGRADE_KEEPS_PID: bool = spandeck_terminal::sys::UPGRADE_KEEPS_PID;
 
 pub struct Station {
     pub name: String,
@@ -207,6 +209,9 @@ impl Station {
             // Windows: the home folder is the profile.
             .env("USERPROFILE", self.root.join("home"))
             .env("SPANDECK_LOG", "warn")
+            // Where a pane host is used (Windows): one whose daemon a test
+            // ended does not wait ten minutes for another.
+            .env("SPANDECK_HOST_LINGER", "5")
             .env_remove("SPANDECK_SOCKET")
             .env_remove("SPANDECK_TOKEN")
             .env_remove("SPANDECK_PANE")
@@ -442,9 +447,20 @@ impl Drop for Station {
                 }
             }
         }
+        // Windows: an upgrade in the test left a daemon that is not our child.
+        if spandeck_terminal::sys::WINDOWS {
+            let now = self.try_call("station.info", json!({})).ok();
+            if let Some(pid) = now.and_then(|i| i["pid"].as_u64()) {
+                if self.child.as_ref().is_none_or(|c| u64::from(c.id()) != pid) {
+                    let _ = Command::new("taskkill")
+                        .args(["/PID", &pid.to_string(), "/F"])
+                        .output();
+                }
+            }
+        }
         if let Some(mut c) = self.child.take() {
             // SIGTERM first so panes are cleaned up with the daemon. (On
-            // Windows ending the daemon ends its panes: their jobs close.)
+            // Windows the pane host ends them a few seconds after it.)
             if !spandeck_terminal::sys::WINDOWS {
                 kill_pid(c.id() as i32, 15);
             }

@@ -280,6 +280,8 @@ pub struct Inner {
     /// When each client last had its typing into a pane written to the log.
     pub(crate) typed: Mutex<HashMap<String, u64>>,
     pub(crate) keep_awake: Mutex<Option<std::process::Child>>,
+    /// The pane host this daemon's panes live in, where one is used.
+    pub(crate) host: Mutex<Option<Arc<spandeck_terminal::HostClient>>>,
     pub(crate) seq: AtomicU64,
     pub fleet: crate::fleet::FleetState,
     /// The fleet key, and requests to be let in.
@@ -378,6 +380,7 @@ impl Daemon {
             presence: Mutex::new(HashMap::new()),
             typed: Mutex::new(HashMap::new()),
             keep_awake: Mutex::new(None),
+            host: Mutex::new(None),
             seq: AtomicU64::new(0),
             web_addrs: Mutex::new(vec![]),
             vault: Default::default(),
@@ -808,8 +811,15 @@ impl Daemon {
                 name
             }
         };
-        let term = Pane::spawn(&spec, self.make_sink(&id, tx.clone()))
-            .map_err(|e| invalid(format!("could not start {}: {e}", spec.program)))?;
+        let sink = self.make_sink(&id, tx.clone());
+        let term = match self.pane_host() {
+            Some(host) => {
+                let host = host.map_err(|e| invalid(format!("the pane host is not there: {e}")))?;
+                Pane::spawn_on(&host, &id, &spec, sink)
+            }
+            None => Pane::spawn(&spec, sink),
+        }
+        .map_err(|e| invalid(format!("could not start {}: {e}", spec.program)))?;
         let now = now_ms();
         let meta = PaneMeta {
             id: id.clone(),
@@ -1169,6 +1179,8 @@ impl Daemon {
             }
         }
         self.cancel_pane_approvals(&old.id);
+        // The new program takes the old one's place, under the same id.
+        old.term.forget();
         self.panes.write().unwrap().remove(&old.id);
         let p = self.spawn_pane(SpawnOpts {
             id: Some(old.id.clone()),
@@ -1360,6 +1372,7 @@ impl Daemon {
             let _ = p.term.signal(Signal::Hangup);
             let _ = p.term.signal(Signal::Kill);
         }
+        p.term.forget();
         self.panes.write().unwrap().remove(&p.id);
         let _ = self.db.with(|c| {
             c.execute(
@@ -1529,7 +1542,128 @@ impl Daemon {
 
     // ------------------------------------------------------------ crash recovery
 
-    /// After a crash or reboot: agents resume their conversation by session id.
+    /// Is this station's pane host in use? Always on Windows; on Unix only
+    /// when `SPANDECK_PANE_HOST=1` asks for it (panes are otherwise in the
+    /// daemon's own process, kept through an upgrade by exec in place).
+    fn uses_pane_host() -> bool {
+        sys::PANE_HOST || std::env::var("SPANDECK_PANE_HOST").is_ok_and(|v| v == "1")
+    }
+
+    /// The pane host, started if it is not running. `None`: this station
+    /// keeps its panes in the daemon's own process.
+    pub(crate) fn pane_host(&self) -> Option<std::io::Result<Arc<spandeck_terminal::HostClient>>> {
+        if !Self::uses_pane_host() {
+            return None;
+        }
+        let mut held = self.host.lock().unwrap();
+        if let Some(host) = held.as_ref().filter(|h| h.alive()) {
+            return Some(Ok(host.clone()));
+        }
+        let pipe = self.paths.host_socket();
+        let program = self.exe.with_file_name(format!(
+            "spandeck-pane-host{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        let connect = || spandeck_terminal::host::connect_or_start(&pipe, &program);
+        let host = connect().and_then(|host| {
+            // A host from an older spandeck with no pane in it is replaced,
+            // so the host is renewed whenever that costs nothing. One with
+            // panes stays: the protocol only grows, and this daemon speaks
+            // every earlier one.
+            let idle = host.list().map(|l| l.is_empty()).unwrap_or(false);
+            if host.info.version != VERSION && idle {
+                let _ = host.shutdown();
+                std::thread::sleep(Duration::from_millis(400));
+                return connect();
+            }
+            Ok(host)
+        });
+        match host {
+            Ok(host) => {
+                tracing::info!(pid = host.info.pid, version = %host.info.version, protocol = host.info.protocol, "pane host");
+                *held = Some(host.clone());
+                Some(Ok(host))
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
+
+    /// The station is stopping for good (not being replaced): end the panes
+    /// the pane host holds, and the host.
+    pub fn stop_pane_host(&self) {
+        if let Some(host) = self.host.lock().unwrap().take() {
+            let _ = host.shutdown();
+        }
+    }
+
+    /// What the Control Deck is told about the pane host.
+    fn pane_host_info(&self) -> Value {
+        match self.host.lock().unwrap().as_ref() {
+            Some(h) => json!({
+                "version": h.info.version, "protocol": h.info.protocol, "pid": h.info.pid,
+                // Older than this daemon: renewed by itself once it holds no pane.
+                "outdated": h.info.version != VERSION,
+            }),
+            None => Value::Null,
+        }
+    }
+
+    /// Panes the pane host still holds after this daemon's predecessor went
+    /// without a handoff (it crashed, or was ended). Each is taken over with
+    /// its screen rebuilt from the output the host kept. Returns their ids.
+    fn adopt_from_host(&self, rows: &[(String, String, String, Option<i64>)]) -> Vec<String> {
+        let Some(Ok(host)) = self.pane_host() else {
+            return vec![];
+        };
+        let held = host.list().unwrap_or_default();
+        let mut adopted = vec![];
+        for h in &held {
+            let row = rows.iter().find(|r| r.0 == h.id);
+            let meta = row.and_then(|r| serde_json::from_str::<PaneMeta>(&r.1).ok());
+            let (Some(row), Some(meta), None) = (row, meta, h.exit) else {
+                // Not a pane this station knows as open, or its program has
+                // ended: nothing to go back to.
+                if !self.panes.read().unwrap().contains_key(&h.id) {
+                    let _ = host.forget(&h.id);
+                }
+                continue;
+            };
+            if self.panes.read().unwrap().contains_key(&h.id) {
+                continue;
+            }
+            let (tx, _) = broadcast::channel(1024);
+            match Pane::adopt_on(&host, &h.id, None, self.make_sink(&h.id, tx.clone())) {
+                Ok(term) => {
+                    let entry = Arc::new(PaneEntry {
+                        id: h.id.clone(),
+                        token: row.2.clone(),
+                        term,
+                        tx,
+                        meta: Mutex::new(meta.clone()),
+                    });
+                    self.panes.write().unwrap().insert(h.id.clone(), entry);
+                    self.record(
+                        "pane.kept",
+                        Some(&h.id),
+                        meta.project.as_deref(),
+                        meta.task.as_deref(),
+                        None,
+                        json!({"why": "daemon restart", "pid": h.pid}),
+                    );
+                    adopted.push(h.id.clone());
+                }
+                Err(e) => {
+                    tracing::warn!(pane = %h.id, error = %e, "a pane in the pane host could not be taken over");
+                    let _ = host.forget(&h.id);
+                }
+            }
+        }
+        adopted
+    }
+
+    /// After a crash or reboot: agents resume their conversation by session
+    /// id. Where a pane host is used, panes it still holds are simply taken
+    /// over as they are.
     fn recover(&self) {
         let rows: Vec<(String, String, String, Option<i64>)> = self
             .db
@@ -1541,7 +1675,12 @@ impl Daemon {
                 rows.collect()
             })
             .unwrap_or_default();
+        let kept = self.adopt_from_host(&rows);
         for (id, meta, token, pid) in rows {
+            // Already in service: kept by the pane host, or adopted from a handoff.
+            if kept.contains(&id) || self.panes.read().unwrap().contains_key(&id) {
+                continue;
+            }
             // A child left over from a handoff that did not complete: its
             // terminal is lost, so end it before resuming the conversation.
             if let Some(pid) = pid.map(|p| p as i32).filter(|p| *p > 1) {
@@ -1660,12 +1799,10 @@ impl Daemon {
     }
 
     /// Describe every live pane for the next process image. Readers stop here.
-    /// Where there is no live handoff (Windows) no pane is described: the
-    /// next daemon resumes agents by session id, as after a crash.
     pub fn prepare_handoff(&self) -> HandoffState {
         let mut panes = vec![];
         for p in self.list_panes() {
-            if !sys::LIVE_HANDOFF || p.meta.lock().unwrap().exit.is_some() {
+            if p.meta.lock().unwrap().exit.is_some() {
                 continue;
             }
             match p.term.prepare_handoff(2000) {
@@ -1702,25 +1839,9 @@ impl Daemon {
             }
         };
         let _ = std::fs::remove_file(file);
-        if !sys::LIVE_HANDOFF {
-            // The daemon before this one ended, and its panes with it. This
-            // is the upgrade on such a system, not a failure: say it
-            // happened, then resume each agent by its session id.
-            if state.version != 1 {
-                return false;
-            }
-            self.record(
-                "station.upgraded",
-                None,
-                None,
-                None,
-                None,
-                json!({"from": state.from_version, "to": VERSION, "panes": 0, "adopted": 0, "live": false}),
-            );
-            self.recover();
-            return true;
-        }
-        if state.version != 1 || state.pid != std::process::id() {
+        // Unix: the same process (exec in place). Windows: a new process,
+        // and the panes are in the pane host.
+        if state.version != 1 || (sys::UPGRADE_KEEPS_PID && state.pid != std::process::id()) {
             tracing::error!("handoff state is not for this process; resuming agents by session id");
             return false;
         }
@@ -1729,9 +1850,7 @@ impl Daemon {
         for hp in state.panes {
             let id = hp.meta.id.clone();
             let (tx, _) = broadcast::channel(1024);
-            // SAFETY: the descriptor was left open across exec by prepare_handoff
-            // in the previous image of this same process.
-            match unsafe { Pane::adopt(&hp.pty, self.make_sink(&id, tx.clone())) } {
+            match self.adopt_pane(&id, &hp.pty, tx.clone()) {
                 Ok(term) => {
                     let entry = Arc::new(PaneEntry {
                         id: id.clone(),
@@ -1762,13 +1881,34 @@ impl Daemon {
         true
     }
 
+    /// Take over one pane a previous image described: from the pane host, or
+    /// by the descriptor it left open.
+    fn adopt_pane(
+        &self,
+        id: &str,
+        h: &PaneHandoff,
+        tx: broadcast::Sender<PaneEvent>,
+    ) -> std::io::Result<Pane> {
+        let sink = self.make_sink(id, tx);
+        match &h.host_id {
+            Some(host_id) => {
+                let host = self.pane_host().unwrap_or_else(|| {
+                    Err(std::io::Error::other("this station uses no pane host"))
+                })?;
+                Pane::adopt_on(&host, host_id, Some(h), sink)
+            }
+            // SAFETY: the descriptor was left open across exec by
+            // prepare_handoff in a previous image of this same process.
+            None => unsafe { Pane::adopt(h, sink) },
+        }
+    }
+
     /// Put panes back into service after an exec that did not happen.
     pub fn readopt(&self, state: HandoffState) {
         for hp in state.panes {
             let id = hp.meta.id.clone();
             let (tx, _) = broadcast::channel(1024);
-            // SAFETY: descriptors created by prepare_handoff in this process.
-            if let Ok(term) = unsafe { Pane::adopt(&hp.pty, self.make_sink(&id, tx.clone())) } {
+            if let Ok(term) = self.adopt_pane(&id, &hp.pty, tx.clone()) {
                 let entry = Arc::new(PaneEntry {
                     id: id.clone(),
                     token: hp.token,
@@ -1801,8 +1941,10 @@ impl Daemon {
             "started_ms": self.started_ms,
             "labels": self.cfg.labels,
             "os": std::env::consts::OS,
-            // False on Windows: an upgrade or restart there restarts every pane.
-            "live_handoff": sys::LIVE_HANDOFF,
+            // Every terminal is kept through an upgrade or a restart: on Unix
+            // by replacing the program in place, on Windows by the pane host.
+            "live_handoff": true,
+            "pane_host": self.pane_host_info(),
             "arch": std::env::consts::ARCH,
             "panes": panes.iter().filter(|p| p.meta.lock().unwrap().exit.is_none()).count(),
             "working": count(AgentState::Working),

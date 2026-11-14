@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::pty::{ExitInfo, Pty, PtyWriter, Signal, SpawnSpec};
+use crate::hosted::{self, HostClient};
+use crate::pty::{ExitInfo, Pty, PtyReader, Signal, SpawnSpec};
 use crate::screen::{Screen, ScreenEvent, ScreenInfo};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +27,15 @@ pub type Sink = Box<dyn FnMut(PaneEvent) + Send + 'static>;
 /// State needed to rebuild a pane in a new process image after an upgrade.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PaneHandoff {
+    /// Unix: the terminal's descriptor, inherited across exec. -1 for a
+    /// pane the pane host holds.
     pub master_fd: i32,
+    /// A pane the pane host holds: its id there, and the number of the
+    /// first output byte the previous daemon did not take.
+    #[serde(default)]
+    pub host_id: Option<String>,
+    #[serde(default)]
+    pub offset: u64,
     pub pid: i32,
     pub cols: u16,
     pub rows: u16,
@@ -34,10 +43,51 @@ pub struct PaneHandoff {
     pub snapshot: Vec<u8>,
 }
 
+/// Where a pane's terminal is: in this process, or in the pane host.
+enum Terminal {
+    Local(Pty),
+    Hosted(hosted::Handle),
+}
+
+enum Source {
+    Local(PtyReader),
+    Hosted(hosted::Source),
+}
+
+impl Source {
+    fn ready(&mut self) -> io::Result<bool> {
+        match self {
+            Source::Local(r) => r.ready(),
+            Source::Hosted(s) => s.ready(),
+        }
+    }
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Source::Local(r) => r.read(buf),
+            Source::Hosted(s) => s.read(buf),
+        }
+    }
+    fn exit_status(&self) -> ExitInfo {
+        match self {
+            Source::Local(r) => r.exit_status(),
+            Source::Hosted(s) => s.exit_status(),
+        }
+    }
+    /// The number of the next output byte (hosted panes only; else 0).
+    fn offset(&self) -> u64 {
+        match self {
+            Source::Local(_) => 0,
+            Source::Hosted(s) => s.offset(),
+        }
+    }
+}
+
+type Writer = Box<dyn Write + Send>;
+
 pub struct Pane {
-    pty: Pty,
+    pty: Terminal,
     screen: Arc<Mutex<Screen>>,
-    writer: Mutex<PtyWriter>,
+    writer: Mutex<Writer>,
     exited: Arc<Mutex<Option<ExitInfo>>>,
     /// Set to stop the reader thread without closing the PTY (handoff).
     detach: Arc<AtomicBool>,
@@ -57,7 +107,77 @@ impl Pane {
     pub fn spawn(spec: &SpawnSpec, sink: Sink) -> io::Result<Pane> {
         let pty = Pty::spawn(spec)?;
         let screen = Screen::new(spec.cols, spec.rows);
-        Pane::start(pty, screen, sink)
+        let source = Source::Local(pty.reader()?);
+        let (writer, replies) = (Box::new(pty.writer()?), Box::new(pty.writer()?));
+        Pane::start(
+            Terminal::Local(pty),
+            source,
+            writer,
+            replies,
+            screen,
+            sink,
+            0,
+        )
+    }
+
+    /// Start a program in a pane the pane host holds under `id`, so it
+    /// outlives this process.
+    pub fn spawn_on(
+        host: &Arc<HostClient>,
+        id: &str,
+        spec: &SpawnSpec,
+        sink: Sink,
+    ) -> io::Result<Pane> {
+        let parts = host.spawn(id, spec)?;
+        let screen = Screen::new(spec.cols, spec.rows);
+        let replies = Box::new(hosted::HostWriter::clone_of(&parts.writer));
+        Pane::start(
+            Terminal::Hosted(parts.handle),
+            Source::Hosted(parts.source),
+            Box::new(parts.writer),
+            replies,
+            screen,
+            sink,
+            0,
+        )
+    }
+
+    /// Take over a pane the pane host holds. With `handoff` (an upgrade):
+    /// the previous daemon's picture of the screen, and output from the
+    /// byte it stopped at. Without (the previous daemon crashed): the
+    /// screen is rebuilt from the output the host kept.
+    pub fn adopt_on(
+        host: &Arc<HostClient>,
+        id: &str,
+        handoff: Option<&PaneHandoff>,
+        sink: Sink,
+    ) -> io::Result<Pane> {
+        let (parts, attached) = host.attach(id, handoff.map(|h| h.offset))?;
+        let screen = match handoff {
+            // The host no longer has everything since the snapshot: the
+            // snapshot plus what is left is still the best picture there is.
+            Some(h) => {
+                let mut screen = Screen::new(h.cols, h.rows);
+                screen.feed(&h.snapshot);
+                if attached.lost {
+                    tracing::warn!(pane = id, "some output was not kept across the handoff");
+                }
+                screen
+            }
+            None => Screen::new(attached.cols, attached.rows),
+        };
+        let replies = Box::new(hosted::HostWriter::clone_of(&parts.writer));
+        Pane::start(
+            Terminal::Hosted(parts.handle),
+            Source::Hosted(parts.source),
+            Box::new(parts.writer),
+            replies,
+            screen,
+            sink,
+            // Old output is replayed into the screen; the questions in it
+            // (cursor position and the like) were answered long ago.
+            attached.end,
+        )
     }
 
     /// Rebuild a pane from handoff state inside the new process image.
@@ -68,19 +188,38 @@ impl Pane {
         let pty = Pty::adopt(h.master_fd, h.pid)?;
         let mut screen = Screen::new(h.cols, h.rows);
         screen.feed(&h.snapshot);
-        Pane::start(pty, screen, sink)
+        let source = Source::Local(pty.reader()?);
+        let (writer, replies) = (Box::new(pty.writer()?), Box::new(pty.writer()?));
+        Pane::start(
+            Terminal::Local(pty),
+            source,
+            writer,
+            replies,
+            screen,
+            sink,
+            0,
+        )
     }
 
-    fn start(pty: Pty, screen: Screen, mut sink: Sink) -> io::Result<Pane> {
+    /// `quiet_until`: output before this byte is a replay, and gets no replies.
+    fn start(
+        pty: Terminal,
+        mut reader: Source,
+        writer: Writer,
+        mut reply_writer: Writer,
+        screen: Screen,
+        mut sink: Sink,
+        quiet_until: u64,
+    ) -> io::Result<Pane> {
         let screen = Arc::new(Mutex::new(screen));
         let exited = Arc::new(Mutex::new(None));
         let detach = Arc::new(AtomicBool::new(false));
         let bytes_out = Arc::new(AtomicU64::new(0));
         let last_output_ms = Arc::new(AtomicU64::new(now_ms()));
-        let mut reader = pty.reader()?;
-        let writer = pty.writer()?;
-        let mut reply_writer = pty.writer()?;
-        let pid = pty.pid();
+        let pid = match &pty {
+            Terminal::Local(p) => p.pid(),
+            Terminal::Hosted(h) => h.pid(),
+        };
 
         let handle = {
             let screen = screen.clone();
@@ -126,8 +265,11 @@ impl Pane {
                         };
                         bytes_out.fetch_add(n as u64, Ordering::Relaxed);
                         last_output_ms.store(now_ms(), Ordering::Relaxed);
+                        let replay = reader.offset() <= quiet_until && quiet_until > 0;
                         for ev in events {
                             match ev {
+                                ScreenEvent::Reply(_) if replay => {}
+                                ScreenEvent::Bell if replay => {}
                                 ScreenEvent::Reply(bytes) => {
                                     let _ = reply_writer.write_all(&bytes);
                                 }
@@ -155,7 +297,19 @@ impl Pane {
     }
 
     pub fn pid(&self) -> i32 {
-        self.pty.pid()
+        match &self.pty {
+            Terminal::Local(p) => p.pid(),
+            Terminal::Hosted(h) => h.pid(),
+        }
+    }
+
+    /// The daemon is done with this pane for good. A pane in this process
+    /// ends when it is dropped; one in the pane host has to be told, since
+    /// dropping it is also what a daemon does when it is being replaced.
+    pub fn forget(&self) {
+        if let Terminal::Hosted(h) = &self.pty {
+            h.forget();
+        }
     }
 
     pub fn write(&self, bytes: &[u8]) -> io::Result<()> {
@@ -164,13 +318,19 @@ impl Pane {
 
     pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
         let mut screen = self.screen.lock().unwrap();
-        self.pty.resize(cols, rows)?;
+        match &self.pty {
+            Terminal::Local(p) => p.resize(cols, rows)?,
+            Terminal::Hosted(h) => h.resize(cols, rows)?,
+        }
         screen.resize(cols, rows);
         Ok(())
     }
 
     pub fn signal(&self, sig: Signal) -> io::Result<()> {
-        self.pty.signal(sig)
+        match &self.pty {
+            Terminal::Local(p) => p.signal(sig),
+            Terminal::Hosted(h) => h.signal(sig),
+        }
     }
 
     pub fn exit_info(&self) -> Option<ExitInfo> {
@@ -214,11 +374,11 @@ impl Pane {
     /// Stop the reader and describe this pane for the next process image.
     /// The PTY stays open and is marked to survive exec.
     pub fn prepare_handoff(&self, max_history: usize) -> io::Result<PaneHandoff> {
-        if !crate::sys::LIVE_HANDOFF {
+        if matches!(self.pty, Terminal::Local(_)) && !crate::sys::LOCAL_HANDOFF {
             // The reader is left running: the pane stays in service.
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "a terminal cannot be handed to another process on this system",
+                "a terminal in this process cannot be handed to another on this system",
             ));
         }
         self.detach.store(true, Ordering::SeqCst);
@@ -226,13 +386,27 @@ impl Pane {
             let _ = h.join();
         }
         let mut screen = self.screen.lock().unwrap();
-        let raw = self.pty.handoff_fd()?;
+        let (raw, host_id, offset) = match &self.pty {
+            Terminal::Local(p) => (p.handoff_fd()?, None, 0),
+            // The reader has stopped: this is the first byte it did not take.
+            Terminal::Hosted(h) => (-1, Some(h.id().to_string()), h.offset()),
+        };
         Ok(PaneHandoff {
             master_fd: raw,
-            pid: self.pty.pid(),
+            host_id,
+            offset,
+            pid: self.pid(),
             cols: screen.cols(),
             rows: screen.rows(),
             snapshot: screen.snapshot_ansi(max_history),
         })
+    }
+}
+
+impl Drop for Pane {
+    fn drop(&mut self) {
+        // The reader thread holds the terminal (and, for a hosted pane, the
+        // connection to the host) open: let it go.
+        self.detach.store(true, Ordering::SeqCst);
     }
 }

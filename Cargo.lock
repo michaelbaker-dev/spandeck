@@ -2395,6 +2395,7 @@ version = "0.2.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "base64 0.23.1",
  "insta",
  "libc",
  "nix",

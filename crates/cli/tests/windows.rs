@@ -1,6 +1,6 @@
 //! Windows acceptance (DECISIONS.md, "Windows"): a station runs natively,
-//! the CLI reaches it over the named pipe, panes are pseudoconsoles, and an
-//! upgrade restarts the panes and resumes agents by session id.
+//! the CLI reaches it over the named pipe, panes are pseudoconsoles held by
+//! the pane host, and a daemon that is ended takes no pane with it.
 //!
 //! These run only on Windows. The scenario tests in the other files run
 //! there too where they can; one that cannot carries its reason.
@@ -25,7 +25,7 @@ fn a_station_runs_a_shell_pane_and_kill_ends_it() {
     let s = Station::start("win");
     let info = s.call("station.info", json!({}));
     assert_eq!(info["os"], json!("windows"));
-    assert_eq!(info["live_handoff"], json!(false));
+    assert_eq!(info["live_handoff"], json!(true));
     assert!(s
         .paths()
         .socket()
@@ -70,47 +70,55 @@ fn a_fake_agent_reports_through_the_pipe_and_reads_input() {
     s.wait_text(&pane, "[fake] got: hello");
 }
 
-/// The Windows form of the upgrade Guarantee: there is no live handoff, so a
-/// restart starts a new daemon process, the old panes end, an agent goes
-/// back to its conversation and a shell is not brought back.
+/// The pane host: panes are not in the daemon's process, so a daemon that
+/// is ended without warning takes none of them with it. The next daemon
+/// finds each pane in the host with its screen, and it is still the same
+/// program at the other end. (Upgrade, restart and going back are the same
+/// tests as on Unix, in phase1.rs.)
 #[test]
-fn a_restart_starts_a_new_daemon_and_resumes_agents_by_session_id() {
-    let s = Station::start("win");
-    let agent = s.fake(json!({"steps": []}), json!({}));
+fn after_a_daemon_crash_every_pane_is_still_there_with_its_screen() {
+    let mut s = Station::start("win");
+    let agent = s.fake(
+        json!({"steps": [{"say": "before-the-crash marker"}]}),
+        json!({}),
+    );
     let shell = spawn(
         &s,
-        json!({"program": "cmd.exe", "cwd": s.root.join("home")}),
+        json!({"program": "cmd.exe", "args": ["/d", "/k", "echo shell-was-here"], "cwd": s.root.join("home")}),
     );
-    let session = wait_for("session id", 15, || {
-        s.pane(&agent)["session_id"].as_str().map(String::from)
-    });
+    s.wait_text(&agent, "before-the-crash marker");
+    s.wait_text(&shell, "shell-was-here");
     let before = s.call("station.info", json!({}));
-    let reply = s.call("station.restart", json!({}));
-    assert_eq!(reply["live_handoff"], json!(false));
-    let after = wait_for("the new daemon to answer", 40, || {
-        let i = s.try_call("station.info", json!({})).ok()?;
-        (i["started_ms"] != before["started_ms"]).then_some(i)
-    });
-    assert_ne!(
-        after["pid"], before["pid"],
-        "a new process, not the old one"
-    );
-    s.wait_text(&agent, &format!("[fake] RESUMED {session}"));
-    assert!(
-        s.try_call("pane.get", json!({"pane": shell})).is_err(),
-        "a plain shell is not brought back"
-    );
+    assert!(before["pane_host"]["pid"].as_u64().is_some());
+    let (agent_pid, shell_pid) = (s.pane(&agent)["pid"].clone(), s.pane(&shell)["pid"].clone());
+
+    s.kill9();
+    s.launch();
+    let after = s.call("station.info", json!({}));
+    assert_ne!(after["pid"], before["pid"]);
     assert_eq!(
-        s.log("station.upgraded")[0]["data"]["live"],
-        json!(false),
-        "the ship's log says the terminals were not kept"
+        after["pane_host"]["pid"], before["pane_host"]["pid"],
+        "the same pane host"
     );
-    // The daemon the harness started is gone; end the one that replaced it.
-    if let Some(pid) = after["pid"].as_u64() {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output();
+    for (pane, pid, said) in [
+        (&agent, &agent_pid, "before-the-crash marker"),
+        (&shell, &shell_pid, "shell-was-here"),
+    ] {
+        let p = s.pane(pane);
+        assert_eq!(p["exited"], json!(false));
+        assert_eq!(&p["pid"], pid, "the program was never restarted");
+        s.wait_text(pane, said);
     }
+    s.call(
+        "pane.send_text",
+        json!({"pane": agent, "text": "still here"}),
+    );
+    s.wait_text(&agent, "[fake] got: still here");
+    assert_eq!(s.log("pane.kept").len(), 2);
+    assert!(
+        s.log("pane.resumed").is_empty(),
+        "nothing had to be resumed"
+    );
 }
 
 /// Private files: the state folder is for this user, SYSTEM and

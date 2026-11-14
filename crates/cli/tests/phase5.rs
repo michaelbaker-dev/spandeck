@@ -107,10 +107,7 @@ fn a_refused_station_stays_out() {
 /// 0.2: one Control Deck looks after the other stations: restart one, and
 /// start one whose daemon is not running, if this station is allowed to.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "tests exec-in-place live handoff; Windows restarts panes instead (tests/windows.rs)"
-)]
+#[cfg_attr(windows, ignore = "starts a stopped station with a Unix command line")]
 fn another_station_is_restarted_and_a_stopped_one_is_started_from_the_deck() {
     // The "SSH" here is a script that starts bravo's daemon on this machine.
     let dir = tempfile::tempdir().unwrap();

@@ -22,8 +22,13 @@ use nix::unistd::Pid;
 
 use crate::pty::{ExitInfo, Signal, SpawnSpec};
 
-/// An upgrade replaces the daemon's program in place and keeps every terminal.
-pub const LIVE_HANDOFF: bool = true;
+/// A terminal in this process survives an upgrade: the daemon's program is
+/// replaced in place (exec) and the descriptors stay open.
+pub const LOCAL_HANDOFF: bool = true;
+
+/// Panes live in the daemon's own process. (Set `SPANDECK_PANE_HOST=1` to
+/// try the pane host on Unix; Windows always uses it.)
+pub const PANE_HOST: bool = false;
 
 // ---------------------------------------------------------------- terminals
 
@@ -359,6 +364,29 @@ pub fn replace_file(new: &Path, to: &Path) -> io::Result<()> {
 pub fn replace_process(cmd: &mut Command) -> io::Error {
     cmd.exec()
 }
+
+/// Start a program that goes on after this one ends, with no terminal.
+pub fn spawn_detached(cmd: &mut Command) -> io::Result<()> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: setsid is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn()?;
+    // Collected when it ends, so it does not stay a zombie of this process.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// The upgraded daemon is the same process (exec in place).
+pub const UPGRADE_KEEPS_PID: bool = true;
 
 /// End a pane's program left over from an upgrade that did not complete, if
 /// it is still this process's child.

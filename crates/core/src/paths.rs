@@ -60,6 +60,13 @@ impl Paths {
             .unwrap_or_else(std::env::temp_dir);
         dir.join(format!("spandeck-{tag}.sock"))
     }
+    /// Where the pane host listens (DECISIONS.md, "Windows"): the local
+    /// socket's name with `-host` after it.
+    pub fn host_socket(&self) -> PathBuf {
+        let mut name = self.socket().into_os_string();
+        name.push("-host");
+        PathBuf::from(name)
+    }
     pub fn db(&self) -> PathBuf {
         self.state_dir.join("spandeck.db")
     }

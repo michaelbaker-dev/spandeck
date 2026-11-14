@@ -12,6 +12,8 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+# Keystrokes on their way to the pane host, inside a JSON line.
+base64.workspace = true
 # The local socket (a Unix socket, or a Windows named pipe) is async.
 tokio.workspace = true
 
