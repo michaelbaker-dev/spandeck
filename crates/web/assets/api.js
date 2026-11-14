@@ -4,13 +4,23 @@
 
 const FRAME_OUTPUT = 1, FRAME_RESYNC = 2;
 
+// Who this is, to the station: one name per browser, plus a part that is
+// different in every tab or window. Two windows of the same browser showing the
+// same pane used to look like one client, so neither gave way and they resized
+// the pane back and forth without end (the screen flashed).
 function clientId() {
   let id = localStorage.getItem('spandeck.client');
   if (!id) {
     id = 'web-' + Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, '0')).join('');
     localStorage.setItem('spandeck.client', id);
   }
-  return id;
+  let tab = null;
+  try { tab = sessionStorage.getItem('spandeck.tab'); } catch (e) { /* no session storage: one tab's worth */ }
+  if (!tab) {
+    tab = Array.from(crypto.getRandomValues(new Uint8Array(3)), b => b.toString(16).padStart(2, '0')).join('');
+    try { sessionStorage.setItem('spandeck.tab', tab); } catch (e) { /* as above */ }
+  }
+  return `${id}-${tab}`;
 }
 
 // The localhost token arrives once in the URL fragment and is kept locally.
