@@ -7,8 +7,8 @@ use crate::daemon::Daemon;
 use crate::db::Db;
 
 /// A program's own word for its version. It gets no terminal and nothing to
-/// read, and three seconds: on a Mac, `codex --version` run from the daemon
-/// never returned, and the station check hung with it.
+/// read, and three seconds of our attention: on a Mac, `codex --version` run
+/// from the daemon never returned, and the station check hung with it.
 fn version_of(program: &str) -> Option<String> {
     use std::io::Read;
     let mut child = std::process::Command::new(program)
@@ -26,8 +26,12 @@ fn version_of(program: &str) -> Option<String> {
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                // Stop waiting, but never kill it: a program asked for its
+                // version may be in the middle of updating itself, and one
+                // killed there can be left without its own binary.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
                 return None;
             }
         }

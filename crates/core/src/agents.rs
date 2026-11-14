@@ -187,8 +187,19 @@ impl Daemon {
                             std::thread::sleep(Duration::from_millis(20))
                         }
                         _ => {
-                            let _ = child.kill();
-                            let _ = child.wait();
+                            // A quick question (a version) that gets no answer
+                            // is left to finish by itself: the program may be
+                            // updating itself, and killing it there can leave
+                            // it without its binary. Only a long job that
+                            // overran (an install, an update) is stopped.
+                            if limit < Duration::from_secs(60) {
+                                std::thread::spawn(move || {
+                                    let _ = child.wait();
+                                });
+                            } else {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                            }
                             break None;
                         }
                     }
