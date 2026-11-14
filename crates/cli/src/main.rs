@@ -367,11 +367,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::Hook { agent } => return Ok(hook_main(&paths, &agent)),
         Cmd::FixCodexSandbox => {
             // Run in a Codex pane before Codex starts. Never stops Codex starting.
-            if let Err(e) = fix_with_sudo() {
-                println!("Not fixed ({e}). Codex will start, but it cannot run commands until this is done: spandeck doctor --fix\n");
-                std::thread::sleep(std::time::Duration::from_secs(2));
-            }
-            return Ok(0);
+            return Ok(if fix_with_sudo().is_ok() { 0 } else { 1 });
         }
         Cmd::Mcp => {
             mcp::run(&paths)?;

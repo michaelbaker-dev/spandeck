@@ -581,19 +581,22 @@ impl Daemon {
         // Codex cannot run a single command where the system blocks its
         // sandbox. The fix needs a password once, so it is offered in the
         // pane itself, before Codex starts; Codex starts either way.
-        let (program, args) =
-            if agent == AgentKind::Codex && crate::doctor::codex_sandbox_blocked(&self.home) {
-                let mut wrapped = vec![
+        let (program, args) = if agent == AgentKind::Codex
+            && crate::doctor::codex_sandbox_blocked(&self.home)
+        {
+            let mut wrapped = vec![
                     "-c".to_string(),
-                    "\"$0\" fix-codex-sandbox; exec \"$@\"".to_string(),
+                    // Ctrl-C at the password prompt must skip the fix, not end the
+                // pane: the shell catches it, and Codex starts regardless.
+                "trap : INT; \"$0\" fix-codex-sandbox || { echo; echo 'Skipped. Codex will start, but it cannot run commands until you run: spandeck doctor --fix'; sleep 2; }; trap - INT; exec \"$@\"".to_string(),
                     self.exe.display().to_string(),
                     program,
                 ];
-                wrapped.extend(args);
-                ("/bin/sh".to_string(), wrapped)
-            } else {
-                (program, args)
-            };
+            wrapped.extend(args);
+            ("/bin/sh".to_string(), wrapped)
+        } else {
+            (program, args)
+        };
 
         let cwd = opts.cwd.clone().unwrap_or_else(|| self.home.clone());
         if !cwd.is_dir() {
