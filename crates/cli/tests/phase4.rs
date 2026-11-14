@@ -251,11 +251,23 @@ fn a_project_layout_is_saved_with_the_project_resized_and_arranged() {
     };
 
     let page = Page::open(&s, 1400, 860);
+    // The layout is a row under its project in the list; selecting it shows
+    // it on the right, and the row says it is the one selected.
     page.goto("/s/alpha");
-    page.wait("the layout's tab", "(t => t ? (t.click(), true) : false)([...document.querySelectorAll('.tab.proj')].find(t => t.innerText === 'build'))");
+    let row = |name: &str| {
+        format!("(t => t ? (t.click(), true) : false)([...document.querySelectorAll('.side-proj .side-layout')].find(t => t.querySelector('.side-name').innerText === '{name}'))")
+    };
+    let head = |label: &str| {
+        format!("[...document.querySelectorAll('.lay-head button')].find(b => b.innerText === '{label}').click()")
+    };
+    page.wait("the layout's row", &row("build"));
     page.wait(
         "three panes",
-        "document.querySelectorAll('.workspace .pane').length === 3",
+        "location.hash === '#/s/alpha/l/proj/build' && document.querySelectorAll('.workspace .pane').length === 3",
+    );
+    assert_eq!(
+        page.js("[document.querySelector('.side-layout.current .side-name').innerText, document.querySelector('.lay-head .lay-name').innerText, document.querySelector('.lay-head .lay-saved').innerText]"),
+        json!(["build", "build", "Saved with proj on alpha"])
     );
     // Where each pane is on screen, by its name.
     let ids: std::collections::HashMap<String, String> = s
@@ -308,7 +320,7 @@ fn a_project_layout_is_saved_with_the_project_resized_and_arranged() {
     );
 
     // Arrange: drag lead onto the right edge of dev.
-    page.js("[...document.querySelectorAll('.tabs button')].find(b => b.innerText === 'Arrange').click()");
+    page.js(&head("Arrange"));
     page.wait(
         "the panes to be draggable",
         "document.querySelectorAll('.arr[data-ref]').length === 3",
@@ -348,7 +360,7 @@ fn a_project_layout_is_saved_with_the_project_resized_and_arranged() {
     save(json!({"name": "both", "tree": {"dir": "row", "ratio": 500,
         "a": pane("dev"), "b": {"pane": "logs", "project": "other"}}}))
     .unwrap();
-    page.wait("the second layout's tab", "(t => t ? (t.click(), true) : false)([...document.querySelectorAll('.tab.proj')].find(t => t.innerText.endsWith('both')))");
+    page.wait("the second layout's row", &row("both"));
     page.wait(
         "the guest and its host",
         "document.querySelectorAll('.workspace .pane').length === 2 && !!document.querySelector('.workspace .pane .chip.guest')",
@@ -358,10 +370,185 @@ fn a_project_layout_is_saved_with_the_project_resized_and_arranged() {
         json!([["dev", ""], ["logs", "from other"]]),
         "only the pane of the other project carries the chip"
     );
-    page.js("[...document.querySelectorAll('.tabs button')].find(b => b.innerText === 'Arrange').click()");
+    page.js(&head("Arrange"));
     let card = page.wait(
         "the guest's card in Arrange",
         "document.querySelector('.arr[data-ref=\"other/logs\"] .arr-card')?.innerText",
     );
     assert!(card.as_str().unwrap().contains("from other"), "{card}");
+
+    // A layout's own menu (the owner's rule: "right-click a layout and select
+    // edit or delete"): duplicate it, rename the copy, delete it.
+    let names = || {
+        let layouts =
+            s.call("project.get", json!({"name": "proj"}))["definition"]["layout"].clone();
+        let names: Vec<String> = layouts
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["name"].as_str().unwrap().to_string())
+            .collect();
+        names.join(" ")
+    };
+    let current = "document.querySelector('.side-proj .side-layout.current')";
+    page.right_click(current);
+    page.choose("Duplicate");
+    page.wait("the copy", "location.hash === '#/s/alpha/l/proj/both-copy' && document.querySelectorAll('.workspace .pane').length === 2");
+    page.right_click(current);
+    page.choose("Rename");
+    page.wait("the new name", "(f => f ? (f.querySelector('input').value = 'pair', f.querySelector('button[type=submit]').click(), true) : false)(document.querySelector('.dialog form'))");
+    page.wait("the renamed layout", "location.hash === '#/s/alpha/l/proj/pair' && document.querySelector('.lay-head .lay-name')?.innerText === 'pair'");
+    assert_eq!(names(), "build both pair");
+    page.right_click(current);
+    page.choose("Delete");
+    page.wait("the question", "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.dialog button')].find(b => b.innerText === 'Delete'))");
+    page.wait("the station again", "location.hash === '#/s/alpha' && document.querySelectorAll('.side-proj .side-layout').length === 2");
+    assert_eq!(names(), "build both");
+}
+
+/// The list on the left (the owner's rules, 14 Nov 2026): a layout is made
+/// from its project's menu, or outside any project as a global one; a layout
+/// holds any pane, from any project or none, dragged in from the list; panes
+/// and layouts can be pinned; each pane says by an icon what it is; and every
+/// station shows the same Pinned and Layouts. A workspace an older deck kept
+/// in the browser becomes a global layout.
+#[test]
+fn the_list_makes_layouts_in_projects_and_global_ones_takes_any_pane_and_pins() {
+    use common::browser::Page;
+    let (a, b) = Station::pair();
+    let shell = |n: &str| json!({"name": n, "agent": "shell"});
+    a.call(
+        "project.new",
+        json!({"path": "~/api", "panes": [shell("dev")], "open": true}),
+    );
+    a.call(
+        "project.new",
+        json!({"path": "~/web", "panes": [shell("logs")], "open": true}),
+    );
+    let helper = a.fake(
+        json!({"steps": []}),
+        json!({"name": "helper", "project": "api"}),
+    );
+    let scratch = a.call("pane.spawn", json!({"agent": "shell", "name": "scratch"}))["id"].clone();
+    let dev = a.pane("dev")["id"].clone();
+    let global = |s: &Station, name: &str| {
+        s.call("deck.get", json!({}))["layouts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["name"] == json!(name))
+            .cloned()
+    };
+
+    let page = Page::open(&a, 1400, 860);
+    page.goto("/s/alpha");
+    page.wait("the list", "!!document.querySelector('.side-pane')");
+
+    // A workspace from the browser: its panes that still exist, named the new way.
+    page.js(&format!(
+        "(localStorage.setItem('spandeck.layout.alpha', JSON.stringify({{active: 0, tabs: [{{name: 'my work!', tree: {{dir: 'row', ratio: 0.5, a: {{pane: {dev}}}, b: {{dir: 'col', ratio: 0.5, a: {{pane: {scratch}}}, b: {{pane: 'p-gone'}}}}}}}}]}})), true)"
+    ));
+    let moved = wait_for("the workspace to become a global layout", 15, || {
+        global(&a, "my-work")
+    });
+    assert_eq!(
+        moved["tree"],
+        json!({"dir": "row", "ratio": 500, "a": {"pane": "dev", "project": "api", "station": "alpha"}, "b": {"id": scratch, "station": "alpha"}})
+    );
+    page.wait(
+        "the browser's own copy to be deleted",
+        "localStorage.getItem('spandeck.layout.alpha') === null",
+    );
+
+    // What each pane is: an icon, and its name where a screen reader finds it.
+    let pane_row = |id: &serde_json::Value| {
+        format!("document.querySelector('.side-stations .side-pane[data-id={id}]')")
+    };
+    assert_eq!(
+        page.js(&format!("[{}.getAttribute('aria-label'), {}.querySelector('.ico-wrap').title, {}.querySelector('svg.ico').getAttribute('aria-hidden'), {}.getAttribute('aria-label').split(', ').slice(0, 2)]",
+            pane_row(&dev), pane_row(&dev), pane_row(&dev), pane_row(&json!(helper)))),
+        json!(["dev, Shell, idle", "Shell", "true", ["helper", "Agent"]])
+    );
+
+    // A project's menu makes a layout in that project.
+    let submit = |name: &str| {
+        page.wait("the name", &format!("(f => f ? (f.querySelector('input').value = '{name}', f.querySelector('button[type=submit]').click(), true) : false)(document.querySelector('.dialog form'))"));
+    };
+    page.right_click("[...document.querySelectorAll('.side-project')].find(x => x.querySelector('.side-name').innerText === 'api')");
+    page.choose("New layout");
+    submit("build");
+    page.wait(
+        "the project's layout on the right",
+        "location.hash === '#/s/alpha/l/api/build' && document.querySelectorAll('.workspace .pane').length === 2 && document.querySelector('.lay-head .lay-saved').innerText === 'Saved with api on alpha'",
+    );
+    assert_eq!(
+        page.js("document.querySelector('.side-layout.current').closest('.side-proj').querySelector('.side-project .side-name').innerText"),
+        json!("api"),
+        "the layout is listed in its project"
+    );
+
+    // Outside any project, the menu makes a global one.
+    page.right_click("document.querySelector('.sidebar')");
+    page.choose("New global layout");
+    submit("all");
+    page.wait(
+        "the empty global layout on the right",
+        "location.hash === '#/l/all' && !!document.querySelector('.workspace .arr[data-empty]') && document.querySelector('.lay-head .lay-saved').innerText.startsWith('Global layout')",
+    );
+
+    // Drag a pane of a project into it, then (out of Arrange) one with no project.
+    let drag = |id: &serde_json::Value, onto: &str, across: f64| {
+        page.js(&format!("(() => {{ const row = {}, from = row.getBoundingClientRect(), to = document.querySelector('{onto}').getBoundingClientRect();
+            const ev = (t, x, y, el) => (el || window).dispatchEvent(new MouseEvent(t, {{bubbles: true, cancelable: true, clientX: x, clientY: y}}));
+            const x = to.left + to.width * {across}, y = to.top + to.height / 2;
+            ev('mousedown', from.left + 30, from.top + 8, row); ev('mousemove', x, y); ev('mouseup', x, y); return true; }})()", pane_row(id)));
+    };
+    drag(&a.pane("logs")["id"], ".workspace .arr[data-empty]", 0.5);
+    page.wait(
+        "the pane from web",
+        "document.querySelector('.workspace .arr[data-ref=\"alpha:web/logs\"] .chip.guest')?.innerText === 'from web'",
+    );
+    page.js("[...document.querySelectorAll('.lay-head button')].find(b => b.innerText === 'Done arranging').click()");
+    page.wait(
+        "the layout out of Arrange",
+        "document.querySelectorAll('.workspace .pane').length === 1 && !document.querySelector('.arr')",
+    );
+    drag(&scratch, ".workspace .pane", 0.9);
+    wait_for("both panes to be saved for the fleet", 10, || {
+        global(&a, "all").filter(|l| {
+            l["tree"] == json!({"dir": "row", "ratio": 500, "a": {"pane": "logs", "project": "web", "station": "alpha"}, "b": {"id": scratch, "station": "alpha"}})
+        })
+    });
+    page.wait(
+        "both panes on the right",
+        "JSON.stringify([...document.querySelectorAll('.workspace .pane .strip-name')].map(x => x.innerText)) === '[\"logs\",\"scratch\"]' && !document.querySelector('.arr')",
+    );
+
+    // Pin a pane and a layout: both are listed under Pinned.
+    page.right_click(&pane_row(&dev));
+    page.choose("Pin");
+    page.right_click("[...document.querySelectorAll('.side-proj .side-layout')].find(x => x.querySelector('.side-name').innerText === 'build')");
+    page.choose("Pin");
+    let pinned = "JSON.stringify([...document.querySelectorAll('.side-pinned .side-row')].map(x => x.getAttribute('aria-label')))";
+    page.wait(
+        "the pinned rows",
+        &format!("{pinned} === '[\"dev, Shell, idle\",\"build, layout\"]'"),
+    );
+    assert_eq!(
+        a.call("deck.get", json!({}))["pins"],
+        json!([{"kind": "pane", "station": "alpha", "id": dev}, {"kind": "layout", "station": "alpha", "project": "api", "name": "build"}])
+    );
+
+    // The other station's deck: the same Pinned and the same Layouts, and a
+    // global layout shows the panes where they run.
+    page.visit(&b);
+    page.wait(
+        "the same list on bravo",
+        &format!("{pinned} === '[\"dev, Shell, idle\",\"build, layout\"]' && JSON.stringify([...document.querySelectorAll('.side-globals .side-layout .side-name')].map(x => x.innerText)) === '[\"my-work\",\"all\"]'"),
+    );
+    page.js("[...document.querySelectorAll('.side-globals .side-layout')].find(x => x.querySelector('.side-name').innerText === 'all').click()");
+    page.wait(
+        "alpha's panes in the layout on bravo",
+        "JSON.stringify([...document.querySelectorAll('.workspace .pane')].map(el => [el.querySelector('.strip-name').innerText, el.querySelector('.chip.guest')?.innerText, !!el.querySelector('.xterm-rows')])) === '[[\"logs\",\"from web on alpha\",true],[\"scratch\",\"on alpha\",true]]'",
+    );
 }

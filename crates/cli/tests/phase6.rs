@@ -922,11 +922,14 @@ fn the_deck_shows_who_works_for_whom_and_who_is_talking() {
     );
 
     // Watch: both agents, a line for the task and one for the message.
-    page.goto("/s/alpha");
-    page.wait("the Watch tab", "(t => t ? (t.click(), true) : false)([...document.querySelectorAll('.tab')].find(t => t.innerText === 'Watch'))");
+    // Watch is an entry under the project in the list, with its own address.
+    page.wait(
+        "Watch under the project",
+        "(t => t ? (t.click(), true) : false)(document.querySelector('.side-proj .side-watch'))",
+    );
     page.wait(
         "two agents",
-        "document.querySelectorAll('.watch-card').length === 2",
+        "location.hash === '#/s/alpha/w/demo' && document.querySelectorAll('.watch-card').length === 2 && !!document.querySelector('.side-watch.current')",
     );
     let labels = page.wait("the lines", "(x => x.length >= 2 ? x : null)([...document.querySelectorAll('.watch-map .link-label')].map(e => e.className + ' | ' + e.innerText))");
     let labels = labels.to_string();

@@ -1,13 +1,18 @@
-// The Control Deck. Three zoom levels, each with a URL:
+// The Control Deck. The list on the left is the same on every station; what
+// is selected in it is shown on the right, and each selection has a URL:
 //   #/fleet                      every station
-//   #/s/<station>                one station: the deck of panes, and split workspaces
+//   #/s/<station>                one station: every running pane as a tile
 //   #/s/<station>/p/<pane>       one pane, full size
-//   #/s/<station>/l/<project>/<layout>   a project layout (a phone steps through it)
-// On a phone the same URLs show a small view: status, blockers, approvals, stop.
+//   #/s/<station>/l/<project>/<layout>   a project's layout
+//   #/s/<station>/w/<project>    Watch: a project's agents and who is talking
+//   #/l/<layout>                 a global layout (kept by the whole fleet)
+// On a phone the same URLs show a small view: status, blockers, approvals,
+// stop, one pane to talk to, and a layout stepped through a pane at a time.
 
 import { Api } from './api.js';
 import { PaneTerm } from './term.js';
-import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL } from './ui.js';
+import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText } from './ui.js';
+import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
 
 const api = new Api();
 const root = document.getElementById('app');
@@ -20,6 +25,8 @@ const S = {
   tasks: new Map(),      // station -> [active task]
   msgs: new Map(),       // station -> [recent message]
   projects: new Map(),   // station -> [project]
+  deck: { layouts: [], pins: [] }, // global layouts and pins: one document for the fleet
+  loaded: false,         // the first answers have arrived
   approvals: [],         // across the fleet
   notes: [],             // notification inbox (this station)
   terms: new Map(),      // key -> PaneTerm
@@ -30,10 +37,13 @@ const S = {
 
 function parseRoute() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
+  if (parts[0] === 'l' && parts[1]) return { view: 'layout', layout: 'global:' + parts[1] };
   if (parts[0] === 's' && parts[1]) {
-    if (parts[2] === 'p' && parts[3]) return { view: 'pane', station: parts[1], pane: parts[3] };
-    if (parts[2] === 'l' && parts[3] && parts[4]) return { view: 'station', station: parts[1], layout: `${parts[1]}/${parts[3]}/${parts[4]}` };
-    return { view: 'station', station: parts[1] };
+    const station = parts[1];
+    if (parts[2] === 'p' && parts[3]) return { view: 'pane', station, pane: parts[3] };
+    if (parts[2] === 'l' && parts[3] && parts[4]) return { view: 'layout', station, layout: `${station}/${parts[3]}/${parts[4]}` };
+    if (parts[2] === 'w' && parts[3]) return { view: 'watch', station, project: parts[3] };
+    return { view: 'station', station };
   }
   return { view: 'fleet' };
 }
@@ -41,6 +51,8 @@ const go = (hash) => { if (location.hash !== hash) location.hash = hash; else re
 const stationUrl = (s) => `#/s/${encodeURIComponent(s)}`;
 const paneUrl = (s, p) => `#/s/${encodeURIComponent(s)}/p/${encodeURIComponent(p)}`;
 const layoutUrl = (s, project, name) => `#/s/${encodeURIComponent(s)}/l/${encodeURIComponent(project)}/${encodeURIComponent(name)}`;
+const watchUrl = (s, project) => `#/s/${encodeURIComponent(s)}/w/${encodeURIComponent(project)}`;
+const globalUrl = (name) => `#/l/${encodeURIComponent(name)}`;
 
 // --------------------------------------------------------------------- data
 
@@ -48,12 +60,17 @@ const panesOf = (st) => S.panes.get(st) || [];
 const liveAgents = (st) => panesOf(st).filter(p => !p.exited);
 const findPane = (st, id) => panesOf(st).find(p => p.id === id || p.name === id);
 const online = (st) => S.fleet.stations.find(s => s.station === st)?.state === 'online';
+const stationsByName = () => S.fleet.stations.slice().sort((a, b) => a.station.localeCompare(b.station));
+const onlineStations = () => stationsByName().filter(s => s.state === 'online').map(s => s.station);
+const byState = (a, b) => stateRank(a) - stateRank(b) || a.name.localeCompare(b.name);
 // The projects a project is linked with. A station that does not know about
 // links yet says nothing, which is the same as none.
 const linksOf = (pr) => Array.isArray(pr?.links) ? pr.links.filter(l => l && l.with) : [];
 const linkName = (st, l) => l.station && l.station !== st ? `${l.with} on ${l.station}` : l.with;
 const linkedText = (st, pr) => { const ls = linksOf(pr); return ls.length ? 'Linked with ' + linkName(st, ls[0]) + (ls.length > 1 ? ` +${ls.length - 1}` : '') : ''; };
-const linkedChip = (st, pr) => linksOf(pr).length ? h('span', { class: 'chip linked', title: `Agents in ${pr.name} can message agents in ${linksOf(pr).map(l => linkName(st, l)).join(', ')}, and they share their findings boards. Files, history and keys stay separate.` }, linkedText(st, pr)) : null;
+// `short` is for a row of the list, where there is room for little: "⇄ web".
+const linkedChip = (st, pr, short) => linksOf(pr).length ? h('span', { class: 'chip linked', 'aria-label': linkedText(st, pr), title: `Linked: agents in ${pr.name} can message agents in ${linksOf(pr).map(l => linkName(st, l)).join(', ')}, and they share their findings boards. Files, history and keys stay separate.` },
+  short ? '⇄ ' + linksOf(pr)[0].with + (linksOf(pr).length > 1 ? ` +${linksOf(pr).length - 1}` : '') : linkedText(st, pr)) : null;
 
 async function refreshStation(st) {
   try {
@@ -75,7 +92,11 @@ async function refresh() {
   S.approvals = lists.flat();
   try { S.notes = await api.call('notify.list', { limit: 60 }); } catch (e) { /* keep */ }
   try { S.trust = await api.call('trust.status'); } catch (e) { /* keep */ }
+  // Always from the station the deck was opened on: every station has the same copy.
+  try { S.deck = await api.call('deck.get'); } catch (e) { /* keep */ }
+  S.loaded = true;
   update();
+  migrateWorkspaces();
 }
 
 let refreshTimer = null;
@@ -89,7 +110,7 @@ api.onEvent((ev) => {
   }
   if (ev.kind === 'notify.new') notifyBrowser(ev.data);
   if (ev.kind === 'connection.restored') { for (const t of S.terms.values()) t.attach(); }
-  if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events|vault|trust)\./.test(ev.kind)) refreshSoon();
+  if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events|vault|trust|deck)\./.test(ev.kind)) refreshSoon();
 });
 
 function notifyBrowser(n) {
@@ -112,72 +133,59 @@ addEventListener('mousedown', touch, true);
 
 const rpc = (st, method, params) => api.on(st, method, params).then((r) => { refreshSoon(60); return r; }).catch((e) => { toast(e.message, 'error'); throw e; });
 
-// --------------------------------------------------------------- layouts
-// Per station: tabs, each a tree of splits. Leaves name a pane.
-
-function loadLayout(st) {
-  try { return JSON.parse(localStorage.getItem('spandeck.layout.' + st)) || { tabs: [], active: -1 }; }
-  catch (e) { return { tabs: [], active: -1 }; }
-}
-function saveLayout(st, l) { localStorage.setItem('spandeck.layout.' + st, JSON.stringify(l)); }
-const leaves = (n, out = []) => { if (!n) return out; if (n.pane) out.push(n); else { leaves(n.a, out); leaves(n.b, out); } return out; };
-
-function openInWorkspace(st, paneId, dir) {
-  const l = loadLayout(st);
-  l.proj = null;
-  let tab = l.tabs[l.active];
-  const existing = l.tabs.findIndex(t => leaves(t.tree).some(x => x.pane === paneId));
-  if (existing >= 0 && !dir) { l.active = existing; saveLayout(st, l); return go(stationUrl(st)); }
-  if (!tab) {
-    const p = findPane(st, paneId);
-    tab = { name: p?.project || p?.name || 'workspace', tree: { pane: paneId } };
-    l.tabs.push(tab);
-    l.active = l.tabs.length - 1;
-  } else if (!tab.tree) {
-    tab.tree = { pane: paneId };
-  } else {
-    const target = leaves(tab.tree).find(x => x.pane === S.focused) || leaves(tab.tree).pop();
-    const old = { ...target };
-    for (const k of Object.keys(target)) delete target[k];
-    Object.assign(target, { dir: dir || 'row', ratio: 0.5, a: old, b: { pane: paneId } });
-  }
-  saveLayout(st, l);
-  go(stationUrl(st));
-}
-
-function closeLeaf(st, paneId) {
-  const l = loadLayout(st);
-  const tab = l.tabs[l.active];
-  if (!tab) return;
-  const prune = (n) => {
-    if (!n) return null;
-    if (n.pane) return n.pane === paneId ? null : n;
-    const a = prune(n.a), b = prune(n.b);
-    if (a && b) return { ...n, a, b };
-    return a || b;
-  };
-  tab.tree = prune(tab.tree);
-  if (!tab.tree) { l.tabs.splice(l.active, 1); l.active = l.tabs.length ? Math.max(0, l.active - 1) : -1; }
-  saveLayout(st, l);
-  render();
-}
-
 // ------------------------------------------------------------- pane menus
 
-function paneMenu(e, st, p, where) {
+// Paste into a pane. A browser that will hand over the clipboard is asked for
+// it; one that will not (plain http, or permission refused) gets a box to
+// paste into by hand.
+async function pasteInto(term) {
+  if (navigator.clipboard?.readText) {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) return term.pasteText(text);
+      return toast('There is no text on the clipboard');
+    } catch (e) { /* not allowed: ask for the text instead */ }
+  }
+  dialog(`Paste into ${term.pane.name}`, (close) => {
+    const box = h('textarea', { rows: 5, 'aria-label': 'Text to paste', placeholder: 'Press Cmd-V or Ctrl-V here, then Paste' });
+    return h('form', { onsubmit: (e) => { e.preventDefault(); const text = box.value; close(); term.pasteText(text).then((ok) => ok && term.focus()); } },
+      h('p', { class: 'muted' }, 'This browser does not let a page read the clipboard here. Press Cmd-V or Ctrl-V in the box, then Paste. Nothing runs until you press Enter in the pane.'),
+      box, h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel'), h('button', { class: 'primary', type: 'submit' }, 'Paste')));
+  });
+}
+
+async function copyScreen(st, p) {
+  try {
+    const lines = (await api.on(st, 'pane.text', { pane: p.id })).lines.map(l => l.replace(/\s+$/, ''));
+    while (lines.length && !lines[lines.length - 1]) lines.pop();
+    await copyText(lines.join('\n'), `Copied what is on ${p.name}'s screen`);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+// `term` is the terminal the menu was opened on, when it was opened on one.
+function paneMenu(e, st, p, where, term) {
   const s = stateOf(p), agent = p.agent !== 'shell', alive = !p.exited;
   const act = (m, extra) => () => rpc(st, m, { pane: p.id, ...extra }).then((r) => {
     // A restarted pane is a new program behind the same name: show it.
     if (m === 'pane.restart') for (const t of S.terms.values()) if (t.station === st && t.pane.id === p.id) { if (t.chan !== null) api.detach(t.chan); t.chan = null; t.attach(); }
     return r;
   });
+  const ctx = isPhone() ? null : layCtx, inLay = ctx && ctx.has(st, p), pin = panePin(st, p);
   showMenu(e.clientX, e.clientY, [
     { title: `${p.name} · ${p.address}` },
+    term && { label: 'Copy', hint: 'Cmd+C · Ctrl+Shift+C', disabled: !term.hasSelection(), action: () => term.copySelection() },
+    term && alive && { label: 'Paste', hint: 'Cmd+V · Ctrl+Shift+V', action: () => pasteInto(term) },
+    term && { label: 'Copy everything on screen', action: () => copyScreen(st, p) },
+    term && term.tracksMouse() && { note: 'To select text here, hold Option (Mac) or Shift while dragging.' },
+    term && '-',
     where !== 'zoom' && { label: 'Open full size', action: () => go(paneUrl(st, p.id)) },
-    where !== 'leaf' && { label: 'Open in workspace', action: () => openInWorkspace(st, p.id) },
-    { label: 'Split right', hint: 'Ctrl+Shift+E', action: () => pickPane(st, (id) => openInWorkspace(st, id, 'row'), p.id) },
-    { label: 'Split down', hint: 'Ctrl+Shift+O', action: () => pickPane(st, (id) => openInWorkspace(st, id, 'col'), p.id) },
-    where === 'leaf' && { label: 'Close this view', hint: 'Ctrl+Shift+W', action: () => closeLeaf(st, p.id) },
+    // With a layout on screen a pane goes beside the one that has the
+    // keyboard; with none, into a layout you choose.
+    ctx && !inLay && alive && { label: `Add to ${ctx.lay.name}, to the right`, hint: 'Ctrl+Shift+E', action: () => addToLayout(ctx.lay, st, p, 'row') },
+    ctx && !inLay && alive && { label: `Add to ${ctx.lay.name}, below`, hint: 'Ctrl+Shift+O', action: () => addToLayout(ctx.lay, st, p, 'col') },
+    ctx && inLay && { label: 'Take out of this layout', hint: where === 'leaf' ? 'Ctrl+Shift+W' : undefined, action: () => { ctx.remove(ctx.sideRef(st, p)); render(); } },
+    !ctx && alive && !isPhone() && { label: 'Add to a layout…', action: () => addToLayoutDialog(st, p) },
+    { label: isPinned(pin) ? 'Unpin' : 'Pin', action: () => togglePin(pin) },
     '-',
     agent && alive && { label: 'Stop this turn', action: act('pane.stop'), disabled: !(s === 'working' || s === 'needs_you') },
     agent && alive && { label: p.paused ? 'Unpause (deliver work again)' : 'Pause (no new work)', action: act('pane.pause', { paused: !p.paused }) },
@@ -190,7 +198,7 @@ function paneMenu(e, st, p, where) {
     agent && alive && { label: 'Run a command in it…', action: () => commandDialog(st, p) },
     { label: 'Send it a message', action: () => messageDialog(st, p) },
     { label: 'Rename', action: () => renameDialog(st, p) },
-    { label: 'Copy address', action: () => navigator.clipboard?.writeText(p.address).then(() => toast('Copied ' + p.address)) },
+    { label: 'Copy address', action: () => copyText(p.address, 'Copied ' + p.address) },
     '-',
     alive && { label: 'Kill the process', danger: true, action: () => confirmBox('Kill ' + p.name + '?', 'The process ends now. An agent can be resumed later by its session.', 'Kill', act('pane.kill')) },
     agent && { label: alive ? 'Restart and resume the conversation' : 'Start again and resume the conversation', action: () => alive
@@ -202,29 +210,40 @@ function paneMenu(e, st, p, where) {
   ]);
 }
 
-function pickPane(st, then, exclude) {
-  const options = liveAgents(st).filter(p => p.id !== exclude);
+// Choose a running pane, from any station, that is not in the layout yet.
+function pickPane(then, ctx) {
+  const options = onlineStations().flatMap(st => liveAgents(st).filter(p => !ctx || !ctx.has(st, p)).map(p => ({ st, p })));
   dialog('Choose a pane', (close) => h('div', { class: 'list' },
-    options.map(p => h('button', { class: 'list-row', onclick: () => { close(); then(p.id); } }, dot(p), h('b', {}, p.name), h('span', { class: 'muted' }, p.project || ''))),
-    h('button', { class: 'list-row', onclick: () => { close(); newPaneDialog(st, null, then); } }, '＋ New pane…')));
+    options.map(({ st, p }) => h('button', { class: 'list-row', onclick: () => { close(); then(st, p); } }, dot(p), paneMark(p), h('b', {}, p.name), h('span', { class: 'muted' }, `${st}${p.project ? ' · ' + p.project : ''}`))),
+    options.length ? null : h('p', { class: 'muted' }, 'Every running pane is already in this layout.')));
 }
 
 // ------------------------------------------------------------------ dialogs
 
+const AGENT_CHOICES = [['claude', 'Claude Code'], ['codex', 'Codex'], ['shell', 'Shell']];
+
 function newPaneDialog(st, project, then) {
   dialog('New pane on ' + st, (close) => {
-    const agent = h('select', {}, h('option', { value: 'claude' }, 'Claude Code'), h('option', { value: 'codex' }, 'Codex'), h('option', { value: 'shell' }, 'Shell'));
-    const name = h('input', { placeholder: 'optional' });
+    const agent = h('select', {}, AGENT_CHOICES.map(([v, label]) => h('option', { value: v }, label)));
+    const name = h('input', { 'aria-label': 'Name' });
     const proj = h('select', {}, h('option', { value: '' }, '(no project)'), (S.projects.get(st) || []).map(p => h('option', { value: p.name, selected: p.name === project }, p.name)));
     const cwd = h('input', { placeholder: 'default: the project folder, or your home folder' });
+    // A pane's name is used once in its project (and once among the panes
+    // with none): offer one that is free, until a name is typed.
+    let typed = false;
+    const suggest = () => { if (!typed) name.value = freeName(agent.value, panesOf(st).filter(p => !p.exited && (p.project || '') === proj.value).map(p => p.name)); };
+    name.addEventListener('input', () => { typed = name.value !== ''; });
+    agent.addEventListener('change', suggest);
+    proj.addEventListener('change', suggest);
+    suggest();
     const submit = async () => {
-      const params = { agent: agent.value, name: name.value || undefined, project: proj.value || undefined, cwd: cwd.value || undefined };
+      const params = { agent: agent.value, name: name.value.trim() || undefined, project: proj.value || undefined, cwd: cwd.value || undefined };
       const pane = await rpc(st, 'pane.spawn', params);
       close();
       then ? then(pane.id) : go(paneUrl(st, pane.id));
     };
     return h('form', { onsubmit: (e) => { e.preventDefault(); submit(); } },
-      field('Run', agent), field('Name', name), field('Project', proj), field('Folder', cwd),
+      field('Run', agent), field('Name', name, 'A name is used once in a project.'), field('Project', proj), field('Folder', cwd),
       h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel'), h('button', { class: 'primary', type: 'submit' }, 'Start')));
   });
 }
@@ -429,6 +448,8 @@ function palette() {
     { label: 'Go to the fleet', run: () => go('#/fleet') },
     ...S.fleet.stations.map(s => ({ label: `Go to station ${s.station}`, run: () => go(stationUrl(s.station)) })),
     ...S.fleet.stations.flatMap(s => liveAgents(s.station).map(p => ({ label: `Open pane ${p.name} on ${s.station}`, run: () => go(paneUrl(s.station, p.id)) }))),
+    ...allLayouts().map(x => ({ label: `Open layout ${x.name} (${layShort(x)})`, run: () => go(layUrl(x)) })),
+    { label: 'New global layout…', run: () => newLayoutDialog(null, null) },
     { label: 'New pane…', run: () => newPaneDialog(S.route.station || api.station) },
     { label: 'New project…', run: () => newProjectDialog(S.route.station || api.station) },
     { label: 'Approval requests', run: approvalsPanel },
@@ -454,9 +475,10 @@ function palette() {
   });
 }
 
-async function doctorPanel() {
-  const st = S.route.station || api.station;
-  const d = await api.on(st, 'station.doctor');
+async function doctorPanel(where) {
+  const st = (typeof where === 'string' && where) || S.route.station || api.station;
+  let d;
+  try { d = await api.on(st, 'station.doctor'); } catch (e) { return toast(e.message, 'error'); }
   dialog('Station check: ' + st, () => h('table', { class: 'table' }, h('tbody', {}, d.checks.map(c => h('tr', {},
     h('td', {}, h('span', { class: 'chip ' + (c.ok ? 'ok' : c.required ? 'bad' : 'warn') }, c.ok ? 'ok' : c.required ? 'fail' : 'warn')), h('td', {}, c.name), h('td', { class: 'muted' }, c.detail))))), { wide: true });
 }
@@ -652,10 +674,14 @@ function topbar() {
   const needs = S.fleet.stations.flatMap(s => liveAgents(s.station)).filter(p => p.state === 'needs_you').length;
   const unread = S.notes.filter(n => !n.read).length;
   const pane = r.view === 'pane' ? findPane(r.station, r.pane) : null;
+  const lay = r.view === 'layout' ? findLayout(r.layout) : null;
+  const project = pane?.project || lay?.project || (r.view === 'watch' ? r.project : null);
+  const here = pane ? pane.name : lay ? lay.name : r.view === 'watch' ? 'Watch' : null;
   const crumbs = [h('a', { href: '#/fleet' }, 'Fleet')];
   if (r.station) crumbs.push('›', h('a', { href: stationUrl(r.station) }, r.station));
-  if (pane?.project) crumbs.push('›', h('span', {}, pane.project));
-  if (pane) crumbs.push('›', h('span', { class: 'here' }, pane.name));
+  else if (lay) crumbs.push('›', h('span', {}, 'Layouts'));
+  if (project) crumbs.push('›', h('span', {}, project));
+  if (here) crumbs.push('›', h('span', { class: 'here' }, here));
   return h('header', { class: 'topbar' },
     h('a', { class: 'brand', href: '#/fleet', title: 'spandeck ' + (api.version || '') }, 'spandeck'),
     h('nav', { class: 'crumbs', 'aria-label': 'Where you are' }, crumbs),
@@ -678,24 +704,31 @@ function stopRows() {
     `${s.station}: ${s.label}`, s.status === 'confirmed' ? ` (${s.result?.stopped?.length ?? 0} stopped)` : s.status === 'unreachable' ? ' — will be delivered when it is back' : '')));
 }
 
-function stationTile(s) {
-  const agents = liveAgents(s.station).filter(p => p.agent !== 'shell').sort((a, b) => stateRank(a) - stateRank(b));
+const STATION_STATE = { unreachable: 'unreachable', not_linked: 'not in this fleet', update_needed: 'on a version this station cannot control' };
+
+function stationMenu(e, s) {
+  e.preventDefault();
+  e.stopPropagation();
   const up = s.state === 'online';
-  return h('a', {
-    class: 'tile station ' + s.state, href: stationUrl(s.station),
-    oncontextmenu: (e) => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
-      { label: 'Open ' + s.station, action: () => go(stationUrl(s.station)) },
-      up && { label: 'New pane here…', action: () => newPaneDialog(s.station) },
-      up && { label: 'New project here…', action: () => newProjectDialog(s.station) },
-      s.state === 'not_linked' && { label: `Join ${s.station}'s fleet…`, action: () => joinFleet(s.station) },
-      up && { label: 'Restart spandeck here (keeps terminals)', action: () => confirmBox(`Restart spandeck on ${s.station}?`, 'Every terminal and agent keeps running. If it does not come back healthy, the restart is undone.', 'Restart', () => rpc(s.station, 'station.restart', {}).then(() => toast(`${s.station} is restarting`))) },
-      up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`))) },
-      s.state === 'unreachable' && { label: 'Wake it (same network only)', action: () => rpc(api.station, 'fleet.wake', { station: s.station }).then((r) => toast(`Sent ${r.sent} wake packets to ${s.station}. Give it a minute.`)) },
-      s.state === 'unreachable' && { label: 'Start spandeck there (over SSH)', action: () => rpc(api.station, 'fleet.start', { station: s.station }).then((r) => toast(`${s.station} is ${r.state}`)) },
-      s.state === 'unreachable' && { label: 'Forget this station', danger: true, action: () => confirmBox(`Forget ${s.station}?`, 'It is removed from this list. If it comes back it is listed again.', 'Forget', () => rpc(api.station, 'fleet.forget', { station: s.station })) },
-      up && { label: 'Stop every agent here', danger: true, action: () => rpc(api.station, 'stop.all', { scope: s.station === api.station ? 'station' : s.station }) },
-    ]); },
-  },
+  showMenu(e.clientX, e.clientY, [
+    { label: 'Open ' + s.station, action: () => go(stationUrl(s.station)) },
+    up && { label: 'New pane here…', action: () => newPaneDialog(s.station) },
+    up && { label: 'New project here…', action: () => newProjectDialog(s.station) },
+    up && { label: 'Check this station', action: () => doctorPanel(s.station) },
+    s.state === 'not_linked' && { label: `Join ${s.station}'s fleet…`, action: () => joinFleet(s.station) },
+    up && { label: 'Restart spandeck here (keeps terminals)', action: () => confirmBox(`Restart spandeck on ${s.station}?`, 'Every terminal and agent keeps running. If it does not come back healthy, the restart is undone.', 'Restart', () => rpc(s.station, 'station.restart', {}).then(() => toast(`${s.station} is restarting`))) },
+    up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`))) },
+    s.state === 'unreachable' && { label: 'Wake it (same network only)', action: () => rpc(api.station, 'fleet.wake', { station: s.station }).then((r) => toast(`Sent ${r.sent} wake packets to ${s.station}. Give it a minute.`)) },
+    s.state === 'unreachable' && { label: 'Start spandeck there (over SSH)', action: () => rpc(api.station, 'fleet.start', { station: s.station }).then((r) => toast(`${s.station} is ${r.state}`)) },
+    s.state === 'unreachable' && { label: 'Forget this station', danger: true, action: () => confirmBox(`Forget ${s.station}?`, 'It is removed from this list. If it comes back it is listed again.', 'Forget', () => rpc(api.station, 'fleet.forget', { station: s.station })) },
+    up && { label: 'Stop every agent here', danger: true, action: () => rpc(api.station, 'stop.all', { scope: s.station === api.station ? 'station' : s.station }) },
+  ]);
+}
+
+function stationTile(s) {
+  const agents = liveAgents(s.station).filter(p => p.agent !== 'shell').sort(byState);
+  const up = s.state === 'online';
+  return h('a', { class: 'tile station ' + s.state, href: stationUrl(s.station), oncontextmenu: (e) => stationMenu(e, s) },
     h('div', { class: 'tile-head' }, h('span', { class: 'dot ' + (up ? (s.needs_you ? 'needs_you' : s.working ? 'working' : 'idle') : 'unreachable') }), h('b', {}, s.station), s.self ? h('span', { class: 'chip' }, 'this station') : null, h('span', { class: 'grow' }), h('span', { class: 'muted' }, s.version || '')),
     up ? h('div', { class: 'tile-stats' },
       h('span', {}, h('b', {}, s.working ?? 0), ' working'), h('span', { class: s.needs_you ? 'needs' : '' }, h('b', {}, s.needs_you ?? 0), ' need you'),
@@ -703,15 +736,8 @@ function stationTile(s) {
       s.codex_sandbox_blocked ? h('span', { class: 'chip warn', title: 'Codex cannot run commands on this station: the system blocks its sandbox. On the station, run "spandeck doctor --fix" once. It asks for your password.' }, 'Codex blocked') : null,
       s.service === false ? h('span', { class: 'chip warn', title: 'spandeck does not start at login on this station. After a reboot it stays down until someone starts it. Run "spandeck service --install" there.' }, 'not started at login') : null, vaultChip(s))
       : h('div', { class: 'tile-stats warn-text' }, s.state === 'update_needed' ? 'Needs an update before it can be controlled' : s.state === 'unreachable' ? `Unreachable · last seen ${ago(s.last_seen_ms)} ago. Right-click to wake or start it.` : s.state === 'not_linked' ? `Not in this fleet. On ${s.station}, run "spandeck fleet --join ${api.station}", then approve it under Access.` : `Unreachable · last seen ${ago(s.last_seen_ms)} ago`),
-    h('div', { class: 'tile-agents' }, agents.slice(0, 8).map(p => h('div', { class: 'agent-line' }, dot(p), h('span', {}, p.name), h('span', { class: 'muted' }, p.tool || p.needs_reason || STATE_LABEL[stateOf(p)]))),
+    h('div', { class: 'tile-agents' }, agents.slice(0, 8).map(p => h('div', { class: 'agent-line' }, dot(p), paneMark(p), h('span', {}, p.name), h('span', { class: 'muted' }, p.tool || p.needs_reason || STATE_LABEL[stateOf(p)]))),
       up && !agents.length ? h('span', { class: 'muted' }, 'No agents running') : null));
-}
-
-function fleetView() {
-  const stations = S.fleet.stations.slice().sort((a, b) => (b.needs_you || 0) - (a.needs_you || 0) || (b.self ? 1 : 0) - (a.self ? 1 : 0));
-  return h('main', { class: 'fleet' }, stopRows(),
-    h('div', { class: 'tiles' }, stations.map(stationTile)),
-    stations.length <= 1 ? h('p', { class: 'muted hint' }, 'Other stations appear here on their own: any machine under your Tailscale login that runs spandeckd.') : null);
 }
 
 const thumbs = new Map();
@@ -731,36 +757,42 @@ async function loadThumbs(st, panes) {
   }
 }
 
+// A pane's icon, with the name of what it is for a pointer that rests on it.
+// Whatever row or tile carries it says the same in its own accessible name.
+const paneMark = (p) => h('span', { class: 'ico-wrap', title: iconName(p.icon) }, paneIcon(p.icon));
+const paneSays = (p) => `${p.name}, ${iconName(p.icon)}, ${STATE_LABEL[stateOf(p)] || stateOf(p)}`;
+
 function paneTile(st, p) {
   const key = st + '/' + p.id;
-  return h('a', { class: 'tile pane-tile ' + stateOf(p), href: paneUrl(st, p.id), oncontextmenu: (e) => { e.preventDefault(); paneMenu(e, st, p, 'tile'); } },
-    h('div', { class: 'tile-head' }, dot(p), h('b', {}, p.name), p.agent !== 'shell' ? h('span', { class: 'chip' }, p.agent_name) : null, h('span', { class: 'grow' }),
+  return h('a', { class: 'tile pane-tile ' + stateOf(p), href: paneUrl(st, p.id), 'aria-label': paneSays(p), oncontextmenu: (e) => { e.preventDefault(); paneMenu(e, st, p, 'tile'); } },
+    h('div', { class: 'tile-head' }, dot(p), paneMark(p), h('b', {}, p.name), p.agent !== 'shell' ? h('span', { class: 'chip' }, p.agent_name) : null, h('span', { class: 'grow' }),
       h('span', { class: 'muted' }, p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}` : `${STATE_LABEL[stateOf(p)] || stateOf(p)} · ${ago(p.state_since_ms)}`)),
     p.needs_reason ? h('div', { class: 'needs-line' }, p.needs_reason) : null,
     h('pre', { class: 'thumb', dataset: { key } }, thumbText(thumbs.get(key) || [])));
 }
 
-function sidebar(st) {
-  const projects = S.projects.get(st) || [];
-  const panes = panesOf(st);
-  // Arranging a project layout: the list says which panes are the project's
-  // own, which would be guests, and which cannot be placed at all.
-  const home = arrangeCtx?.project || null;
-  const placed = new Set(home ? leaves(arrangeCtx.tree()).map(arrangeCtx.refOf) : []);
-  const NO_NAME = 'This pane is not in a project, so a project layout has no name to save it by. Start it in a project, or use a workspace (＋, this browser only).';
-  const row = (p) => {
-    const ref = arrangeCtx && !p.exited ? arrangeCtx.sideRef(p) : null;
-    const stuck = home && !p.project;
-    return h('a', { class: 'side-pane' + (S.route.pane === p.id ? ' current' : '') + (ref ? ' draggable' : '') + (stuck ? ' stuck' : ''), href: paneUrl(st, p.id),
-      title: stuck ? NO_NAME : ref && home ? (p.project === home ? 'Drag into the layout' : `Drag into the layout as a guest from ${p.project}`) : undefined,
-      onmousedown: (e) => { if (ref) startArrange(e, ref, p.name, arrangeCtx); else if (stuck && !e.button) toast(NO_NAME); },
-      onclick: (e) => { if (arrangeCtx) e.preventDefault(); }, oncontextmenu: (e) => { e.preventDefault(); paneMenu(e, st, p, 'side'); } }, dot(p), h('span', { class: 'side-name' }, p.name),
-      p.paused ? h('span', { class: 'chip warn' }, 'paused') : null,
-      ref && placed.has(ref) ? h('span', { class: 'chip' }, 'in layout') : null);
-  };
-  const projMenu = (e, pr) => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
+// ---- the list on the left ----
+// The same on every station: what is pinned, every station with its projects
+// (each with its layouts, Watch and panes), then the global layouts. What is
+// selected in it is what the right-hand side shows.
+
+// Which groups are folded away is this browser's own business.
+const folded = new Set((() => { try { return JSON.parse(localStorage.getItem('spandeck.side.folded')) || []; } catch (e) { return []; } })());
+function fold(key) {
+  if (!folded.delete(key)) folded.add(key);
+  try { localStorage.setItem('spandeck.side.folded', JSON.stringify([...folded])); } catch (e) { /* not kept, then */ }
+  render();
+}
+const caret = (key, what) => h('button', { class: 'caret', type: 'button', 'aria-expanded': String(!folded.has(key)), 'aria-label': `${folded.has(key) ? 'Show' : 'Hide'} ${what}`,
+  onclick: (e) => { e.preventDefault(); e.stopPropagation(); fold(key); } }, folded.has(key) ? '▸' : '▾');
+
+function projMenu(e, st, pr) {
+  e.preventDefault();
+  e.stopPropagation();
+  showMenu(e.clientX, e.clientY, [
     { title: pr.address },
     pr.open ? { label: 'Close project (keeps conversations)', action: () => rpc(st, 'project.close', { name: pr.name }) } : { label: 'Open project', action: () => rpc(st, 'project.open', { name: pr.name }) },
+    { label: 'New layout…', action: () => newLayoutDialog(st, pr.name) },
     { label: 'New pane in this project…', action: () => newPaneDialog(st, pr.name) },
     { label: 'Tasks, reviews and sign-off', action: () => tasksPanel(st, pr.name).catch(er => toast(er.message, 'error')) },
     '-',
@@ -768,33 +800,94 @@ function sidebar(st) {
     ...linksOf(pr).map(l => ({ label: `Unlink from ${linkName(st, l)}`, action: () => rpc(st, 'project.unlink', { project: pr.name, with: l.with, ...(l.station && l.station !== st ? { station: l.station } : {}) }).then(() => toast(`${pr.name} and ${l.with} are no longer linked`)) })),
     '-',
     { label: 'Remove from this station', danger: true, action: () => confirmBox('Remove ' + pr.name + '?', 'Its panes are closed. The folder and its .spandeck files are not touched.', 'Remove', () => rpc(st, 'project.remove', { name: pr.name })) },
-  ]); };
-  const group = (pr) => h('div', { class: 'side-group' },
-    h('div', { class: 'side-project', oncontextmenu: (e) => projMenu(e, pr), title: pr.path }, h('b', {}, pr.name), pr.branch ? h('span', { class: 'muted' }, pr.branch) : null, h('span', { class: 'grow' }),
-      h('button', { class: 'icon-btn', 'aria-label': 'Project menu', onclick: (e) => projMenu(e, pr) }, '⋮')),
-    linksOf(pr).length ? h('div', { class: 'side-links' }, linkedChip(st, pr)) : null,
-    pr.open ? panes.filter(p => p.project === pr.name).sort((a, b) => stateRank(a) - stateRank(b)).map(row) : h('button', { class: 'mini', onclick: () => rpc(st, 'project.open', { name: pr.name }) }, 'Open'),
-    pr.problem ? h('div', { class: 'warn-text small' }, pr.problem) : null);
-  const loose = panes.filter(p => !p.project).sort((a, b) => stateRank(a) - stateRank(b));
-  const guests = projects.filter(pr => pr.name !== home);
-  return h('aside', { class: 'sidebar', oncontextmenu: (e) => { if (e.target.closest('.side-pane,.side-project')) return; e.preventDefault(); showMenu(e.clientX, e.clientY, [
-    { label: 'New pane…', action: () => newPaneDialog(st) }, { label: 'New project…', action: () => newProjectDialog(st) }, { label: 'Check this station', action: doctorPanel }]); } },
-    home ? [
-      h('div', { class: 'side-section' }, h('b', {}, 'This layout\'s project')),
-      projects.filter(pr => pr.name === home).map(group),
-      guests.length ? h('div', { class: 'side-section' }, h('b', {}, 'Other projects'), h('small', {}, 'Their panes join this layout as guests')) : null,
-      guests.map(group),
-    ] : projects.map(group),
-    h('div', { class: 'side-group' }, h('div', { class: 'side-project' }, h('b', {}, 'Other panes')),
-      home && loose.length ? h('div', { class: 'muted small side-hint' }, 'Not in a project: these cannot go in a project layout.') : null, loose.map(row)),
-    h('div', { class: 'side-actions' }, h('button', { onclick: () => newPaneDialog(st) }, '＋ Pane'), h('button', { onclick: () => newProjectDialog(st) }, '＋ Project')));
+  ]);
+}
+
+function sidebar() {
+  const r = S.route, ctx = layCtx;
+  const current = (on) => (on ? { class: ' current', 'aria-current': 'page' } : { class: '' });
+
+  // `where` says whose a row is when it is shown outside its own group.
+  const paneRow = (st, p, where) => {
+    const cur = current(r.view === 'pane' && r.station === st && (r.pane === p.id || r.pane === p.name));
+    const can = ctx && !p.exited;
+    return h('a', { class: 'side-row side-pane' + cur.class + (can && ctx.arrange ? ' draggable' : ''), href: paneUrl(st, p.id),
+      'aria-label': paneSays(p), 'aria-current': cur['aria-current'], dataset: { id: p.id, station: st },
+      title: can ? (ctx.arrange ? 'Drag into the layout' : `Drag into ${ctx.lay.name}, or click to open`) : undefined,
+      onmousedown: (e) => { if (can) sideDrag(e, st, p); },
+      onclick: (e) => { if (ctx?.arrange || Date.now() - dragEnded < 300) e.preventDefault(); },
+      oncontextmenu: (e) => { e.preventDefault(); e.stopPropagation(); paneMenu(e, st, p, 'side'); } },
+    dot(p), paneMark(p), h('span', { class: 'side-name' }, p.name),
+    where ? h('span', { class: 'muted side-where' }, where) : null,
+    p.paused ? h('span', { class: 'chip warn' }, 'paused') : null,
+    can && ctx.arrange && ctx.has(st, p) ? h('span', { class: 'chip' }, 'in layout') : null);
+  };
+  const layRow = (lay, where) => {
+    const cur = current(r.view === 'layout' && r.layout === lay.key);
+    return h('a', { class: 'side-row side-layout' + cur.class, href: layUrl(lay), 'aria-label': `${lay.name}, layout`, 'aria-current': cur['aria-current'], title: layWhere(lay),
+      oncontextmenu: (e) => layMenu(e, lay) },
+    h('span', { class: 'ico-wrap' }, layoutIcon()), h('span', { class: 'side-name' }, lay.name), where ? h('span', { class: 'muted side-where' }, where) : null,
+    h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Layout menu', onclick: (e) => layMenu(e, lay) }, '⋮'));
+  };
+  const watchRow = (st, pr) => {
+    const cur = current(r.view === 'watch' && r.station === st && r.project === pr.name);
+    return h('a', { class: 'side-row side-watch' + cur.class, href: watchUrl(st, pr.name), 'aria-label': `Watch ${pr.name}`, 'aria-current': cur['aria-current'], title: `Every agent in ${pr.name}, and who is talking to whom` },
+      h('span', { class: 'ico-wrap' }, watchIcon()), h('span', { class: 'side-name' }, 'Watch'));
+  };
+
+  const project = (st, pr) => {
+    const key = `p:${st}/${pr.name}`;
+    const mine = panesOf(st).filter(p => p.project === pr.name).sort(byState);
+    return h('div', { class: 'side-group side-proj' },
+      h('div', { class: 'side-row side-project', title: pr.path, oncontextmenu: (e) => projMenu(e, st, pr) }, caret(key, pr.name), h('b', { class: 'side-name' }, pr.name),
+        pr.branch ? h('span', { class: 'muted side-where' }, pr.branch) : null, linkedChip(st, pr, true),
+        h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Project menu', onclick: (e) => projMenu(e, st, pr) }, '⋮')),
+      folded.has(key) ? null : h('div', { class: 'side-kids' },
+        projectLayouts(st).filter(x => x.project === pr.name).map(x => layRow(x)),
+        mine.some(p => !p.exited) ? watchRow(st, pr) : null,
+        pr.open ? mine.map(p => paneRow(st, p)) : h('button', { class: 'mini side-open', onclick: () => rpc(st, 'project.open', { name: pr.name }) }, 'Open'),
+        pr.problem ? h('div', { class: 'warn-text small' }, pr.problem) : null));
+  };
+  const station = (s) => {
+    const st = s.station, up = s.state === 'online', key = 's:' + st;
+    const cur = current(r.view === 'station' && r.station === st);
+    const loose = up ? panesOf(st).filter(p => !p.project).sort(byState) : [];
+    const projects = up ? (S.projects.get(st) || []) : [];
+    return h('div', { class: 'side-group side-station-group', dataset: { station: st } },
+      h('a', { class: 'side-row side-station' + cur.class + (up ? '' : ' away'), href: stationUrl(st), 'aria-current': cur['aria-current'],
+        title: up ? `Every pane running on ${st}` : `${st} is ${STATION_STATE[s.state] || s.state}`, oncontextmenu: (e) => stationMenu(e, s) },
+      up ? caret(key, st) : h('span', { class: 'caret' }),
+      h('span', { class: 'dot ' + (up ? (s.needs_you ? 'needs_you' : s.working ? 'working' : 'idle') : 'unreachable') }), h('span', { class: 'ico-wrap' }, stationIcon()),
+      h('b', { class: 'side-name' }, st),
+      up ? (s.self && S.fleet.stations.length > 1 ? h('span', { class: 'muted side-where' }, 'this one') : null) : h('span', { class: 'warn-text side-where' }, STATION_STATE[s.state] || s.state)),
+      !up || folded.has(key) ? null : h('div', { class: 'side-kids' },
+        projects.map(pr => project(st, pr)),
+        loose.length ? h('div', { class: 'side-group side-proj' }, projects.length ? h('div', { class: 'side-row side-project side-other' }, h('span', { class: 'caret' }), h('b', { class: 'side-name' }, 'Other panes')) : null,
+          h('div', { class: projects.length ? 'side-kids' : '' }, loose.map(p => paneRow(st, p)))) : null,
+        !projects.length && !loose.length ? h('div', { class: 'muted small side-hint' }, 'Nothing is running here.') : null));
+  };
+
+  const pins = pinnedItems(), globals = globalLayouts();
+  const here = (e) => e.target.closest?.('.side-station-group')?.dataset.station || r.station || api.station;
+  return h('aside', { class: 'sidebar', 'aria-label': 'Stations, projects, layouts and panes',
+    oncontextmenu: (e) => { e.preventDefault(); const st = online(here(e)) ? here(e) : api.station; showMenu(e.clientX, e.clientY, [
+      { label: 'New global layout…', action: () => newLayoutDialog(null, null) },
+      { label: 'New pane…', action: () => newPaneDialog(st) }, { label: 'New project…', action: () => newProjectDialog(st) }, { label: 'Check this station', action: () => doctorPanel(st) }]); } },
+  pins.length ? h('div', { class: 'side-group side-pinned' }, h('div', { class: 'side-section' }, h('span', { class: 'ico-wrap' }, pinIcon()), h('b', {}, 'Pinned')),
+    pins.map(x => x.p ? paneRow(x.st, x.p, `${x.st}${x.p.project ? ' · ' + x.p.project : ''}`) : x.lay ? layRow(x.lay, layShort(x.lay))
+      : h('div', { class: 'side-row side-gone muted', title: 'Pinned, but not here now' }, h('span', { class: 'side-name' }, x.gone), h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Unpin', title: 'Unpin', onclick: () => togglePin(x.pin) }, '✕')))) : null,
+  h('div', { class: 'side-group side-stations' }, h('div', { class: 'side-section' }, h('b', {}, 'Stations')), stationsByName().map(station)),
+  h('div', { class: 'side-group side-globals' }, h('div', { class: 'side-section' }, h('b', {}, 'Layouts'), h('span', { class: 'grow' }),
+    h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'New global layout', title: 'New global layout: the same on every station', onclick: () => newLayoutDialog(null, null) }, '＋')),
+  globals.length ? globals.map(x => layRow(x)) : h('div', { class: 'muted small side-hint' }, 'No global layouts yet. A global layout can hold any pane from any station.')),
+  h('div', { class: 'side-actions' }, h('button', { onclick: () => newPaneDialog(online(r.station) ? r.station : api.station) }, '＋ Pane'), h('button', { onclick: () => newProjectDialog(online(r.station) ? r.station : api.station) }, '＋ Project')));
 }
 
 function getTerm(st, p, where, mode) {
   const key = `${where}:${st}/${p.id}`;
   let t = S.terms.get(key);
   if (!t) {
-    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where), onFocus: (term) => { S.focused = term.pane.id; } });
+    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where, term), onFocus: (term) => { S.focused = `${st}/${term.pane.id}`; } });
     S.terms.set(key, t);
     t._fresh = true;
   } else t.update(p);
@@ -812,8 +905,9 @@ function agentRows(st, p, depth = 0, seen = new Set()) {
   const rows = (p.subagents || []).map(a => ({ depth, name: a.kind, detail: 'its own sub-agent', state: 'working', activity: ago(a.since_ms) }));
   for (const c of panesOf(st).filter(x => x.parent_pane === p.id && !x.exited)) {
     const task = (S.tasks.get(st) || []).find(t => t.id === c.task);
+    // Beside this one when a layout is on screen, else on its own.
     rows.push({ depth, name: c.name, detail: task ? `${c.role || 'helper'} · ${task.goal.slice(0, 60)}` : (c.role || 'helper'), state: stateOf(c),
-      activity: c.tool ? `${c.tool} · ${ago(c.tool_since_ms)}` : (STATE_LABEL[stateOf(c)] || stateOf(c)), open: () => openInWorkspace(st, c.id, 'row') });
+      activity: c.tool ? `${c.tool} · ${ago(c.tool_since_ms)}` : (STATE_LABEL[stateOf(c)] || stateOf(c)), open: () => (layCtx && !layCtx.has(st, c) ? addToLayout(layCtx.lay, st, c, 'row') : go(paneUrl(st, c.id))) });
     rows.push(...agentRows(st, c, depth + 1, seen));
   }
   return rows;
@@ -935,56 +1029,151 @@ function watchView(st, project) {
 }
 
 // ---- layouts ----
-// A workspace is kept in this browser and names panes by id. A project layout
-// is saved with the project, names panes by their name in the project, and is
-// the same on every device. Both are trees of splits and are drawn, resized
-// and arranged the same way.
+// A layout is a tree of splits whose leaves name panes. A project's layouts
+// are saved in its project file, on its station; a global layout is saved in
+// the deck document, which every station holds. Either may show any pane:
+// one in a project by its name there ({pane, project?, station?}), one in no
+// project by its id ({id, station?}). A leaf never names another layout.
 
-const projLayouts = new Map(); // station/project/name -> { tree, json, dirty, timer }
-let arranging = null;          // the key of the tab being arranged
-let arrangeCtx = null;         // how the tab being arranged resolves and saves
+const layCache = new Map();    // layout key -> { tree, lines, json, dirty, timer, v }
+let arranging = null;          // the key of the layout being arranged
+let layCtx = null;             // the layout on screen: how it names, finds and saves its panes
 let dragState = null;
+let dragEnded = 0;             // when the last drag from the list finished
+let autoArrange = false;       // Arrange was turned on by a drag from the list, and ends with it
 
-const fromServer = (n) => !n ? null : n.pane !== undefined ? { pane: n.pane, ...(n.project ? { project: n.project } : {}) }
-  : { dir: n.dir, ratio: n.ratio / 1000, a: fromServer(n.a), b: fromServer(n.b) };
-const toServer = (n) => !n ? null : n.pane !== undefined ? { pane: n.pane, ...(n.project ? { project: n.project } : {}) }
+const isLeaf = (n) => !!n && n.dir === undefined;
+const leaves = (n, out = []) => { if (!n) return out; if (isLeaf(n)) out.push(n); else { leaves(n.a, out); leaves(n.b, out); } return out; };
+const cleanLeaf = (n) => n.id !== undefined ? { id: n.id, ...(n.station ? { station: n.station } : {}) }
+  : { pane: n.pane, ...(n.project ? { project: n.project } : {}), ...(n.station ? { station: n.station } : {}) };
+const fromServer = (n) => !n ? null : isLeaf(n) ? cleanLeaf(n) : { dir: n.dir, ratio: n.ratio / 1000, a: fromServer(n.a), b: fromServer(n.b) };
+const toServer = (n) => !n ? null : isLeaf(n) ? cleanLeaf(n)
   : { dir: n.dir, ratio: Math.min(950, Math.max(50, Math.round(n.ratio * 1000))), a: toServer(n.a), b: toServer(n.b) };
 
-function projectLayouts(st) {
-  const out = [];
-  for (const pr of S.projects.get(st) || []) {
-    for (const l of pr.definition?.layout || []) {
-      const key = `${st}/${pr.name}/${l.name}`, json = JSON.stringify(l);
-      let c = projLayouts.get(key);
-      if (!c) { c = { tree: fromServer(l.tree), lines: !!l.lines, json }; projLayouts.set(key, c); }
-      else if (!c.dirty && c.json !== json) { c.tree = fromServer(l.tree); c.lines = !!l.lines; c.json = json; }
-      out.push({ key, project: pr.name, name: l.name, cache: c });
-    }
-  }
-  return out;
+// One layout as the deck holds it. `station` and `project` are empty for a
+// global layout. What is on screen is kept while a change is being saved.
+function layoutOf(key, station, project, def) {
+  const json = JSON.stringify(def);
+  let c = layCache.get(key);
+  if (!c) { c = { tree: fromServer(def.tree), lines: !!def.lines, json }; layCache.set(key, c); }
+  else if (!c.dirty && c.json !== json) { c.tree = fromServer(def.tree); c.lines = !!def.lines; c.json = json; }
+  return { key, station, project, name: def.name, cache: c };
 }
+const projectLayouts = (st) => (S.projects.get(st) || []).flatMap(pr => (pr.definition?.layout || []).map(l => layoutOf(`${st}/${pr.name}/${l.name}`, st, pr.name, l)));
+const globalLayouts = () => (S.deck.layouts || []).map(l => layoutOf('global:' + l.name, null, null, l));
+const allLayouts = () => [...onlineStations().flatMap(projectLayouts), ...globalLayouts()];
+const findLayout = (key) => allLayouts().find(x => x.key === key) || null;
+const layUrl = (lay) => lay.project ? layoutUrl(lay.station, lay.project, lay.name) : globalUrl(lay.name);
+const layShort = (lay) => lay.project ? `${lay.project} on ${lay.station}` : 'every station';
+const layWhere = (lay) => lay.project ? `Saved with ${lay.project} on ${lay.station}` : 'Global layout · the same on every station';
+const layPin = (lay) => lay.project ? { kind: 'layout', station: lay.station, project: lay.project, name: lay.name } : { kind: 'layout', name: lay.name };
+const VALID_NAME = '[A-Za-z0-9._-]+';
+// A name nothing in `taken` has: base, base-2, base-3…
+const freeName = (base, taken) => { let n = base, i = 1; while (taken.includes(n)) n = `${base}-${i += 1}`; return n; };
 
-function saveProjectLayout(st, lay) {
+function saveLayout(lay) {
   const c = lay.cache;
   c.dirty = true;
+  const v = c.v = (c.v || 0) + 1;
   clearTimeout(c.timer);
-  c.timer = setTimeout(() => {
-    api.on(st, 'project.layout.save', { project: lay.project, layout: { name: lay.name, lines: !!c.lines, tree: toServer(c.tree) } })
-      .then(() => { c.dirty = false; c.json = null; refreshSoon(60); })
-      .catch((e) => { c.dirty = false; toast(e.message, 'error'); });
+  c.timer = setTimeout(async () => {
+    const layout = { name: lay.name, lines: !!c.lines, tree: toServer(c.tree) };
+    try {
+      await (lay.project ? api.on(lay.station, 'project.layout.save', { project: lay.project, layout }) : api.call('deck.layout.save', { layout }));
+      await refresh();
+    } catch (e) { toast(e.message, 'error'); }
+    // What was saved is on the page now; from here the saved copy is shown.
+    if (c.v === v) { c.dirty = false; c.json = null; update(); }
   }, 250);
+}
+
+// How a layout names and finds a pane.
+const leafStation = (lay, n) => n.station || lay.station || api.station;
+function leafPane(lay, n) {
+  const st = leafStation(lay, n);
+  if (n.id !== undefined) return panesOf(st).find(p => p.id === n.id) || null;
+  const project = n.project || lay.project || null;
+  return panesOf(st).find(p => !p.exited && (p.project || null) === project && p.name === n.pane) || null;
+}
+// A leaf's name within its layout, short where it can be: "dev",
+// "web/logs" (another project), "spark2:web/logs" (another station),
+// "#p-01abc" (a pane in no project).
+function leafRef(lay, n) {
+  const st = lay.station ? (n.station && n.station !== lay.station ? n.station : '') : (n.station || api.station);
+  const at = st ? st + ':' : '';
+  if (n.id !== undefined) return `${at}#${n.id}`;
+  return at + (n.project && (n.project !== lay.project || st) ? n.project + '/' : '') + n.pane;
+}
+function refLeaf(ref) {
+  const c = ref.indexOf(':'), station = c < 0 ? {} : { station: ref.slice(0, c) };
+  const rest = ref.slice(c + 1);
+  if (rest[0] === '#') return { id: rest.slice(1), ...station };
+  const i = rest.indexOf('/');
+  return { pane: rest.slice(i + 1), ...(i < 0 ? {} : { project: rest.slice(0, i) }), ...station };
+}
+// The leaf that puts pane `p` of station `st` in this layout.
+function paneLeaf(lay, st, p) {
+  const station = lay.station === st ? {} : { station: st };
+  if (!p.project) return { id: p.id, ...station };
+  return { pane: p.name, ...(p.project !== lay.project || station.station ? { project: p.project } : {}), ...station };
+}
+// Where a pane is from, when that is not the layout's own project or station.
+function leafGuest(lay, n) {
+  const st = leafStation(lay, n);
+  const project = n.id !== undefined ? null : (n.project || lay.project || null);
+  return [project && project !== lay.project ? 'from ' + project : '', st !== (lay.station || api.station) ? 'on ' + st : ''].filter(Boolean).join(' ') || null;
+}
+
+function ctxFor(lay) {
+  const refOf = (n) => leafRef(lay, n);
+  const set = (tree) => { lay.cache.tree = tree; saveLayout(lay); };
+  const tree = () => lay.cache.tree;
+  const label = (n) => n.pane !== undefined ? n.pane : (leafPane(lay, n)?.name || 'closed pane');
+  const ctx = {
+    lay, key: lay.key, arrange: arranging === lay.key, refOf, tree, label,
+    stationOf: (n) => leafStation(lay, n),
+    resolve: (n) => { const p = leafPane(lay, n); return p ? { st: leafStation(lay, n), p } : null; },
+    guest: (n) => leafGuest(lay, n),
+    emptyText: 'This layout is empty. Press Arrange, or drag a pane here from the list on the left.',
+    missing: (n) => {
+      const st = leafStation(lay, n), project = n.pane !== undefined ? (n.project || lay.project) : null;
+      if (!online(st)) return h('div', { class: 'empty' }, h('p', {}, `${st} is unreachable, so ${label(n)} cannot be shown.`));
+      return h('div', { class: 'empty' }, h('p', {}, n.pane !== undefined ? `${label(n)}${project ? ' in ' + project : ''} is not running.` : 'This pane was closed.'),
+        project ? h('button', { onclick: () => rpc(st, 'project.open', { name: project }) }, `Start ${project}'s panes`) : null,
+        h('button', { class: 'mini', onclick: () => { ctx.remove(refOf(n)); render(); } }, 'Take out of this layout'));
+    },
+    changed: () => saveLayout(lay),
+    move: (ref, target, zone) => set(treeMove(tree(), ref, target, zone, refLeaf, refOf)),
+    remove: (ref) => set(treeRemove(tree(), ref, refOf)),
+    shape: (kind) => set(treeShape(kind, leaves(tree()).map(x => ({ ...x })))),
+    // Any pane in the list can be put in: the name it would have here.
+    sideRef: (st, p) => refOf(paneLeaf(lay, st, p)),
+    has: (st, p) => { const ref = refOf(paneLeaf(lay, st, p)); return leaves(tree()).some(n => refOf(n) === ref); },
+  };
+  return ctx;
+}
+const focusedLeaf = (ctx) => leaves(ctx.tree()).find(n => { const r = ctx.resolve(n); return r && `${r.st}/${r.p.id}` === S.focused; }) || null;
+
+// Put a pane in a layout: beside the pane that has the keyboard, else at the end.
+function addToLayout(lay, st, p, dir) {
+  const ctx = ctxFor(lay), leaf = paneLeaf(lay, st, p), all = leaves(lay.cache.tree);
+  if (ctx.has(st, p)) return toast(`${p.name} is already in ${lay.name}`);
+  const beside = focusedLeaf(ctx) || all[all.length - 1];
+  lay.cache.tree = beside ? treeInsert(lay.cache.tree, ctx.refOf(beside), dir === 'col' ? 'below' : 'right', leaf, ctx.refOf) : leaf;
+  saveLayout(lay);
+  render();
 }
 
 // Tree edits. `refOf` names a leaf; leaves are compared by that name.
 function treeRemove(n, ref, refOf) {
   if (!n) return null;
-  if (n.pane !== undefined) return refOf(n) === ref ? null : n;
+  if (isLeaf(n)) return refOf(n) === ref ? null : n;
   const a = treeRemove(n.a, ref, refOf), b = treeRemove(n.b, ref, refOf);
   return a && b ? { ...n, a, b } : (a || b);
 }
 function treeInsert(n, target, zone, leaf, refOf) {
   if (!n) return leaf;
-  if (n.pane !== undefined) {
+  if (isLeaf(n)) {
     if (refOf(n) !== target) return n;
     const first = zone === 'left' || zone === 'above';
     return { dir: zone === 'left' || zone === 'right' ? 'row' : 'col', ratio: 0.5, a: first ? leaf : n, b: first ? n : leaf };
@@ -997,7 +1186,7 @@ function treeMove(tree, ref, target, zone, leafOf, refOf) {
   const all = leaves(tree), src = all.find(x => refOf(x) === ref), dst = all.find(x => refOf(x) === target);
   if (!dst) return src ? tree : { dir: 'row', ratio: 0.5, a: tree, b: leafOf(ref) };
   if (zone === 'swap') {
-    const swap = (n) => n.pane !== undefined ? (refOf(n) === ref ? { ...dst } : refOf(n) === target ? (src ? { ...src } : leafOf(ref)) : n) : { ...n, a: swap(n.a), b: swap(n.b) };
+    const swap = (n) => isLeaf(n) ? (refOf(n) === ref ? { ...dst } : refOf(n) === target ? (src ? { ...src } : leafOf(ref)) : n) : { ...n, a: swap(n.a), b: swap(n.b) };
     return swap(tree);
   }
   return treeInsert(treeRemove(tree, ref, refOf), target, zone, src ? { ...src } : leafOf(ref), refOf);
@@ -1016,13 +1205,14 @@ function treeShape(kind, list) {
 }
 
 // Moving a pane in Arrange: a label follows the pointer, the pane under it
-// shows where the drop would go, and letting go there moves it.
-function startArrange(e, ref, label, ctx) {
+// shows where the drop would go, and letting go there moves it. The move is
+// made in whatever layout is on screen when the pointer is let go.
+function startArrange(e, ref, label) {
   if (e.button) return;
   e.preventDefault();
   const ghost = h('div', { class: 'arr-ghost' }, label);
   document.getElementById('overlays').append(ghost);
-  dragState = { ref, ctx, over: null };
+  dragState = { ref, over: null };
   document.body.classList.add('dragging');
   const clear = () => document.querySelectorAll('.arr[data-zone]').forEach(x => x.removeAttribute('data-zone'));
   const move = (ev) => {
@@ -1046,7 +1236,8 @@ function startArrange(e, ref, label, ctx) {
     clear();
     const d = dragState;
     dragState = null;
-    if (d.over) d.ctx.move(d.ref, d.over.target, d.over.zone);
+    if (d.over && layCtx) layCtx.move(d.ref, d.over.target, d.over.zone);
+    if (autoArrange) { autoArrange = false; arranging = null; }
     render();
   };
   addEventListener('mousemove', move);
@@ -1054,28 +1245,51 @@ function startArrange(e, ref, label, ctx) {
   move(e);
 }
 
-function renderTree(st, node, ctx) {
+// A pane in the list on the left, pressed while a layout is on screen: once
+// the pointer has moved a little it is being dragged into the layout, which
+// goes into Arrange so there is somewhere to drop it. A press that does not
+// move is still a click.
+function sideDrag(e, st, p) {
+  if (e.button || !layCtx) return;
+  // Without this the browser starts its own drag of the link.
+  e.preventDefault();
+  const x0 = e.clientX, y0 = e.clientY;
+  const off = () => { removeEventListener('mousemove', move); removeEventListener('mouseup', off); };
+  const move = (ev) => {
+    if (Math.hypot(ev.clientX - x0, ev.clientY - y0) < 6) return;
+    off();
+    if (!layCtx) return;
+    const ref = layCtx.sideRef(st, p);
+    if (!layCtx.arrange) { arranging = layCtx.key; autoArrange = true; render(); }
+    addEventListener('mouseup', () => { dragEnded = Date.now(); }, { once: true });
+    startArrange(ev, ref, p.name);
+  };
+  addEventListener('mousemove', move);
+  addEventListener('mouseup', off);
+}
+
+function renderTree(node, ctx) {
   if (!node) {
     return ctx.arrange
-      ? h('div', { class: 'empty arr', 'data-empty': '1' }, h('div', { class: 'arr-zone' }), 'Drag a pane here from the list on the left, or pick a shape above.')
+      ? h('div', { class: 'empty arr', 'data-empty': '1' }, h('div', { class: 'arr-zone' }), 'Drag a pane here from the list on the left.')
       : h('div', { class: 'empty' }, ctx.emptyText);
   }
-  if (node.pane !== undefined) {
-    const p = ctx.resolve(node);
-    const guest = ctx.guest ? ctx.guest(node) : null;
-    const t = p ? getTerm(st, p, 'leaf', 'control') : null;
+  if (isLeaf(node)) {
+    const r = ctx.resolve(node);
+    const guest = ctx.guest(node);
+    const t = r ? getTerm(r.st, r.p, 'leaf', 'control') : null;
     if (t) t.setGuest(guest);
     const body = t ? t.el : ctx.missing(node);
     if (!ctx.arrange) return body;
     const ref = ctx.refOf(node), label = ctx.label(node);
     return h('div', { class: 'arr-wrap' }, body,
-      h('div', { class: 'arr', 'data-ref': ref, onmousedown: (e) => { if (!e.target.closest('button')) startArrange(e, ref, label, ctx); } },
+      h('div', { class: 'arr', 'data-ref': ref, onmousedown: (e) => { if (!e.target.closest('button')) startArrange(e, ref, label); } },
         h('div', { class: 'arr-zone' }),
-        h('div', { class: 'arr-card' }, h('b', {}, label), guest ? h('span', { class: 'chip guest' }, 'from ' + guest) : null, h('span', { class: 'muted' }, 'Drag onto another pane'),
+        h('div', { class: 'arr-card' }, h('b', {}, label), guest ? h('span', { class: 'chip guest' }, guest) : null, h('span', { class: 'muted' }, 'Drag onto another pane'),
           h('button', { class: 'mini', onclick: () => { ctx.remove(ref); render(); } }, 'Take out of this layout'))));
   }
-  const a = h('div', { class: 'split-a', style: { flex: `${node.ratio} 1 0` } }, renderTree(st, node.a, ctx));
-  const b = h('div', { class: 'split-b', style: { flex: `${1 - node.ratio} 1 0` } }, renderTree(st, node.b, ctx));
+  const a = h('div', { class: 'split-a', style: { flex: `${node.ratio} 1 0` } }, renderTree(node.a, ctx));
+  const b = h('div', { class: 'split-b', style: { flex: `${1 - node.ratio} 1 0` } }, renderTree(node.b, ctx));
   const gutter = h('div', { class: 'gutter', role: 'separator', 'aria-orientation': node.dir === 'row' ? 'vertical' : 'horizontal', title: 'Drag to resize' });
   const box = h('div', { class: 'split ' + node.dir }, a, gutter, b);
   // The line between two panes can be dragged at any time.
@@ -1096,137 +1310,231 @@ function renderTree(st, node, ctx) {
   return box;
 }
 
-function newLayoutDialog(st, project) {
-  dialog(`New layout in ${project}`, (close) => {
-    const name = h('input', { placeholder: 'build', required: true, pattern: '[A-Za-z0-9._-]+', title: 'Letters, digits, - _ . only' });
+// ---- making, renaming and removing layouts; pins ----
+
+const layoutNames = (st, project) => project ? ((S.projects.get(st) || []).find(pr => pr.name === project)?.definition?.layout || []).map(l => l.name) : (S.deck.layouts || []).map(l => l.name);
+const layoutSave = (st, project, layout) => project ? rpc(st, 'project.layout.save', { project, layout }) : rpc(api.station, 'deck.layout.save', { layout });
+const layoutRemove = (lay) => lay.project ? rpc(lay.station, 'project.layout.remove', { project: lay.project, layout: lay.name }) : rpc(api.station, 'deck.layout.remove', { layout: lay.name });
+const nameField = (value, placeholder) => h('input', { value: value || '', placeholder, required: true, pattern: VALID_NAME, title: 'Letters, digits, - _ . only' });
+
+// A new layout in a project (saved with the project), or with no project a
+// global one (saved for every station). `first` is a pane to start it with.
+function newLayoutDialog(st, project, first) {
+  dialog(project ? `New layout in ${project}` : 'New global layout', (close) => {
+    const taken = layoutNames(st, project);
+    const name = nameField(freeName(project ? 'layout' : 'global', taken));
     const submit = async () => {
       const n = name.value.trim();
-      const mine = panesOf(st).filter(p => p.project === project && !p.exited).map(p => ({ pane: p.name }));
-      await rpc(st, 'project.layout.save', { project, layout: { name: n, tree: toServer(treeShape(mine.length === 3 ? 'two-over-one' : 'grid', mine)) } });
-      const l = loadLayout(st);
-      l.proj = `${st}/${project}/${n}`;
-      saveLayout(st, l);
-      arranging = l.proj;
+      if (taken.includes(n)) return toast(`There is already a layout named ${n} ${project ? 'in ' + project : 'for every station'}. Choose another name.`, 'error');
+      const lay = { key: project ? `${st}/${project}/${n}` : 'global:' + n, station: project ? st : null, project: project || null, name: n };
+      const mine = first ? [paneLeaf(lay, first.st, first.p)]
+        : project ? panesOf(st).filter(p => p.project === project && !p.exited).map(p => ({ pane: p.name })) : [];
+      await layoutSave(st, project, { name: n, tree: toServer(treeShape(mine.length === 3 ? 'two-over-one' : 'grid', mine)) });
       close();
-      refresh();
+      await refresh();
+      if (!mine.length || (project && !first)) arranging = lay.key;
+      go(layUrl(lay));
     };
     return h('form', { onsubmit: (e) => { e.preventDefault(); submit(); } },
       field('Name', name),
-      h('p', { class: 'muted' }, `Saved in ${project}'s project file, so it is the same on every device. It starts with the project's running panes; you can arrange them next.`),
+      h('p', { class: 'muted' }, project
+        ? `Saved in ${project}'s project file, so it is the same on every device. It starts with the project's running panes; any pane from any project or station can be dragged in from the list.`
+        : 'Kept for the whole fleet: it is in the list on every station. Drag any pane from any station or project into it.'),
       h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel'), h('button', { class: 'primary', type: 'submit' }, 'Create')));
   });
 }
 
+function renameLayoutDialog(lay) {
+  dialog('Rename layout', (close) => {
+    const name = nameField(lay.name);
+    const submit = async () => {
+      const to = name.value.trim();
+      if (to === lay.name) return close();
+      if (layoutNames(lay.station, lay.project).includes(to)) return toast(`There is already a layout named ${to}. Choose another name.`, 'error');
+      const pinned = isPinned(layPin(lay)), next = { ...lay, name: to, key: lay.project ? `${lay.station}/${lay.project}/${to}` : 'global:' + to };
+      await layoutSave(lay.station, lay.project, { name: to, lines: !!lay.cache.lines, tree: toServer(lay.cache.tree) });
+      await layoutRemove(lay);
+      if (pinned) { await api.call('deck.unpin', { pin: layPin(lay) }).catch(() => {}); await api.call('deck.pin', { pin: layPin(next) }).catch(() => {}); }
+      close();
+      const here = S.route.layout === lay.key;
+      await refresh();
+      if (here) go(layUrl(next));
+    };
+    return h('form', { onsubmit: (e) => { e.preventDefault(); submit(); } }, field('Name', name), h('div', { class: 'row end' }, h('button', { class: 'primary', type: 'submit' }, 'Rename')));
+  });
+}
+
+async function duplicateLayout(lay) {
+  const name = freeName(lay.name + '-copy', layoutNames(lay.station, lay.project));
+  await layoutSave(lay.station, lay.project, { name, lines: !!lay.cache.lines, tree: toServer(lay.cache.tree) });
+  await refresh();
+  go(layUrl({ ...lay, name }));
+}
+
+function deleteLayout(lay) {
+  confirmBox(`Delete the layout ${lay.name}?`, `${lay.project ? `It is removed from ${lay.project}'s project file.` : 'It is removed from every station.'} The panes keep running.`, 'Delete', async () => {
+    await layoutRemove(lay);
+    // Removing a global layout unpins it on the station; a project's is unpinned here.
+    if (lay.project && isPinned(layPin(lay))) await api.call('deck.unpin', { pin: layPin(lay) }).catch(() => {});
+    layCache.delete(lay.key);
+    const here = S.route.layout === lay.key;
+    await refresh();
+    if (here) go(lay.station ? stationUrl(lay.station) : '#/fleet');
+  });
+}
+
+function layMenu(e, lay) {
+  e.preventDefault();
+  e.stopPropagation();
+  const pin = layPin(lay);
+  showMenu(e.clientX, e.clientY, [
+    { title: `${lay.name} · ${layWhere(lay)}` },
+    { label: 'Open', action: () => go(layUrl(lay)) },
+    { label: 'Arrange', action: () => { arranging = lay.key; go(layUrl(lay)); } },
+    { label: 'Rename', action: () => renameLayoutDialog(lay) },
+    { label: 'Duplicate', action: () => duplicateLayout(lay) },
+    { label: isPinned(pin) ? 'Unpin' : 'Pin', action: () => togglePin(pin) },
+    '-',
+    { label: 'Delete', danger: true, action: () => deleteLayout(lay) }]);
+}
+
+// Pins are part of the deck document: the same on every station.
+const samePin = (a, b) => ['kind', 'station', 'project', 'id', 'name'].every(k => (a[k] || '') === (b[k] || ''));
+const isPinned = (pin) => (S.deck.pins || []).some(x => samePin(x, pin));
+const panePin = (st, p) => ({ kind: 'pane', station: st, id: p.id });
+function togglePin(pin) {
+  return api.call(isPinned(pin) ? 'deck.unpin' : 'deck.pin', { pin }).then((pins) => { S.deck = { ...S.deck, pins }; render(); }).catch((e) => toast(e.message, 'error'));
+}
+// What is pinned, found: a pane, a layout, or a line saying it is not there.
+function pinnedItems() {
+  return (S.deck.pins || []).map((pin) => {
+    if (pin.kind === 'pane') {
+      const p = panesOf(pin.station).find(x => x.id === pin.id);
+      return p ? { pin, st: pin.station, p } : { pin, gone: online(pin.station) ? `A pane on ${pin.station} that was closed` : `A pane on ${pin.station} (unreachable)` };
+    }
+    const lay = findLayout(pin.project ? `${pin.station}/${pin.project}/${pin.name}` : 'global:' + pin.name);
+    return lay ? { pin, lay } : { pin, gone: `${pin.name}${pin.project ? ` in ${pin.project} on ${pin.station}` : ''} (not available)` };
+  });
+}
+
+// Choose a layout for a pane, or make a new global one with it.
+function addToLayoutDialog(st, p) {
+  dialog(`Add ${p.name} to a layout`, (close) => {
+    const lays = allLayouts();
+    return h('div', { class: 'list' },
+      lays.map(x => h('button', { class: 'list-row', onclick: () => { close(); addToLayout(x, st, p, 'row'); go(layUrl(x)); } }, h('span', { class: 'ico-wrap' }, layoutIcon()), h('b', {}, x.name), h('span', { class: 'muted' }, layShort(x)))),
+      h('button', { class: 'list-row', onclick: () => { close(); newLayoutDialog(null, null, { st, p }); } }, '＋ New global layout…'));
+  });
+}
+
+// Workspaces used to be kept in each browser. Each becomes a global layout,
+// once, and the browser's copy is deleted. A workspace of a station that is
+// away waits until its panes can be looked up.
+let migrating = false;
+async function migrateWorkspaces() {
+  if (migrating) return;
+  const PREFIX = 'spandeck.layout.';
+  let keys = [];
+  try { keys = Object.keys(localStorage).filter(k => k.startsWith(PREFIX)); } catch (e) { return; }
+  if (!keys.length) return;
+  migrating = true;
+  try {
+    const taken = (S.deck.layouts || []).map(l => l.name);
+    let made = 0;
+    for (const key of keys) {
+      const st = key.slice(PREFIX.length);
+      const info = S.fleet.stations.find(s => s.station === st);
+      if (info && info.state !== 'online') continue;
+      let old = null;
+      try { old = JSON.parse(localStorage.getItem(key)); } catch (e) { /* not ours: dropped below */ }
+      for (const tab of info && Array.isArray(old?.tabs) ? old.tabs : []) {
+        const convert = (n) => {
+          if (!n) return null;
+          if (n.pane !== undefined) {
+            const p = panesOf(st).find(x => x.id === n.pane);
+            return !p ? null : p.project ? { pane: p.name, project: p.project, station: st } : { id: p.id, station: st };
+          }
+          const a = convert(n.a), b = convert(n.b);
+          return a && b ? { dir: n.dir === 'col' ? 'col' : 'row', ratio: Number(n.ratio) || 0.5, a, b } : (a || b);
+        };
+        const tree = convert(tab.tree);
+        if (!tree) continue;
+        const name = freeName(String(tab.name || '').trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'workspace', taken);
+        await api.call('deck.layout.save', { layout: { name, tree: toServer(tree) } });
+        taken.push(name);
+        made += 1;
+      }
+      localStorage.removeItem(key);
+    }
+    if (made) { toast(`${made} workspace${made === 1 ? '' : 's'} from this browser ${made === 1 ? 'is now a global layout' : 'are now global layouts'}, under Layouts on every station.`); refreshSoon(60); }
+  } catch (e) { /* tried again at the next refresh */ }
+  migrating = false;
+}
+
+// ---- the right-hand side ----
+
+const shell = (...main) => h('div', { class: 'station-view' }, sidebar(), ...main);
+const awayText = (st, info) => `${st} is ${STATION_STATE[info.state] || 'unreachable'}. Nothing here says what it is doing right now.`;
+
+function fleetView() {
+  const stations = S.fleet.stations.slice().sort((a, b) => (b.needs_you || 0) - (a.needs_you || 0) || (b.self ? 1 : 0) - (a.self ? 1 : 0));
+  return shell(h('main', { class: 'station-main' }, h('div', { class: 'fleet' }, stopRows(),
+    h('div', { class: 'tiles' }, stations.map(stationTile)),
+    stations.length <= 1 ? h('p', { class: 'muted hint' }, 'Other stations appear here on their own: any machine under your Tailscale login that runs spandeckd.') : null)));
+}
+
+// One station: every running pane as a tile.
 function stationView(st) {
   const info = S.fleet.stations.find(s => s.station === st);
-  if (info && info.state !== 'online') return h('main', { class: 'fleet' }, h('p', { class: 'warn-text' }, `${st} is ${info.state === 'update_needed' ? 'on a version this station cannot control' : 'unreachable'}. Nothing here says what it is doing right now.`));
-  const l = loadLayout(st);
-  if (l.active >= l.tabs.length) l.active = l.tabs.length - 1;
-  const lays = projectLayouts(st);
-  // A link to a layout (#/s/<station>/l/<project>/<layout>) opens it.
-  if (S.route.layout && S.route.layout !== S.routeLayout && lays.some(x => x.key === S.route.layout)) { l.proj = S.route.layout; saveLayout(st, l); }
-  S.routeLayout = S.route.layout || null;
-  const lay = lays.find(x => x.key === l.proj) || null;
-  const watchable = (S.projects.get(st) || []).filter(pr => panesOf(st).some(p => p.project === pr.name && !p.exited)).map(pr => pr.name);
-  const watching = (l.proj || '').startsWith('watch:') && watchable.includes(l.proj.slice(6)) ? l.proj.slice(6) : null;
-  if (!lay && !watching && l.proj) { l.proj = null; }
-  const tab = lay || watching ? null : l.tabs[l.active];
-  const key = lay ? lay.key : watching ? l.proj : tab ? `local:${st}:${l.active}` : null;
-  if (arranging && arranging !== key) arranging = null;
-  const pick = (fn) => () => { fn(); saveLayout(st, l); render(); };
-  const manyProjects = new Set(lays.map(x => x.project)).size > 1;
+  if (info && info.state !== 'online') return shell(h('main', { class: 'station-main' }, h('div', { class: 'fleet' }, h('p', { class: 'warn-text' }, awayText(st, info)))));
+  const live = liveAgents(st).sort(byState);
+  loadThumbs(st, live);
+  return shell(h('main', { class: 'station-main' }, h('div', { class: 'deck' },
+    live.length ? h('div', { class: 'tiles' }, live.map(p => paneTile(st, p))) : h('div', { class: 'empty' }, S.loaded ? 'Nothing is running here. Start a pane or a project from the left.' : 'Loading…'))));
+}
 
-  // How the tab on screen names, finds and saves its panes.
-  let ctx = null;
-  if (lay) {
-    const refOf = (n) => (n.project ? n.project + '/' : '') + n.pane;
-    const find = (n) => panesOf(st).find(p => !p.exited && p.project === (n.project || lay.project) && p.name === n.pane);
-    const set = (tree) => { lay.cache.tree = tree; saveProjectLayout(st, lay); };
-    ctx = {
-      arrange: arranging === key, refOf, resolve: find, label: (n) => n.pane, project: lay.project,
-      // A pane of another project is a guest here.
-      guest: (n) => n.project && n.project !== lay.project ? n.project : null,
-      emptyText: 'This layout is empty. Press Arrange to put panes in it.',
-      missing: (n) => h('div', { class: 'empty' }, h('p', {}, `${refOf(n)} is not running.`),
-        h('button', { onclick: () => rpc(st, 'project.open', { name: n.project || lay.project }) }, `Start ${n.project || lay.project}'s panes`)),
-      changed: () => saveProjectLayout(st, lay),
-      move: (ref, target, zone) => set(treeMove(lay.cache.tree, ref, target, zone, (r) => { const i = r.lastIndexOf('/'); return i < 0 ? { pane: r } : { pane: r.slice(i + 1), project: r.slice(0, i) }; }, refOf)),
-      remove: (ref) => set(treeRemove(lay.cache.tree, ref, refOf)),
-      shape: (kind) => set(treeShape(kind, leaves(lay.cache.tree).map(x => ({ ...x })))),
-      // A pane can be dragged in from the list if it has a name in a project.
-      sideRef: (p) => p.project ? (p.project === lay.project ? '' : p.project + '/') + p.name : null,
-      tree: () => lay.cache.tree,
-    };
-  } else if (tab) {
-    const refOf = (n) => n.pane;
-    const set = (tree) => { tab.tree = tree; saveLayout(st, l); };
-    ctx = {
-      arrange: arranging === key, refOf, resolve: (n) => findPane(st, n.pane), label: (n) => findPane(st, n.pane)?.name || 'closed pane',
-      emptyText: 'Empty workspace. Click a pane on the left to place it here.',
-      missing: (n) => h('div', { class: 'empty' }, 'This pane was closed. ', h('button', { class: 'mini', onclick: () => closeLeaf(st, n.pane) }, 'Remove the view')),
-      changed: () => saveLayout(st, l),
-      move: (ref, target, zone) => set(treeMove(tab.tree, ref, target, zone, (r) => ({ pane: r }), refOf)),
-      remove: (ref) => set(treeRemove(tab.tree, ref, refOf)),
-      shape: (kind) => set(treeShape(kind, leaves(tab.tree).map(x => ({ ...x })))),
-      sideRef: (p) => p.id,
-      tree: () => tab.tree,
-    };
-  }
-  arrangeCtx = ctx && ctx.arrange ? ctx : null;
-
-  const layMenu = (e, x) => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
-    { title: `${x.name} · saved with ${x.project}` },
-    { label: 'Arrange', action: () => { l.proj = x.key; saveLayout(st, l); arranging = x.key; render(); } },
-    { label: 'Rename', action: () => dialog('Rename layout', (close) => { const n = h('input', { value: x.name, pattern: '[A-Za-z0-9._-]+' }); return h('form', { onsubmit: async (ev) => { ev.preventDefault(); const to = n.value.trim(); if (to && to !== x.name) { await rpc(st, 'project.layout.save', { project: x.project, layout: { name: to, tree: toServer(x.cache.tree) } }); await rpc(st, 'project.layout.remove', { project: x.project, layout: x.name }); l.proj = `${st}/${x.project}/${to}`; saveLayout(st, l); } close(); refresh(); } }, field('Name', n), h('div', { class: 'row end' }, h('button', { class: 'primary', type: 'submit' }, 'Rename'))); }) },
-    { label: 'Delete this layout', danger: true, action: () => confirmBox(`Delete the layout ${x.name}?`, `It is removed from ${x.project}'s project file. The panes keep running.`, 'Delete', () => rpc(st, 'project.layout.remove', { project: x.project, layout: x.name })) }]); };
-  const tabs = h('div', { class: 'tabs', role: 'tablist' },
-    h('button', { class: 'tab' + (!key ? ' current' : ''), role: 'tab', onclick: pick(() => { l.active = -1; l.proj = null; }) }, 'Deck'),
-    lays.map(x => h('button', { class: 'tab proj' + (x.key === key ? ' current' : ''), role: 'tab', title: `Layout saved with ${x.project}`,
-      onclick: pick(() => { l.proj = x.key; }), oncontextmenu: (e) => layMenu(e, x) }, manyProjects ? `${x.project} · ${x.name}` : x.name)),
-    watchable.map(pr => h('button', { class: 'tab' + (watching === pr ? ' current' : ''), role: 'tab', title: `Every agent in ${pr}, and who is talking to whom`,
-      onclick: pick(() => { l.proj = 'watch:' + pr; }) }, watchable.length > 1 ? `${pr} · Watch` : 'Watch')),
-    l.tabs.map((t, i) => h('button', { class: 'tab' + (!lay && !watching && i === l.active ? ' current' : ''), role: 'tab', title: 'Workspace kept in this browser',
-      onclick: pick(() => { l.active = i; l.proj = null; }),
-      oncontextmenu: (e) => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
-        { label: 'Arrange', action: () => { l.active = i; l.proj = null; saveLayout(st, l); arranging = `local:${st}:${i}`; render(); } },
-        { label: 'Rename', action: () => dialog('Rename workspace', (close) => { const n = h('input', { value: t.name }); return h('form', { onsubmit: (ev) => { ev.preventDefault(); t.name = n.value; saveLayout(st, l); close(); render(); } }, field('Name', n), h('div', { class: 'row end' }, h('button', { class: 'primary', type: 'submit' }, 'Rename'))); }) },
-        { label: 'Close workspace', danger: true, action: () => { l.tabs.splice(i, 1); l.active = Math.min(l.active, l.tabs.length - 1); saveLayout(st, l); render(); } }]); } }, t.name)),
-    h('button', { class: 'tab add', title: 'New layout or workspace', 'aria-label': 'New layout or workspace', onclick: (e) => {
-      const r = e.currentTarget.getBoundingClientRect();
-      showMenu(r.left, r.bottom, [
-        ...(S.projects.get(st) || []).filter(pr => !pr.problem).map(pr => ({ label: `New layout in ${pr.name} (saved with the project)`, action: () => newLayoutDialog(st, pr.name) })),
-        { label: 'New workspace (this browser only)', action: pick(() => { l.tabs.push({ name: 'workspace ' + (l.tabs.length + 1), tree: null }); l.active = l.tabs.length - 1; l.proj = null; }) }]);
-    } }, '＋'),
+// A layout: its name and where it is saved, Arrange and Lines, then the panes.
+function layoutView(key) {
+  const lay = findLayout(key);
+  if (!lay) return shell(h('main', { class: 'station-main' }, h('div', { class: 'empty' }, S.loaded ? 'That layout is not here any more: it was deleted, or its station is unreachable.' : 'Loading…')));
+  if (arranging && arranging !== lay.key) arranging = null;
+  const ctx = layCtx = ctxFor(lay);
+  const c = lay.cache;
+  const head = h('div', { class: 'lay-head' },
+    h('span', { class: 'ico-wrap' }, layoutIcon()), h('b', { class: 'lay-name' }, lay.name), h('span', { class: 'muted lay-saved' }, layWhere(lay)),
+    lay.project ? linkedChip(lay.station, (S.projects.get(lay.station) || []).find(pr => pr.name === lay.project)) : null,
     h('span', { class: 'grow' }),
-    lay || watching ? linkedChip(st, (S.projects.get(st) || []).find(pr => pr.name === (lay ? lay.project : watching))) : null,
-    lay ? h('button', { class: 'tab arrange' + (lay.cache.lines ? ' current' : ''), 'aria-pressed': String(!!lay.cache.lines), title: 'Draw lines between panes whose agents are talking',
-      onclick: () => { lay.cache.lines = !lay.cache.lines; saveProjectLayout(st, lay); render(); } }, lay.cache.lines ? 'Lines: on' : 'Lines: off') : null,
-    key && !watching ? h('button', { class: 'tab arrange' + (arranging === key ? ' current' : ''), 'aria-pressed': String(arranging === key), title: 'Move panes around by dragging them', onclick: () => { arranging = arranging === key ? null : key; render(); } }, arranging === key ? 'Done arranging' : 'Arrange') : null);
-
-  let content;
-  if (watching) {
-    content = watchView(st, watching);
-  } else if (!ctx) {
-    const live = liveAgents(st).sort((a, b) => stateRank(a) - stateRank(b));
-    content = h('div', { class: 'deck' }, live.length ? h('div', { class: 'tiles' }, live.map(p => paneTile(st, p))) : h('div', { class: 'empty' }, 'Nothing is running here. Start a pane or a project from the left.'));
-    loadThumbs(st, live);
-  } else {
-    const bar = ctx.arrange ? h('div', { class: 'arrange-bar' },
-      h('b', {}, 'Arranging'), h('span', {}, 'Drag a pane onto another: its edges put it beside, the middle swaps. Drag panes in from the list on the left.'),
-      h('span', { class: 'grow' }),
-      [['row', 'Side by side'], ['two-over-one', 'Two over one'], ['one-stack', 'One + stack'], ['grid', 'Grid']].map(([k, label]) => h('button', { class: 'mini', onclick: () => { ctx.shape(k); render(); } }, label))) : null;
-    content = h('div', { class: 'workspace-col' }, bar, h('div', { class: 'workspace' + (ctx.arrange ? ' arranging' : '') }, renderTree(st, ctx.tree(), ctx)));
-    if (lay && lay.cache.lines && !ctx.arrange) {
-      const shown = leaves(lay.cache.tree).map(n => ctx.resolve(n)).filter(Boolean);
-      pendingLinks = { selector: '.workspace', links: linksFor(st, shown).filter(x => x.kind === 'message') };
-    }
+    h('button', { class: 'toggle' + (ctx.arrange ? ' on' : ''), 'aria-pressed': String(ctx.arrange), title: 'Move panes around by dragging them', onclick: () => { arranging = ctx.arrange ? null : lay.key; render(); } }, ctx.arrange ? 'Done arranging' : 'Arrange'),
+    h('button', { class: 'toggle' + (c.lines ? ' on' : ''), 'aria-pressed': String(!!c.lines), title: 'Draw lines between panes whose agents are talking', onclick: () => { c.lines = !c.lines; saveLayout(lay); render(); } }, c.lines ? 'Lines: on' : 'Lines: off'));
+  const bar = ctx.arrange ? h('div', { class: 'arrange-bar' },
+    h('b', {}, 'Arranging'), h('span', {}, 'Drag a pane onto another: an edge puts it beside, the middle swaps. Drag any pane in from the list.'),
+    h('span', { class: 'grow' }),
+    [['row', 'Side by side'], ['two-over-one', 'Two over one'], ['one-stack', 'One + stack'], ['grid', 'Grid']].map(([k, label]) => h('button', { class: 'mini', onclick: () => { ctx.shape(k); render(); } }, label))) : null;
+  const content = h('div', { class: 'workspace-col' }, bar, h('div', { class: 'workspace' + (ctx.arrange ? ' arranging' : '') }, renderTree(c.tree, ctx)));
+  if (c.lines && !ctx.arrange) {
+    // Messages stay on a station, so the lines are worked out for each.
+    const by = new Map();
+    for (const r of leaves(c.tree).map(n => ctx.resolve(n)).filter(Boolean)) by.set(r.st, [...(by.get(r.st) || []), r.p]);
+    pendingLinks = { selector: '.workspace', links: [...by].flatMap(([st, panes]) => linksFor(st, panes)).filter(x => x.kind === 'message') };
   }
-  return h('div', { class: 'station-view' }, sidebar(st), h('main', { class: 'station-main' }, tabs, content));
+  // The list on the left is drawn after the layout, so it can say what is in it.
+  return shell(h('main', { class: 'station-main' }, head, content));
+}
+
+// A project's Watch, with a header that says whose it is.
+function watchPage(st, project) {
+  const info = S.fleet.stations.find(s => s.station === st);
+  const pr = (S.projects.get(st) || []).find(x => x.name === project);
+  const head = h('div', { class: 'lay-head' }, h('span', { class: 'ico-wrap' }, watchIcon()), h('b', { class: 'lay-name' }, 'Watch'),
+    h('span', { class: 'muted lay-saved' }, `Every agent in ${project} on ${st}, and who is talking to whom`), linkedChip(st, pr));
+  const body = info && info.state !== 'online' ? h('div', { class: 'empty' }, awayText(st, info))
+    : !pr ? h('div', { class: 'empty' }, S.loaded ? `There is no project ${project} on ${st}.` : 'Loading…') : watchView(st, project);
+  return shell(h('main', { class: 'station-main' }, head, body));
 }
 
 function paneView(st, id) {
   const p = findPane(st, id);
-  if (!p) return h('div', { class: 'station-view' }, sidebar(st), h('main', { class: 'station-main' }, h('div', { class: 'empty' }, online(st) === false ? `${st} is unreachable.` : 'That pane is not on this station any more.')));
+  if (!p) return shell(h('main', { class: 'station-main' }, h('div', { class: 'empty' }, !S.loaded ? 'Loading…' : online(st) ? 'That pane is not on this station any more.' : `${st} is unreachable.`)));
   const t = getTerm(st, p, 'zoom', 'control');
   // The terminal takes the keyboard when the view opens, and keeps it across
   // redraws, but never takes it from a dialog or a box someone is typing in.
@@ -1235,7 +1543,7 @@ function paneView(st, id) {
     if (document.querySelector('.dialog')) return;
     if (!a || a === document.body || t.el.contains(a)) t.focus();
   }, 50);
-  return h('div', { class: 'station-view' }, sidebar(st), h('main', { class: 'station-main zoomed' }, t.el));
+  return shell(h('main', { class: 'station-main zoomed' }, t.el));
 }
 
 // ---- phone: status, blockers, approvals, stop controls, and a pane you can
@@ -1284,14 +1592,14 @@ function composer(st, p) {
   return c;
 }
 
-// ---- phone: a project layout, one pane at a time. A small map of the layout
-// at the top says where you are; tap a box or swipe to change pane ----
+// ---- phone: a layout, one pane at a time. A small map of the layout at the
+// top says where you are; tap a box or swipe to change pane ----
 
 const phoneAt = new Map(); // layout key -> the pane shown, by its name in the layout
 
 // The layout's tree drawn small: each pane is a button.
 function layoutMap(node, cells, pick) {
-  if (node.pane !== undefined) {
+  if (isLeaf(node)) {
     const c = cells.find(x => x.node === node);
     return h('button', { type: 'button', class: `map-box ${c.state}${c.current ? ' current' : ''}`, 'aria-label': c.label, 'aria-current': c.current ? 'true' : undefined,
       onclick: (e) => { e.currentTarget.blur(); pick(c.ref); } }, h('span', { class: 'dot ' + c.state }), h('span', { class: 'map-name' }, c.name));
@@ -1303,25 +1611,25 @@ function layoutMap(node, cells, pick) {
 }
 // How many boxes wide and tall a tree is, so every box stays big enough to tap.
 const mapSpan = (n) => {
-  if (!n || n.pane !== undefined) return [1, 1];
+  if (!n || isLeaf(n)) return [1, 1];
   const [aw, ah] = mapSpan(n.a), [bw, bh] = mapSpan(n.b);
   return n.dir === 'row' ? [aw + bw, Math.max(ah, bh)] : [Math.max(aw, bw), ah + bh];
 };
 
-function phoneLayoutView(st, lays) {
-  const lay = lays.find(x => x.key === S.route.layout) || lays[0];
-  const refOf = (n) => (n.project ? n.project + '/' : '') + n.pane;
+// Any layout: a project's or a global one, with panes from any station.
+function phoneLayoutView(lay) {
+  const lays = allLayouts();
+  const ctx = ctxFor(lay);
   const cells = leaves(lay.cache.tree).map((n) => {
-    const p = panesOf(st).find(x => !x.exited && x.project === (n.project || lay.project) && x.name === n.pane) || null;
-    const guest = n.project && n.project !== lay.project ? n.project : null;
+    const p = ctx.resolve(n)?.p || null, guest = ctx.guest(n), name = ctx.label(n);
     const state = p ? stateOf(p) : 'missing';
-    return { node: n, ref: refOf(n), p, guest, name: n.pane, state, label: `${n.pane}${guest ? ' from ' + guest : ''}, ${p ? STATE_LABEL[state] || state : 'not running'}` };
+    return { node: n, ref: ctx.refOf(n), st: ctx.stationOf(n), p, guest, name, state, label: `${name}${guest ? ' ' + guest : ''}, ${p ? STATE_LABEL[state] || state : 'not running'}` };
   });
   let i = cells.findIndex(c => c.ref === phoneAt.get(lay.key));
   if (i < 0) i = 0;
   const cur = cells[i] || null;
   if (cur) cur.current = true;
-  const p = cur?.p || null;
+  const p = cur?.p || null, st = cur?.st;
 
   // As in the pane view: the page is redrawn every few seconds, and what is
   // on it stays where it is. The terminal and the message box are never put
@@ -1362,14 +1670,15 @@ function phoneLayoutView(st, lays) {
   const show = (ref) => { if (phoneAt.get(lay.key) !== ref) { phoneAt.set(lay.key, ref); render(); } };
   v.step = (d) => { const to = cells[i + d]; if (to) show(to.ref); };
 
+  const live = !!p && !p.exited;
   const fitKey = p ? `${st}/${p.id}` : '';
-  const fitted = !!p && phoneFit.has(fitKey);
-  const canStop = !!p && (p.state === 'working' || p.state === 'needs_you');
-  const headSig = `${p?.id}|${fitted}|${canStop}`;
+  const fitted = live && phoneFit.has(fitKey);
+  const canStop = live && (p.state === 'working' || p.state === 'needs_you');
+  const headSig = `${st}/${p?.id}|${live}|${fitted}|${canStop}`;
   if (v.headSig !== headSig) {
     v.headSig = headSig;
     v.head.replaceChildren(...[h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'),
-      p ? h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: (e) => { e.currentTarget.blur(); fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen') : null,
+      live ? h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: (e) => { e.currentTarget.blur(); fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen') : null,
       h('span', { class: 'grow' }),
       h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(st, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn')].filter(Boolean));
   }
@@ -1377,8 +1686,8 @@ function phoneLayoutView(st, lays) {
   if (v.titleSig !== titleSig) {
     v.titleSig = titleSig;
     v.title.replaceChildren(lays.length > 1
-      ? h('select', { 'aria-label': 'Layout', onchange: (e) => { const x = lays.find(y => y.key === e.target.value); if (x) go(layoutUrl(st, x.project, x.name)); } }, lays.map(x => h('option', { value: x.key, selected: x.key === lay.key }, `${x.project} · ${x.name}`)))
-      : h('span', {}, h('b', {}, lay.name), h('span', { class: 'muted' }, ` · layout in ${lay.project} on ${st}`)));
+      ? h('select', { 'aria-label': 'Layout', onchange: (e) => { const x = lays.find(y => y.key === e.target.value); if (x) go(layUrl(x)); } }, lays.map(x => h('option', { value: x.key, selected: x.key === lay.key }, `${x.project ? x.project + (onlineStations().length > 1 ? ' on ' + x.station : '') : 'Global'} · ${x.name}`)))
+      : h('span', {}, h('b', {}, lay.name), h('span', { class: 'muted' }, lay.project ? ` · layout in ${lay.project} on ${lay.station}` : ' · global layout')));
   }
   const mapSig = JSON.stringify([lay.cache.tree, i, cells.map(c => c.label)]);
   if (v.mapSig !== mapSig) {
@@ -1389,7 +1698,7 @@ function phoneLayoutView(st, lays) {
     if (v.map.firstChild) Object.assign(v.map.firstChild.style, { minWidth: w * 48 - 4 + 'px', height: Math.max(hh * 48 - 4, 56) + 'px' });
     v.map.hidden = !cells.length;
     v.nav.hidden = !cells.length;
-    v.showing.textContent = cur ? `Showing ${cur.name}${cur.guest ? ' (from ' + cur.guest + ')' : ''} · ${i + 1} of ${cells.length}` : '';
+    v.showing.textContent = cur ? `Showing ${cur.name}${cur.guest ? ' (' + cur.guest + ')' : ''} · ${i + 1} of ${cells.length}` : '';
     v.dots.replaceChildren(...cells.map((c, j) => h('i', { class: j === i ? 'on' : '' })));
     for (const [b, d, word] of [[v.prev, -1, 'Previous'], [v.next, 1, 'Next']]) {
       const to = cells[i + d];
@@ -1399,8 +1708,7 @@ function phoneLayoutView(st, lays) {
   }
   // What is waiting for an answer from a pane in this layout stays on top,
   // whichever pane is showing.
-  const ids = new Set(cells.filter(c => c.p).map(c => c.p.id));
-  const waiting = S.approvals.filter(a => a.station === st && ids.has(findPane(st, a.pane)?.id));
+  const waiting = S.approvals.filter(a => cells.some(c => c.p && c.st === a.station && findPane(a.station, a.pane)?.id === c.p.id));
   for (const [id, el] of v.rows) if (!waiting.some(a => a.id === id)) { el.remove(); v.rows.delete(id); }
   for (const a of waiting) if (!v.rows.has(a.id)) { const el = approvalRow(a); v.rows.set(a.id, el); v.appr.append(el); }
 
@@ -1409,12 +1717,14 @@ function phoneLayoutView(st, lays) {
     const t = fitted ? getTerm(st, p, 'phone-fit', 'control') : getTerm(st, p, 'phone', 'watch');
     t.setGuest(cur.guest);
     body = t.el;
-    foot = composer(st, p);
+    foot = live ? composer(st, p) : null;
   } else {
     const what = cur ? cur.ref : '';
     if (v.gone?.what !== what) {
+      const project = cur && cur.node.pane !== undefined ? (cur.node.project || lay.project) : null;
       v.gone = { what, el: h('div', { class: 'empty lay-gone' }, cur
-        ? [h('p', {}, `${cur.name} is not running.`), h('button', { onclick: () => rpc(st, 'project.open', { name: cur.node.project || lay.project }) }, `Start ${cur.node.project || lay.project}'s panes`)]
+        ? [h('p', {}, online(st) ? `${cur.name} is not running.` : `${st} is unreachable, so ${cur.name} cannot be shown.`),
+          project && online(st) ? h('button', { onclick: () => rpc(st, 'project.open', { name: project }) }, `Start ${project}'s panes`) : null]
         : h('p', {}, 'This layout is empty. Put panes in it with Arrange, on a computer.')) };
     }
     body = v.gone.el;
@@ -1424,66 +1734,100 @@ function phoneLayoutView(st, lays) {
   return v.main;
 }
 
-function phoneView() {
-  const r = S.route;
-  if (r.view === 'station') {
-    const lays = online(r.station) ? projectLayouts(r.station) : [];
-    if (lays.length) return phoneLayoutView(r.station, lays);
+function phonePaneView(st, id) {
+  const p = findPane(st, id);
+  if (!p) return h('main', { class: 'phone' }, h('p', {}, 'That pane is gone.'), h('a', { href: '#/fleet' }, 'Back'));
+  // Watching shows the pane at the size someone else set, shrunk to fit.
+  // Fitting resizes the pane to this screen, as a computer's deck would.
+  const fitKey = `${st}/${p.id}`;
+  const fitted = phoneFit.has(fitKey);
+  const t = fitted ? getTerm(st, p, 'phone-fit', 'control') : getTerm(st, p, 'phone', 'watch');
+  // The page is redrawn every few seconds. The terminal and the message
+  // box stay where they are, so the keyboard does not close while you type.
+  let v = phonePanes.get(fitKey);
+  if (!v) {
+    v = { head: h('div', { class: 'row' }), slot: h('div', { class: 'keep' }), foot: h('div', { class: 'keep' }) };
+    v.main = h('main', { class: 'phone phone-pane' }, v.head, v.slot, v.foot);
+    phonePanes.clear();
+    phonePanes.set(fitKey, v);
   }
-  if (r.view === 'pane') {
-    const p = findPane(r.station, r.pane);
-    if (!p) return h('main', { class: 'phone' }, h('p', {}, 'That pane is gone.'), h('a', { href: '#/fleet' }, 'Back'));
-    // Watching shows the pane at the size someone else set, shrunk to fit.
-    // Fitting resizes the pane to this screen, as a computer's deck would.
-    const fitKey = `${r.station}/${p.id}`;
-    const fitted = phoneFit.has(fitKey);
-    const t = fitted ? getTerm(r.station, p, 'phone-fit', 'control') : getTerm(r.station, p, 'phone', 'watch');
-    // The page is redrawn every few seconds. The terminal and the message
-    // box stay where they are, so the keyboard does not close while you type.
-    let v = phonePanes.get(fitKey);
-    if (!v) {
-      v = { head: h('div', { class: 'row' }), slot: h('div', { class: 'keep' }), foot: h('div', { class: 'keep' }) };
-      v.main = h('main', { class: 'phone phone-pane' }, v.head, v.slot, v.foot);
-      phonePanes.clear();
-      phonePanes.set(fitKey, v);
-    }
-    // The bar is rebuilt only when what it shows changes. Rebuilding it on
-    // every redraw made the phone put a focus ring on a button at each touch.
-    const canStop = !p.exited && (p.state === 'working' || p.state === 'needs_you');
-    const sig = `${fitted}|${p.exited}|${canStop}`;
-    if (v.sig !== sig) {
-      v.sig = sig;
-      v.head.replaceChildren(h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'),
-        p.exited ? '' : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: (e) => { e.currentTarget.blur(); fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
-        h('span', { class: 'grow' }),
-        h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(r.station, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn'));
-    }
-    if (v.slot.firstChild !== t.el) v.slot.replaceChildren(t.el);
-    const foot = p.exited ? (v.ended ||= h('p', { class: 'muted small' }, 'This pane has ended.')) : composer(r.station, p);
-    if (v.foot.firstChild !== foot) v.foot.replaceChildren(foot);
-    return v.main;
+  // The bar is rebuilt only when what it shows changes. Rebuilding it on
+  // every redraw made the phone put a focus ring on a button at each touch.
+  const canStop = !p.exited && (p.state === 'working' || p.state === 'needs_you');
+  const sig = `${fitted}|${p.exited}|${canStop}`;
+  if (v.sig !== sig) {
+    v.sig = sig;
+    v.head.replaceChildren(h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'),
+      p.exited ? '' : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: (e) => { e.currentTarget.blur(); fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
+      h('span', { class: 'grow' }),
+      h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(st, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn'));
   }
+  if (v.slot.firstChild !== t.el) v.slot.replaceChildren(t.el);
+  const foot = p.exited ? (v.ended ||= h('p', { class: 'muted small' }, 'This pane has ended.')) : composer(st, p);
+  if (v.foot.firstChild !== foot) v.foot.replaceChildren(foot);
+  return v.main;
+}
+
+// The phone's list: what needs you first, then the same list as a computer
+// shows on its left: Pinned, each station with its projects (their layouts,
+// Watch, panes), and the global layouts.
+function phoneList() {
   const all = S.fleet.stations.flatMap(s => liveAgents(s.station).map(p => ({ st: s.station, p })));
   const blockers = all.filter(x => x.p.agent !== 'shell' && (x.p.state === 'needs_you' || x.p.state === 'error'));
-  const line = ({ st, p }) => h('a', { class: 'phone-row', href: paneUrl(st, p.id) }, dot(p), h('div', { class: 'grow' }, h('b', {}, p.name), h('span', { class: 'muted' }, ` · ${st}${p.project ? ' · ' + p.project : ''}`),
-    h('div', { class: 'muted small' }, p.needs_reason || (p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}` : `${STATE_LABEL[stateOf(p)]} · ${ago(p.state_since_ms)}`))), '›');
-  // A project layout is opened as a map you step through, one pane at a time.
-  const layRow = (st, x) => { const n = leaves(x.cache.tree).length; return h('a', { class: 'phone-row lay-row', href: layoutUrl(st, x.project, x.name) }, h('span', { class: 'lay-icon', 'aria-hidden': 'true' }, '▦'),
-    h('div', { class: 'grow' }, h('b', {}, x.name), h('span', { class: 'muted' }, ` · layout in ${x.project}`), h('div', { class: 'muted small' }, `${n} pane${n === 1 ? '' : 's'}, one at a time`)), '›'); };
+  const whereOf = (st, p) => `${st}${p.project ? ' · ' + p.project : ''}`;
+  const line = (st, p, where) => h('a', { class: 'phone-row', href: paneUrl(st, p.id), 'aria-label': paneSays(p) }, dot(p), paneMark(p),
+    h('div', { class: 'grow' }, h('b', {}, p.name), where ? h('span', { class: 'muted' }, ' · ' + where) : null,
+      h('div', { class: 'muted small' }, p.needs_reason || (p.exited ? 'ended' : p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}` : `${STATE_LABEL[stateOf(p)]} · ${ago(p.state_since_ms)}`))), '›');
+  // A layout is opened as a map you step through, one pane at a time.
+  const layRow = (x, where) => { const n = leaves(x.cache.tree).length; return h('a', { class: 'phone-row lay-row', href: layUrl(x), 'aria-label': `${x.name}, layout` }, h('span', { class: 'ico-wrap' }, layoutIcon()),
+    h('div', { class: 'grow' }, h('b', {}, x.name), where ? h('span', { class: 'muted' }, ' · ' + where) : null, h('div', { class: 'muted small' }, `${n} pane${n === 1 ? '' : 's'}, one at a time`)), '›'); };
+  const watchRow = (st, pr) => h('a', { class: 'phone-row watch-row', href: watchUrl(st, pr.name), 'aria-label': `Watch ${pr.name}` }, h('span', { class: 'ico-wrap' }, watchIcon()),
+    h('div', { class: 'grow' }, h('b', {}, 'Watch'), h('div', { class: 'muted small' }, 'Every agent here, and who is talking')), '›');
+  const pins = pinnedItems();
+  const globals = globalLayouts();
+  const station = (s) => {
+    const st = s.station, up = s.state === 'online';
+    const projects = up ? (S.projects.get(st) || []) : [];
+    const loose = up ? panesOf(st).filter(p => !p.project && !p.exited).sort(byState) : [];
+    return h('div', { class: 'phone-station' },
+      h('div', { class: 'row' }, h('span', { class: 'dot ' + (up ? 'idle' : 'unreachable') }), h('b', {}, st), h('span', { class: 'muted' }, up ? `${s.working ?? 0} working · ${s.needs_you ?? 0} need you` : STATION_STATE[s.state] || s.state.replace('_', ' ')), h('span', { class: 'grow' }),
+        up ? h('button', { onclick: () => newPaneDialog(st) }, 'New') : null,
+        s.state === 'unreachable' ? h('button', { onclick: () => rpc(api.station, 'fleet.wake', { station: st }).then((r) => toast(`Sent ${r.sent} wake packets. Give it a minute.`)) }, 'Wake') : null,
+        s.state === 'unreachable' ? h('button', { onclick: () => rpc(api.station, 'fleet.start', { station: st }).then((r) => toast(`${st} is ${r.state}`)) }, 'Start') : null,
+        up ? h('button', { class: 'danger', onclick: () => confirmBox(`Stop every agent on ${st}?`, 'Running turns are interrupted. Processes stay.', 'Stop', () => rpc(api.station, 'stop.all', { scope: s.self ? 'station' : st })) }, 'Stop') : null),
+      projects.map(pr => {
+        const mine = panesOf(st).filter(p => p.project === pr.name && !p.exited).sort(byState);
+        return h('div', { class: 'phone-project' },
+          h('div', { class: 'row phone-project-head' }, h('b', {}, pr.name), pr.branch ? h('span', { class: 'muted' }, pr.branch) : null, linkedChip(st, pr)),
+          projectLayouts(st).filter(x => x.project === pr.name).map(x => layRow(x)),
+          mine.length ? watchRow(st, pr) : null,
+          mine.map(p => line(st, p)),
+          !mine.length ? h('div', { class: 'row' }, h('span', { class: 'muted small grow' }, pr.open ? 'Nothing is running.' : 'Closed.'), pr.open ? null : h('button', { onclick: () => rpc(st, 'project.open', { name: pr.name }) }, 'Open')) : null);
+      }),
+      loose.length ? h('div', { class: 'phone-project' }, projects.length ? h('div', { class: 'row phone-project-head' }, h('b', {}, 'Other panes')) : null, loose.map(p => line(st, p))) : null);
+  };
   return h('main', { class: 'phone' },
     h('section', {}, h('h2', {}, 'Approvals'), S.approvals.length ? S.approvals.map(a => approvalRow(a)) : h('p', { class: 'muted' }, 'Nothing is waiting for approval.')),
-    h('section', {}, h('h2', {}, 'Needs you'), blockers.length ? blockers.map(line) : h('p', { class: 'muted' }, 'No agent is blocked.')),
-    h('section', {}, h('h2', {}, 'Stations'),
-      S.fleet.stations.map(s => h('div', { class: 'phone-station' },
-        h('div', { class: 'row' }, h('span', { class: 'dot ' + (s.state === 'online' ? 'idle' : 'unreachable') }), h('b', {}, s.station), h('span', { class: 'muted' }, s.state === 'online' ? `${s.working ?? 0} working · ${s.needs_you ?? 0} need you` : s.state.replace('_', ' ')), h('span', { class: 'grow' }),
-          s.state === 'online' ? h('button', { onclick: () => newPaneDialog(s.station) }, 'New') : null,
-          s.state === 'unreachable' ? h('button', { onclick: () => rpc(api.station, 'fleet.wake', { station: s.station }).then((r) => toast(`Sent ${r.sent} wake packets. Give it a minute.`)) }, 'Wake') : null,
-          s.state === 'unreachable' ? h('button', { onclick: () => rpc(api.station, 'fleet.start', { station: s.station }).then((r) => toast(`${s.station} is ${r.state}`)) }, 'Start') : null,
-          s.state === 'online' ? h('button', { class: 'danger', onclick: () => confirmBox(`Stop every agent on ${s.station}?`, 'Running turns are interrupted. Processes stay.', 'Stop', () => rpc(api.station, 'stop.all', { scope: s.self ? 'station' : s.station })) }, 'Stop') : null),
-        s.state === 'online' ? projectLayouts(s.station).map(x => layRow(s.station, x)) : null,
-        all.filter(x => x.st === s.station).sort((a, b) => stateRank(a.p) - stateRank(b.p)).map(line)))),
+    h('section', {}, h('h2', {}, 'Needs you'), blockers.length ? blockers.map(x => line(x.st, x.p, whereOf(x.st, x.p))) : h('p', { class: 'muted' }, 'No agent is blocked.')),
+    pins.length ? h('section', { class: 'phone-pinned' }, h('h2', {}, 'Pinned'), pins.map(x => x.p ? line(x.st, x.p, whereOf(x.st, x.p)) : x.lay ? layRow(x.lay, layShort(x.lay)) : h('div', { class: 'phone-row muted' }, x.gone))) : null,
+    h('section', {}, h('h2', {}, 'Stations'), stationsByName().map(station)),
+    globals.length ? h('section', { class: 'phone-layouts' }, h('h2', {}, 'Layouts'), globals.map(x => layRow(x, 'every station'))) : null,
     stopRows(),
     h('section', {}, h('button', { class: 'danger big wide', onclick: () => confirmBox('Stop the whole fleet?', 'Every running agent turn on every station is interrupted.', 'Stop everything', () => rpc(api.station, 'stop.all', { scope: 'fleet' })) }, 'Stop every agent in the fleet')));
+}
+
+function phoneView() {
+  const r = S.route;
+  if (r.view === 'layout') {
+    const lay = findLayout(r.layout);
+    if (lay) return phoneLayoutView(lay);
+    return h('main', { class: 'phone' }, h('p', {}, S.loaded ? 'That layout is not here any more.' : 'Loading…'), h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'));
+  }
+  if (r.view === 'watch') return h('main', { class: 'phone phone-watch' },
+    h('div', { class: 'row' }, h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'), h('b', {}, `Watch · ${r.project}`), h('span', { class: 'muted' }, 'on ' + r.station)),
+    watchView(r.station, r.project));
+  if (r.view === 'pane') return phonePaneView(r.station, r.pane);
+  return phoneList();
 }
 
 // A browser on another device asks a station to let it in, shows the code the
@@ -1534,24 +1878,34 @@ function render() {
   }
   closeMenu();
   pendingLinks = null;
+  layCtx = null;
   S.route = parseRoute();
   for (const t of S.terms.values()) t._used = false;
   const r = S.route;
+  // The list on the left is drawn again each time: keep where it was scrolled to.
+  const sideTop = document.querySelector('.sidebar')?.scrollTop || 0;
   let main;
   if (isPhone()) main = phoneView();
   else if (r.view === 'pane') main = paneView(r.station, r.pane);
+  else if (r.view === 'layout') main = layoutView(r.layout);
+  else if (r.view === 'watch') main = watchPage(r.station, r.project);
   else if (r.view === 'station') main = stationView(r.station);
   else main = fleetView();
+  if (!layCtx) arranging = null;
   // A view that is already on the page stays attached: replacing it would
   // take the keyboard away from whatever is being typed into.
   if (root.children.length === 2 && root.children[1] === main) root.replaceChild(topbar(), root.children[0]);
   else root.replaceChildren(topbar(), main);
+  const side = document.querySelector('.sidebar');
+  if (side && sideTop) side.scrollTop = sideTop;
   for (const [key, t] of S.terms) {
     if (!t._used) { t.dispose(); S.terms.delete(key); }
     else if (t._fresh) { t._fresh = false; t.mount(); }
     else t.layout();
   }
-  document.title = (r.pane ? (findPane(r.station, r.pane)?.name || 'pane') + ' · ' : r.station ? r.station + ' · ' : '') + 'spandeck';
+  const lay = r.view === 'layout' ? findLayout(r.layout) : null;
+  const what = r.view === 'pane' ? (findPane(r.station, r.pane)?.name || 'pane') : lay ? lay.name : r.view === 'watch' ? `Watch ${r.project}` : r.station || '';
+  document.title = (what ? what + ' · ' : '') + 'spandeck';
   // Lines are drawn once the panes have their places on screen.
   const links = pendingLinks;
   pendingLinks = null;
@@ -1559,6 +1913,7 @@ function render() {
 }
 
 // Data changed: redraw everything except live terminals, which are reused.
+let draws = 0;
 function update() {
   // Do not redraw under an open dialog's feet, while a menu is open, or in
   // the middle of dragging a pane or the line between two.
@@ -1568,6 +1923,9 @@ function update() {
   const focusedTerm = [...S.terms.values()].find(t => t.el.contains(active));
   render();
   if (focusedTerm && !typing) focusedTerm.focus();
+  // How many times the page was redrawn for new data. Nothing in the deck
+  // reads it; a test waits on it instead of sleeping through a redraw.
+  root.dataset.draws = String(++draws);
 }
 
 addEventListener('hashchange', render);
@@ -1575,16 +1933,18 @@ addEventListener('resize', () => { clearTimeout(S._rs); S._rs = setTimeout(rende
 addEventListener('keydown', (e) => {
   const mod = e.ctrlKey || e.metaKey;
   if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); palette(); return; }
-  const st = S.route.station;
-  if (mod && e.shiftKey && st) {
-    const k = e.key.toLowerCase();
-    if (k === 'e' || k === 'o') { e.preventDefault(); pickPane(st, (id) => openInWorkspace(st, id, k === 'e' ? 'row' : 'col'), S.focused); }
-    if (k === 'w' && S.focused) { e.preventDefault(); closeLeaf(st, S.focused); }
+  // With a layout on screen: put a pane beside the focused one, or take the
+  // focused one out.
+  if (mod && e.shiftKey && layCtx) {
+    const k = e.key.toLowerCase(), ctx = layCtx;
+    if (k === 'e' || k === 'o') { e.preventDefault(); pickPane((st, p) => addToLayout(ctx.lay, st, p, k === 'e' ? 'row' : 'col'), ctx); }
+    const n = k === 'w' ? focusedLeaf(ctx) : null;
+    if (n) { e.preventDefault(); ctx.remove(ctx.refOf(n)); render(); }
   }
   // Esc zooms out, unless a terminal has the keyboard (agents need Esc).
   if (e.key === 'Escape' && !document.querySelector('.backdrop,.menu') && !document.activeElement?.closest('.pane')) {
-    if (S.route.view === 'pane') go(stationUrl(S.route.station));
-    else if (S.route.view === 'station') go('#/fleet');
+    const r = S.route;
+    if (r.view !== 'fleet') go(r.view !== 'station' && r.station ? stationUrl(r.station) : '#/fleet');
   }
 }, false);
 

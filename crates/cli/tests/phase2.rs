@@ -205,7 +205,7 @@ async fn a_websocket_must_authenticate_in_its_first_message() {
 use common::browser::Page;
 
 #[test]
-fn browser_opens_a_pane_types_splits_resizes_and_drops_a_file() {
+fn browser_opens_a_pane_types_copies_pastes_splits_resizes_and_drops_a_file() {
     let s = Station::start("alpha");
     let a = s.call(
         "pane.spawn",
@@ -267,30 +267,69 @@ fn browser_opens_a_pane_types_splits_resizes_and_drops_a_file() {
         Some(true)
     );
 
-    // Split: open the first pane in a workspace, then the second beside it.
+    // Layouts: the first pane goes into a new global layout from its menu in
+    // the list, then the second beside it. The tab bar is gone.
     page.goto("/s/alpha");
     page.wait(
         "the deck again",
-        "document.querySelectorAll('.pane-tile').length === 2",
+        "document.querySelectorAll('.pane-tile').length === 2 && !document.querySelector('.tabs, .tab')",
     );
-    page.js("[...document.querySelectorAll('.side-pane')].find(x => x.innerText.includes('one')).dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, clientX: 60, clientY: 120}))");
-    page.wait("the right-click menu", "!!document.querySelector('.menu')");
-    page.js("[...document.querySelectorAll('.menu-item')].find(i => i.innerText.includes('Open in workspace')).click()");
+    let row = |name: &str| {
+        format!("[...document.querySelectorAll('.side-pane')].find(x => x.querySelector('.side-name').innerText === '{name}')")
+    };
+    page.right_click(&row("one"));
+    page.choose("Add to a layout");
+    page.wait("the layout chooser", "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.dialog .list-row')].find(r => r.innerText.includes('New global layout')))");
+    page.wait("its name", "(f => f && f.querySelector('input').value === 'global' ? (f.querySelector('button[type=submit]').click(), true) : false)(document.querySelector('.dialog form'))");
     page.wait(
-        "one pane in the workspace",
-        "document.querySelectorAll('.workspace .pane').length === 1",
+        "one pane in the layout",
+        "location.hash === '#/l/global' && document.querySelectorAll('.workspace .pane').length === 1",
     );
-    page.js("document.querySelector('.workspace .pane').dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, clientX: 600, clientY: 300}))");
-    page.js("[...document.querySelectorAll('.menu-item')].find(i => i.innerText.includes('Split right')).click()");
-    page.wait(
-        "the pane picker",
-        "!!document.querySelector('.dialog .list-row')",
-    );
-    page.js("[...document.querySelectorAll('.dialog .list-row')].find(r => r.innerText.includes('two')).click()");
+    page.right_click(&row("two"));
+    page.choose("Add to global, to the right");
     page.wait(
         "two panes side by side",
         "document.querySelectorAll('.workspace .split.row .pane').length === 2",
     );
+
+    // Copy and paste (the owner's report, 14 Nov 2026: with text highlighted
+    // nothing was copied, and the pane's menu had no Copy). The menu copies
+    // what is selected, and pastes as one paste that runs nothing by itself.
+    // Here the page is given no clipboard, as over plain http on the tailnet.
+    page.js("(() => { Object.defineProperty(navigator, 'clipboard', {value: undefined, configurable: true}); \
+              document.addEventListener('copy', () => { window.__copied = document.activeElement.value; }); return true; })()");
+    let first = "document.querySelector('.workspace .pane')";
+    page.right_click(first);
+    assert_eq!(
+        page.js("[...document.querySelectorAll('.menu-item')].filter(i => /^(Copy|Paste)/.test(i.innerText)).map(i => [i.innerText.split('\\n')[0], i.disabled]).slice(0, 3)"),
+        json!([["Copy", true], ["Paste", false], ["Copy everything on screen", false]]),
+        "with nothing selected there is nothing to copy"
+    );
+    page.js("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))");
+    assert_eq!(
+        page.js(&format!("(() => {{ const t = {first}.paneTerm.term, b = t.buffer.active; \
+            for (let y = 0; y < b.length; y++) if (b.getLine(y).translateToString(true) === 'typed-23') {{ t.select(0, y, 8); return t.getSelection(); }} return null; }})()")),
+        json!("typed-23")
+    );
+    page.right_click(first);
+    page.choose("Copy");
+    page.wait(
+        "the selection to be copied",
+        "window.__copied === 'typed-23'",
+    );
+    page.right_click(first);
+    page.choose("Paste");
+    page.wait("the box to paste into", "(b => b ? (b.value = 'echo pasted-$((30+3))', b.closest('form').querySelector('button[type=submit]').click(), true) : false)(document.querySelector('.dialog textarea'))");
+    s.wait_text(&a, "echo pasted-$((30+3))");
+    assert!(!s.text(&a).contains("pasted-33"), "a paste runs nothing");
+    page.wait(
+        "terminal focus",
+        &format!(
+            "(t => t ? (t.focus(), true) : false)({first}.querySelector('.xterm-helper-textarea'))"
+        ),
+    );
+    page.tab.press_key("Enter").unwrap();
+    s.wait_text(&a, "pasted-33");
 
     // Drag the gutter: the split is resized and the panes are re-fitted.
     let before = s.pane(&b)["cols"].as_u64().unwrap();
@@ -450,20 +489,26 @@ fn screenshots_of_every_view() {
     if names.len() >= 3 {
         s.call("project.layout.save", json!({"project": "api", "layout": {"name": "build", "tree": {"dir": "col", "ratio": 600,
             "a": {"dir": "row", "ratio": 500, "a": {"pane": names[0]}, "b": {"pane": names[1]}}, "b": {"pane": names[2]}}}}));
-        page.wait("layout tab", "(t => t ? (t.click(), true) : false)([...document.querySelectorAll('.tab.proj')].find(t => t.innerText === 'build'))");
+        let head = |label: &str| {
+            format!("[...document.querySelectorAll('.lay-head button')].find(b => b.innerText === '{label}').click()")
+        };
+        let layout = |name: &str| {
+            format!("(t => t ? (t.click(), true) : false)([...document.querySelectorAll('.side-layout')].find(t => t.querySelector('.side-name').innerText === '{name}'))")
+        };
+        page.wait("layout row", &layout("build"));
         page.wait(
             "layout",
             "document.querySelectorAll('.workspace .pane').length === 3",
         );
         shoot(&page, "2b-project-layout");
-        page.js("[...document.querySelectorAll('.tabs button')].find(b => b.innerText === 'Arrange').click()");
+        page.js(&head("Arrange"));
         page.wait(
             "arrange",
             "document.querySelectorAll('.arr[data-ref]').length === 3",
         );
         page.js("document.querySelector('.arr[data-ref]').dataset.zone = 'right'");
         shoot(&page, "2c-arrange");
-        page.js("[...document.querySelectorAll('.tabs button')].find(b => b.innerText === 'Done arranging').click()");
+        page.js(&head("Done arranging"));
 
         // A guest pane from another project, and how Arrange lists the panes.
         let web = s.git_repo("web");
@@ -474,16 +519,16 @@ fn screenshots_of_every_view() {
         s.call("pane.spawn", json!({"agent": "shell", "name": "scratch"}));
         s.call("project.layout.save", json!({"project": "api", "layout": {"name": "with-logs", "tree": {"dir": "row", "ratio": 600,
             "a": {"pane": names[0]}, "b": {"pane": "logs", "project": "web"}}}}));
-        page.wait("guest layout tab", "(t => t ? (t.click(), true) : false)([...document.querySelectorAll('.tab.proj')].find(t => t.innerText.endsWith('with-logs')))");
+        page.wait("guest layout row", &layout("with-logs"));
         page.wait(
             "guest",
             "!!document.querySelector('.workspace .pane .chip.guest')",
         );
         shoot(&page, "2d-guest-in-layout");
-        page.js("[...document.querySelectorAll('.tabs button')].find(b => b.innerText === 'Arrange').click()");
-        page.wait("arrange", "!!document.querySelector('.side-section')");
+        page.js(&head("Arrange"));
+        page.wait("arrange", "!!document.querySelector('.arr[data-ref]')");
         shoot(&page, "2e-arrange-guest");
-        page.js("[...document.querySelectorAll('.tabs button')].find(b => b.innerText === 'Done arranging').click()");
+        page.js(&head("Done arranging"));
         page.js("document.querySelector('.side-project [aria-label=\"Project menu\"]').click()");
         page.js("[...document.querySelectorAll('.menu-item')].find(b => b.innerText.startsWith('Link with')).click()");
         shoot(&page, "2f-link-dialog");
@@ -500,10 +545,36 @@ fn screenshots_of_every_view() {
             "!!document.querySelector('.sidebar .chip.linked')",
         );
         shoot(&page, "2g-linked-layout");
-        page.js("[...document.querySelectorAll('.tab')].find(t => t.innerText.endsWith('Watch') && t.innerText.startsWith('api')).click()");
+        page.goto("/s/spark2/w/api");
         page.wait("watch", "!!document.querySelector('.watch-card.guest')");
         shoot(&page, "2h-watch-linked");
-        page.js("[...document.querySelectorAll('.tab')].find(t => t.innerText === 'Deck').click()");
+        // A global layout with a pane that is in no project, pins, and menus.
+        s.call("deck.layout.save", json!({"layout": {"name": "everything", "tree": {"dir": "row", "ratio": 550,
+            "a": {"pane": names[0], "project": "api", "station": "spark2"},
+            "b": {"dir": "col", "ratio": 500, "a": {"pane": "logs", "project": "web", "station": "spark2"}, "b": {"id": s.pane("scratch")["id"], "station": "spark2"}}}}}));
+        s.call(
+            "deck.pin",
+            json!({"pin": {"kind": "layout", "name": "everything"}}),
+        );
+        s.call(
+            "deck.pin",
+            json!({"pin": {"kind": "pane", "station": "spark2", "id": dev}}),
+        );
+        page.wait("global layout row", &layout("everything"));
+        page.wait(
+            "global layout",
+            "document.querySelectorAll('.workspace .pane').length === 3 && !!document.querySelector('.side-pinned')",
+        );
+        shoot(&page, "2i-global-layout");
+        page.right_click("document.querySelector('.side-globals .side-layout')");
+        shoot(&page, "2j-layout-menu");
+        page.right_click("document.querySelector('.side-project')");
+        shoot(&page, "2k-project-menu");
+        page.right_click("document.querySelector('.sidebar')");
+        shoot(&page, "2l-empty-space-menu");
+        page.js(
+            "document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))",
+        );
     }
     page.goto(&format!("/s/spark2/p/{dev}"));
     page.wait("pane", "!!document.querySelector('.pane .xterm-rows')");
@@ -538,6 +609,25 @@ fn screenshots_of_every_view() {
     shoot(&phone, "8b-phone-layout");
     phone.js("document.querySelectorAll('.lay-map button')[2].click()");
     shoot(&phone, "8c-phone-layout-third");
+    phone.goto("/l/everything");
+    phone.wait(
+        "phone global layout",
+        "document.querySelectorAll('.lay-map button').length === 3 && !!document.querySelector('.phone-layout .xterm-rows')",
+    );
+    shoot(&phone, "8d-phone-global-layout");
+    phone.goto("/s/spark2/w/api");
+    phone.wait(
+        "phone watch",
+        "!!document.querySelector('.phone-watch .watch-card')",
+    );
+    shoot(&phone, "8e-phone-watch");
+    phone.goto("/fleet");
+    phone.wait(
+        "phone list",
+        "!!document.querySelector('main.phone .phone-station')",
+    );
+    phone.js("(document.querySelector('main.phone').scrollTop = 330, true)");
+    shoot(&phone, "7b-phone-list-stations");
     let fresh = Page::open_signed_out(&s, 390, 844);
     fresh.js("document.querySelector('main.login button').click()");
     fresh.wait("code", "!!document.querySelector('.big-code')");
@@ -685,7 +775,7 @@ fn a_dialog_keeps_the_keyboard_while_a_pane_is_open() {
     page.wait("the palette", "!!document.querySelector('.dialog input')");
     page.js("(document.querySelector('.dialog input').focus(), window.__in = document.querySelector('.dialog input'), true)");
     page.tab.type_str("new pro").unwrap();
-    std::thread::sleep(Duration::from_millis(3300));
+    page.redraw(&s, &pane);
     page.tab.type_str("ject").unwrap();
     assert_eq!(
         page.js("[document.activeElement === window.__in, window.__in.value]"),
