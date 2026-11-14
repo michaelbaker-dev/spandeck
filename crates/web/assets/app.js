@@ -779,7 +779,13 @@ function paneView(st, id) {
   const p = findPane(st, id);
   if (!p) return h('div', { class: 'station-view' }, sidebar(st), h('main', { class: 'station-main' }, h('div', { class: 'empty' }, online(st) === false ? `${st} is unreachable.` : 'That pane is not on this station any more.')));
   const t = getTerm(st, p, 'zoom', 'control');
-  setTimeout(() => t.focus(), 50);
+  // The terminal takes the keyboard when the view opens, and keeps it across
+  // redraws, but never takes it from a dialog or a box someone is typing in.
+  setTimeout(() => {
+    const a = document.activeElement;
+    if (document.querySelector('.dialog')) return;
+    if (!a || a === document.body || t.el.contains(a)) t.focus();
+  }, 50);
   return h('div', { class: 'station-view' }, sidebar(st), h('main', { class: 'station-main zoomed' }, t.el));
 }
 

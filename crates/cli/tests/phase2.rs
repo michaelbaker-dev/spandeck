@@ -587,3 +587,39 @@ fn a_new_browser_shows_a_code_and_opens_the_deck_once_it_is_approved() {
     let devices = s.call("trust.status", json!({}))["devices"].clone();
     assert_eq!(devices.as_array().unwrap().len(), 1, "{devices}");
 }
+
+/// A bug that happened: with a pane open full size, typing in a dialog lost
+/// the keyboard to the terminal every few seconds.
+#[test]
+fn a_dialog_keeps_the_keyboard_while_a_pane_is_open() {
+    use common::browser::Page;
+    let s = Station::start("alpha");
+    let pane = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "sh", "cwd": s.root.join("home")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let page = Page::open(&s, 1200, 760);
+    page.goto(&format!("/s/alpha/p/{pane}"));
+    page.wait(
+        "the pane",
+        "!!document.querySelector('.station-main.zoomed .xterm-rows')",
+    );
+    page.js("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'k', ctrlKey: true, bubbles: true}))");
+    page.wait("the palette", "!!document.querySelector('.dialog input')");
+    page.js("(document.querySelector('.dialog input').focus(), window.__in = document.querySelector('.dialog input'), true)");
+    page.tab.type_str("new pro").unwrap();
+    std::thread::sleep(Duration::from_millis(3300));
+    page.tab.type_str("ject").unwrap();
+    assert_eq!(
+        page.js("[document.activeElement === window.__in, window.__in.value]"),
+        json!([true, "new project"]),
+        "the dialog kept the keyboard through a redraw"
+    );
+    assert!(
+        !s.text(&pane).contains("ject"),
+        "nothing typed went to the terminal"
+    );
+}
