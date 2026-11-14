@@ -6,19 +6,37 @@ use spandeck_agents::{install, AgentKind};
 use crate::daemon::Daemon;
 use crate::db::Db;
 
+/// A program's own word for its version. It gets no terminal and nothing to
+/// read, and three seconds: on a Mac, `codex --version` run from the daemon
+/// never returned, and the station check hung with it.
 fn version_of(program: &str) -> Option<String> {
-    let out = std::process::Command::new(program)
+    use std::io::Read;
+    let mut child = std::process::Command::new(program)
         .arg("--version")
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    out.status.success().then(|| {
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string()
-    })
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() < std::time::Duration::from_secs(3) => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    status
+        .success()
+        .then(|| out.lines().next().unwrap_or("").trim().to_string())
 }
 
 impl Daemon {
