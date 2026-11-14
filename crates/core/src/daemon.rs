@@ -473,10 +473,9 @@ impl Daemon {
         }
         if n % 20 == 1 {
             self.discover_peers().await;
-            self.vault_discover().await;
-        }
-        if n % 20 == 11 {
-            self.vault_maintain().await;
+            // The vault: the whole chain when the daemon starts, then the
+            // address, the lock and the token every ten seconds.
+            self.vault_check(n == 1).await;
             self.vault_report_archive().await;
         }
         if n % 4 == 2 {

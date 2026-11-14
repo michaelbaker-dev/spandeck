@@ -651,6 +651,8 @@ pub mod fake_vault {
         pub rotation: Option<u64>,
         pub retired: bool,
         pub overdue: bool,
+        /// The owner untied the token from its machine at the vault.
+        pub unpinned: bool,
         /// A rotation's new token that has not been used yet.
         pub unused_new: Option<String>,
         /// The token this one replaces once it is first used.
@@ -666,7 +668,11 @@ pub mod fake_vault {
         pub calls: Vec<Value>,
         pub reports: Vec<String>,
         pub issued: Vec<String>,
+        /// Every token any caller has shown this vault, at whatever address.
+        pub presented: Vec<String>,
         pub port: u16,
+        /// What the vault says its version is, when a test wants to choose.
+        pub version: Option<String>,
         n: u32,
     }
 
@@ -674,6 +680,8 @@ pub mod fake_vault {
     pub struct FakeVault {
         pub port: u16,
         pub inner: Arc<Mutex<Inner>>,
+        /// Set when the vault has moved away from this address.
+        gone: Arc<std::sync::atomic::AtomicBool>,
     }
 
     type S = Arc<Mutex<Inner>>;
@@ -693,6 +701,7 @@ pub mod fake_vault {
         allow_overdue: bool,
     ) -> Result<String, (StatusCode, Json<Value>)> {
         let t = bearer(h);
+        s.presented.push(t.clone());
         let Some(tok) = s.tokens.get(&t) else {
             return Err((
                 StatusCode::UNAUTHORIZED,
@@ -727,7 +736,7 @@ pub mod fake_vault {
         let s = s.lock().unwrap();
         if s.service {
             Json(
-                json!({"service": "agentvault", "version": "0.1.0-fake", "initialized": true, "sealed": !s.unlocked}),
+                json!({"service": "agentvault", "version": s.version.as_deref().unwrap_or("0.1.0-fake"), "initialized": true, "sealed": !s.unlocked}),
             )
         } else {
             Json(json!({"version": "something else"}))
@@ -816,7 +825,8 @@ pub mod fake_vault {
                 (
                     StatusCode::OK,
                     Json(
-                        json!({"valid": true, "scopes": ["list", "proxy"], "proxy_get_only": true, "rotation": {"every_hours": tok.rotation}, "overdue": false}),
+                        json!({"name": format!("spandeck:{}", tok.station), "nodes": if tok.unpinned { vec![] } else { vec!["this-machine"] },
+                            "scopes": ["list", "proxy"], "proxy_get_only": true, "rotation": {"every_hours": tok.rotation}}),
                     ),
                 )
             }
@@ -963,15 +973,31 @@ pub mod fake_vault {
 
     impl FakeVault {
         pub fn start() -> FakeVault {
-            let inner: S = Arc::new(Mutex::new(Inner {
-                unlocked: true,
-                service: true,
-                ..Default::default()
-            }));
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            FakeVault::serve(
+                Arc::new(Mutex::new(Inner {
+                    unlocked: true,
+                    service: true,
+                    ..Default::default()
+                })),
+                0,
+            )
+        }
+
+        /// The vault moves to another port, as when its machine is renamed:
+        /// the same vault, with the tokens it issued. Nothing answers as a
+        /// vault at the old address any more.
+        pub fn moved(&self, port: u16) -> FakeVault {
+            self.gone.store(true, std::sync::atomic::Ordering::SeqCst);
+            FakeVault::serve(self.inner.clone(), port)
+        }
+
+        fn serve(inner: S, port: u16) -> FakeVault {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
             listener.set_nonblocking(true).unwrap();
             let port = listener.local_addr().unwrap().port();
             inner.lock().unwrap().port = port;
+            let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let left = gone.clone();
             let app = Router::new()
                 .route("/v1/status", get(status))
                 .route("/v1/token-requests", post(open_request))
@@ -984,6 +1010,18 @@ pub mod fake_vault {
                 .route("/v1/secrets/{name}", get(secret))
                 .route("/v1/proxy/{name}/{*path}", any(proxy))
                 .route("/v1/attention/report", post(report))
+                .layer(axum::middleware::from_fn(
+                    move |req: axum::extract::Request, next: axum::middleware::Next| {
+                        let left = left.clone();
+                        async move {
+                            if left.load(std::sync::atomic::Ordering::SeqCst) {
+                                StatusCode::NOT_FOUND.into_response()
+                            } else {
+                                next.run(req).await
+                            }
+                        }
+                    },
+                ))
                 .with_state(inner.clone());
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
@@ -995,16 +1033,31 @@ pub mod fake_vault {
                     let _ = axum::serve(listener, app).await;
                 });
             });
-            FakeVault { port, inner }
+            FakeVault { port, inner, gone }
         }
 
         pub fn url(&self) -> String {
             format!("http://127.0.0.1:{}", self.port)
         }
 
+        /// Whether anything answers as a vault at this address.
+        pub fn answer(&self, yes: bool) {
+            self.gone.store(!yes, std::sync::atomic::Ordering::SeqCst);
+        }
+
         /// The config lines that point a station at this vault.
         pub fn config(&self) -> String {
             format!("\n[vault]\nurl = \"{}\"\n", self.url())
+        }
+
+        /// Config for a station that looks for its vault, as one on a
+        /// tailnet does, among the addresses given.
+        pub fn search(ports: &[u16]) -> String {
+            let list: Vec<String> = ports
+                .iter()
+                .map(|p| format!("\"http://127.0.0.1:{p}\""))
+                .collect();
+            format!("\n[vault]\nsearch = [{}]\n", list.join(", "))
         }
 
         /// The owner approves (or denies) every pending request on the vault's page.

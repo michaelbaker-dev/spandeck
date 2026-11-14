@@ -812,11 +812,15 @@ impl Daemon {
             // ---------------------------------------------------------- vault
             "vault.status" => self.vault_view(),
             "vault.refresh" => {
-                self.vault_discover().await;
-                self.vault_maintain().await;
+                self.vault_check(false).await;
                 self.vault_report_archive().await;
                 self.vault_view()
             }
+            // The whole chain, now. `opened` is a Control Deck saying it has
+            // just opened: the station then checks at most once a minute.
+            "vault.check" => self.vault_check_now(flag(&params, "opened")).await,
+            // "Not now" on the connect prompt, and turning it back on.
+            "vault.prompt" => self.vault_set_prompt(flag(&params, "dismissed"), by),
             "vault.connect" => self.vault_connect(by).await?,
             "vault.disconnect" => self.vault_disconnect(by)?,
             "vault.rotation" => {

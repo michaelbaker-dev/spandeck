@@ -155,6 +155,32 @@ impl Daemon {
                 );
             }
         }
+        // The vault, as the last check left it (`vault.check` asks again).
+        let vault = self.vault_view();
+        let url = vault["url"].as_str().unwrap_or("");
+        let broken = vault["checks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|c| c["ok"] == json!(false))
+            .and_then(|c| c["detail"].as_str())
+            .unwrap_or("");
+        let (ok, detail) = match vault["health"].as_str().unwrap_or("") {
+            "off" => (true, "turned off in the config".to_string()),
+            "none" => (
+                true,
+                "no AgentVault found on your tailnet (spandeck works without one)".to_string(),
+            ),
+            "ok" => (
+                true,
+                format!("connected to {url}; agents can use your keys through it"),
+            ),
+            "not_connected" => (false, format!("AgentVault found at {url}, and this station is not connected to it: connect it in the Control Deck, under Vault")),
+            "problem" => (false, broken.to_string()),
+            _ => (true, "not checked yet".to_string()),
+        };
+        add("vault", ok, false, detail);
+
         let keep = self
             .cfg
             .keep_awake_cmd
