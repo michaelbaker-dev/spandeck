@@ -1252,7 +1252,8 @@ impl Daemon {
             d.readopt(state);
         });
         Ok(
-            json!({"ok": true, "from": VERSION, "to": check.get("version"), "protocol": PROTOCOL, "schema": Db::LATEST_SCHEMA, "peers_needing_update": left_behind}),
+            // `live_handoff` false (Windows): panes are restarted, not kept.
+            json!({"ok": true, "from": VERSION, "to": check.get("version"), "protocol": PROTOCOL, "schema": Db::LATEST_SCHEMA, "peers_needing_update": left_behind, "live_handoff": spandeck_terminal::sys::LIVE_HANDOFF}),
         )
     }
 }

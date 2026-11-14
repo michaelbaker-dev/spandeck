@@ -33,6 +33,14 @@ you rely on it.
 curl -fsSL https://raw.githubusercontent.com/michaelbaker-dev/spandeck/main/scripts/install.sh | sh
 ```
 
+Windows (x64, Windows 10 1809 or later; in PowerShell, no administrator needed). Windows
+support is new: read "Windows" in `DECISIONS.md` for what differs, above all that an
+upgrade or restart of a Windows station restarts its panes.
+
+```powershell
+irm https://raw.githubusercontent.com/michaelbaker-dev/spandeck/main/scripts/install.ps1 | iex
+```
+
 This downloads the release for your machine from
 [Releases](https://github.com/michaelbaker-dev/spandeck/releases), checks its SHA-256,
 and puts `spandeck` and the short command `sd` in `~/.local/bin`. To do it by hand,

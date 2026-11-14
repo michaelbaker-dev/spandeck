@@ -8,6 +8,7 @@ use serde_json::json;
 /// same name it messes up the layout, we should not allow creating duplicate
 /// pane names"): within a project, and among the panes with no project.
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn a_pane_name_is_used_once_in_a_project_and_once_outside_any() {
     let s = Station::start("alpha");
     let repo = s.git_repo("proj");
@@ -179,6 +180,7 @@ fn the_command_line_creates_a_project_in_the_current_folder() {
 /// A bug that happened: a new project in `~/some/new/folder` was refused,
 /// because `~` was taken literally and the folder did not exist yet.
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn a_project_can_be_made_in_a_home_folder_that_does_not_exist_yet() {
     let s = Station::start("alpha");
     let v = s.call(

@@ -185,6 +185,7 @@ fn the_control_deck_shows_which_orders_apply_and_where_each_came_from() {
 
 /// A rule is shown as enforced only where the agent's integration can block.
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn rules_show_as_guidance_for_agents_whose_blocking_is_not_verified() {
     let (s, repo) = setup();
     // A Codex pane (a stand-in program: Codex is not installed on this station).

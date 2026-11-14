@@ -20,6 +20,9 @@ jobs:
           # The oldest hosted Ubuntu, so the binaries need only its glibc.
           - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, gate: true }
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, gate: true }
+          # No live handoff on Windows, so no handoff gate: its gate is the
+          # Windows station scenarios (a pane, the pipe, restart and resume).
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, gate: false, windows: true }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -33,8 +36,28 @@ jobs:
       - name: Handoff acceptance test (release gate)
         if: matrix.gate
         run: cargo test -p spandeck-terminal --test handoff && cargo test -p spandeck --test phase1 handoff
+      - name: Windows station scenarios (release gate)
+        if: matrix.windows
+        run: cargo test -p spandeck-terminal --test conpty --test local && cargo test -p spandeck --test windows -- --test-threads=1
+        shell: bash
       - run: cargo build --release --locked --bin spandeck --bin sd --target ${{ matrix.target }}
+        if: ${{ !matrix.windows }}
+      - run: cargo build --release --locked --bin spandeck --bin sd --bin spandeckd --target ${{ matrix.target }}
+        if: matrix.windows
+      - name: Package (Windows)
+        if: matrix.windows
+        shell: pwsh
+        run: |
+          $name = "spandeck-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force dist, $name | Out-Null
+          $bin = "target/${{ matrix.target }}/release"
+          Copy-Item "$bin/spandeck.exe", "$bin/sd.exe", "$bin/spandeckd.exe", README.md, LICENSE $name
+          Compress-Archive -Path $name -DestinationPath "dist/$name.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$name.zip").Hash.ToLower()
+          # The same form sha256sum writes, in ASCII with a Unix line end.
+          [IO.File]::WriteAllText("dist/$name.zip.sha256", "$hash  $name.zip`n")
       - name: Package
+        if: ${{ !matrix.windows }}
         run: |
           name=spandeck-${{ github.ref_name }}-${{ matrix.target }}
           mkdir -p dist "$name"
@@ -44,7 +67,9 @@ jobs:
           if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"; else shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"; fi
       - uses: actions/attest-build-provenance@v2
         with:
-          subject-path: dist/*.tar.gz
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

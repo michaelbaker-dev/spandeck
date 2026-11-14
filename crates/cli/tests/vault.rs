@@ -56,6 +56,7 @@ fn everything_the_api_says(s: &Station) -> String {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn a_station_connects_only_when_the_owner_approves_on_the_vault() {
     let vault = FakeVault::start();
     let s = station(&vault);

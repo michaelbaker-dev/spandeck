@@ -33,6 +33,7 @@ fn arg_printer(s: &Station) -> String {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn one_setup_reaches_every_station_and_every_new_agent() {
     let (a, b) = Station::pair();
     let out = a.call("setup.set", json!({"setup": setup()}));
@@ -170,6 +171,7 @@ fn a_station_that_was_away_catches_up_when_it_is_seen_again() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn a_command_is_typed_into_idle_agents_and_busy_ones_are_skipped() {
     let (a, b) = Station::pair();
     let idle_a = a.fake(json!({"steps": []}), json!({"name": "idle-a"}));
@@ -461,6 +463,7 @@ fn script(dir: &std::path::Path, name: &str, body: &str) -> String {
 /// before trying to launch the agent", and the new agents "need to be set up
 /// with MCP/skills automatically".
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn a_missing_agent_is_installed_in_its_pane_and_then_started_with_spandecks_tools() {
     let tools = tempfile::tempdir().unwrap();
     let t = tools.path();
@@ -564,6 +567,7 @@ fn a_missing_agent_is_installed_in_its_pane_and_then_started_with_spandecks_tool
 /// pane for a broken one offers a reinstall and then starts the copy that
 /// works; and reinstalling by a chosen way is the owner's to ask for.
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn a_program_that_is_there_but_does_not_start_is_reinstalled_not_called_installed_or_missing() {
     let tools = tempfile::tempdir().unwrap();
     let t = tools.path();

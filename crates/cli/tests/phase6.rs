@@ -590,6 +590,7 @@ fn recipe(s: &Station, phase: &str) -> Value {
 
 /// Done when: the review loop recipe finishes with two fake agents.
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn the_review_loop_runs_until_clean_then_waits_for_sign_off() {
     let s = Station::start("alpha");
     let (reviewer, author) =
@@ -649,6 +650,7 @@ fn the_review_loop_runs_until_clean_then_waits_for_sign_off() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn the_review_loop_stops_and_asks_when_the_reviewer_repeats_itself() {
     let s = Station::start("alpha");
     let same = "src/lib.rs:10 off-by-one in the loop bound";
@@ -672,6 +674,7 @@ fn the_review_loop_stops_and_asks_when_the_reviewer_repeats_itself() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn the_review_loop_stops_at_its_round_limit() {
     let s = Station::start("alpha");
     let (reviewer, author) = review_roles(json!([

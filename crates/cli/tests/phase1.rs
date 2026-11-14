@@ -4,6 +4,7 @@ use common::*;
 use serde_json::json;
 
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn spawn_type_read_and_resize_through_the_local_api() {
     let s = Station::start("alpha");
     let pane = s.call(
@@ -40,6 +41,10 @@ fn the_api_refuses_a_missing_or_wrong_token() {
 
 /// Done when: a fake agent survives an upgrade by handoff.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "tests exec-in-place live handoff; Windows restarts panes instead (tests/windows.rs)"
+)]
 fn a_fake_agent_survives_an_upgrade_by_live_handoff() {
     let s = Station::start("alpha");
     let pane = s.fake(
@@ -78,6 +83,10 @@ fn a_fake_agent_survives_an_upgrade_by_live_handoff() {
 
 /// Done when: a forced handoff failure ends with the agent resumed by session id.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "tests exec-in-place live handoff; Windows restarts panes instead (tests/windows.rs)"
+)]
 fn a_failed_handoff_falls_back_to_resume_by_session_id() {
     let s = Station::start("alpha");
     let pane = s.fake(json!({"steps": []}), json!({}));
@@ -113,6 +122,7 @@ fn a_failed_handoff_falls_back_to_resume_by_session_id() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn after_a_daemon_crash_agents_resume_and_shells_do_not() {
     let mut s = Station::start("alpha");
     let agent = s.fake(json!({"steps": []}), json!({}));
@@ -141,6 +151,10 @@ fn after_a_daemon_crash_agents_resume_and_shells_do_not() {
 /// Guarantee (Upgrades): after an upgrade, a health check, and rollback to
 /// the previous binary if it fails. The terminals survive both swaps.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "tests exec-in-place live handoff; Windows restarts panes instead (tests/windows.rs)"
+)]
 fn an_upgrade_that_fails_its_health_check_goes_back_and_keeps_every_terminal() {
     // The switch makes the new image report itself unhealthy. It is read
     // only by an image started by an upgrade, and only in debug builds.
@@ -186,6 +200,10 @@ fn an_upgrade_that_fails_its_health_check_goes_back_and_keeps_every_terminal() {
 /// checksum, and keeps every terminal. A download that does not match is
 /// refused and changes nothing.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "tests exec-in-place live handoff; Windows restarts panes instead (tests/windows.rs)"
+)]
 fn a_station_updates_to_a_release_only_if_the_download_matches_its_checksum() {
     use common::fake_releases::{Releases, TAG};
     let (good, bad) = (Releases::start(true), Releases::start(false));
@@ -277,6 +295,10 @@ fn a_pane_is_restarted_in_place_and_the_agent_resumes_its_conversation() {
 
 /// 0.2: a restart keeps every terminal.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "tests exec-in-place live handoff; Windows restarts panes instead (tests/windows.rs)"
+)]
 fn a_restart_keeps_every_terminal() {
     let s = Station::start("alpha");
     let pane = s.fake(

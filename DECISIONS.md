@@ -7,7 +7,7 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 ## Decisions
 
 - **Rust, our own daemon, written from scratch.** herdr and Wolfpack are read for lessons, not forked.
-- **v1 runs on macOS and Linux.** Windows later, so platform code stays isolated (`crates/terminal/src/pty.rs`).
+- **v1 runs on macOS and Linux.** Windows is being added (see Windows, below); platform code stays isolated (`crates/terminal/src/sys/`).
 - **Name**: spandeck; daemon spandeckd; the command center is the Control Deck; machines are stations, agents are crew, the event log is the ship's log.
 - **Live handoff on upgrade, no per-pane host process.** The old daemon execs the new binary in place (same pid, inherited PTY descriptors). After a crash or reboot each agent resumes its conversation by session id.
 - **Stations under the same Tailscale login find each other automatically, and each joins the fleet on the owner's approval, once** (changed 14 Nov 2026; before, they trusted each other with no step). Tailscale identifies a device, not a program on it, so a station also signs its calls with a fleet key and a browser on another device holds a token the owner approved. An agent reaching another station gets only what its task grants.
@@ -22,7 +22,7 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - **Usage per agent** (the owner's request on 14 Nov 2026; before, usage and cost views were not in v1): each pane shows its agent's model, tokens and context, with an estimated cost; the station and the fleet show totals. See Usage and cost.
 - **Phone**: status, blockers, approval requests and stop controls; and, since 0.2 (the owner's request on 14 Nov 2026), talking to any pane: a message box that can be typed or dictated into, the keys a phone lacks, fitting the pane to the screen, and starting a pane. In the browser; no native app.
 - **Station-to-station SSH** uses short-lived certificates spandeck issues per task (v1.5, with cross-station delegation).
-- Not in v1: Windows, desktop shell, native iPhone app and widget, Officer of the Deck, fleet updates and channels (of spandeck itself), common config, cross-station delegation, flow view, agent tree and timeline. (OpenCode and Antigravity adapters were on this list until 14 Nov 2026: see Agent programs.)
+- Not in v1: desktop shell, native iPhone app and widget, Officer of the Deck, fleet updates and channels (of spandeck itself), common config, cross-station delegation, flow view, agent tree and timeline. (OpenCode and Antigravity adapters were on this list until 14 Nov 2026: see Agent programs.)
 
 ## Pre-build resolutions (13 Nov 2026)
 
@@ -163,10 +163,12 @@ owner gets less of.
   (terminals, the local socket, private files, process control, the shell, start at login,
   keep-awake) is behind that one interface, and no other file in any crate names `cfg(unix)`,
   `cfg(windows)`, `nix`, `libc` or `windows-sys`. A value that differs (a folder, a command)
-  is asked of `sys`, not chosen with a `cfg` where it is used. Two exceptions, each one line:
-  `spandeckd.rs` (the attribute that makes it a windowless program) and a test that cannot run
-  on a system carries `#[cfg_attr(windows, ignore = "<the reason>")]`. `pty.rs` keeps the
-  types every system shares. Reason: the rule was written so a Windows port replaces one
+  is asked of `sys`, or chosen by `if sys::WINDOWS` in ordinary code that is compiled and
+  checked on every system, never with a `cfg` where it is used. Exceptions, each one line:
+  `spandeckd.rs` (the attribute that makes it a windowless program); a test that cannot run
+  on Windows carries `#[cfg_attr(windows, ignore = "<the reason>")]`; a test file for one
+  system only begins `#![cfg(unix)]` or `#![cfg(windows)]`. `pty.rs` keeps the types every
+  system shares. Reason: the rule was written so a Windows port replaces one
   place; it is now a folder instead of a file because the port is more than the PTY.
 - **Terminals: ConPTY** (`CreatePseudoConsole`), one per pane, with the program started by
   `CreateProcessW` inside a job object that is ended when it closes. Kill is ending the job
@@ -174,7 +176,8 @@ owner gets less of.
   every program on it to close. Interrupt is Ctrl-C typed into the pane, as on Unix. A pane's
   exit is its first program's exit code (there are no signals, so `ExitInfo::Signal` never
   appears). A program that is a `.cmd` or `.bat` file (npm's `claude.cmd`) is run through
-  `cmd.exe /d /s /c`; an argument `cmd.exe` would read as a command is refused, not passed on.
+  `cmd.exe`, with every argument quoted the way Rust's standard library does it so that `&`,
+  `|` and `%NAME%` in an argument stay text; an argument with a line break is refused.
   Because the job ends with the daemon, no pane's program outlives a daemon crash: the
   recommended default ("processes do not survive a daemon crash") holds by construction.
 - **Local socket: a named pipe**, `\\.\pipe\spandeck-<hash of the state folder>`, in place of
@@ -193,7 +196,8 @@ owner gets less of.
   Unix the owner loses:** every shell pane and whatever it was running; the screen and
   scrollback of every pane; an agent's turn in progress (the conversation is kept; an agent
   with nothing to resume is closed). The Control Deck says so before an upgrade on a Windows
-  station (`station.info` carries `live_handoff: false`). This is the Guarantee's own
+  station, and so does the command line (`station.info` and the reply to an upgrade carry
+  `live_handoff: false`). This is the Guarantee's own
   fallback ("if live handoff does not complete, terminals are lost and agents resume by
   session id") made the normal case. The way to parity is a small pane-host process that owns
   the pseudoconsoles and outlives the daemon; it is not built, because none of it could be
@@ -216,13 +220,24 @@ owner gets less of.
   The helper ends when the daemon does. It does not stop a laptop sleeping when its lid shuts.
 - **Shells.** A shell pane runs PowerShell 7 (`pwsh.exe`) when installed, else Windows
   PowerShell, else `cmd.exe`. One shell line (an install or update command from the catalogue)
-  runs through `powershell -NoProfile -ExecutionPolicy Bypass -Command`. Install-before-launch
+  runs through Windows PowerShell 5.1, which every Windows has
+  (`powershell -NoProfile -ExecutionPolicy Bypass -Command`); nothing needs PowerShell 7. Install-before-launch
   is not a second script in another language: on Windows the pane runs
   `spandeck install-then-launch`, the same steps written in Rust (say what was found, show the
   command, run it in the pane, Ctrl-C skips, start the first copy that answers).
-- **The agent catalogue has Windows commands per agent**, read from each vendor's
-  documentation on 14 Nov 2026; an agent whose vendor documents no native Windows install is
-  not offered an install there, and one that does not run on native Windows says so.
+- **The agent catalogue has a Windows list**, read from each vendor's documentation on
+  14 Nov 2026: Claude Code (PowerShell script, npm, WinGet), Codex (PowerShell script, npm),
+  OpenCode (npm only: its page has no Windows installer and says Windows package managers are
+  not supported), Antigravity (PowerShell script). All four document native Windows. The
+  update commands of Codex, OpenCode and Antigravity were read from the programs on Linux and
+  are not confirmed for Windows.
+- **Hooks.** Claude Code on Windows runs a hook in Git Bash when that is installed and in
+  PowerShell when it is not; no one command line is right in both, so spandeck's entries name
+  PowerShell (`"shell": "powershell"`) and use `& '<path>' hook claude`. Each hook then costs a
+  PowerShell start; if that proves slow on the real machine, the no-shell form (`command` plus
+  `args`) is the next thing to try. Codex documents no way to name the shell for a hook on
+  Windows: the same line is written and is unverified, and screen detection covers Codex
+  where its hooks do not fire, as on Unix.
 - **Folders.** State in `%LOCALAPPDATA%\spandeck`, config in `%APPDATA%\spandeck`
   (`SPANDECK_STATE_DIR` and `SPANDECK_CONFIG_DIR` still win). Home is `%USERPROFILE%`; `~` means
   that. A program name is looked for with each extension in `PATHEXT`. Paths are compared as
@@ -246,8 +261,15 @@ owner gets less of.
   which behaves differently on Windows. None of it can be tried without a Windows machine, so
   it is listed, not written. A Windows station can add a Mac or Linux machine: that direction
   needs only `ssh.exe`, which Windows ships.
+- **Not on Windows yet:** wake-on-LAN of a Windows station (its network card's address is
+  not read), starting a stopped Windows station over SSH (`fleet.start` runs a Unix line),
+  usage figures for OpenCode (where its database is on Windows is not documented), and the
+  Codex sandbox repair (a Linux problem). ARM64.
 - **Tests.** CI gains a `windows` job that builds everything and runs the tests. A test that
-  needs a Unix shell or exec-in-place is marked ignored on Windows with its reason; nothing is
-  skipped silently and nothing changes on macOS or Linux. Windows-only tests cover what is
-  new: a ConPTY round trip, the pipe refusing nothing to its own user, the command line
-  built for `.cmd` files.
+  needs a Unix shell, a signal or exec-in-place is marked ignored on Windows with its reason;
+  nothing changes on macOS or Linux. Windows-only tests cover what is new: ConPTY (input,
+  exit code, resize, environment, a `.cmd` file's arguments, kill ending the whole tree,
+  hang-up), the local socket on each system, and a station end to end (a shell pane over the
+  pipe, an agent's hooks, restart and resume, the state folder's access list). The scenario
+  tests written for Unix run on Windows in a step that reports without failing the job until
+  they have been seen to pass there.

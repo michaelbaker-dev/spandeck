@@ -203,6 +203,7 @@ fn the_session_file_is_archived_line_for_line() {
 
 /// Observing without hooks: the screen is the fallback signal.
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn screen_detection_reports_state_when_no_hook_has_fired() {
     let s = Station::start("alpha");
     let pane = s.call(
@@ -217,6 +218,7 @@ fn screen_detection_reports_state_when_no_hook_has_fired() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn an_agent_cannot_use_methods_that_administer_the_station() {
     let s = Station::start("alpha");
     let pane = s.fake(json!({"steps": []}), json!({}));

@@ -174,7 +174,7 @@ impl Station {
         std::fs::write(
             root.join("config/config.toml"),
             format!(
-                "station = \"{name}\"\nweb_port = {port}\nweb_bind = [\"127.0.0.1\"]\ndiscovery = false\nkeep_awake_cmd = [\"sleep\", \"300\"]\n{prices}{}\n[agents.fake]\nprogram = \"{FAKE}\"\n{}\n",
+                "station = \"{name}\"\nweb_port = {port}\nweb_bind = [\"127.0.0.1\"]\ndiscovery = false\nkeep_awake_cmd = [\"sleep\", \"300\"]\n{prices}{}\n[agents.fake]\nprogram = '{FAKE}'\n{}\n",
                 top.join(""),
                 tables
                     .join("")

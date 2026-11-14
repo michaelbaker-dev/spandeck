@@ -205,6 +205,7 @@ async fn a_websocket_must_authenticate_in_its_first_message() {
 use common::browser::Page;
 
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn browser_opens_a_pane_types_copies_pastes_splits_resizes_and_drops_a_file() {
     let s = Station::start("alpha");
     let a = s.call(
@@ -381,6 +382,7 @@ fn browser_opens_a_pane_types_copies_pastes_splits_resizes_and_drops_a_file() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn a_second_browser_letterboxes_instead_of_resizing_the_pane() {
     let s = Station::start("alpha");
     let a = s.call(
@@ -789,6 +791,7 @@ fn a_new_browser_shows_a_code_and_opens_the_deck_once_it_is_approved() {
 /// A bug that happened: with a pane open full size, typing in a dialog lost
 /// the keyboard to the terminal every few seconds.
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn a_dialog_keeps_the_keyboard_while_a_pane_is_open() {
     use common::browser::Page;
     let prices = fake_prices::Prices::start();

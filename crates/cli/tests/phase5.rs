@@ -107,6 +107,10 @@ fn a_refused_station_stays_out() {
 /// 0.2: one Control Deck looks after the other stations: restart one, and
 /// start one whose daemon is not running, if this station is allowed to.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "tests exec-in-place live handoff; Windows restarts panes instead (tests/windows.rs)"
+)]
 fn another_station_is_restarted_and_a_stopped_one_is_started_from_the_deck() {
     // The "SSH" here is a script that starts bravo's daemon on this machine.
     let dir = tempfile::tempdir().unwrap();
@@ -215,6 +219,7 @@ fn another_station_is_restarted_and_a_stopped_one_is_started_from_the_deck() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn two_stations_find_each_other_and_one_deck_controls_both() {
     let (a, b) = Station::pair();
     let fleet = a.call("fleet.view", json!({}));
@@ -337,6 +342,10 @@ fn stop_row(s: &Station, station: &str) -> Value {
 /// Done when: a stop sent to an unreachable station shows as unreachable, then
 /// is delivered on reconnect, and applies only to work running when issued.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "sends a Unix signal (SIGSTOP, SIGTERM); Windows has none"
+)]
 fn a_stop_for_an_unreachable_station_is_shown_honestly_and_delivered_on_reconnect() {
     let (a, b) = Station::pair();
     let long_job = json!({"steps": [{"prompt": "long job"}, {"work": 120000}]});
@@ -488,6 +497,7 @@ fn a_push_is_sent_when_you_are_away_and_muted_panes_stay_quiet() {
 /// The phone checklist: status, blockers, an approval and a stop all work,
 /// and attaching from the phone is read-only.
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     use common::browser::Page;
     let s = Station::start("alpha");
@@ -961,6 +971,10 @@ fn files_holding(dir: &std::path::Path, needle: &str) -> Vec<std::path::PathBuf>
 /// its standard input here, as a machine with its own home directory. The
 /// release is downloaded from a stand-in release page.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "builds its release archive with sh and tar.gz; the Windows release is a .zip"
+)]
 fn a_machine_is_added_from_the_deck_and_its_password_is_kept_nowhere() {
     const RIGHT: &str = "c0rrect-horse-staple-91";
     const WRONG: &str = "wr0ng-horse-battery-37";

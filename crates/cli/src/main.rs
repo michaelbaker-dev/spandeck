@@ -982,8 +982,12 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Cmd::Restart { station } => {
             let v = on_station(&mut c, station.as_deref(), "station.restart", json!({}))?;
-            show(j, &v, |_| {
-                "restarting; terminals stay open. If it does not come back healthy, the restart is undone.".to_string()
+            show(j, &v, |v| {
+                if v["live_handoff"] == json!(false) {
+                    WINDOWS_RESTART.to_string()
+                } else {
+                    "restarting; terminals stay open. If it does not come back healthy, the restart is undone.".to_string()
+                }
             });
         }
         Cmd::Update { version, station } => {
@@ -1001,9 +1005,14 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     )
                 } else {
                     format!(
-                        "updating {} -> {}; the download matched its checksum. Terminals stay open, and a version that does not start properly is undone.",
+                        "updating {} -> {}; the download matched its checksum. {}",
                         v["from"].as_str().unwrap_or(""),
-                        v["release"].as_str().unwrap_or("")
+                        v["release"].as_str().unwrap_or(""),
+                        if v["live_handoff"] == json!(false) {
+                            WINDOWS_RESTART
+                        } else {
+                            "Terminals stay open, and a version that does not start properly is undone."
+                        }
                     )
                 }
             });
@@ -1300,6 +1309,10 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
         Ok(0)
     })
 }
+
+/// What a restart, update or upgrade means on a Windows station, which
+/// cannot keep its terminals through one (DECISIONS.md, "Windows").
+const WINDOWS_RESTART: &str = "That station runs Windows: its terminals are restarted. Agents go back to their conversations; shells, and a turn that is running now, are lost. A version that does not start properly is undone.";
 
 /// Call a method here, or on another station in the fleet through this one.
 fn on_station(

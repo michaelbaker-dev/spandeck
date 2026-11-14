@@ -218,7 +218,13 @@ pub fn adapter(kind: AgentKind) -> Option<&'static dyn Adapter> {
 /// Guess the agent from a command line, so `claude` typed into a shell pane
 /// or a launcher with a custom path is still recognised.
 pub fn kind_from_command(program: &str) -> AgentKind {
-    let base = program.rsplit('/').next().unwrap_or(program);
+    let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    // Windows: `claude.exe`, or npm's `claude.cmd`.
+    let lower = base.to_ascii_lowercase();
+    let base = [".exe", ".cmd", ".bat"]
+        .iter()
+        .find_map(|ext| lower.strip_suffix(ext).map(|stem| &base[..stem.len()]))
+        .unwrap_or(base);
     match base {
         "claude" => AgentKind::Claude,
         "codex" => AgentKind::Codex,
