@@ -61,7 +61,7 @@ pub struct FleetState {
 
 impl FleetState {
     pub fn new(cfg: &Config, trust: Arc<crate::trust::TrustState>) -> FleetState {
-        let http = reqwest::Client::builder()
+        let http = crate::http::builder()
             .timeout(Duration::from_secs(5))
             .connect_timeout(Duration::from_millis(1500))
             .build()

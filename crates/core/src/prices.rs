@@ -185,7 +185,7 @@ impl PriceList {
 
     /// Fetch and parse the list. Nothing but the URL is sent.
     pub async fn fetch(url: &str) -> anyhow::Result<PriceList> {
-        let http = reqwest::Client::builder()
+        let http = crate::http::builder()
             .timeout(Duration::from_secs(60))
             .user_agent("spandeck")
             .build()?;

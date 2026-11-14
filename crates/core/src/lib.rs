@@ -22,6 +22,7 @@
 //!   vault     AgentVault: station token, key use through the vault's proxy
 //!   usage     what each pane's agent has used, and the station's totals
 //!   prices    the public list of model prices and context windows, fetched daily
+//!   http      the one outgoing HTTPS client builder, and what it trusts
 
 pub mod add;
 pub mod agents;
@@ -33,6 +34,7 @@ pub mod doctor;
 pub mod fleet;
 pub mod git;
 pub mod hooks;
+pub mod http;
 pub mod links;
 pub mod manage;
 pub mod memory;

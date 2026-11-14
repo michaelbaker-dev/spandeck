@@ -277,7 +277,7 @@ impl Daemon {
             .clone()
             .unwrap_or_else(|| RELEASES.to_string());
         let base = base.trim_end_matches('/');
-        let http = reqwest::Client::builder()
+        let http = crate::http::builder()
             .timeout(Duration::from_secs(300))
             .connect_timeout(Duration::from_secs(10))
             .build()

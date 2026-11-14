@@ -288,6 +288,19 @@ not been tried on a real machine is said where it applies.
   script is run on a real Windows in a test as far as its network check; a whole add of a
   Windows machine has not been done yet. A Windows station adding another machine uses the
   same code with `ssh.exe`; typing a password that way (askpass) is untried on Windows.
+- **Certificates on Windows: the system's verifier, with the Mozilla roots as a second
+  source** (15 Nov 2026, after a fault on rtx6000: the first contact with the vault failed
+  with `UnknownIssuer` on a good Let's Encrypt chain, and worked once curl had connected to
+  the same address). Windows keeps only the roots it has needed and fetches others on
+  demand; that fetch did not happen for spandeck's check. Which of Windows' rules stopped it
+  was not established: the machine has the root now, so the state cannot be made again. The
+  fix does not depend on the answer: when Windows cannot build a chain to a root it has,
+  the same Windows verifier is asked again with the Mozilla root list carried inside
+  spandeck (`webpki-root-certs`). Verification is not weakened: Windows still checks names,
+  dates, usage and signatures, and a root an organisation added to Windows still works. The
+  cost: a public root the owner removed from Windows by hand is still trusted by spandeck if
+  Mozilla lists it, and the carried list is as old as the release. Every outgoing client is
+  made in one place (`crates/core/src/http.rs`). macOS and Linux are unchanged.
 - **Smart App Control.** Where it is on, Windows refuses programs it does not know, which
   includes every spandeck build, since releases are not signed. The owner turned it off on
   rtx6000. Signing the Windows release is what would make that unnecessary; it is not done.

@@ -2388,6 +2388,7 @@ dependencies = [
  "tracing",
  "turmoil",
  "ulid",
+ "webpki-root-certs",
 ]
 
 [[package]]

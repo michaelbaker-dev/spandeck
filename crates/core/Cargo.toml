@@ -22,6 +22,9 @@ regex.workspace = true
 sha2.workspace = true
 base64.workspace = true
 reqwest.workspace = true
+# The Mozilla root list, a second source of roots for Windows' own verifier
+# (crates/core/src/http.rs). Already in the tree through reqwest.
+webpki-root-certs = "1"
 hmac = "0.13"
 
 [dev-dependencies]
