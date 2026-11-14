@@ -27,6 +27,9 @@ export class PaneTerm {
 
     this.strip = h('div', { class: 'strip', oncontextmenu: (e) => this._menu(e) });
     this.body = h('div', { class: 'term-body' });
+    // Slides in from the right: the agents working under this one.
+    this.drawer = h('aside', { class: 'agents-drawer', 'aria-label': 'Agents under this one' });
+    this.agentsOpen = false;
     this.note = h('div', { class: 'term-note', hidden: true });
     this.el = h('div', {
       class: 'pane', dataset: { pane: pane.id },
@@ -35,7 +38,7 @@ export class PaneTerm {
       ondragover: (e) => { if (this.control) { e.preventDefault(); this.el.classList.add('dropping'); } },
       ondragleave: () => this.el.classList.remove('dropping'),
       ondrop: (e) => this._drop(e),
-    }, this.strip, this.body, this.note);
+    }, this.strip, h('div', { class: 'pane-main' }, this.body, this.drawer), this.note);
 
     this.term = new Terminal({
       fontFamily: 'ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace',
@@ -230,6 +233,16 @@ export class PaneTerm {
       : `${STATE_LABEL[s] || s}${s === 'working' || s === 'needs_you' ? ' · ' + ago(p.state_since_ms) : ''}`;
     const rpc = (m, extra = {}) => this.api.on(this.station, m, { pane: p.id, ...extra }).catch(e => toast(e.message, 'error'));
     this.strip.className = 'strip ' + s;
+    const agents = this.opts.agentsOf ? this.opts.agentsOf(p) : [];
+    this.el.classList.toggle('agents-open', this.agentsOpen);
+    if (this.agentsOpen) {
+      this.drawer.replaceChildren(
+        h('div', { class: 'row' }, h('b', {}, 'Agents under ' + p.name), h('span', { class: 'grow' }),
+          h('button', { class: 'mini', 'aria-label': 'Slide the agents panel away', onclick: () => { this.agentsOpen = false; this.renderStrip(); } }, '›')),
+        agents.length ? h('div', { class: 'agent-rows' }, agents.map(a => h(a.open ? 'button' : 'div', { class: 'agent-row', style: { marginLeft: a.depth * 16 + 'px' }, ...(a.open ? { type: 'button', onclick: a.open, title: 'Open this pane beside this one' } : {}) },
+          h('span', { class: 'dot ' + a.state }), h('b', {}, a.name), h('span', { class: 'muted grow' }, a.detail), h('span', { class: 'muted' }, a.activity))))
+          : h('p', { class: 'muted' }, 'No agents are working under this one. Helpers it gives tasks to, and its own sub-agents, appear here.'));
+    }
     // replaceChildren would print a missing piece as the word "null".
     this.strip.replaceChildren(...[
       dot(p),
@@ -243,6 +256,8 @@ export class PaneTerm {
       p.task ? h('span', { class: 'chip', title: 'Working on task ' + p.task }, 'task') : null,
       this.mode === 'watch' ? h('span', { class: 'chip' }, 'watching') : null,
       this._lostControl ? h('button', { class: 'mini', title: 'Another client set this pane\'s size', onclick: () => this.takeControl() }, 'Take control') : null,
+      agents.length || this.agentsOpen ? h('button', { class: 'mini' + (this.agentsOpen ? ' on' : ''), 'aria-pressed': String(this.agentsOpen), title: 'The agents working under this one',
+        onclick: () => { this.agentsOpen = !this.agentsOpen; this.renderStrip(); } }, this.agentsOpen ? 'Agents ›' : `‹ Agents ${agents.length}`) : null,
       p.agent !== 'shell' && !p.exited && (s === 'working' || s === 'needs_you')
         ? h('button', { class: 'mini danger', title: 'Stop: interrupt this turn. The process stays.', onclick: () => rpc('pane.stop') }, 'Stop') : null,
       h('button', { class: 'icon-btn', title: 'Pane menu', 'aria-label': 'Pane menu', onclick: (e) => this._menu(e) }, '⋮'),

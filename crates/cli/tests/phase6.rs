@@ -875,3 +875,93 @@ fn mail_that_is_not_read_is_nudged_again_and_mail_sent_at_startup_is_not_lost() 
     std::thread::sleep(Duration::from_millis(4500));
     assert_eq!(s.text(&ignorer).matches("You have mail").count(), count);
 }
+
+/// Layouts, step 2 (agreed 14 Nov 2026): a pane shows the agents working
+/// under it, and Watch shows every agent in a project with a line for each
+/// task given and each recent message.
+#[test]
+fn the_deck_shows_who_works_for_whom_and_who_is_talking() {
+    use common::browser::Page;
+    let s = Station::start("alpha");
+    let helper = json!({"steps": [
+        {"subagent": {"type": "Explore"}},
+        {"rpc": {"method": "msg.send", "params": {"to": "lead", "kind": "question", "body": "which branch should I test?"}}},
+        {"work": 120000}
+    ]});
+    let repo = project(&s, "demo", &[("tester", "same-tree", helper)], "");
+    let lead = agent(&s, "demo", &repo, "lead", reads_mail());
+    s.wait_text(&lead, "[fake] session");
+    let out = s
+        .call_as_pane(
+            &lead,
+            "delegate",
+            json!({"role": "tester", "task": "run the test suite"}),
+        )
+        .unwrap();
+    let pane = out["pane"].as_str().unwrap().to_string();
+    s.wait_text(&pane, "[fake] msg.send ->");
+    // The helper's own sub-agent is known from its hooks.
+    wait_for("the sub-agent", 10, || {
+        (s.pane(&pane)["subagents"][0]["kind"] == json!("Explore")).then_some(())
+    });
+
+    let page = Page::open(&s, 1400, 860);
+    // On the lead's pane: the agents under it, and theirs.
+    page.goto(&format!("/s/alpha/p/{lead}"));
+    page.wait("the agents button", "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.strip button')].find(b => b.innerText.includes('Agents 2')))");
+    let drawer = page.wait(
+        "the drawer",
+        "document.querySelector('.pane.agents-open .agents-drawer')?.innerText",
+    );
+    let drawer = drawer.as_str().unwrap();
+    assert!(
+        drawer.contains("run the test suite")
+            && drawer.contains("Explore")
+            && drawer.contains("its own sub-agent"),
+        "{drawer}"
+    );
+
+    // Watch: both agents, a line for the task and one for the message.
+    page.goto("/s/alpha");
+    page.wait("the Watch tab", "(t => t ? (t.click(), true) : false)([...document.querySelectorAll('.tab')].find(t => t.innerText === 'Watch'))");
+    page.wait(
+        "two agents",
+        "document.querySelectorAll('.watch-card').length === 2",
+    );
+    let labels = page.wait("the lines", "(x => x.length >= 2 ? x : null)([...document.querySelectorAll('.watch-map .link-label')].map(e => e.className + ' | ' + e.innerText))");
+    let labels = labels.to_string();
+    assert!(
+        labels.contains("task | lead →") && labels.contains("task · run the test suite"),
+        "{labels}"
+    );
+    assert!(
+        labels.contains("message") && labels.contains("→ lead · question"),
+        "{labels}"
+    );
+    assert_eq!(
+        page.js("document.querySelectorAll('.watch-map .links .link').length"),
+        json!(2)
+    );
+    let feed = page.js("document.querySelector('.watch-feed').innerText");
+    assert!(
+        feed.as_str()
+            .unwrap()
+            .contains("which branch should I test?"),
+        "{feed}"
+    );
+    // For a human to look at: SPANDECK_SHOTS=/some/dir
+    if let Ok(dir) = std::env::var("SPANDECK_SHOTS") {
+        use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png;
+        std::thread::sleep(Duration::from_millis(1500));
+        let png = page.tab.capture_screenshot(Png, None, None, true).unwrap();
+        std::fs::write(format!("{dir}/11-watch.png"), png).unwrap();
+        page.goto(&format!("/s/alpha/p/{lead}"));
+        page.wait(
+            "the agents button",
+            "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.strip button')].find(b => b.innerText.includes('Agents')))",
+        );
+        std::thread::sleep(Duration::from_millis(1200));
+        let png = page.tab.capture_screenshot(Png, None, None, true).unwrap();
+        std::fs::write(format!("{dir}/12-agents-drawer.png"), png).unwrap();
+    }
+}

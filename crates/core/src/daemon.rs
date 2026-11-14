@@ -135,6 +135,16 @@ pub struct PaneMeta {
     /// Client that owns this pane's size; others letterbox.
     #[serde(default)]
     pub controller: Option<String>,
+    /// Sub-agents the agent itself has running (its own, not spandeck helpers).
+    #[serde(default)]
+    pub subagents: Vec<SubAgent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubAgent {
+    /// What the agent calls it: "Explore", "general-purpose", and so on.
+    pub kind: String,
+    pub since_ms: u64,
 }
 
 pub struct PaneEntry {
@@ -164,6 +174,7 @@ impl PaneEntry {
             "parent_pane": m.parent_pane, "hooks_seen": m.hooks_seen, "muted": m.muted,
             "watch": m.watch, "slot": m.slot, "last_message": m.last_message,
             "cols": info.cols, "rows": info.rows, "controller": m.controller,
+            "subagents": m.subagents,
             "last_output_ms": self.term.last_output_ms(), "pid": self.term.pid(),
             "program": m.spec.program,
         })
@@ -696,6 +707,7 @@ impl Daemon {
             last_message: None,
             turn: TurnStats::default(),
             controller: None,
+            subagents: vec![],
         };
         let entry = Arc::new(PaneEntry {
             id: id.clone(),

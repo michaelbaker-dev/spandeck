@@ -162,8 +162,28 @@ impl Daemon {
                         }
                     }
                 }
+                EventKind::SubagentStart => {
+                    if m.subagents.len() < 24 {
+                        m.subagents.push(crate::daemon::SubAgent {
+                            kind: ev.message.clone().unwrap_or_else(|| "sub-agent".into()),
+                            since_ms: now,
+                        });
+                    }
+                }
+                EventKind::SubagentStop => {
+                    let kind = ev.message.clone().unwrap_or_else(|| "sub-agent".into());
+                    match m.subagents.iter().position(|s| s.kind == kind) {
+                        Some(i) => {
+                            m.subagents.remove(i);
+                        }
+                        None => {
+                            m.subagents.pop();
+                        }
+                    }
+                }
                 EventKind::TurnEnd | EventKind::TurnFailed | EventKind::Interrupted => {
                     m.tool = None;
+                    m.subagents.clear();
                     m.last_message = ev.message.clone().or(m.last_message.take());
                     if ev.kind == EventKind::TurnEnd {
                         if m.turn.tool_calls >= 5 && m.turn.file_changes == 0 {
@@ -181,6 +201,7 @@ impl Daemon {
                 }
                 EventKind::SessionStart => {
                     m.tool = None;
+                    m.subagents.clear();
                 }
                 _ => {}
             }

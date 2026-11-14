@@ -12,6 +12,7 @@
 //!   {"tool": {"name":"Bash","command":"x","ok":true,"file":"p","run":false}}
 //!   {"permission": {"name":"Write","file":"p"}}
 //!   {"work": ms}                         a long tool call; ESC interrupts it
+//!   {"subagent": {"type":"Explore","stop":false}}  the agent's own sub-agent starts (or stops)
 //!   {"turn_end": "last message"}         Stop (may be continued with mail)
 //!   {"rpc": {"method":"…","params":{}}}  call the daemon as this pane, print the reply
 //!   {"task_result": {"summary":"…","findings_by_round":[["a"],[]]}}
@@ -170,6 +171,12 @@ impl Agent {
                 .and_then(|b| b.as_str())
                 .unwrap_or("none");
             out(&format!("[fake] permission: {behavior}"));
+        } else if let Some(sub) = step.get("subagent") {
+            let stop = sub.get("stop").and_then(|s| s.as_bool()).unwrap_or(false);
+            self.hook(
+                if stop { "SubagentStop" } else { "SubagentStart" },
+                json!({"agent_type": sub.get("type").and_then(|t| t.as_str()).unwrap_or("Explore")}),
+            );
         } else if let Some(ms) = step.get("work").and_then(|s| s.as_u64()) {
             self.hook("PreToolUse", json!({"tool_name": "Bash", "tool_input": {"command": format!("sleep {ms}ms")}, "tool_use_id": "work"}));
             out("[fake] working (esc to interrupt)");

@@ -16,6 +16,8 @@ const S = {
   route: { view: 'fleet' },
   fleet: { stations: [], stops: [] },
   panes: new Map(),      // station -> [pane]
+  tasks: new Map(),      // station -> [active task]
+  msgs: new Map(),       // station -> [recent message]
   projects: new Map(),   // station -> [project]
   approvals: [],         // across the fleet
   notes: [],             // notification inbox (this station)
@@ -46,9 +48,12 @@ const online = (st) => S.fleet.stations.find(s => s.station === st)?.state === '
 
 async function refreshStation(st) {
   try {
-    const [panes, projects] = await Promise.all([api.on(st, 'pane.list'), api.on(st, 'project.list')]);
+    const [panes, projects, tasks, msgs] = await Promise.all([api.on(st, 'pane.list'), api.on(st, 'project.list'),
+      api.on(st, 'task.list', { active: true, limit: 100 }).catch(() => []), api.on(st, 'msg.recent', { limit: 60 }).catch(() => [])]);
     S.panes.set(st, panes);
     S.projects.set(st, projects);
+    S.tasks.set(st, tasks);
+    S.msgs.set(st, msgs);
   } catch (e) { /* unreachable: the fleet view says so */ }
 }
 
@@ -726,12 +731,125 @@ function getTerm(st, p, where, mode) {
   const key = `${where}:${st}/${p.id}`;
   let t = S.terms.get(key);
   if (!t) {
-    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', onMenu: (e, term) => paneMenu(e, st, term.pane, where), onFocus: (term) => { S.focused = term.pane.id; } });
+    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where), onFocus: (term) => { S.focused = term.pane.id; } });
     S.terms.set(key, t);
     t._fresh = true;
   } else t.update(p);
   t._used = true;
   return t;
+}
+
+// ---- who works for whom, and who is talking ----
+
+// The agents under a pane: helpers it gave tasks to (and theirs), and each
+// agent's own running sub-agents.
+function agentRows(st, p, depth = 0, seen = new Set()) {
+  if (seen.has(p.id) || depth > 4) return [];
+  seen.add(p.id);
+  const rows = (p.subagents || []).map(a => ({ depth, name: a.kind, detail: 'its own sub-agent', state: 'working', activity: ago(a.since_ms) }));
+  for (const c of panesOf(st).filter(x => x.parent_pane === p.id && !x.exited)) {
+    const task = (S.tasks.get(st) || []).find(t => t.id === c.task);
+    rows.push({ depth, name: c.name, detail: task ? `${c.role || 'helper'} · ${task.goal.slice(0, 60)}` : (c.role || 'helper'), state: stateOf(c),
+      activity: c.tool ? `${c.tool} · ${ago(c.tool_since_ms)}` : (STATE_LABEL[stateOf(c)] || stateOf(c)), open: () => openInWorkspace(st, c.id, 'row') });
+    rows.push(...agentRows(st, c, depth + 1, seen));
+  }
+  return rows;
+}
+
+// An address in a message ("dev", "proj/dev", "p-123@spark2") to the pane it names.
+function paneAt(st, addr, project) {
+  if (!addr) return null;
+  const a = String(addr).replace(/@[^@]*$/, '');
+  const live = panesOf(st).filter(p => !p.exited);
+  return live.find(p => p.id === a) || live.find(p => `${p.project}/${p.name}` === a)
+    || live.find(p => p.name === a && (!project || p.project === project)) || null;
+}
+
+// Lines for a set of panes: a task given, and messages in the last ten minutes.
+function linksFor(st, panes) {
+  const ids = new Set(panes.map(p => p.id)), out = new Map();
+  for (const c of panes) {
+    if (c.parent_pane && ids.has(c.parent_pane)) {
+      const task = (S.tasks.get(st) || []).find(t => t.id === c.task);
+      out.set(`${c.parent_pane}>${c.id}`, { from: c.parent_pane, to: c.id, kind: 'task', label: 'task' + (task ? ` · ${task.goal.slice(0, 28)}` : ''), live: false });
+    }
+  }
+  const now = Date.now();
+  for (const m of (S.msgs.get(st) || []).slice().reverse()) {
+    if (now - m.ts > 600000) continue;
+    const from = paneAt(st, m.from ?? m.sender, m.project), to = paneAt(st, m.to ?? m.recipient, m.project);
+    if (!from || !to || from.id === to.id || !ids.has(from.id) || !ids.has(to.id)) continue;
+    out.set(`${from.id}>${to.id}:m`, { from: from.id, to: to.id, kind: 'message', label: `${m.kind} · ${ago(m.ts)} ago`, live: now - m.ts < 45000 });
+  }
+  return [...out.values()];
+}
+
+// Draw the lines over `box`, between the elements that show each pane.
+function drawLinks(box, links) {
+  box.querySelectorAll(':scope > .links, :scope > .link-label').forEach(x => x.remove());
+  if (!links.length) return;
+  const b = box.getBoundingClientRect();
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('class', 'links');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('viewBox', `0 0 ${b.width} ${b.height}`);
+  const labels = [];
+  // Two lines between the same pair run side by side, labels apart.
+  const pairOf = (l) => [l.from, l.to].sort().join('|');
+  const total = new Map(), nth = new Map();
+  for (const l of links) total.set(pairOf(l), (total.get(pairOf(l)) || 0) + 1);
+  for (const l of links) {
+    const fe = box.querySelector(`[data-pane="${l.from}"]`), te = box.querySelector(`[data-pane="${l.to}"]`);
+    if (!fe || !te) continue;
+    const f = fe.getBoundingClientRect(), t = te.getBoundingClientRect();
+    // From the edge of one to the edge of the other, so the line is not hidden behind them.
+    const fc = [f.left + f.width / 2 - b.left, f.top + f.height / 2 - b.top], tc = [t.left + t.width / 2 - b.left, t.top + t.height / 2 - b.top];
+    const edge = (r, c, o) => { const dx = o[0] - c[0], dy = o[1] - c[1]; const k = Math.min(Math.abs(dx) < 1 ? 9e9 : (r.width / 2) / Math.abs(dx), Math.abs(dy) < 1 ? 9e9 : (r.height / 2) / Math.abs(dy), 1); return [c[0] + dx * k, c[1] + dy * k]; };
+    const k = pairOf(l), i = nth.get(k) || 0, n = total.get(k);
+    nth.set(k, i + 1);
+    const side = (i - (n - 1) / 2) * 16, spread = 0.5 + (i - (n - 1) / 2) * 0.36;
+    // Always measured the same way round, so the two lines of a pair do not cross.
+    const along = l.from > l.to ? 1 - spread : spread;
+    const swap = l.from > l.to, d = swap ? [fc[0] - tc[0], fc[1] - tc[1]] : [tc[0] - fc[0], tc[1] - fc[1]];
+    const len = Math.hypot(d[0], d[1]) || 1, nx = -d[1] / len * side, ny = d[0] / len * side;
+    const e1 = edge(f, fc, tc), e2 = edge(t, tc, fc);
+    const p1 = [e1[0] + nx, e1[1] + ny], p2 = [e2[0] + nx, e2[1] + ny];
+    const mid = [p1[0] + (p2[0] - p1[0]) * along, p1[1] + (p2[1] - p1[1]) * along];
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', `M ${p1[0]} ${p1[1]} L ${p2[0]} ${p2[1]}`);
+    path.setAttribute('class', `link ${l.kind}${l.live ? ' live' : ''}`);
+    svg.append(path);
+    const dot = document.createElementNS(NS, 'circle');
+    dot.setAttribute('cx', p2[0]); dot.setAttribute('cy', p2[1]); dot.setAttribute('r', 4);
+    dot.setAttribute('class', `link-end ${l.kind}`);
+    svg.append(dot);
+    labels.push(h('div', { class: `link-label ${l.kind}${l.live ? ' live' : ''}`, style: { left: mid[0] + 'px', top: mid[1] + 'px' } },
+      `${findPaneAny(l.from)?.name || '?'} → ${findPaneAny(l.to)?.name || '?'} · ${l.label}`));
+  }
+  box.append(svg, ...labels);
+}
+const findPaneAny = (id) => { for (const list of S.panes.values()) { const p = list.find(x => x.id === id); if (p) return p; } return null; };
+let pendingLinks = null; // { selector, links } drawn after the next render
+
+// Watch: every agent in a project as a small live card, laid out by who works
+// for whom, with the lines, and the messages between them at the side.
+function watchView(st, project) {
+  const mine = panesOf(st).filter(p => p.project === project && !p.exited);
+  const depth = (p, n = 0) => { const up = mine.find(x => x.id === p.parent_pane); return up && n < 6 ? depth(up, n + 1) : n; };
+  const rows = [];
+  for (const p of mine) (rows[depth(p)] ||= []).push(p);
+  loadThumbs(st, mine);
+  pendingLinks = { selector: '.watch-map', links: linksFor(st, mine) };
+  const msgs = (S.msgs.get(st) || []).filter(m => m.project === project).slice(0, 14);
+  return h('div', { class: 'watch' },
+    h('div', { class: 'watch-map' }, mine.length
+      ? rows.filter(Boolean).map(r => h('div', { class: 'watch-row' }, r.sort((a, b) => a.name.localeCompare(b.name)).map(p => h('div', { class: 'watch-card', dataset: { pane: p.id } }, paneTile(st, p)))))
+      : h('div', { class: 'empty' }, `Nothing is running in ${project}.`),
+      h('div', { class: 'watch-key' }, h('span', {}, h('i', { class: 'key task' }), 'task given'), h('span', {}, h('i', { class: 'key message live' }), 'message, moving now'), h('span', {}, h('i', { class: 'key message' }), 'message in the last 10 minutes'))),
+    h('aside', { class: 'watch-feed' }, h('h3', {}, 'Messages between agents'),
+      msgs.length ? msgs.map(m => h('div', { class: 'note' }, h('div', {}, h('b', {}, String(m.from ?? m.sender).replace(/@.*$/, '')), ' → ', h('b', {}, String(m.to ?? m.recipient).replace(/@.*$/, '')), h('span', { class: 'muted' }, ` · ${m.kind} · ${ago(m.ts)} ago`)), h('div', { class: 'pre' }, String(m.body || '').slice(0, 280))))
+        : h('p', { class: 'muted' }, 'No messages yet. When agents in this project message each other, they appear here and as lines on the left.')));
 }
 
 // ---- layouts ----
@@ -756,8 +874,8 @@ function projectLayouts(st) {
     for (const l of pr.definition?.layout || []) {
       const key = `${st}/${pr.name}/${l.name}`, json = JSON.stringify(l);
       let c = projLayouts.get(key);
-      if (!c) { c = { tree: fromServer(l.tree), json }; projLayouts.set(key, c); }
-      else if (!c.dirty && c.json !== json) { c.tree = fromServer(l.tree); c.json = json; }
+      if (!c) { c = { tree: fromServer(l.tree), lines: !!l.lines, json }; projLayouts.set(key, c); }
+      else if (!c.dirty && c.json !== json) { c.tree = fromServer(l.tree); c.lines = !!l.lines; c.json = json; }
       out.push({ key, project: pr.name, name: l.name, cache: c });
     }
   }
@@ -769,7 +887,7 @@ function saveProjectLayout(st, lay) {
   c.dirty = true;
   clearTimeout(c.timer);
   c.timer = setTimeout(() => {
-    api.on(st, 'project.layout.save', { project: lay.project, layout: { name: lay.name, tree: toServer(c.tree) } })
+    api.on(st, 'project.layout.save', { project: lay.project, layout: { name: lay.name, lines: !!c.lines, tree: toServer(c.tree) } })
       .then(() => { c.dirty = false; c.json = null; refreshSoon(60); })
       .catch((e) => { c.dirty = false; toast(e.message, 'error'); });
   }, 250);
@@ -921,9 +1039,11 @@ function stationView(st) {
   if (l.active >= l.tabs.length) l.active = l.tabs.length - 1;
   const lays = projectLayouts(st);
   const lay = lays.find(x => x.key === l.proj) || null;
-  if (!lay && l.proj) { l.proj = null; }
-  const tab = lay ? null : l.tabs[l.active];
-  const key = lay ? lay.key : tab ? `local:${st}:${l.active}` : null;
+  const watchable = (S.projects.get(st) || []).filter(pr => panesOf(st).some(p => p.project === pr.name && !p.exited)).map(pr => pr.name);
+  const watching = (l.proj || '').startsWith('watch:') && watchable.includes(l.proj.slice(6)) ? l.proj.slice(6) : null;
+  if (!lay && !watching && l.proj) { l.proj = null; }
+  const tab = lay || watching ? null : l.tabs[l.active];
+  const key = lay ? lay.key : watching ? l.proj : tab ? `local:${st}:${l.active}` : null;
   if (arranging && arranging !== key) arranging = null;
   const pick = (fn) => () => { fn(); saveLayout(st, l); render(); };
   const manyProjects = new Set(lays.map(x => x.project)).size > 1;
@@ -973,7 +1093,9 @@ function stationView(st) {
     h('button', { class: 'tab' + (!key ? ' current' : ''), role: 'tab', onclick: pick(() => { l.active = -1; l.proj = null; }) }, 'Deck'),
     lays.map(x => h('button', { class: 'tab proj' + (x.key === key ? ' current' : ''), role: 'tab', title: `Layout saved with ${x.project}`,
       onclick: pick(() => { l.proj = x.key; }), oncontextmenu: (e) => layMenu(e, x) }, manyProjects ? `${x.project} · ${x.name}` : x.name)),
-    l.tabs.map((t, i) => h('button', { class: 'tab' + (!lay && i === l.active ? ' current' : ''), role: 'tab', title: 'Workspace kept in this browser',
+    watchable.map(pr => h('button', { class: 'tab' + (watching === pr ? ' current' : ''), role: 'tab', title: `Every agent in ${pr}, and who is talking to whom`,
+      onclick: pick(() => { l.proj = 'watch:' + pr; }) }, watchable.length > 1 ? `${pr} · Watch` : 'Watch')),
+    l.tabs.map((t, i) => h('button', { class: 'tab' + (!lay && !watching && i === l.active ? ' current' : ''), role: 'tab', title: 'Workspace kept in this browser',
       onclick: pick(() => { l.active = i; l.proj = null; }),
       oncontextmenu: (e) => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
         { label: 'Arrange', action: () => { l.active = i; l.proj = null; saveLayout(st, l); arranging = `local:${st}:${i}`; render(); } },
@@ -986,10 +1108,14 @@ function stationView(st) {
         { label: 'New workspace (this browser only)', action: pick(() => { l.tabs.push({ name: 'workspace ' + (l.tabs.length + 1), tree: null }); l.active = l.tabs.length - 1; l.proj = null; }) }]);
     } }, '＋'),
     h('span', { class: 'grow' }),
-    key ? h('button', { class: 'tab arrange' + (arranging === key ? ' current' : ''), 'aria-pressed': String(arranging === key), title: 'Move panes around by dragging them', onclick: () => { arranging = arranging === key ? null : key; render(); } }, arranging === key ? 'Done arranging' : 'Arrange') : null);
+    lay ? h('button', { class: 'tab arrange' + (lay.cache.lines ? ' current' : ''), 'aria-pressed': String(!!lay.cache.lines), title: 'Draw lines between panes whose agents are talking',
+      onclick: () => { lay.cache.lines = !lay.cache.lines; saveProjectLayout(st, lay); render(); } }, lay.cache.lines ? 'Lines: on' : 'Lines: off') : null,
+    key && !watching ? h('button', { class: 'tab arrange' + (arranging === key ? ' current' : ''), 'aria-pressed': String(arranging === key), title: 'Move panes around by dragging them', onclick: () => { arranging = arranging === key ? null : key; render(); } }, arranging === key ? 'Done arranging' : 'Arrange') : null);
 
   let content;
-  if (!ctx) {
+  if (watching) {
+    content = watchView(st, watching);
+  } else if (!ctx) {
     const live = liveAgents(st).sort((a, b) => stateRank(a) - stateRank(b));
     content = h('div', { class: 'deck' }, live.length ? h('div', { class: 'tiles' }, live.map(p => paneTile(st, p))) : h('div', { class: 'empty' }, 'Nothing is running here. Start a pane or a project from the left.'));
     loadThumbs(st, live);
@@ -999,6 +1125,10 @@ function stationView(st) {
       h('span', { class: 'grow' }),
       [['row', 'Side by side'], ['two-over-one', 'Two over one'], ['one-stack', 'One + stack'], ['grid', 'Grid']].map(([k, label]) => h('button', { class: 'mini', onclick: () => { ctx.shape(k); render(); } }, label))) : null;
     content = h('div', { class: 'workspace-col' }, bar, h('div', { class: 'workspace' + (ctx.arrange ? ' arranging' : '') }, renderTree(st, ctx.tree(), ctx)));
+    if (lay && lay.cache.lines && !ctx.arrange) {
+      const shown = leaves(lay.cache.tree).map(n => ctx.resolve(n)).filter(Boolean);
+      pendingLinks = { selector: '.workspace', links: linksFor(st, shown).filter(x => x.kind === 'message') };
+    }
   }
   return h('div', { class: 'station-view' }, sidebar(st), h('main', { class: 'station-main' }, tabs, content));
 }
@@ -1164,6 +1294,7 @@ function render() {
     return;
   }
   closeMenu();
+  pendingLinks = null;
   S.route = parseRoute();
   for (const t of S.terms.values()) t._used = false;
   const r = S.route;
@@ -1182,6 +1313,10 @@ function render() {
     else t.layout();
   }
   document.title = (r.pane ? (findPane(r.station, r.pane)?.name || 'pane') + ' · ' : r.station ? r.station + ' · ' : '') + 'spandeck';
+  // Lines are drawn once the panes have their places on screen.
+  const links = pendingLinks;
+  pendingLinks = null;
+  if (links) requestAnimationFrame(() => { const box = document.querySelector(links.selector); if (box) drawLinks(box, links.links); });
 }
 
 // Data changed: redraw everything except live terminals, which are reused.
