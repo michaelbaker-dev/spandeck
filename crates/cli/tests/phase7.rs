@@ -230,7 +230,17 @@ fn rules_show_as_guidance_for_agents_whose_blocking_is_not_verified() {
         ),
         (Some("guidance"), Some(false))
     );
-    assert_eq!(row("antigravity")["note"], json!("Not integrated in v1."));
+    // Neither OpenCode nor Antigravity can block a tool call, so their rules
+    // are never shown as enforced.
+    for agent in ["opencode", "antigravity"] {
+        assert_eq!(
+            (
+                row(agent)["rules_shown_as"].as_str(),
+                row(agent)["blocks_tools"].as_bool()
+            ),
+            (Some("guidance"), Some(false))
+        );
+    }
 }
 
 #[test]

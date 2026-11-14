@@ -15,10 +15,12 @@
 //!   orders    standing orders at five layers
 //!   fleet     discovery over Tailscale, trust, peer calls, stop-all
 //!   notify    the inbox and push rules
+//!   agents    agent programs here: found, versioned, installed when missing, updated
 //!   setup     fleet-wide agent setup: MCP servers, skills, model defaults
 //!   deck      fleet-wide deck document: global layouts and pins
 //!   vault     AgentVault: station token, key use through the vault's proxy
 
+pub mod agents;
 pub mod client;
 pub mod daemon;
 pub mod db;

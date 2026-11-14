@@ -270,7 +270,7 @@ impl Daemon {
 
     /// The enforcement table: what each agent's integration can block.
     pub fn enforcement_table(&self) -> Value {
-        let mut rows: Vec<Value> = spandeck_agents::enforcement_table()
+        let rows: Vec<Value> = spandeck_agents::enforcement_table()
             .into_iter()
             .map(|(kind, c)| {
                 json!({
@@ -282,11 +282,6 @@ impl Daemon {
                 })
             })
             .collect();
-        rows.push(json!({
-            "agent": "antigravity", "name": "Antigravity", "blocks_tools": false, "remote_approval": false,
-            "injects_context": false, "verified": false, "rules_shown_as": "guidance",
-            "note": "Not integrated in v1.",
-        }));
         json!(rows)
     }
 

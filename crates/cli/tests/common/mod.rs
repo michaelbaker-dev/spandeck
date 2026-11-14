@@ -155,11 +155,12 @@ impl Station {
         std::fs::create_dir_all(root.join("home")).unwrap();
         std::fs::create_dir_all(root.join("fake")).unwrap();
         // Top-level keys first: TOML tables swallow everything after them.
+        // Tables that begin with `[agents.fake]` add to the fake agent's own.
         let (top, tables): (Vec<&str>, Vec<&str>) = {
             let idx = extra
-                .find("\n[")
-                .map(|i| i + 1)
-                .or_else(|| extra.starts_with('[').then_some(0))
+                .starts_with('[')
+                .then_some(0)
+                .or_else(|| extra.find("\n[").map(|i| i + 1))
                 .unwrap_or(extra.len());
             (vec![&extra[..idx]], vec![&extra[idx..]])
         };
@@ -168,7 +169,10 @@ impl Station {
             format!(
                 "station = \"{name}\"\nweb_port = {port}\nweb_bind = [\"127.0.0.1\"]\ndiscovery = false\nkeep_awake_cmd = [\"sleep\", \"300\"]\n{}\n[agents.fake]\nprogram = \"{FAKE}\"\n{}\n",
                 top.join(""),
-                tables.join("")
+                tables
+                    .join("")
+                    .strip_prefix("[agents.fake]\n")
+                    .unwrap_or(&tables.join(""))
             ),
         )
         .unwrap();

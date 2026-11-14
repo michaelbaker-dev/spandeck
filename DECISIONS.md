@@ -21,7 +21,7 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - **Activity strip on every pane.** Tree, timeline, heat view are v1.5.
 - **Phone**: status, blockers, approval requests and stop controls; and, since 0.2 (the owner's request on 14 Nov 2026), talking to any pane: a message box that can be typed or dictated into, the keys a phone lacks, fitting the pane to the screen, and starting a pane. In the browser; no native app.
 - **Station-to-station SSH** uses short-lived certificates spandeck issues per task (v1.5, with cross-station delegation).
-- Not in v1: Windows, desktop shell, native iPhone app and widget, Officer of the Deck, usage and cost views, fleet updates and channels, common config, cross-station delegation, flow view, agent tree and timeline, OpenCode and Antigravity adapters.
+- Not in v1: Windows, desktop shell, native iPhone app and widget, Officer of the Deck, usage and cost views, fleet updates and channels (of spandeck itself), common config, cross-station delegation, flow view, agent tree and timeline. (OpenCode and Antigravity adapters were on this list until 14 Nov 2026: see Agent programs.)
 
 ## Pre-build resolutions (13 Nov 2026)
 
@@ -60,6 +60,12 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - The owner is told when the setting changes outside the Control Deck, or the token is swapped or refused.
 - Connecting a station is the only step: by default its agents may use every key the owner allowed that station's token at the vault (changed 14 Nov 2026 at the owner's request; before, a project had to list its keys). A project can narrow its agents with `[vault] keys` in `.spandeck/project.toml`.
 - When a station has a token, a raw key in an agent's command is blocked and reported to the vault; one pasted into a prompt, or found in a transcript, is reported.
+
+## Agent programs (14 Nov 2026, the owner's request)
+
+- OpenCode and Antigravity are agents a pane can run, wired to spandeck's tools and skill when the pane starts. Neither can block a tool call or pass an approval to the Control Deck, so their rules are guidance.
+- A pane started for an agent that is not installed on its station installs it first, in the pane, with the vendor's own install command. That command is fixed in the code (HTTPS only) or set in the station's own config; it never comes from a caller or another station.
+- The owner can see each agent's version on each station and update one or all of them. After an update that changed the version, an idle pane of that agent restarts into its conversation; a pane in a turn, or waiting on the owner, restarts when it is next idle. Updating is the owner's to do: an agent cannot.
 
 ## Guarantees (contracts the build must meet)
 

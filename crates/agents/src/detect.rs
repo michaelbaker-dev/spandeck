@@ -57,6 +57,36 @@ pub const CODEX_RULES: &[Rule] = &[
     },
 ];
 
+/// From the words in OpenCode 2.3.0's program text; not yet seen on a live
+/// screen, so treat a wrong guess here as a rule to fix, not a mystery.
+pub const OPENCODE_RULES: &[Rule] = &[
+    Rule {
+        state: AgentState::NeedsYou,
+        any: &["Permission required", "Allow once"],
+        window: 16,
+    },
+    Rule {
+        state: AgentState::Working,
+        any: &["esc interrupt", "esc to interrupt"],
+        window: 8,
+    },
+];
+
+/// A fallback only: Antigravity reports its state over OSC 7501. The sign-in
+/// screen was seen live on 1.5.9; the rest is from the program's text.
+pub const ANTIGRAVITY_RULES: &[Rule] = &[
+    Rule {
+        state: AgentState::NeedsYou,
+        any: &["You are currently not signed in", "Do you want to proceed?"],
+        window: 16,
+    },
+    Rule {
+        state: AgentState::Working,
+        any: &["esc to interrupt", "Esc to cancel", "esc to cancel"],
+        window: 8,
+    },
+];
+
 pub const FAKE_RULES: &[Rule] = &[
     Rule {
         state: AgentState::NeedsYou,

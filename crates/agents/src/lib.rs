@@ -2,18 +2,22 @@
 //!
 //! One interface per agent, shaped by five verbs: observe, send work, enforce,
 //! inject context, capture history. Hook-driven agents (Claude Code, Codex)
-//! implement it through their hook payloads; an API-driven agent such as
-//! OpenCode fits the same trait with an event stream behind it.
+//! implement it through their hook payloads; Antigravity through its own
+//! hook dialect; OpenCode, which has no hooks, through launch settings and
+//! the screen. `catalogue` says how each program is installed and updated.
 //!
 //! This crate is pure: no daemon state, no I/O beyond config-file edits in
 //! `install`. The daemon feeds it vendor payloads and gets normalized events
 //! and vendor-shaped replies back.
 
+pub mod antigravity;
+pub mod catalogue;
 pub mod claude;
 pub mod codex;
 pub mod detect;
 pub mod event;
 pub mod install;
+pub mod opencode;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,6 +31,8 @@ pub enum AgentKind {
     Shell,
     Claude,
     Codex,
+    OpenCode,
+    Antigravity,
     /// The scriptable test agent. Speaks Claude Code's hook dialect.
     Fake,
 }
@@ -37,6 +43,8 @@ impl AgentKind {
             "shell" => AgentKind::Shell,
             "claude" | "claude-code" => AgentKind::Claude,
             "codex" => AgentKind::Codex,
+            "opencode" => AgentKind::OpenCode,
+            "antigravity" | "agy" => AgentKind::Antigravity,
             "fake" => AgentKind::Fake,
             _ => return None,
         })
@@ -47,6 +55,8 @@ impl AgentKind {
             AgentKind::Shell => "shell",
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
+            AgentKind::OpenCode => "opencode",
+            AgentKind::Antigravity => "antigravity",
             AgentKind::Fake => "fake",
         }
     }
@@ -56,6 +66,8 @@ impl AgentKind {
             AgentKind::Shell => "Shell",
             AgentKind::Claude => "Claude Code",
             AgentKind::Codex => "Codex",
+            AgentKind::OpenCode => "OpenCode",
+            AgentKind::Antigravity => "Antigravity",
             AgentKind::Fake => "Fake agent",
         }
     }
@@ -150,6 +162,9 @@ pub struct LaunchOpts {
     pub extra_args: Vec<String>,
     /// Override the program (config or tests).
     pub program: Option<String>,
+    /// The id to give a new conversation, for an agent that lets the caller
+    /// choose it (see `Adapter::session_prefix`).
+    pub session: Option<String>,
 }
 
 pub trait Adapter: Send + Sync {
@@ -173,12 +188,21 @@ pub trait Adapter: Send + Sync {
 
     /// Observe (fallback): guess state from the visible screen.
     fn detect_screen(&self, lines: &[String]) -> Option<AgentState>;
+
+    /// For an agent with no hooks to report its session id, but which starts
+    /// a conversation under an id the caller chooses: what such an id starts
+    /// with. The daemon makes one up at launch and resumes by it later.
+    fn session_prefix(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 pub fn adapter(kind: AgentKind) -> Option<&'static dyn Adapter> {
     match kind {
         AgentKind::Claude => Some(&claude::ClaudeCode),
         AgentKind::Codex => Some(&codex::Codex),
+        AgentKind::OpenCode => Some(&opencode::OpenCode),
+        AgentKind::Antigravity => Some(&antigravity::Antigravity),
         AgentKind::Fake => Some(&claude::FakeAgent),
         AgentKind::Shell => None,
     }
@@ -191,6 +215,8 @@ pub fn kind_from_command(program: &str) -> AgentKind {
     match base {
         "claude" => AgentKind::Claude,
         "codex" => AgentKind::Codex,
+        "opencode" => AgentKind::OpenCode,
+        "agy" => AgentKind::Antigravity,
         b if b.starts_with("spandeck-fake-agent") => AgentKind::Fake,
         _ => AgentKind::Shell,
     }
@@ -198,16 +224,19 @@ pub fn kind_from_command(program: &str) -> AgentKind {
 
 /// Which picture stands for a pane. Agents spandeck has an adapter for are
 /// known by their kind; any other program by its name, since a few agents
-/// (Gemini, Grok, OpenCode) run in a pane with no adapter yet.
+/// (Gemini, Grok) run in a pane with no adapter yet.
 pub fn icon(kind: AgentKind, program: &str) -> &'static str {
     match kind {
         AgentKind::Claude => "claude",
         AgentKind::Codex => "codex",
+        AgentKind::OpenCode => "opencode",
+        AgentKind::Antigravity => "antigravity",
         AgentKind::Fake => "agent",
         AgentKind::Shell => match program.rsplit('/').next().unwrap_or(program) {
             "gemini" => "gemini",
             "grok" => "grok",
             "opencode" => "opencode",
+            "agy" => "antigravity",
             _ => "shell",
         },
     }
@@ -215,10 +244,15 @@ pub fn icon(kind: AgentKind, program: &str) -> &'static str {
 
 /// The enforcement table (Phase 7), one row per agent kind.
 pub fn enforcement_table() -> Vec<(AgentKind, Capabilities)> {
-    [AgentKind::Claude, AgentKind::Codex]
-        .into_iter()
-        .filter_map(|k| adapter(k).map(|a| (k, a.capabilities())))
-        .collect()
+    [
+        AgentKind::Claude,
+        AgentKind::Codex,
+        AgentKind::OpenCode,
+        AgentKind::Antigravity,
+    ]
+    .into_iter()
+    .filter_map(|k| adapter(k).map(|a| (k, a.capabilities())))
+    .collect()
 }
 
 #[cfg(test)]
@@ -226,7 +260,7 @@ mod tests {
     use super::*;
 
     /// The Control Deck draws a pane's icon from this (the pane view's
-    /// `icon`); its seven values are the contract with the deck.
+    /// `icon`); its eight values are the contract with the deck.
     #[test]
     fn a_pane_icon_comes_from_the_agent_kind_or_else_the_program_name() {
         for (kind, program, want) in [
@@ -240,6 +274,13 @@ mod tests {
                 "/home/me/.opencode/bin/opencode",
                 "opencode",
             ),
+            (AgentKind::OpenCode, "/bin/sh", "opencode"),
+            (
+                AgentKind::Antigravity,
+                "/home/me/.local/bin/agy",
+                "antigravity",
+            ),
+            (AgentKind::Shell, "agy", "antigravity"),
             (AgentKind::Shell, "/bin/zsh", "shell"),
             (AgentKind::Shell, "gemini-wrapper", "shell"),
         ] {
