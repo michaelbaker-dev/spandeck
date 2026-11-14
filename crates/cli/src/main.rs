@@ -41,6 +41,9 @@ enum Cmd {
     },
     /// What this station is doing.
     Status,
+    /// Offer the Codex sandbox fix in a pane, before Codex starts.
+    #[command(hide = true)]
+    FixCodexSandbox,
     /// Check this station's setup.
     Doctor {
         /// Fix what needs an administrator: asks for your password with sudo.
@@ -362,6 +365,14 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
     match cli.cmd {
         Cmd::Daemon { handoff, no_web } => return daemon_main(paths, handoff, no_web),
         Cmd::Hook { agent } => return Ok(hook_main(&paths, &agent)),
+        Cmd::FixCodexSandbox => {
+            // Run in a Codex pane before Codex starts. Never stops Codex starting.
+            if let Err(e) = fix_with_sudo() {
+                println!("Not fixed ({e}). Codex will start, but it cannot run commands until this is done: spandeck doctor --fix\n");
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            return Ok(0);
+        }
         Cmd::Mcp => {
             mcp::run(&paths)?;
             return Ok(0);
@@ -1006,6 +1017,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         Cmd::Daemon { .. }
+        | Cmd::FixCodexSandbox
         | Cmd::Hook { .. }
         | Cmd::Mcp
         | Cmd::HandoffCheck
@@ -1266,7 +1278,8 @@ fn fix_with_sudo() -> anyhow::Result<()> {
     println!(
         "Codex cannot run commands on this machine: the system blocks the sandbox Codex uses.\n\
          This installs one AppArmor profile, {CODEX_SANDBOX_PROFILE_PATH}, that allows it for\n\
-         Codex's own sandbox program only. Nothing else on the system changes.\n"
+         Codex's own sandbox program only. Nothing else on the system changes.\n\
+         It needs your password once. Press Ctrl-C to skip.\n"
     );
     let tmp = std::env::temp_dir().join(format!("spandeck-codex-bwrap.{}", std::process::id()));
     std::fs::write(&tmp, CODEX_SANDBOX_PROFILE)?;
