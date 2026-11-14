@@ -1088,7 +1088,14 @@ function addMachineDialog() {
   }
 
   function view(a) {
-    const passForm = (label) => form(field(`Password for ${a.user} on ${a.name}`, pass, 'Used once, for this connection. It is not saved, logged or shown anywhere.'), label, () => { if (pass.value) start(a.machine, a.name, pass.value); else pass.focus(); });
+    // The user name stays editable here: a mistyped name is refused exactly
+    // like a wrong password, and the owner could retype only the password.
+    if (user.dataset.forJob !== a.id) { user.value = a.user; user.dataset.forJob = a.id; }
+    const another = h('button', { type: 'button', onclick: () => { picked = null; again = true; redraw(); if (!info) load(); } }, 'Pick another machine');
+    const passForm = (label) => h('form', { onsubmit: (e) => { e.preventDefault(); if (!user.value.trim()) user.focus(); else if (pass.value) start(a.machine, a.name, pass.value); else pass.focus(); } },
+      field(`Your user name on ${a.name}`, user, 'The short name of your account there. Change it here if it was wrong.'),
+      field(`Password on ${a.name}`, pass, 'Used once, for this connection. It is not saved, logged or shown anywhere.'),
+      h('div', { class: 'row end' }, another, closeBtn('Cancel'), h('button', { class: 'primary', type: 'submit' }, label)));
     if (a.stage === 'needs_password') return [h('p', {}, `${a.name} asks for a password: neither Tailscale SSH nor an SSH key let ${api.station} in as ${a.user}.`), passForm('Connect and install')];
     if (a.stage === 'failed') return [
       h('p', { class: 'warn-text' }, a.problem?.text || 'It was not added.'), log,
@@ -1117,7 +1124,7 @@ function addMachineDialog() {
     if (key === shown) return;
     shown = key;
     box.replaceChildren(...(a ? view(a) : picker()).flat().filter(Boolean));
-    const first = box.querySelector(a ? 'input' : '.list-row.first ~ * input, form input');
+    const first = box.querySelector(a ? (user.value.trim() ? 'input[type=password], input' : 'input') : '.list-row.first ~ * input, form input');
     if (first) first.focus();
   }
 
