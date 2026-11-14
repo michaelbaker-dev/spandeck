@@ -313,7 +313,38 @@ enum IntegrationCmd {
     },
 }
 
+/// ssh runs this binary as its askpass helper while a machine is being
+/// added from the Control Deck: one argument, the prompt, and the answer is
+/// read from standard output. The daemon decides whether the prompt gets the
+/// password; this only carries it, and keeps no copy.
+fn askpass(socket: &str) -> i32 {
+    use std::io::{Read, Write};
+    let prompt = std::env::args().nth(1).unwrap_or_default();
+    let nonce = std::env::var("SPANDECK_ASKPASS_NONCE").unwrap_or_default();
+    let answer = (|| -> std::io::Result<Vec<u8>> {
+        let mut s = std::os::unix::net::UnixStream::connect(socket)?;
+        s.set_read_timeout(Some(Duration::from_secs(10)))?;
+        let prompt: String = prompt.chars().filter(|c| !c.is_control()).collect();
+        s.write_all(format!("{nonce}\n{prompt}\n").as_bytes())?;
+        let mut answer = vec![];
+        s.read_to_end(&mut answer)?;
+        Ok(answer)
+    })();
+    match answer {
+        Ok(mut answer) if !answer.is_empty() => {
+            answer.push(b'\n');
+            let sent = std::io::stdout().write_all(&answer).is_ok();
+            answer.fill(0);
+            i32::from(!sent)
+        }
+        _ => 1,
+    }
+}
+
 fn main() {
+    if let Ok(socket) = std::env::var("SPANDECK_ASKPASS_SOCK") {
+        std::process::exit(askpass(&socket));
+    }
     let cli = Cli::parse();
     let code = match run(cli) {
         Ok(code) => code,

@@ -912,3 +912,366 @@ fn a_phone_steps_through_a_layout_from_its_map() {
         &format!("{showing} === 'Showing lead · 3 of 3'"),
     );
 }
+
+/// Kills a daemon the harness did not start (the one "installed" by an add).
+struct KillAtEnd(std::path::PathBuf);
+impl Drop for KillAtEnd {
+    fn drop(&mut self) {
+        if let Some(pid) = std::fs::read_to_string(&self.0)
+            .ok()
+            .and_then(|p| p.trim().parse::<i32>().ok())
+        {
+            kill_pid(pid, 9);
+        }
+    }
+}
+
+fn executable(path: &std::path::Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, text).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Every file under `dir` that holds `needle`.
+fn files_holding(dir: &std::path::Path, needle: &str) -> Vec<std::path::PathBuf> {
+    let mut found = vec![];
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = e.path();
+        let Ok(kind) = e.file_type() else { continue };
+        if kind.is_dir() {
+            found.extend(files_holding(&path, needle));
+        } else if kind.is_file() {
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            if bytes.windows(needle.len()).any(|w| w == needle.as_bytes()) {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Add a machine (the owner's request, 14 Nov 2026). Done when: the picker
+/// lists only Mac and Linux machines under the owner's login that are online
+/// and not stations; an add installs spandeck over the SSH command, starts
+/// it, and ends in a join request shown with its code; a wrong password and
+/// a machine that does not answer are each explained; only the owner may
+/// start one; and the password is in no file, log, event or command line.
+///
+/// Tailscale and SSH are stand-ins: a `tailscale` that prints a fixed
+/// tailnet, and an "ssh" that asks for the password the way ssh does (by
+/// running the askpass helper it was given) and then runs what arrives on
+/// its standard input here, as a machine with its own home directory. The
+/// release is downloaded from a stand-in release page.
+#[test]
+fn a_machine_is_added_from_the_deck_and_its_password_is_kept_nowhere() {
+    const RIGHT: &str = "c0rrect-horse-staple-91";
+    const WRONG: &str = "wr0ng-horse-battery-37";
+    let releases = common::fake_releases::Releases::start(true);
+    let dir = tempfile::tempdir().unwrap();
+    let at = |p: &str| dir.path().join(p);
+    for d in [
+        "standin",
+        "seen",
+        "remote-bin",
+        "charlie/config",
+        "charlie/home",
+    ] {
+        std::fs::create_dir_all(at(d)).unwrap();
+    }
+    let (pa, pc) = (free_port(), free_port());
+
+    // The tailnet: two machines that can be added, and five that cannot.
+    let peer = |name: &str, os: &str, ip: &str, more: Value| {
+        let mut v = json!({"ID": format!("n-{name}"), "HostName": name, "DNSName": format!("{name}.tail0000.ts.net."),
+            "OS": os, "UserID": 7, "Online": true, "TailscaleIPs": [ip]});
+        for (k, x) in more.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        (format!("key-{name}"), v)
+    };
+    let peers: serde_json::Map<String, Value> = [
+        peer("charlie", "linux", "100.64.0.7", json!({})),
+        peer(
+            "studio",
+            "macOS",
+            "100.64.0.8",
+            json!({"sshHostKeys": ["ssh-ed25519 AAAA"]}),
+        ),
+        peer("phone", "iOS", "100.64.0.9", json!({})),
+        peer("winbox", "windows", "100.64.0.10", json!({})),
+        peer(
+            "ci-runner",
+            "linux",
+            "100.64.0.11",
+            json!({"Tags": ["tag:ci"]}),
+        ),
+        peer("asleep", "macOS", "100.64.0.12", json!({"Online": false})),
+        peer("guest", "linux", "100.64.0.13", json!({"UserID": 8})),
+    ]
+    .into_iter()
+    .collect();
+    std::fs::write(
+        at("standin/status.json"),
+        json!({"Self": {"UserID": 7, "HostName": "alpha", "TailscaleIPs": ["100.64.0.1"]},
+            "User": {"7": {"LoginName": "owner@example.com"}}, "Peer": peers})
+        .to_string(),
+    )
+    .unwrap();
+    executable(
+        &at("standin/tailscale"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in version) echo 1.0 ;; status) cat {} ;; *) exit 1 ;; esac\n",
+            at("standin/status.json").display()
+        ),
+    );
+    // The machine's own service manager is not this machine's: there, the
+    // login service cannot be started, and spandeck is started directly.
+    for tool in ["systemctl", "launchctl", "loginctl"] {
+        executable(&at("remote-bin").join(tool), "#!/bin/sh\nexit 1\n");
+    }
+    std::fs::write(at("standin/right"), RIGHT).unwrap();
+    std::fs::write(
+        at("charlie/config/config.toml"),
+        format!("station = \"charlie\"\nweb_port = {pc}\nweb_bind = [\"127.0.0.1\"]\ndiscovery = false\nkeep_awake_cmd = [\"sleep\", \"300\"]\nprices.auto = false\npeers = [\"127.0.0.1:{pa}\"]\n"),
+    )
+    .unwrap();
+    let _charlie = KillAtEnd(at("charlie/state/spandeckd.pid"));
+    executable(
+        &at("standin/ssh"),
+        &format!(
+            r#"#!/bin/sh
+# What any process on this machine could see of a real ssh: its command line
+# and its environment. The test looks for the password in them.
+{{ echo "argv: $*"; env; }} >> {seen}/ssh
+user=$1 host=$2
+case "$host" in
+  100.64.0.8) echo "ssh: connect to host $host port 22: Operation timed out" >&2; exit 255 ;;
+esac
+pw=$("$SSH_ASKPASS" "$user@$host's password: ") || pw=
+if [ "$pw" != "$(cat {standin}/right)" ]; then
+  echo "$user@$host: Permission denied (publickey,password)." >&2
+  exit 255
+fi
+unset pw
+exec env -i PATH={remote_bin}:/usr/bin:/bin HOME={c}/home SPANDECK_STATE_DIR={c}/state \
+  SPANDECK_CONFIG_DIR={c}/config SPANDECK_BIN_DIR={c}/bin SPANDECK_LOG=warn sh -s
+"#,
+            seen = at("seen").display(),
+            standin = at("standin").display(),
+            remote_bin = at("remote-bin").display(),
+            c = at("charlie").display(),
+        ),
+    );
+
+    let path = format!(
+        "{}:{}",
+        at("standin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let mut a = Station::start_on(
+        "alpha",
+        pa,
+        &format!(
+            "add_machine_cmd = [\"{}\", \"{{user}}\", \"{{host}}\"]\npeers = [\"127.0.0.1:{pc}\"]\n[update]\nurl = \"{}\"\nin_place = false\n",
+            at("standin/ssh").display(),
+            releases.url()
+        ),
+        &[("PATH", &path)],
+    );
+    let add = |a: &Station, machine: &str, password: Option<&str>| {
+        let mut params = json!({"machine": format!("n-{machine}"), "user": "sam"});
+        if let Some(p) = password {
+            params["password"] = json!(p);
+        }
+        a.try_call("fleet.add", params)
+    };
+    // The stage an add comes to rest at, with everything the deck is told.
+    let rest_at = |a: &Station, stages: &[&str]| {
+        wait_for_or(
+            &format!("the add to reach {stages:?}"),
+            60,
+            || a.call("fleet.add_status", json!({})).to_string(),
+            || {
+                let v = a.call("fleet.add_status", json!({}));
+                let stage = v["stage"].as_str().unwrap_or_default();
+                assert!(
+                    stages.contains(&stage) || v["running"] == json!(true),
+                    "ended somewhere else: {v}"
+                );
+                stages.contains(&stage).then_some(v)
+            },
+        )
+    };
+
+    // Off until the owner turns it on at this station. Nothing is run.
+    assert_eq!(
+        a.call("fleet.candidates", json!({}))["enabled"],
+        json!(false)
+    );
+    let err = add(&a, "charlie", Some(WRONG)).unwrap_err();
+    assert!(
+        err.message.contains("add_machines = true"),
+        "{}",
+        err.message
+    );
+    assert!(!at("seen/ssh").exists());
+    let cfg = a.root.join("config/config.toml");
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    std::fs::write(&cfg, format!("add_machines = true\n{text}")).unwrap();
+    a.kill9();
+    a.launch();
+
+    // Everything the Control Deck is sent from here on.
+    let events = Arc::new(std::sync::Mutex::new(String::new()));
+    {
+        let (mut c, events) = (a.client().unwrap(), events.clone());
+        c.subscribe(None).unwrap();
+        std::thread::spawn(move || {
+            while let Ok(ev) = c.next_event() {
+                events.lock().unwrap().push_str(&ev.to_string());
+            }
+        });
+    }
+
+    // The picker: Macs and Linux machines of the owner's that are online.
+    let listed = a.call("fleet.candidates", json!({}));
+    let names: Vec<&str> = listed["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["charlie", "studio"], "{listed}");
+    assert_eq!(listed["machines"][1]["tailscale_ssh"], json!(true));
+
+    // Only the owner, at this station: not an agent, and not through another station.
+    let pane = a.fake(json!({"steps": [{"say": "here"}]}), json!({}));
+    for method in ["fleet.add", "fleet.candidates", "fleet.add_cancel"] {
+        let err = a
+            .call_as_pane(
+                &pane,
+                method,
+                json!({"machine": "n-charlie", "user": "sam"}),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, "denied", "{method}: {}", err.message);
+    }
+    let err = a
+        .try_call(
+            "peer.call",
+            json!({"station": "bravo", "method": "fleet.add", "params": {"machine": "n-charlie", "user": "sam", "password": WRONG}}),
+        )
+        .unwrap_err();
+    assert!(
+        err.message.contains("cannot be forwarded"),
+        "{}",
+        err.message
+    );
+    // A caller names a machine from the list, never an address.
+    assert!(add(&a, "phone", None).is_err());
+
+    // A machine that does not answer.
+    add(&a, "studio", None).unwrap();
+    let v = rest_at(&a, &["failed"]);
+    assert_eq!(v["problem"]["kind"], json!("unreachable"), "{v}");
+    assert!(v["problem"]["text"].as_str().unwrap().contains("asleep"));
+
+    // No key lets this station in, so a password is asked for; a wrong one
+    // is said to be wrong.
+    add(&a, "charlie", None).unwrap();
+    rest_at(&a, &["needs_password"]);
+    add(&a, "charlie", Some(WRONG)).unwrap();
+    let v = rest_at(&a, &["failed"]);
+    assert_eq!(v["problem"]["kind"], json!("wrong_password"), "{v}");
+
+    // The right one: installed from the release page with its checksum
+    // checked, started, and asking to join. The code is the one the new
+    // station's request shows here; nothing is granted yet.
+    add(&a, "charlie", Some(RIGHT)).unwrap();
+    let v = rest_at(&a, &["approve"]);
+    let said = v["lines"].to_string();
+    assert!(said.contains("checksum verified"), "{said}");
+    let waiting = a.call("trust.status", json!({}));
+    let req = &waiting["requests"][0];
+    assert_eq!(
+        (
+            req["kind"].clone(),
+            req["name"].clone(),
+            req["code"].clone(),
+            req["id"].clone()
+        ),
+        (
+            json!("station"),
+            json!("charlie"),
+            v["code"].clone(),
+            v["request"].clone()
+        ),
+        "{waiting}"
+    );
+    assert!(at("charlie/bin/spandeck").exists());
+
+    // The owner approves it with the usual control, and it becomes a station.
+    a.call("trust.approve", json!({"request": v["request"]}));
+    rest_at(&a, &["done"]);
+    let fleet = a.call("fleet.view", json!({}));
+    assert!(
+        fleet["stations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["station"] == json!("charlie") && s["state"] == json!("online")),
+        "{fleet}"
+    );
+    // A station is no longer a machine to add.
+    let listed = a.call("fleet.candidates", json!({}));
+    assert_eq!(listed["machines"].as_array().unwrap().len(), 1, "{listed}");
+
+    // The audit log: who, which machine, which user, how it went.
+    let log = a.log("fleet.add");
+    let outcomes: Vec<&str> = log
+        .iter()
+        .filter(|e| e["data"]["machine"] == json!("charlie"))
+        .map(|e| {
+            assert_eq!(
+                (&e["data"]["user"], &e["actor"]),
+                (&json!("sam"), &json!("you")),
+                "{e}"
+            );
+            e["data"]["outcome"].as_str().unwrap()
+        })
+        .collect();
+    for want in [
+        "started",
+        "needs a password",
+        "failed: wrong_password",
+        "joined",
+    ] {
+        assert!(outcomes.contains(&want), "{want}: {outcomes:?}");
+    }
+
+    // The password guarantee. Neither password is in any file of either
+    // station, in what ssh was started with, in the ship's log, or in
+    // anything sent to the Control Deck.
+    let seen = std::fs::read_to_string(at("seen/ssh")).unwrap();
+    assert!(
+        seen.contains("SSH_ASKPASS=") && seen.contains("argv: sam 100.64.0.7"),
+        "{seen}"
+    );
+    let sent = events.lock().unwrap().clone();
+    assert!(sent.contains("fleet.add.output") && sent.contains("checksum verified"));
+    let told = format!(
+        "{sent}{}{}{}",
+        a.call("log.query", json!({"limit": 2000})),
+        a.call("fleet.add_status", json!({})),
+        a.call("notify.list", json!({"limit": 100})),
+    );
+    for secret in [RIGHT, WRONG] {
+        assert!(!told.contains(secret), "a password was sent or logged");
+        for place in [a.root.as_path(), &at("seen"), &at("charlie")] {
+            assert_eq!(
+                files_holding(place, secret),
+                Vec::<std::path::PathBuf>::new()
+            );
+        }
+    }
+}

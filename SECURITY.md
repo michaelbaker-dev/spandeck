@@ -51,6 +51,13 @@ days, not hours.
 - `remote_start = true` lets a station run a start command on your other machines over
   Tailscale SSH. It is off by default; what it may do there is governed by your
   Tailscale SSH rules, not by spandeck.
+- `add_machines = true` lets a station connect to another of your machines over SSH and
+  install spandeck there when you ask it to from the Control Deck. It is off by default.
+  A password you type for it is used for that one connection and kept nowhere, but it
+  does pass through the browser and the station's memory on the way. The first
+  connection to a machine trusts the host key it shows (and the Tailscale address it
+  was reached at); a later change of key is refused. The install is the README's
+  script: the release is checked against its published SHA-256, as below.
 - An update is checked against the SHA-256 published beside it. That catches a damaged
   or swapped download, not a release that was malicious when published.
 - No sandbox. An agent runs with your user's permissions; spandeck observes and can

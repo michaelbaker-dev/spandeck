@@ -359,6 +359,24 @@ impl Daemon {
         }
     }
 
+    /// A station's request that is waiting here and shows this code: its id,
+    /// the station's name, and when it lapses.
+    pub(crate) fn trust_station_request(&self, code: &str) -> Option<(String, String, u64)> {
+        let now = now_ms();
+        self.trust
+            .requests
+            .lock()
+            .unwrap()
+            .values()
+            .find(|r| {
+                r.kind == "station"
+                    && r.decision == Decision::Waiting
+                    && r.expires_ms > now
+                    && r.code == code
+            })
+            .map(|r| (r.id.clone(), r.name.clone(), r.expires_ms))
+    }
+
     /// The owner's answer. `which` is a request id or the code shown.
     pub fn trust_decide(&self, which: &str, approve: bool, by: &str) -> Result<Value> {
         let found = {
@@ -407,6 +425,10 @@ impl Daemon {
             json!({"kind": r.kind, "name": r.name, "from": r.from, "by": by}),
         );
         self.emit("trust.updated", None, None, json!({}));
+        if r.kind == "station" {
+            // An add from the Control Deck may be waiting on this answer.
+            self.add_decided(&r.code, approve);
+        }
         Ok(json!({"kind": r.kind, "name": r.name, "approved": approve}))
     }
 

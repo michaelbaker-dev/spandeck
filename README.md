@@ -56,8 +56,9 @@ page shows a code and asks you to approve the browser: run `spandeck approve <co
 the station, or approve it under **Access** in a Control Deck that is already signed in.
 On the station itself, use the address `spandeck cc` prints (it carries a local token).
 
-To add a second station, install spandeck on it and run `spandeck fleet --join <first
-station>`, then approve the code on the first station. Stations under your Tailscale
+To add a second station, use **Add a machine** in the Control Deck (below), or install
+spandeck on it and run `spandeck fleet --join <first station>`, then approve the code on
+the first station. Stations under your Tailscale
 login see each other without this, but neither controls the other until you approve.
 
 To update a station without losing its terminals: install the new release, then
@@ -109,6 +110,46 @@ From the Control Deck, right-click a station (or use the commands on any station
   if there is one, else `~/.local/bin/spandeck daemon`.
 - A station that is off stays in the list as unreachable. One that does not start at
   login is marked; fix that with `spandeck service --install`.
+
+## Adding a machine
+
+The fleet screen ends in a tile with a plus sign: **Add a machine**. It installs spandeck
+on another of your machines and brings it into the fleet without you opening a terminal
+there.
+
+1. Turn it on once, on the station whose Control Deck you use: put `add_machines = true`
+   in `~/.config/spandeck/config.toml` and restart spandeck there. It is off by default
+   because it lets that station run commands on your other machines.
+2. Click the tile and pick a machine. It lists the Mac and Linux machines under your
+   Tailscale login that are online and not stations yet (no phones, Windows or tagged
+   machines).
+3. Give your user name on that machine. If Tailscale SSH is on there, or the station
+   already has an SSH key that works, nothing more is asked. Otherwise you are asked for
+   the password. It is used for that one connection and is not saved or logged.
+4. The station connects over SSH and runs the install script above: you see its output
+   as it runs. spandeck is then started there, now and at login.
+5. The new station asks to join, and the tile shows its code with **Approve** and
+   **Refuse**. Approve it, and the tile becomes the new station.
+
+If it does not work, the tile says why and what to do. The usual reasons:
+
+| It says | Do this |
+| --- | --- |
+| SSH is not turned on | On a Mac: System Settings, General, Sharing, Remote Login. On Linux: install and start the SSH server. Or turn on Tailscale SSH there: `tailscale set --ssh`. |
+| It did not accept that user name and password | Check both. The user name is the short account name (`whoami` on that machine). |
+| It did not answer | The machine is asleep or off, or Tailscale is not connected there. |
+| It answered with a different SSH host key | If you reinstalled that machine, delete its line from `~/.local/state/spandeck/known_hosts`. If you did not, do not connect. |
+| No release for its system | spandeck runs on macOS and Linux, on Apple silicon, arm64 and x86-64. |
+| It could not reach GitHub | The machine needs internet access to download the release. |
+| The install script failed | Its last lines are shown. Running the install command above on that machine shows the same. |
+
+The station needs the OpenSSH client (8.4 or newer). `add_machine_cmd` in the config
+replaces the SSH command, with `{user}`, `{host}` and `{known_hosts}` filled in; the
+install script arrives on its standard input. The first time a machine is reached its
+SSH host key is saved in spandeck's own `known_hosts`; your `~/.ssh/config` and
+`~/.ssh/known_hosts` are not used. On a Mac nobody is logged in to, the login service
+cannot be started over SSH: spandeck is started directly and starts by itself from the
+next login.
 
 ## Usage and cost
 
@@ -166,7 +207,7 @@ is working. To keep it awake whenever spandeckd runs, add `stay_awake = true` to
 | Daemon | Panes survive client disconnects. An upgrade replaces the daemon in place and keeps every terminal (`spandeck upgrade <binary>`), and undoes itself if the new version fails its health check. After a crash or reboot each agent resumes its conversation by session id. |
 | Agents | Claude Code and Codex through one hook command. States, session capture, remote approval of permission prompts, stuck detection, pause / stop / kill. |
 | Projects | `.spandeck/project.toml` in the repo. Opening a project restores its panes. |
-| Fleet | Discovery over Tailscale, one deck for every station, attach through the station you opened, stop-all with three honest states (requested, confirmed, unreachable). |
+| Fleet | Add a machine from the deck (SSH in, install, start, ask to join). Discovery over Tailscale, one deck for every station, attach through the station you opened, stop-all with three honest states (requested, confirmed, unreachable). |
 | Working together | Messages as records (`send`, `inbox`, `reply`, `ack`) through an MCP server; delegation with task records; worktree per writing helper; checkpoint and diff; sign-off bound to a commit; the review loop; shared project memory; session archive with `recall`. |
 | Standing orders | Rules and guidance at five layers. Rules are enforced by hooks and shown as enforced only where the agent can really be blocked. |
 | API keys | Optional [AgentVault](https://github.com/michaelbaker-dev/agentvault) integration: agents use keys through the vault and never see them. See `docs/vault.md`. |
@@ -184,6 +225,10 @@ is working. To keep it awake whenever spandeckd runs, add `stay_awake = true` to
 - **More than one real station**: discovery, attach and the message relay are tested
   with several daemons on one machine and under network simulation, not yet between
   two physical machines.
+- **Adding a machine**: tested with the real OpenSSH client against a test SSH server on
+  the same machine, and with stand-ins for Tailscale and the release page. It has not
+  yet installed spandeck on a second physical machine, used a real password login, or
+  met Tailscale SSH or macOS Remote Login.
 - **Phone**: tested in a phone-sized desktop browser, not on a real phone. Dictation
   with the 🎤 button has not been tried on any device.
 

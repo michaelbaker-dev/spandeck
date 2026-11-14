@@ -167,6 +167,14 @@ pub struct Config {
     /// The command used for that. `{host}` and `{script}` are filled in.
     /// Default: `tailscale ssh {host} sh -c {script}`.
     pub remote_start_cmd: Option<Vec<String>>,
+    /// Let the owner add a machine to the fleet from this station's Control
+    /// Deck: this station connects to it over SSH and installs spandeck
+    /// there. Off by default, and separate from `remote_start`.
+    pub add_machines: bool,
+    /// The command that reaches the machine being added, instead of ssh.
+    /// `{user}`, `{host}` and `{known_hosts}` are filled in; the install
+    /// script arrives on its standard input.
+    pub add_machine_cmd: Option<Vec<String>>,
     /// Where wake-on-LAN packets are sent. Default: 255.255.255.255.
     pub wake_broadcast: Option<String>,
     pub update: UpdateConfig,
@@ -215,6 +223,8 @@ impl Default for Config {
             vault: Default::default(),
             remote_start: false,
             remote_start_cmd: None,
+            add_machines: false,
+            add_machine_cmd: None,
             wake_broadcast: None,
             update: UpdateConfig::default(),
             prices: Default::default(),
