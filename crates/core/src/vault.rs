@@ -965,6 +965,11 @@ impl Daemon {
         if hours.is_some_and(|h| h < 1) {
             return Err(invalid("the shortest rotation interval is 1 hour"));
         }
+        // Not while a check is running: one that read the vault's setting
+        // between this station's own being saved and the vault being told saw
+        // the two differ, and told the owner it "was changed outside the
+        // Control Deck" when the owner had just changed it here.
+        let _one = self.vault.checking.lock().await;
         match hours {
             Some(h) => self.db.kv_set("vault.rotation_hours", &h.to_string()),
             None => self.db.kv_set("vault.rotation_hours", ""),
