@@ -24,6 +24,7 @@ pub mod doctor;
 pub mod fleet;
 pub mod git;
 pub mod hooks;
+pub mod manage;
 pub mod memory;
 pub mod messages;
 pub mod notify;

@@ -48,6 +48,11 @@ days, not hours.
 - Signed station calls are accepted for two minutes, so stations' clocks must roughly
   agree, and a captured call could be replayed within that time by someone who can
   already read your Tailscale traffic.
+- `remote_start = true` lets a station run a start command on your other machines over
+  Tailscale SSH. It is off by default; what it may do there is governed by your
+  Tailscale SSH rules, not by spandeck.
+- An update is checked against the SHA-256 published beside it. That catches a damaged
+  or swapped download, not a release that was malicious when published.
 - No sandbox. An agent runs with your user's permissions; spandeck observes and can
   block tool calls through hooks, but a determined or confused agent is limited by your
   operating system account, not by spandeck.

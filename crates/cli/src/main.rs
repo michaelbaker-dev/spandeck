@@ -157,6 +157,24 @@ enum Cmd {
     },
     /// Replace the running daemon with a new binary, keeping every terminal.
     Upgrade { binary: PathBuf },
+    /// Restart the daemon in place, keeping every terminal.
+    Restart {
+        /// Another station in the fleet, by name.
+        #[arg(long)]
+        station: Option<String>,
+    },
+    /// Update to the latest release (or a named one), keeping every terminal.
+    Update {
+        /// A release such as v0.2.0. Default: the latest.
+        version: Option<String>,
+        /// Another station in the fleet, by name.
+        #[arg(long)]
+        station: Option<String>,
+    },
+    /// Wake a sleeping station on this network (wake-on-LAN).
+    Wake { station: String },
+    /// Start a station whose daemon is not running, over SSH (needs remote_start = true).
+    Start { station: String },
     /// Call any API method: spandeck rpc pane.list '{}'
     Rpc {
         method: String,
@@ -896,6 +914,59 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             };
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
+        Cmd::Restart { station } | Cmd::Update { station, .. }
+            if station.as_deref().is_some_and(|s| s.is_empty()) =>
+        {
+            anyhow::bail!("--station needs a name");
+        }
+        Cmd::Restart { station } => {
+            let v = on_station(&mut c, station.as_deref(), "station.restart", json!({}))?;
+            show(j, &v, |_| {
+                "restarting; terminals stay open. If it does not come back healthy, the restart is undone.".to_string()
+            });
+        }
+        Cmd::Update { version, station } => {
+            let v = on_station(
+                &mut c,
+                station.as_deref(),
+                "station.update",
+                json!({"version": version}),
+            )?;
+            show(j, &v, |v| {
+                if v["current"] == json!(true) {
+                    format!(
+                        "already on the latest release ({})",
+                        v["version"].as_str().unwrap_or("")
+                    )
+                } else {
+                    format!(
+                        "updating {} -> {}; the download matched its checksum. Terminals stay open, and a version that does not start properly is undone.",
+                        v["from"].as_str().unwrap_or(""),
+                        v["release"].as_str().unwrap_or("")
+                    )
+                }
+            });
+        }
+        Cmd::Wake { station } => {
+            let v = c.call("fleet.wake", json!({"station": station}))?;
+            show(j, &v, |v| {
+                format!(
+                    "sent {} wake packets. {}",
+                    v["sent"],
+                    v["note"].as_str().unwrap_or("")
+                )
+            });
+        }
+        Cmd::Start { station } => {
+            let v = c.call("fleet.start", json!({"station": station}))?;
+            show(j, &v, |v| {
+                format!(
+                    "{} is now {}",
+                    v["station"].as_str().unwrap_or(""),
+                    v["state"].as_str().unwrap_or("")
+                )
+            });
+        }
         Cmd::Upgrade { binary } => {
             let v = c.call("station.upgrade", json!({"binary": binary.canonicalize()?}))?;
             show(j, &v, |v| {
@@ -1012,6 +1083,10 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
         .and(std::env::var_os("SPANDECK_PREVIOUS_EXE"))
         .map(PathBuf::from);
     std::env::remove_var("SPANDECK_PREVIOUS_EXE");
+    let install_to = std::env::var_os("SPANDECK_INSTALL_TO")
+        .map(PathBuf::from)
+        .filter(|p| previous.is_some() && !p.as_os_str().is_empty());
+    std::env::remove_var("SPANDECK_INSTALL_TO");
     let rolled_back = std::env::var("SPANDECK_ROLLED_BACK").ok();
     std::env::remove_var("SPANDECK_ROLLED_BACK");
     // Before any terminal has been taken over, going back is just starting
@@ -1122,6 +1197,18 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
                 tracing::error!(error = %err, "could not go back to the previous binary; staying on this one");
             } else {
                 let _ = std::fs::remove_file(&saved_db);
+                // An update that proved healthy also replaces the binary this
+                // station is started from.
+                if let Some(to) = &install_to {
+                    let installed = std::env::current_exe().and_then(|me| {
+                        let tmp = to.with_extension("new");
+                        std::fs::copy(&me, &tmp)?;
+                        std::fs::rename(&tmp, to)
+                    });
+                    if let Err(e) = installed {
+                        tracing::warn!(error = %e, to = %to.display(), "the new version runs, but could not replace the installed binary");
+                    }
+                }
             }
         } else if let Some(reason) = unhealthy {
             anyhow::bail!(reason);
@@ -1141,4 +1228,20 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
         let _ = std::fs::remove_file(daemon.paths.socket());
         Ok(0)
     })
+}
+
+/// Call a method here, or on another station in the fleet through this one.
+fn on_station(
+    c: &mut spandeck_core::client::Client,
+    station: Option<&str>,
+    method: &str,
+    params: Value,
+) -> Result<Value, spandeck_core::client::ClientError> {
+    match station {
+        Some(st) => c.call(
+            "peer.call",
+            json!({"station": st, "method": method, "params": params}),
+        ),
+        None => c.call(method, params),
+    }
 }

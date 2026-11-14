@@ -183,6 +183,81 @@ fn an_upgrade_that_fails_its_health_check_goes_back_and_keeps_every_terminal() {
     assert!(notes.contains("was undone"), "{notes}");
 }
 
+/// 0.2: a station updates itself to a published release, checked against its
+/// checksum, and keeps every terminal. A download that does not match is
+/// refused and changes nothing.
+#[test]
+fn a_station_updates_to_a_release_only_if_the_download_matches_its_checksum() {
+    use common::fake_releases::{Releases, TAG};
+    let (good, bad) = (Releases::start(true), Releases::start(false));
+    let config = |r: &Releases| format!("[update]\nurl = \"{}\"\nin_place = false\n", r.url());
+
+    let s = Station::start_with("alpha", &config(&bad), &[]);
+    let pane = s.fake(
+        json!({"steps": [{"say": "before-update marker"}]}),
+        json!({}),
+    );
+    s.wait_text(&pane, "before-update marker");
+    let before = s.call("station.info", json!({}));
+    let err = s.try_call("station.update", json!({})).unwrap_err();
+    assert!(err.message.contains("checksum"), "{}", err.message);
+    assert!(s.log("station.upgrading").is_empty());
+    assert_eq!(
+        s.call("station.info", json!({}))["started_ms"],
+        before["started_ms"]
+    );
+    drop(s);
+
+    let s = Station::start_with("alpha", &config(&good), &[]);
+    let pane = s.fake(
+        json!({"steps": [{"say": "before-update marker"}]}),
+        json!({}),
+    );
+    s.wait_text(&pane, "before-update marker");
+    let before = s.call("station.info", json!({}));
+    let pane_pid = s.pane(&pane)["pid"].clone();
+    let out = s.call("station.update", json!({}));
+    assert_eq!(out["release"], json!(TAG));
+    let after = wait_for("the updated image to answer", 20, || {
+        let i = s.try_call("station.info", json!({})).ok()?;
+        (i["started_ms"] != before["started_ms"]).then_some(i)
+    });
+    assert_eq!(after["pid"], before["pid"]);
+    assert_eq!(s.pane(&pane)["pid"], pane_pid);
+    assert!(s.text(&pane).contains("before-update marker"));
+    // It runs the downloaded file, not the one it was started from.
+    let exe = std::fs::read_link(format!("/proc/{}/exe", after["pid"]))
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "releases/".into());
+    assert!(exe.contains("releases/"), "{exe}");
+    assert!(s.log("station.rolled_back").is_empty());
+}
+
+/// 0.2: a restart keeps every terminal.
+#[test]
+fn a_restart_keeps_every_terminal() {
+    let s = Station::start("alpha");
+    let pane = s.fake(
+        json!({"steps": [{"say": "before-restart marker"}]}),
+        json!({}),
+    );
+    s.wait_text(&pane, "before-restart marker");
+    let before = s.call("station.info", json!({}));
+    let pane_pid = s.pane(&pane)["pid"].clone();
+    s.call("station.restart", json!({}));
+    let after = wait_for("the station to come back", 15, || {
+        let i = s.try_call("station.info", json!({})).ok()?;
+        (i["started_ms"] != before["started_ms"]).then_some(i)
+    });
+    assert_eq!(after["pid"], before["pid"]);
+    assert_eq!(s.pane(&pane)["pid"], pane_pid);
+    s.call(
+        "pane.send_text",
+        json!({"pane": pane, "text": "still here"}),
+    );
+    s.wait_text(&pane, "[fake] got: still here");
+}
+
 #[test]
 fn an_upgrade_to_an_incompatible_binary_is_refused_and_changes_nothing() {
     let s = Station::start("alpha");

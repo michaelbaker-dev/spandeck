@@ -84,9 +84,23 @@ impl Station {
     /// Two stations that can see each other. With no key given, each starts
     /// its own fleet, as two fresh installs would.
     pub fn strangers(shared_key: Option<String>) -> (Station, Station) {
+        Station::two(shared_key, "")
+    }
+
+    /// A linked pair, with extra config for the first station.
+    pub fn pair_with(extra_a: &str) -> (Station, Station) {
+        Station::two(Some("5a".repeat(32)), extra_a)
+    }
+
+    fn two(shared_key: Option<String>, extra_a: &str) -> (Station, Station) {
         let (pa, pb) = (free_port(), free_port());
         let key = shared_key.as_deref();
-        let a = Station::start_keyed("alpha", pa, &format!("peers = [\"127.0.0.1:{pb}\"]\n"), key);
+        let a = Station::start_keyed(
+            "alpha",
+            pa,
+            &format!("peers = [\"127.0.0.1:{pb}\"]\n{extra_a}"),
+            key,
+        );
         let b = Station::start_keyed("bravo", pb, &format!("peers = [\"127.0.0.1:{pa}\"]\n"), key);
         let want = if key.is_some() {
             "online"
@@ -420,6 +434,11 @@ impl Drop for Station {
             let _ = c.wait();
         }
     }
+}
+
+/// Send a signal to a process the harness did not start itself.
+pub fn kill_pid(pid: i32, sig: i32) {
+    unsafe { libc_kill(pid, sig) };
 }
 
 extern "C" {
@@ -972,6 +991,115 @@ pub mod fake_vault {
             {
                 f(t);
             }
+        }
+    }
+}
+
+/// A stand-in for the project's release page: one release, holding the same
+/// binary the tests run, so an update can be exercised end to end.
+#[allow(dead_code)]
+pub mod fake_releases {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use axum::extract::{Path, State};
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use axum::Router;
+    use sha2::{Digest, Sha256};
+
+    pub const TAG: &str = "v9.9.9";
+
+    pub struct Releases {
+        pub port: u16,
+    }
+
+    impl Releases {
+        pub fn url(&self) -> String {
+            format!("http://127.0.0.1:{}", self.port)
+        }
+
+        /// `honest`: whether the published checksum matches the file.
+        pub fn start(honest: bool) -> Releases {
+            let target = format!(
+                "{}-{}",
+                std::env::consts::ARCH,
+                if cfg!(target_os = "macos") {
+                    "apple-darwin"
+                } else {
+                    "unknown-linux-gnu"
+                }
+            );
+            let name = format!("spandeck-{TAG}-{target}");
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join(&name)).unwrap();
+            // A link, not a copy: the binary is large.
+            let bin = dir.path().join(&name).join("spandeck");
+            if std::fs::hard_link(super::SPANDECK, &bin).is_err() {
+                std::fs::copy(super::SPANDECK, &bin).unwrap();
+            }
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("tar -cf - {name} | gzip -1 > {name}.tar.gz"))
+                .current_dir(dir.path())
+                .status()
+                .unwrap();
+            assert!(out.success());
+            let archive = std::fs::read(dir.path().join(format!("{name}.tar.gz"))).unwrap();
+            let mut sum: String = Sha256::digest(&archive)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            if !honest {
+                sum = sum.chars().rev().collect();
+            }
+            let mut files: HashMap<String, Vec<u8>> = HashMap::new();
+            files.insert(
+                format!("{name}.tar.gz.sha256"),
+                format!("{sum}  {name}.tar.gz\n").into_bytes(),
+            );
+            files.insert(format!("{name}.tar.gz"), archive);
+            let files = Arc::new(files);
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let app = Router::new()
+                .route(
+                    "/latest",
+                    get(|| async {
+                        (
+                            StatusCode::FOUND,
+                            [(header::LOCATION, format!("/tag/{TAG}"))],
+                        )
+                    }),
+                )
+                .route("/tag/{tag}", get(|| async { "a release" }))
+                .route(
+                    "/download/{tag}/{file}",
+                    get(
+                        |State(files): State<Arc<HashMap<String, Vec<u8>>>>,
+                         Path((tag, file)): Path<(String, String)>| async move {
+                            match files.get(&file).filter(|_| tag == TAG) {
+                                Some(bytes) => bytes.clone().into_response(),
+                                None => StatusCode::NOT_FOUND.into_response(),
+                            }
+                        },
+                    ),
+                )
+                .with_state(files);
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async move {
+                    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                    let _ = axum::serve(listener, app).await;
+                });
+            });
+            Releases { port }
         }
     }
 }

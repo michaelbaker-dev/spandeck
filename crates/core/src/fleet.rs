@@ -80,6 +80,10 @@ impl FleetState {
         self.peers.lock().unwrap().get(station).cloned()
     }
 
+    pub(crate) fn forget(&self, station: &str) {
+        self.peers.lock().unwrap().remove(station);
+    }
+
     pub fn peers(&self) -> Vec<Peer> {
         self.peers.lock().unwrap().values().cloned().collect()
     }
@@ -343,6 +347,19 @@ impl Daemon {
                 }
             }
         }
+        // Stations seen before are asked too, and stay listed while they are off.
+        let known = self.known_stations();
+        {
+            let mut peers = self.fleet.peers.lock().unwrap();
+            for k in &known {
+                candidates.push(k.addr.clone());
+                peers.entry(k.station.clone()).or_insert_with(|| {
+                    let mut p = k.clone();
+                    p.state = "unreachable".into();
+                    p
+                });
+            }
+        }
         candidates.sort();
         candidates.dedup();
         let probes = candidates.iter().map(|addr| {
@@ -428,6 +445,13 @@ impl Daemon {
                 }
             }
         }
+        let online: Vec<Peer> = self
+            .fleet
+            .peers()
+            .into_iter()
+            .filter(|p| p.state == "online")
+            .collect();
+        self.remember_stations(&online);
         if changed {
             self.emit("fleet.updated", None, None, json!({}));
         }

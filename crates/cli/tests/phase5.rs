@@ -104,6 +104,117 @@ fn a_refused_station_stays_out() {
     );
 }
 
+/// 0.2: one Control Deck looks after the other stations: restart one, and
+/// start one whose daemon is not running, if this station is allowed to.
+#[test]
+fn another_station_is_restarted_and_a_stopped_one_is_started_from_the_deck() {
+    // The "SSH" here is a script that starts bravo's daemon on this machine.
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("start-bravo.sh");
+    let (mut a, mut b) = Station::pair_with(&format!(
+        "remote_start_cmd = [\"{}\", \"{{host}}\"]\nwake_broadcast = \"127.0.0.1\"\n",
+        script.display()
+    ));
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho \"$1\" > {dir}/asked\nSPANDECK_STATE_DIR={root}/state SPANDECK_CONFIG_DIR={root}/config SPANDECK_FAKE_DIR={root}/fake HOME={root}/home SPANDECK_LOG=warn nohup {SPANDECK} daemon >/dev/null 2>&1 &\n",
+            dir = dir.path().display(),
+            root = b.root.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let bravo_is = |a: &Station, want: &str| {
+        a.call("fleet.refresh", json!({}))["stations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["station"] == json!("bravo") && s["state"] == json!(want))
+    };
+
+    // Restart bravo from alpha: its terminal survives.
+    let pane = b.fake(
+        json!({"steps": [{"say": "before-restart marker"}]}),
+        json!({}),
+    );
+    b.wait_text(&pane, "before-restart marker");
+    let before = b.call("station.info", json!({}));
+    a.call(
+        "peer.call",
+        json!({"station": "bravo", "method": "station.restart", "params": {}}),
+    );
+    wait_for("bravo to come back", 15, || {
+        let i = b.try_call("station.info", json!({})).ok()?;
+        (i["started_ms"] != before["started_ms"]).then_some(())
+    });
+    assert!(b.text(&pane).contains("before-restart marker"));
+    assert!(b.log("station.upgrading")[0]["actor"]
+        .as_str()
+        .unwrap()
+        .contains("via alpha"));
+    // Pointing another station at an arbitrary binary is still refused.
+    let err = a
+        .try_call("peer.call", json!({"station": "bravo", "method": "station.upgrade", "params": {"binary": "/bin/sh"}}))
+        .unwrap_err();
+    assert!(
+        err.message.contains("cannot be forwarded"),
+        "{}",
+        err.message
+    );
+    wait_for("alpha to see bravo again", 20, || {
+        bravo_is(&a, "online").then_some(())
+    });
+
+    // bravo's daemon dies. alpha still lists it, as unreachable.
+    b.kill9();
+    wait_for("alpha to see bravo is gone", 20, || {
+        bravo_is(&a, "unreachable").then_some(())
+    });
+    // Starting it is refused until this station is allowed to.
+    let err = a
+        .try_call("fleet.start", json!({"station": "bravo"}))
+        .unwrap_err();
+    assert_eq!(err.code, "denied");
+    assert!(!dir.path().join("asked").exists());
+    // Waking sends packets to the address learned while it was online, if it has one.
+    match a.try_call("fleet.wake", json!({"station": "bravo"})) {
+        Ok(v) => assert!(v["sent"].as_u64().unwrap() > 0, "{v}"),
+        Err(e) => assert!(e.message.contains("not known yet"), "{}", e.message),
+    }
+
+    // The owner turns remote start on for alpha. After alpha restarts it still
+    // knows bravo, though bravo has been down the whole time.
+    let cfg = a.root.join("config/config.toml");
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    std::fs::write(&cfg, format!("remote_start = true\n{text}")).unwrap();
+    a.kill9();
+    a.launch();
+    assert!(
+        bravo_is(&a, "unreachable"),
+        "a station that is off stays listed"
+    );
+    a.call("fleet.start", json!({"station": "bravo"}));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("asked"))
+            .unwrap()
+            .trim(),
+        "127.0.0.1",
+        "the command was given bravo's address"
+    );
+    wait_for("bravo to be online again", 20, || {
+        bravo_is(&a, "online").then_some(())
+    });
+    // The daemon the script started is not the harness's child: stop it by its pid.
+    let pid: i32 = std::fs::read_to_string(b.root.join("state/spandeckd.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    kill_pid(pid, 15);
+}
+
 #[test]
 fn two_stations_find_each_other_and_one_deck_controls_both() {
     let (a, b) = Station::pair();

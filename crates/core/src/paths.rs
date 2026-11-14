@@ -150,6 +150,34 @@ pub struct Config {
     pub nudge_secs: u64,
     /// AgentVault: normally empty, because spandeck finds the vault by itself.
     pub vault: crate::vault::VaultConfig,
+    /// Let this station start another station's daemon over SSH. Off by
+    /// default: it means this station can run a command on that machine.
+    pub remote_start: bool,
+    /// The command used for that. `{host}` and `{script}` are filled in.
+    /// Default: `tailscale ssh {host} sh -c {script}`.
+    pub remote_start_cmd: Option<Vec<String>>,
+    /// Where wake-on-LAN packets are sent. Default: 255.255.255.255.
+    pub wake_broadcast: Option<String>,
+    pub update: UpdateConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct UpdateConfig {
+    /// Where releases are downloaded from. Default: the project's GitHub releases.
+    pub url: Option<String>,
+    /// After an update proves healthy, replace the binary this station was
+    /// started from, so a reboot starts the new version.
+    pub in_place: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        UpdateConfig {
+            url: None,
+            in_place: true,
+        }
+    }
 }
 
 impl Default for Config {
@@ -172,6 +200,10 @@ impl Default for Config {
             stuck_idle_turns: 3,
             nudge_secs: 60,
             vault: Default::default(),
+            remote_start: false,
+            remote_start_cmd: None,
+            wake_broadcast: None,
+            update: UpdateConfig::default(),
         }
     }
 }

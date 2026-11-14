@@ -1446,6 +1446,8 @@ impl Daemon {
             "at_keyboard": self.at_keyboard(),
             "web": self.web_addrs.lock().unwrap().clone(),
             "load": load_average(),
+            "macs": crate::manage::mac_addresses(),
+            "service": crate::doctor::service_installed(&self.home),
             "setup": {"updated_ms": self.setup().updated_ms},
             "vault": self.vault_view(),
         })

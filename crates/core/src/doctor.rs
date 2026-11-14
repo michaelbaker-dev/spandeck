@@ -44,6 +44,17 @@ impl Daemon {
             true,
             format!("schema {schema} of {}", Db::LATEST_SCHEMA),
         );
+        let service = service_installed(&self.home);
+        add(
+            "service",
+            service,
+            false,
+            if service {
+                "spandeckd starts at login".into()
+            } else {
+                "spandeckd does not start at login: after a reboot this station stays down until someone starts it. Run `spandeck service --install`".into()
+            },
+        );
         add(
             "git",
             version_of("git").is_some(),
@@ -143,6 +154,13 @@ impl Daemon {
             .all(|c| c["ok"] == json!(true) || c["required"] == json!(false));
         json!({"ok": ok, "station": self.station, "checks": checks})
     }
+}
+
+/// Whether this station is set to start spandeckd at login.
+pub fn service_installed(home: &std::path::Path) -> bool {
+    service_definition(std::path::Path::new("spandeck"), home)
+        .0
+        .exists()
 }
 
 /// A systemd user unit (Linux) or launchd agent (macOS) that starts spandeckd at login.

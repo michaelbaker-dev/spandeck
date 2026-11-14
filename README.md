@@ -64,6 +64,30 @@ To update a station without losing its terminals: install the new release, then
 `spandeck upgrade ~/.local/bin/spandeck`. If the new version does not start properly,
 the station goes back to the one it was running and keeps every terminal.
 
+## Looking after stations
+
+From the Control Deck, right-click a station (or use the commands on any station):
+
+| To | In the deck | Command |
+| --- | --- | --- |
+| Restart spandeck, keeping every terminal | Restart spandeck here | `spandeck restart [--station NAME]` |
+| Update to the latest release | Update to the latest release | `spandeck update [--station NAME]` |
+| Wake a sleeping machine | Wake it | `spandeck wake NAME` |
+| Start spandeck where it is not running | Start spandeck there | `spandeck start NAME` |
+
+- **Update** downloads the release on that station, checks it against its published
+  SHA-256, and swaps it in. If the new version does not start properly, the station
+  goes back to the old one. It then replaces the installed binary, so a reboot starts
+  the new version.
+- **Wake** sends wake-on-LAN packets. They reach only a machine on the same network as
+  the station you send from, and only if that machine is set to wake on them.
+- **Start** runs a command on the other machine over Tailscale SSH. It is off until you
+  put `remote_start = true` in the config of the station that does the starting, and
+  Tailscale SSH must be on for the machine being started. It starts the login service
+  if there is one, else `~/.local/bin/spandeck daemon`.
+- A station that is off stays in the list as unreachable. One that does not start at
+  login is marked; fix that with `spandeck service --install`.
+
 ## From your phone
 
 Open any station from a phone on your Tailscale account: `spandeck cc --qr` shows a QR

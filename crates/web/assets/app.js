@@ -635,14 +635,20 @@ function stationTile(s) {
       up && { label: 'New pane here…', action: () => newPaneDialog(s.station) },
       up && { label: 'New project here…', action: () => newProjectDialog(s.station) },
       s.state === 'not_linked' && { label: `Join ${s.station}'s fleet…`, action: () => joinFleet(s.station) },
+      up && { label: 'Restart spandeck here (keeps terminals)', action: () => confirmBox(`Restart spandeck on ${s.station}?`, 'Every terminal and agent keeps running. If it does not come back healthy, the restart is undone.', 'Restart', () => rpc(s.station, 'station.restart', {}).then(() => toast(`${s.station} is restarting`))) },
+      up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`))) },
+      s.state === 'unreachable' && { label: 'Wake it (same network only)', action: () => rpc(api.station, 'fleet.wake', { station: s.station }).then((r) => toast(`Sent ${r.sent} wake packets to ${s.station}. Give it a minute.`)) },
+      s.state === 'unreachable' && { label: 'Start spandeck there (over SSH)', action: () => rpc(api.station, 'fleet.start', { station: s.station }).then((r) => toast(`${s.station} is ${r.state}`)) },
+      s.state === 'unreachable' && { label: 'Forget this station', danger: true, action: () => confirmBox(`Forget ${s.station}?`, 'It is removed from this list. If it comes back it is listed again.', 'Forget', () => rpc(api.station, 'fleet.forget', { station: s.station })) },
       up && { label: 'Stop every agent here', danger: true, action: () => rpc(api.station, 'stop.all', { scope: s.station === api.station ? 'station' : s.station }) },
     ]); },
   },
     h('div', { class: 'tile-head' }, h('span', { class: 'dot ' + (up ? (s.needs_you ? 'needs_you' : s.working ? 'working' : 'idle') : 'unreachable') }), h('b', {}, s.station), s.self ? h('span', { class: 'chip' }, 'this station') : null, h('span', { class: 'grow' }), h('span', { class: 'muted' }, s.version || '')),
     up ? h('div', { class: 'tile-stats' },
       h('span', {}, h('b', {}, s.working ?? 0), ' working'), h('span', { class: s.needs_you ? 'needs' : '' }, h('b', {}, s.needs_you ?? 0), ' need you'),
-      s.load != null ? h('span', { class: 'muted' }, 'load ' + Number(s.load).toFixed(1)) : null, s.keep_awake ? h('span', { class: 'chip' }, 'kept awake') : null, vaultChip(s))
-      : h('div', { class: 'tile-stats warn-text' }, s.state === 'update_needed' ? 'Needs an update before it can be controlled' : s.state === 'not_linked' ? `Not in this fleet. On ${s.station}, run "spandeck fleet --join ${api.station}", then approve it under Access.` : `Unreachable · last seen ${ago(s.last_seen_ms)} ago`),
+      s.load != null ? h('span', { class: 'muted' }, 'load ' + Number(s.load).toFixed(1)) : null, s.keep_awake ? h('span', { class: 'chip' }, 'kept awake') : null,
+      s.service === false ? h('span', { class: 'chip warn', title: 'spandeck does not start at login on this station. After a reboot it stays down until someone starts it. Run "spandeck service --install" there.' }, 'not started at login') : null, vaultChip(s))
+      : h('div', { class: 'tile-stats warn-text' }, s.state === 'update_needed' ? 'Needs an update before it can be controlled' : s.state === 'unreachable' ? `Unreachable · last seen ${ago(s.last_seen_ms)} ago. Right-click to wake or start it.` : s.state === 'not_linked' ? `Not in this fleet. On ${s.station}, run "spandeck fleet --join ${api.station}", then approve it under Access.` : `Unreachable · last seen ${ago(s.last_seen_ms)} ago`),
     h('div', { class: 'tile-agents' }, agents.slice(0, 8).map(p => h('div', { class: 'agent-line' }, dot(p), h('span', {}, p.name), h('span', { class: 'muted' }, p.tool || p.needs_reason || STATE_LABEL[stateOf(p)]))),
       up && !agents.length ? h('span', { class: 'muted' }, 'No agents running') : null));
 }
@@ -849,6 +855,8 @@ function phoneView() {
       S.fleet.stations.map(s => h('div', { class: 'phone-station' },
         h('div', { class: 'row' }, h('span', { class: 'dot ' + (s.state === 'online' ? 'idle' : 'unreachable') }), h('b', {}, s.station), h('span', { class: 'muted' }, s.state === 'online' ? `${s.working ?? 0} working · ${s.needs_you ?? 0} need you` : s.state.replace('_', ' ')), h('span', { class: 'grow' }),
           s.state === 'online' ? h('button', { onclick: () => newPaneDialog(s.station) }, 'New') : null,
+          s.state === 'unreachable' ? h('button', { onclick: () => rpc(api.station, 'fleet.wake', { station: s.station }).then((r) => toast(`Sent ${r.sent} wake packets. Give it a minute.`)) }, 'Wake') : null,
+          s.state === 'unreachable' ? h('button', { onclick: () => rpc(api.station, 'fleet.start', { station: s.station }).then((r) => toast(`${s.station} is ${r.state}`)) }, 'Start') : null,
           s.state === 'online' ? h('button', { class: 'danger', onclick: () => confirmBox(`Stop every agent on ${s.station}?`, 'Running turns are interrupted. Processes stay.', 'Stop', () => rpc(api.station, 'stop.all', { scope: s.self ? 'station' : s.station })) }, 'Stop') : null),
         all.filter(x => x.st === s.station).sort((a, b) => stateRank(a.p) - stateRank(b.p)).map(line)))),
     stopRows(),

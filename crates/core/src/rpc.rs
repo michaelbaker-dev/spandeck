@@ -806,7 +806,12 @@ impl Daemon {
             }
 
             // ------------------------------------------------------- upgrade
-            "station.upgrade" => self.upgrade(Path::new(s(&params, "binary")?), by)?,
+            "station.upgrade" => self.upgrade(Path::new(s(&params, "binary")?), by, None)?,
+            "station.restart" => self.station_restart(by)?,
+            "station.update" => self.station_update(opt(&params, "version"), by).await?,
+            "fleet.wake" => self.fleet_wake(s(&params, "station")?, by)?,
+            "fleet.start" => self.fleet_start(s(&params, "station")?, by).await?,
+            "fleet.forget" => self.forget_station(s(&params, "station")?)?,
 
             _ => return Err(Error::NotFound(format!("method {method}"))),
         })
@@ -933,7 +938,14 @@ impl Daemon {
     }
 
     /// Replace this process with a new binary, keeping every terminal.
-    fn upgrade(&self, binary: &Path, by: &str) -> Result<Value> {
+    /// `install_to`: once the new image proves healthy, it also replaces
+    /// the binary at this path.
+    pub(crate) fn upgrade(
+        &self,
+        binary: &Path,
+        by: &str,
+        install_to: Option<&Path>,
+    ) -> Result<Value> {
         let binary = binary
             .canonicalize()
             .map_err(|e| invalid(format!("{}: {e}", binary.display())))?;
@@ -995,6 +1007,7 @@ impl Daemon {
             json!({"to": check.get("version"), "binary": binary.display().to_string(), "peers_needing_update": left_behind}),
         );
         let d = self.clone();
+        let install_to = install_to.map(|p| p.to_path_buf());
         std::thread::spawn(move || {
             // Let the reply reach the caller first.
             std::thread::sleep(Duration::from_millis(250));
@@ -1014,6 +1027,10 @@ impl Daemon {
                 .arg("--handoff")
                 .arg(&file)
                 .env("SPANDECK_PREVIOUS_EXE", &previous)
+                .env(
+                    "SPANDECK_INSTALL_TO",
+                    install_to.clone().unwrap_or_default(),
+                )
                 .env_remove("SPANDECK_ROLLED_BACK")
                 .exec();
             // exec returned: the old image is still running. Take the panes back.
