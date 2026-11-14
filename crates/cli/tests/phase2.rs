@@ -439,6 +439,33 @@ fn screenshots_of_every_view() {
         "document.querySelectorAll('.pane-tile').length === 4",
     );
     shoot(&page, "2-station-deck");
+    let names: Vec<String> = s
+        .call("pane.list", json!({}))
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["project"] == json!("api"))
+        .map(|p| p["name"].as_str().unwrap().to_string())
+        .collect();
+    if names.len() >= 3 {
+        s.call("project.layout.save", json!({"project": "api", "layout": {"name": "build", "tree": {"dir": "col", "ratio": 600,
+            "a": {"dir": "row", "ratio": 500, "a": {"pane": names[0]}, "b": {"pane": names[1]}}, "b": {"pane": names[2]}}}}));
+        page.wait("layout tab", "(t => t ? (t.click(), true) : false)([...document.querySelectorAll('.tab.proj')].find(t => t.innerText === 'build'))");
+        page.wait(
+            "layout",
+            "document.querySelectorAll('.workspace .pane').length === 3",
+        );
+        shoot(&page, "2b-project-layout");
+        page.js("[...document.querySelectorAll('.tabs button')].find(b => b.innerText === 'Arrange').click()");
+        page.wait(
+            "arrange",
+            "document.querySelectorAll('.arr[data-ref]').length === 3",
+        );
+        page.js("document.querySelector('.arr[data-ref]').dataset.zone = 'right'");
+        shoot(&page, "2c-arrange");
+        page.js("[...document.querySelectorAll('.tabs button')].find(b => b.innerText === 'Done arranging').click()");
+        page.js("[...document.querySelectorAll('.tab')].find(t => t.innerText === 'Deck').click()");
+    }
     page.goto(&format!("/s/spark2/p/{dev}"));
     page.wait("pane", "!!document.querySelector('.pane .xterm-rows')");
     shoot(&page, "3-pane");

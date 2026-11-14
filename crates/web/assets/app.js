@@ -110,6 +110,7 @@ const leaves = (n, out = []) => { if (!n) return out; if (n.pane) out.push(n); e
 
 function openInWorkspace(st, paneId, dir) {
   const l = loadLayout(st);
+  l.proj = null;
   let tab = l.tabs[l.active];
   const existing = l.tabs.findIndex(t => leaves(t.tree).some(x => x.pane === paneId));
   if (existing >= 0 && !dir) { l.active = existing; saveLayout(st, l); return go(stationUrl(st)); }
@@ -699,7 +700,9 @@ function paneTile(st, p) {
 function sidebar(st) {
   const projects = S.projects.get(st) || [];
   const panes = panesOf(st);
-  const row = (p) => h('a', { class: 'side-pane' + (S.route.pane === p.id ? ' current' : ''), href: paneUrl(st, p.id), oncontextmenu: (e) => { e.preventDefault(); paneMenu(e, st, p, 'side'); } }, dot(p), h('span', {}, p.name), p.paused ? h('span', { class: 'chip warn' }, 'paused') : null);
+  const row = (p) => h('a', { class: 'side-pane' + (S.route.pane === p.id ? ' current' : '') + (arrangeCtx && arrangeCtx.sideRef(p) ? ' draggable' : ''), href: paneUrl(st, p.id),
+    onmousedown: (e) => { const ref = arrangeCtx && !p.exited && arrangeCtx.sideRef(p); if (ref) startArrange(e, ref, p.name, arrangeCtx); },
+    onclick: (e) => { if (arrangeCtx) e.preventDefault(); }, oncontextmenu: (e) => { e.preventDefault(); paneMenu(e, st, p, 'side'); } }, dot(p), h('span', {}, p.name), p.paused ? h('span', { class: 'chip warn' }, 'paused') : null);
   const projMenu = (e, pr) => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
     { title: pr.address },
     pr.open ? { label: 'Close project (keeps conversations)', action: () => rpc(st, 'project.close', { name: pr.name }) } : { label: 'Open project', action: () => rpc(st, 'project.open', { name: pr.name }) },
@@ -731,17 +734,148 @@ function getTerm(st, p, where, mode) {
   return t;
 }
 
-function renderTree(st, node, tab) {
-  if (!node) return h('div', { class: 'empty' }, 'Empty workspace. Click a pane on the left to place it here.');
-  if (node.pane) {
-    const p = findPane(st, node.pane);
-    if (!p) return h('div', { class: 'empty' }, 'This pane was closed. ', h('button', { class: 'mini', onclick: () => closeLeaf(st, node.pane) }, 'Remove the view'));
-    return getTerm(st, p, 'leaf', 'control').el;
+// ---- layouts ----
+// A workspace is kept in this browser and names panes by id. A project layout
+// is saved with the project, names panes by their name in the project, and is
+// the same on every device. Both are trees of splits and are drawn, resized
+// and arranged the same way.
+
+const projLayouts = new Map(); // station/project/name -> { tree, json, dirty, timer }
+let arranging = null;          // the key of the tab being arranged
+let arrangeCtx = null;         // how the tab being arranged resolves and saves
+let dragState = null;
+
+const fromServer = (n) => !n ? null : n.pane !== undefined ? { pane: n.pane, ...(n.project ? { project: n.project } : {}) }
+  : { dir: n.dir, ratio: n.ratio / 1000, a: fromServer(n.a), b: fromServer(n.b) };
+const toServer = (n) => !n ? null : n.pane !== undefined ? { pane: n.pane, ...(n.project ? { project: n.project } : {}) }
+  : { dir: n.dir, ratio: Math.min(950, Math.max(50, Math.round(n.ratio * 1000))), a: toServer(n.a), b: toServer(n.b) };
+
+function projectLayouts(st) {
+  const out = [];
+  for (const pr of S.projects.get(st) || []) {
+    for (const l of pr.definition?.layout || []) {
+      const key = `${st}/${pr.name}/${l.name}`, json = JSON.stringify(l);
+      let c = projLayouts.get(key);
+      if (!c) { c = { tree: fromServer(l.tree), json }; projLayouts.set(key, c); }
+      else if (!c.dirty && c.json !== json) { c.tree = fromServer(l.tree); c.json = json; }
+      out.push({ key, project: pr.name, name: l.name, cache: c });
+    }
   }
-  const a = h('div', { class: 'split-a', style: { flex: `${node.ratio} 1 0` } }, renderTree(st, node.a, tab));
-  const b = h('div', { class: 'split-b', style: { flex: `${1 - node.ratio} 1 0` } }, renderTree(st, node.b, tab));
-  const gutter = h('div', { class: 'gutter', role: 'separator', title: 'Drag to resize' });
+  return out;
+}
+
+function saveProjectLayout(st, lay) {
+  const c = lay.cache;
+  c.dirty = true;
+  clearTimeout(c.timer);
+  c.timer = setTimeout(() => {
+    api.on(st, 'project.layout.save', { project: lay.project, layout: { name: lay.name, tree: toServer(c.tree) } })
+      .then(() => { c.dirty = false; c.json = null; refreshSoon(60); })
+      .catch((e) => { c.dirty = false; toast(e.message, 'error'); });
+  }, 250);
+}
+
+// Tree edits. `refOf` names a leaf; leaves are compared by that name.
+function treeRemove(n, ref, refOf) {
+  if (!n) return null;
+  if (n.pane !== undefined) return refOf(n) === ref ? null : n;
+  const a = treeRemove(n.a, ref, refOf), b = treeRemove(n.b, ref, refOf);
+  return a && b ? { ...n, a, b } : (a || b);
+}
+function treeInsert(n, target, zone, leaf, refOf) {
+  if (!n) return leaf;
+  if (n.pane !== undefined) {
+    if (refOf(n) !== target) return n;
+    const first = zone === 'left' || zone === 'above';
+    return { dir: zone === 'left' || zone === 'right' ? 'row' : 'col', ratio: 0.5, a: first ? leaf : n, b: first ? n : leaf };
+  }
+  return { ...n, a: treeInsert(n.a, target, zone, leaf, refOf), b: treeInsert(n.b, target, zone, leaf, refOf) };
+}
+function treeMove(tree, ref, target, zone, leafOf, refOf) {
+  if (!tree) return leafOf(ref);
+  if (ref === target) return tree;
+  const all = leaves(tree), src = all.find(x => refOf(x) === ref), dst = all.find(x => refOf(x) === target);
+  if (!dst) return src ? tree : { dir: 'row', ratio: 0.5, a: tree, b: leafOf(ref) };
+  if (zone === 'swap') {
+    const swap = (n) => n.pane !== undefined ? (refOf(n) === ref ? { ...dst } : refOf(n) === target ? (src ? { ...src } : leafOf(ref)) : n) : { ...n, a: swap(n.a), b: swap(n.b) };
+    return swap(tree);
+  }
+  return treeInsert(treeRemove(tree, ref, refOf), target, zone, src ? { ...src } : leafOf(ref), refOf);
+}
+function treeShape(kind, list) {
+  const chain = (dir, xs) => xs.length === 1 ? xs[0] : { dir, ratio: 1 / xs.length, a: xs[0], b: chain(dir, xs.slice(1)) };
+  if (!list.length) return null;
+  if (kind === 'two-over-one' && list.length > 2) return { dir: 'col', ratio: 0.6, a: chain('row', list.slice(0, -1)), b: list[list.length - 1] };
+  if (kind === 'one-stack' && list.length > 2) return { dir: 'row', ratio: 0.6, a: list[0], b: chain('col', list.slice(1)) };
+  if (kind === 'grid' && list.length > 2) {
+    const cols = Math.ceil(Math.sqrt(list.length)), rows = [];
+    for (let i = 0; i < list.length; i += cols) rows.push(chain('row', list.slice(i, i + cols)));
+    return chain('col', rows);
+  }
+  return chain('row', list);
+}
+
+// Moving a pane in Arrange: a label follows the pointer, the pane under it
+// shows where the drop would go, and letting go there moves it.
+function startArrange(e, ref, label, ctx) {
+  if (e.button) return;
+  e.preventDefault();
+  const ghost = h('div', { class: 'arr-ghost' }, label);
+  document.getElementById('overlays').append(ghost);
+  dragState = { ref, ctx, over: null };
+  document.body.classList.add('dragging');
+  const clear = () => document.querySelectorAll('.arr[data-zone]').forEach(x => x.removeAttribute('data-zone'));
+  const move = (ev) => {
+    ghost.style.left = ev.clientX + 12 + 'px';
+    ghost.style.top = ev.clientY + 12 + 'px';
+    clear();
+    dragState.over = null;
+    const over = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.arr');
+    if (!over || over.dataset.ref === ref) return;
+    if (over.dataset.empty) { over.dataset.zone = 'swap'; dragState.over = { target: null, zone: 'swap' }; return; }
+    const r = over.getBoundingClientRect(), x = (ev.clientX - r.left) / r.width, y = (ev.clientY - r.top) / r.height;
+    const zone = x < 0.25 ? 'left' : x > 0.75 ? 'right' : y < 0.25 ? 'above' : y > 0.75 ? 'below' : 'swap';
+    over.dataset.zone = zone;
+    dragState.over = { target: over.dataset.ref, zone };
+  };
+  const up = () => {
+    removeEventListener('mousemove', move);
+    removeEventListener('mouseup', up);
+    document.body.classList.remove('dragging');
+    ghost.remove();
+    clear();
+    const d = dragState;
+    dragState = null;
+    if (d.over) d.ctx.move(d.ref, d.over.target, d.over.zone);
+    render();
+  };
+  addEventListener('mousemove', move);
+  addEventListener('mouseup', up);
+  move(e);
+}
+
+function renderTree(st, node, ctx) {
+  if (!node) {
+    return ctx.arrange
+      ? h('div', { class: 'empty arr', 'data-empty': '1' }, h('div', { class: 'arr-zone' }), 'Drag a pane here from the list on the left, or pick a shape above.')
+      : h('div', { class: 'empty' }, ctx.emptyText);
+  }
+  if (node.pane !== undefined) {
+    const p = ctx.resolve(node);
+    const body = p ? getTerm(st, p, 'leaf', 'control').el : ctx.missing(node);
+    if (!ctx.arrange) return body;
+    const ref = ctx.refOf(node), label = ctx.label(node);
+    return h('div', { class: 'arr-wrap' }, body,
+      h('div', { class: 'arr', 'data-ref': ref, onmousedown: (e) => { if (!e.target.closest('button')) startArrange(e, ref, label, ctx); } },
+        h('div', { class: 'arr-zone' }),
+        h('div', { class: 'arr-card' }, h('b', {}, label), h('span', { class: 'muted' }, 'Drag onto another pane'),
+          h('button', { class: 'mini', onclick: () => { ctx.remove(ref); render(); } }, 'Take out of this layout'))));
+  }
+  const a = h('div', { class: 'split-a', style: { flex: `${node.ratio} 1 0` } }, renderTree(st, node.a, ctx));
+  const b = h('div', { class: 'split-b', style: { flex: `${1 - node.ratio} 1 0` } }, renderTree(st, node.b, ctx));
+  const gutter = h('div', { class: 'gutter', role: 'separator', 'aria-orientation': node.dir === 'row' ? 'vertical' : 'horizontal', title: 'Drag to resize' });
   const box = h('div', { class: 'split ' + node.dir }, a, gutter, b);
+  // The line between two panes can be dragged at any time.
   gutter.addEventListener('mousedown', (e) => {
     e.preventDefault();
     const rect = box.getBoundingClientRect();
@@ -751,7 +885,7 @@ function renderTree(st, node, tab) {
       a.style.flex = `${node.ratio} 1 0`;
       b.style.flex = `${1 - node.ratio} 1 0`;
     };
-    const up = () => { removeEventListener('mousemove', move); removeEventListener('mouseup', up); document.body.classList.remove('dragging'); const l = loadLayout(st); l.tabs[l.active] = tab; saveLayout(st, l); };
+    const up = () => { removeEventListener('mousemove', move); removeEventListener('mouseup', up); document.body.classList.remove('dragging'); ctx.changed(); };
     document.body.classList.add('dragging');
     addEventListener('mousemove', move);
     addEventListener('mouseup', up);
@@ -759,27 +893,112 @@ function renderTree(st, node, tab) {
   return box;
 }
 
+function newLayoutDialog(st, project) {
+  dialog(`New layout in ${project}`, (close) => {
+    const name = h('input', { placeholder: 'build', required: true, pattern: '[A-Za-z0-9._-]+', title: 'Letters, digits, - _ . only' });
+    const submit = async () => {
+      const n = name.value.trim();
+      const mine = panesOf(st).filter(p => p.project === project && !p.exited).map(p => ({ pane: p.name }));
+      await rpc(st, 'project.layout.save', { project, layout: { name: n, tree: toServer(treeShape(mine.length === 3 ? 'two-over-one' : 'grid', mine)) } });
+      const l = loadLayout(st);
+      l.proj = `${st}/${project}/${n}`;
+      saveLayout(st, l);
+      arranging = l.proj;
+      close();
+      refresh();
+    };
+    return h('form', { onsubmit: (e) => { e.preventDefault(); submit(); } },
+      field('Name', name),
+      h('p', { class: 'muted' }, `Saved in ${project}'s project file, so it is the same on every device. It starts with the project's running panes; you can arrange them next.`),
+      h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel'), h('button', { class: 'primary', type: 'submit' }, 'Create')));
+  });
+}
+
 function stationView(st) {
   const info = S.fleet.stations.find(s => s.station === st);
   if (info && info.state !== 'online') return h('main', { class: 'fleet' }, h('p', { class: 'warn-text' }, `${st} is ${info.state === 'update_needed' ? 'on a version this station cannot control' : 'unreachable'}. Nothing here says what it is doing right now.`));
   const l = loadLayout(st);
   if (l.active >= l.tabs.length) l.active = l.tabs.length - 1;
-  const tab = l.tabs[l.active];
+  const lays = projectLayouts(st);
+  const lay = lays.find(x => x.key === l.proj) || null;
+  if (!lay && l.proj) { l.proj = null; }
+  const tab = lay ? null : l.tabs[l.active];
+  const key = lay ? lay.key : tab ? `local:${st}:${l.active}` : null;
+  if (arranging && arranging !== key) arranging = null;
+  const pick = (fn) => () => { fn(); saveLayout(st, l); render(); };
+  const manyProjects = new Set(lays.map(x => x.project)).size > 1;
+
+  // How the tab on screen names, finds and saves its panes.
+  let ctx = null;
+  if (lay) {
+    const refOf = (n) => (n.project ? n.project + '/' : '') + n.pane;
+    const find = (n) => panesOf(st).find(p => !p.exited && p.project === (n.project || lay.project) && p.name === n.pane);
+    const set = (tree) => { lay.cache.tree = tree; saveProjectLayout(st, lay); };
+    ctx = {
+      arrange: arranging === key, refOf, resolve: find, label: (n) => refOf(n),
+      emptyText: 'This layout is empty. Press Arrange to put panes in it.',
+      missing: (n) => h('div', { class: 'empty' }, h('p', {}, `${refOf(n)} is not running.`),
+        h('button', { onclick: () => rpc(st, 'project.open', { name: n.project || lay.project }) }, `Start ${n.project || lay.project}'s panes`)),
+      changed: () => saveProjectLayout(st, lay),
+      move: (ref, target, zone) => set(treeMove(lay.cache.tree, ref, target, zone, (r) => { const i = r.lastIndexOf('/'); return i < 0 ? { pane: r } : { pane: r.slice(i + 1), project: r.slice(0, i) }; }, refOf)),
+      remove: (ref) => set(treeRemove(lay.cache.tree, ref, refOf)),
+      shape: (kind) => set(treeShape(kind, leaves(lay.cache.tree).map(x => ({ ...x })))),
+      // A pane can be dragged in from the list if it has a name in a project.
+      sideRef: (p) => p.project ? (p.project === lay.project ? '' : p.project + '/') + p.name : null,
+      tree: () => lay.cache.tree,
+    };
+  } else if (tab) {
+    const refOf = (n) => n.pane;
+    const set = (tree) => { tab.tree = tree; saveLayout(st, l); };
+    ctx = {
+      arrange: arranging === key, refOf, resolve: (n) => findPane(st, n.pane), label: (n) => findPane(st, n.pane)?.name || 'closed pane',
+      emptyText: 'Empty workspace. Click a pane on the left to place it here.',
+      missing: (n) => h('div', { class: 'empty' }, 'This pane was closed. ', h('button', { class: 'mini', onclick: () => closeLeaf(st, n.pane) }, 'Remove the view')),
+      changed: () => saveLayout(st, l),
+      move: (ref, target, zone) => set(treeMove(tab.tree, ref, target, zone, (r) => ({ pane: r }), refOf)),
+      remove: (ref) => set(treeRemove(tab.tree, ref, refOf)),
+      shape: (kind) => set(treeShape(kind, leaves(tab.tree).map(x => ({ ...x })))),
+      sideRef: (p) => p.id,
+      tree: () => tab.tree,
+    };
+  }
+  arrangeCtx = ctx && ctx.arrange ? ctx : null;
+
+  const layMenu = (e, x) => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
+    { title: `${x.name} · saved with ${x.project}` },
+    { label: 'Arrange', action: () => { l.proj = x.key; saveLayout(st, l); arranging = x.key; render(); } },
+    { label: 'Rename', action: () => dialog('Rename layout', (close) => { const n = h('input', { value: x.name, pattern: '[A-Za-z0-9._-]+' }); return h('form', { onsubmit: async (ev) => { ev.preventDefault(); const to = n.value.trim(); if (to && to !== x.name) { await rpc(st, 'project.layout.save', { project: x.project, layout: { name: to, tree: toServer(x.cache.tree) } }); await rpc(st, 'project.layout.remove', { project: x.project, layout: x.name }); l.proj = `${st}/${x.project}/${to}`; saveLayout(st, l); } close(); refresh(); } }, field('Name', n), h('div', { class: 'row end' }, h('button', { class: 'primary', type: 'submit' }, 'Rename'))); }) },
+    { label: 'Delete this layout', danger: true, action: () => confirmBox(`Delete the layout ${x.name}?`, `It is removed from ${x.project}'s project file. The panes keep running.`, 'Delete', () => rpc(st, 'project.layout.remove', { project: x.project, layout: x.name })) }]); };
   const tabs = h('div', { class: 'tabs', role: 'tablist' },
-    h('button', { class: 'tab' + (l.active < 0 ? ' current' : ''), role: 'tab', onclick: () => { l.active = -1; saveLayout(st, l); render(); } }, 'Deck'),
-    l.tabs.map((t, i) => h('button', { class: 'tab' + (i === l.active ? ' current' : ''), role: 'tab',
-      onclick: () => { l.active = i; saveLayout(st, l); render(); },
+    h('button', { class: 'tab' + (!key ? ' current' : ''), role: 'tab', onclick: pick(() => { l.active = -1; l.proj = null; }) }, 'Deck'),
+    lays.map(x => h('button', { class: 'tab proj' + (x.key === key ? ' current' : ''), role: 'tab', title: `Layout saved with ${x.project}`,
+      onclick: pick(() => { l.proj = x.key; }), oncontextmenu: (e) => layMenu(e, x) }, manyProjects ? `${x.project} · ${x.name}` : x.name)),
+    l.tabs.map((t, i) => h('button', { class: 'tab' + (!lay && i === l.active ? ' current' : ''), role: 'tab', title: 'Workspace kept in this browser',
+      onclick: pick(() => { l.active = i; l.proj = null; }),
       oncontextmenu: (e) => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
+        { label: 'Arrange', action: () => { l.active = i; l.proj = null; saveLayout(st, l); arranging = `local:${st}:${i}`; render(); } },
         { label: 'Rename', action: () => dialog('Rename workspace', (close) => { const n = h('input', { value: t.name }); return h('form', { onsubmit: (ev) => { ev.preventDefault(); t.name = n.value; saveLayout(st, l); close(); render(); } }, field('Name', n), h('div', { class: 'row end' }, h('button', { class: 'primary', type: 'submit' }, 'Rename'))); }) },
         { label: 'Close workspace', danger: true, action: () => { l.tabs.splice(i, 1); l.active = Math.min(l.active, l.tabs.length - 1); saveLayout(st, l); render(); } }]); } }, t.name)),
-    h('button', { class: 'tab add', title: 'New workspace', onclick: () => { l.tabs.push({ name: 'workspace ' + (l.tabs.length + 1), tree: null }); l.active = l.tabs.length - 1; saveLayout(st, l); render(); } }, '＋'));
+    h('button', { class: 'tab add', title: 'New layout or workspace', 'aria-label': 'New layout or workspace', onclick: (e) => {
+      const r = e.currentTarget.getBoundingClientRect();
+      showMenu(r.left, r.bottom, [
+        ...(S.projects.get(st) || []).filter(pr => !pr.problem).map(pr => ({ label: `New layout in ${pr.name} (saved with the project)`, action: () => newLayoutDialog(st, pr.name) })),
+        { label: 'New workspace (this browser only)', action: pick(() => { l.tabs.push({ name: 'workspace ' + (l.tabs.length + 1), tree: null }); l.active = l.tabs.length - 1; l.proj = null; }) }]);
+    } }, '＋'),
+    h('span', { class: 'grow' }),
+    key ? h('button', { class: 'tab arrange' + (arranging === key ? ' current' : ''), 'aria-pressed': String(arranging === key), title: 'Move panes around by dragging them', onclick: () => { arranging = arranging === key ? null : key; render(); } }, arranging === key ? 'Done arranging' : 'Arrange') : null);
+
   let content;
-  if (!tab) {
+  if (!ctx) {
     const live = liveAgents(st).sort((a, b) => stateRank(a) - stateRank(b));
     content = h('div', { class: 'deck' }, live.length ? h('div', { class: 'tiles' }, live.map(p => paneTile(st, p))) : h('div', { class: 'empty' }, 'Nothing is running here. Start a pane or a project from the left.'));
     loadThumbs(st, live);
   } else {
-    content = h('div', { class: 'workspace' }, renderTree(st, tab.tree, tab));
+    const bar = ctx.arrange ? h('div', { class: 'arrange-bar' },
+      h('b', {}, 'Arranging'), h('span', {}, 'Drag a pane onto another: its edges put it beside, the middle swaps. Drag panes in from the list on the left.'),
+      h('span', { class: 'grow' }),
+      [['row', 'Side by side'], ['two-over-one', 'Two over one'], ['one-stack', 'One + stack'], ['grid', 'Grid']].map(([k, label]) => h('button', { class: 'mini', onclick: () => { ctx.shape(k); render(); } }, label))) : null;
+    content = h('div', { class: 'workspace-col' }, bar, h('div', { class: 'workspace' + (ctx.arrange ? ' arranging' : '') }, renderTree(st, ctx.tree(), ctx)));
   }
   return h('div', { class: 'station-view' }, sidebar(st), h('main', { class: 'station-main' }, tabs, content));
 }
@@ -967,8 +1186,9 @@ function render() {
 
 // Data changed: redraw everything except live terminals, which are reused.
 function update() {
-  // Do not redraw under an open dialog's feet or while a menu is open.
-  if (document.querySelector('.menu')) return;
+  // Do not redraw under an open dialog's feet, while a menu is open, or in
+  // the middle of dragging a pane or the line between two.
+  if (document.querySelector('.menu') || document.body.classList.contains('dragging')) return;
   const active = document.activeElement;
   const typing = active && active.closest && active.closest('.dialog');
   const focusedTerm = [...S.terms.values()].find(t => t.el.contains(active));

@@ -86,6 +86,9 @@ input, select, textarea { width: 100%; } textarea { resize: vertical; }
 .empty { margin: auto; color: var(--muted); padding: 30px; text-align: center; }
 
 .split { display: flex; flex: 1; min-width: 0; min-height: 0; } .split.col { flex-direction: column; }
+/* A side-by-side split is named "row", which is also the name of a general helper
+   class that centres its children: without this, panes side by side were not full height. */
+.split.row { align-items: stretch; gap: 0; }
 .split-a, .split-b { display: flex; min-width: 0; min-height: 0; }
 .gutter { flex: none; background: var(--line); } .split.row > .gutter { width: 5px; cursor: col-resize; } .split.col > .gutter { height: 5px; cursor: row-resize; }
 .gutter:hover { background: var(--blue); }
@@ -163,3 +166,23 @@ input, select, textarea { width: 100%; } textarea { resize: vertical; }
 #app.kbd .phone-pane .pane { min-height: 0; }
 #app.kbd .composer { padding-bottom: 2px; }
 #app.kbd-term .composer-row { display: none; }
+
+/* Layouts: project layouts, workspaces, arranging */
+.tab.proj { font-weight: 600; }
+.tab.arrange { border: 1px solid var(--line); border-radius: 6px; margin-bottom: 4px; }
+.tab.arrange.current { background: #1f4a7a; color: #fff; border-color: #2f6db3; }
+.workspace-col { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.arrange-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; background: #14304f; color: #cfe5ff; border-bottom: 1px solid var(--line); }
+.arr-wrap { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; }
+.arr { position: absolute; inset: 0; z-index: 3; background: rgba(15, 19, 24, .62); cursor: grab; display: flex; align-items: center; justify-content: center; }
+.empty.arr { position: relative; flex: 1; background: transparent; border: 1px dashed #3d5878; border-radius: 10px; margin: 12px; }
+.arr-card { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.arr-zone { position: absolute; display: none; border: 2px solid var(--blue); background: rgba(108, 182, 255, .18); border-radius: 8px; pointer-events: none; }
+.arr[data-zone] .arr-zone { display: block; }
+.arr[data-zone=left] .arr-zone { left: 0; top: 0; width: 50%; height: 100%; }
+.arr[data-zone=right] .arr-zone { right: 0; top: 0; width: 50%; height: 100%; }
+.arr[data-zone=above] .arr-zone { left: 0; top: 0; width: 100%; height: 50%; }
+.arr[data-zone=below] .arr-zone { left: 0; bottom: 0; width: 100%; height: 50%; }
+.arr[data-zone=swap] .arr-zone { inset: 12%; }
+.arr-ghost { position: fixed; z-index: 50; pointer-events: none; padding: 6px 12px; background: var(--panel); border: 1px solid var(--blue); border-radius: 8px; box-shadow: 0 10px 24px rgba(0, 0, 0, .5); font-weight: 600; }
+.side-pane.draggable { cursor: grab; outline: 1px dashed #3d5878; outline-offset: -2px; }

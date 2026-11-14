@@ -444,6 +444,15 @@ impl Daemon {
                     v
                 }
             }
+            "project.layout.save" => {
+                let layout: crate::project::Layout = p(params
+                    .get("layout")
+                    .ok_or_else(|| invalid("missing layout"))?)?;
+                self.project_layout_save(s(&params, "project")?, layout, by)?
+            }
+            "project.layout.remove" => {
+                self.project_layout_remove(s(&params, "project")?, s(&params, "layout")?, by)?
+            }
             "project.list" => json!(self.projects()),
             "project.get" => self.project_view(s(&params, "name")?)?,
             "project.open" => self.project_open(s(&params, "name")?, by)?,

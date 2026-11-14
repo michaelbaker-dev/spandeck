@@ -64,6 +64,21 @@ To update a station without losing its terminals: install the new release, then
 `spandeck upgrade ~/.local/bin/spandeck`. If the new version does not start properly,
 the station goes back to the one it was running and keeps every terminal.
 
+## Layouts
+
+A project can have named layouts: which of its panes are on screen and how they are
+arranged. They are saved in the project file, so they are the same on every device.
+
+- **New layout:** the `＋` beside the tabs, then "New layout in <project>". It starts
+  with the project's running panes.
+- **Resize:** drag the line between two panes, at any time.
+- **Move panes:** press **Arrange**, then drag a pane onto another. Dropping on an edge
+  puts it on that side; dropping in the middle swaps the two. Drag panes in from the
+  list on the left, or pick a shape (side by side, two over one, one + stack, grid).
+- A pane in a layout that is not running shows a button to start the project's panes.
+
+Workspaces, the other kind of tab, are kept in the browser only and can hold any pane.
+
 ## Looking after stations
 
 From the Control Deck, right-click a station (or use the commands on any station):

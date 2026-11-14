@@ -79,6 +79,64 @@ pub struct VaultSettings {
     pub keys: Vec<String>,
 }
 
+/// One arrangement of a project's panes on screen, saved with the project so
+/// it is the same on every device.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Layout {
+    pub name: String,
+    /// Draw lines between panes whose agents are talking.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lines: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<LayoutNode>,
+}
+
+/// A pane, or two parts side by side (`row`) or one above the other (`col`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum LayoutNode {
+    Pane {
+        /// The pane's name in its project.
+        pane: String,
+        /// Another project's pane shown here as a guest. Empty: this project.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
+    Split {
+        dir: String,
+        /// The first part's share, in thousandths.
+        ratio: u16,
+        a: Box<LayoutNode>,
+        b: Box<LayoutNode>,
+    },
+}
+
+impl LayoutNode {
+    /// (leaves, depth), or why this is not a layout.
+    fn check(&self, depth: u32) -> std::result::Result<u32, String> {
+        if depth > 8 {
+            return Err("a layout is at most 8 splits deep".into());
+        }
+        match self {
+            LayoutNode::Pane { pane, project } => {
+                if !valid_name(pane) || project.as_deref().is_some_and(|p| !valid_name(p)) {
+                    return Err(format!("{pane:?} is not a pane name"));
+                }
+                Ok(1)
+            }
+            LayoutNode::Split { dir, ratio, a, b } => {
+                if dir != "row" && dir != "col" {
+                    return Err("a split is a row or a col".into());
+                }
+                if !(50..=950).contains(ratio) {
+                    return Err("a split's ratio is between 50 and 950 thousandths".into());
+                }
+                Ok(a.check(depth + 1)? + b.check(depth + 1)?)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectFile {
     pub name: String,
@@ -92,6 +150,8 @@ pub struct ProjectFile {
     pub recall: RecallSettings,
     #[serde(default)]
     pub vault: VaultSettings,
+    #[serde(default, rename = "layout", skip_serializing_if = "Vec::is_empty")]
+    pub layouts: Vec<Layout>,
 }
 
 impl ProjectFile {
@@ -254,6 +314,7 @@ impl Daemon {
                     review: Default::default(),
                     recall: Default::default(),
                     vault: Default::default(),
+                    layouts: vec![],
                 };
                 file.save(&dir)?;
                 file
@@ -313,6 +374,67 @@ impl Daemon {
             .iter()
             .filter_map(|n| self.project_view(n).ok())
             .collect()
+    }
+
+    /// Save (or replace) one of a project's layouts in its project file.
+    pub fn project_layout_save(&self, project: &str, layout: Layout, by: &str) -> Result<Value> {
+        if !valid_name(&layout.name) {
+            return Err(invalid("layout names use letters, digits, - _ . only"));
+        }
+        if let Some(tree) = &layout.tree {
+            let leaves = tree.check(0).map_err(invalid)?;
+            if leaves > 16 {
+                return Err(invalid("a layout holds at most 16 panes"));
+            }
+        }
+        let (path, mut file) = self.project_file(project)?;
+        match file.layouts.iter_mut().find(|l| l.name == layout.name) {
+            Some(existing) => {
+                if *existing == layout {
+                    return Ok(
+                        json!({"project": project, "layout": layout.name, "changed": false}),
+                    );
+                }
+                *existing = layout.clone();
+            }
+            None => {
+                if file.layouts.len() >= 24 {
+                    return Err(invalid("a project holds at most 24 layouts"));
+                }
+                file.layouts.push(layout.clone());
+            }
+        }
+        file.save(&path)?;
+        self.record(
+            "project.layout",
+            None,
+            Some(project),
+            None,
+            Some(by),
+            json!({"layout": layout.name, "saved": true}),
+        );
+        self.emit("project.updated", None, Some(project), json!({}));
+        Ok(json!({"project": project, "layout": layout.name, "changed": true}))
+    }
+
+    pub fn project_layout_remove(&self, project: &str, name: &str, by: &str) -> Result<Value> {
+        let (path, mut file) = self.project_file(project)?;
+        let before = file.layouts.len();
+        file.layouts.retain(|l| l.name != name);
+        if file.layouts.len() == before {
+            return Err(Error::NotFound(format!("layout {name} in {project}")));
+        }
+        file.save(&path)?;
+        self.record(
+            "project.layout",
+            None,
+            Some(project),
+            None,
+            Some(by),
+            json!({"layout": name, "removed": true}),
+        );
+        self.emit("project.updated", None, Some(project), json!({}));
+        Ok(json!({"project": project, "removed": name}))
     }
 
     pub fn project_view(&self, name: &str) -> Result<Value> {
