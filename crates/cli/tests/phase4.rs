@@ -104,3 +104,42 @@ fn the_command_line_creates_a_project_in_the_current_folder() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("cli-proj@alpha"));
     assert_eq!(s.pane("sh")["project"], json!("cli-proj"));
 }
+
+/// A bug that happened: a new project in `~/some/new/folder` was refused,
+/// because `~` was taken literally and the folder did not exist yet.
+#[test]
+fn a_project_can_be_made_in_a_home_folder_that_does_not_exist_yet() {
+    let s = Station::start("alpha");
+    let v = s.call(
+        "project.new",
+        json!({"path": "~/code/test/fresh", "panes": [{"name": "sh", "agent": "shell"}], "open": true}),
+    );
+    assert_eq!(v["name"], json!("fresh"));
+    let dir = s.root.join("home/code/test/fresh");
+    assert!(dir.join(".spandeck/project.toml").is_file());
+    assert!(
+        dir.join(".git").exists(),
+        "a new folder starts as a git repository"
+    );
+    // A pane's folder understands ~ too.
+    let pane = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "cwd": "~/code/test"}),
+    );
+    assert!(
+        pane["cwd"].as_str().unwrap().ends_with("home/code/test"),
+        "{pane}"
+    );
+    // Two panes cannot share a name, and the message says so.
+    let err = s
+        .try_call(
+            "project.new",
+            json!({"path": "~/twins", "panes": [{"name": "dev", "agent": "shell"}, {"name": "dev", "agent": "shell"}]}),
+        )
+        .unwrap_err();
+    assert!(err.message.contains("its own name"), "{}", err.message);
+    assert!(
+        !s.root.join("home/twins").exists(),
+        "nothing is left behind"
+    );
+}

@@ -220,6 +220,7 @@ impl Daemon {
                 if let (Some(project), None) = (&opts.project, &opts.cwd) {
                     opts.cwd = self.project_path(project).map(PathBuf::from);
                 }
+                opts.cwd = opts.cwd.map(|c| self.expand_path(&c));
                 let pane = self.spawn_pane(opts)?;
                 self.write_instructions(&pane.meta());
                 pane.view(&self.station)

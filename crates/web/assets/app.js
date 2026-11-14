@@ -224,9 +224,9 @@ function newProjectDialog(st) {
       go(stationUrl(st));
     };
     return h('form', { onsubmit: (e) => { e.preventDefault(); submit(); } },
-      field('Folder on ' + st, path, 'A folder that already has .spandeck/project.toml is opened as it is.'),
+      field('Folder on ' + st, path, '~ is your home folder. A folder that is not there yet is created. One that already has .spandeck/project.toml is opened as it is.'),
       field('Name', name),
-      h('div', { class: 'field' }, h('span', {}, 'Panes to start'), rows, h('button', { type: 'button', class: 'mini', onclick: () => addRow() }, '＋ Add a pane')),
+      h('div', { class: 'field' }, h('span', {}, 'Panes to start'), rows, h('button', { type: 'button', class: 'mini', onclick: () => { const used = [...rows.querySelectorAll('input[aria-label="Pane name"]')].map(i => i.value.trim()); let n = 2; while (used.includes('dev' + n)) n += 1; addRow(used.includes('dev') ? 'dev' + n : 'dev'); } }, '＋ Add a pane')),
       h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel'), h('button', { class: 'primary', type: 'submit' }, 'Create and open')));
   });
 }

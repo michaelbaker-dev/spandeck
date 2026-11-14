@@ -933,6 +933,22 @@ impl Daemon {
         Ok(())
     }
 
+    /// A folder as the user typed it: `~` and `~/x` are under the home folder,
+    /// and a path with no leading `/` is too.
+    pub fn expand_path(&self, path: &std::path::Path) -> PathBuf {
+        let text = path.to_string_lossy();
+        let text = text.trim();
+        if text == "~" {
+            self.home.clone()
+        } else if let Some(rest) = text.strip_prefix("~/") {
+            self.home.join(rest)
+        } else if path.is_absolute() {
+            PathBuf::from(text)
+        } else {
+            self.home.join(text)
+        }
+    }
+
     /// Paste text into a pane the way a terminal does. A program that asked
     /// for pastes to be marked (Claude Code, Codex, modern shells) gets the
     /// text as one paste, line breaks kept. Otherwise an agent gets it as one

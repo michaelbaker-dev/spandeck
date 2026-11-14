@@ -166,12 +166,41 @@ impl Daemon {
         panes: Vec<PaneSlot>,
         by: &str,
     ) -> Result<Value> {
-        if !dir.is_dir() {
+        // `~` means the home folder, as in a shell.
+        let dir = self.expand_path(dir);
+        if dir.exists() && !dir.is_dir() {
             return Err(invalid(format!(
-                "{} is not a folder on this station",
+                "{} is a file, not a folder",
                 dir.display()
             )));
         }
+        // A folder that is not there yet is made, as a new git repository:
+        // helpers that write get their own worktree, which needs one.
+        let created = !dir.exists();
+        if created {
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| invalid(format!("could not create {}: {e}", dir.display())))?;
+            let _ = std::process::Command::new("git")
+                .arg("init")
+                .arg("-q")
+                .arg(&dir)
+                .status();
+        }
+        let out = self.project_new_in(&dir, name, panes, by);
+        // Nothing is left behind by a project that could not be made.
+        if out.is_err() && created {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        out
+    }
+
+    fn project_new_in(
+        &self,
+        dir: &Path,
+        name: Option<String>,
+        panes: Vec<PaneSlot>,
+        by: &str,
+    ) -> Result<Value> {
         let dir = dir.canonicalize()?;
         let file = match ProjectFile::load(&dir) {
             Ok(existing) if name.as_ref().is_none_or(|n| *n == existing.name) => existing,
@@ -195,7 +224,7 @@ impl Daemon {
                 for p in &panes {
                     if !valid_name(&p.name) || !seen.insert(p.name.clone()) {
                         return Err(invalid(format!(
-                            "pane name {:?} is invalid or repeated",
+                            "pane name {:?} is used twice or is not a name (letters, digits, - _ . only). Give each pane its own name.",
                             p.name
                         )));
                     }
