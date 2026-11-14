@@ -134,6 +134,15 @@ impl FleetState {
                 return r.clone();
             }
         }
+        // A connection from this machine's own Tailscale address is a local
+        // process, not the owner at another device: it needs a token, like
+        // localhost. Otherwise any local program could act as the owner.
+        if self
+            .tailnet_self()
+            .is_some_and(|me| me.ips.iter().any(|i| i.parse::<IpAddr>().ok() == Some(ip)))
+        {
+            return Remote::Loopback;
+        }
         let remote = match (self.tailnet_self(), tailscale_whois(ip)) {
             (Some(me), Some(who)) => {
                 let uid = who.pointer("/UserProfile/ID").and_then(|v| v.as_i64());

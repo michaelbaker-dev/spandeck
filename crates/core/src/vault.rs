@@ -101,7 +101,11 @@ impl Daemon {
             .open(&tmp)?;
         f.write_all(token.as_bytes())?;
         f.sync_all()?;
-        std::fs::rename(&tmp, self.vault_token_file())
+        std::fs::rename(&tmp, self.vault_token_file())?;
+        if let Some(base) = self.vault_base() {
+            self.db.kv_set("vault.base", &base);
+        }
+        Ok(())
     }
 
     pub fn vault_connected(&self) -> bool {
@@ -204,8 +208,10 @@ impl Daemon {
                         .and_then(|t| t.as_array())
                         .is_some_and(|t| !t.is_empty());
                     let online = node.get("Online").and_then(|o| o.as_bool()).unwrap_or(true);
-                    // The vault machine may be tagged: it then belongs to nobody.
-                    if (mine || tagged) && online {
+                    // Only the owner's own machines are asked. A tagged machine
+                    // belongs to nobody, so a vault on one is named in the config.
+                    let _ = tagged;
+                    if mine && online {
                         if let Some(dns) = node
                             .get("DNSName")
                             .and_then(|d| d.as_str())
@@ -222,6 +228,13 @@ impl Daemon {
         if let Some(known) = self.vault.seen.lock().unwrap().base.clone() {
             candidates.retain(|c| *c != known);
             candidates.insert(0, known);
+        }
+        // A station that holds a token talks only to the vault that issued it,
+        // so no other machine can ask for the token by claiming to be a vault.
+        if self.cfg.vault.url.is_none() && self.vault_token().is_some() {
+            if let Some(pinned) = self.db.kv_get("vault.base").filter(|b| !b.is_empty()) {
+                candidates = vec![pinned];
+            }
         }
         let mut found: Option<(String, Value)> = None;
         for base in candidates {
@@ -460,7 +473,7 @@ impl Daemon {
         } else {
             url.to_string()
         };
-        if !approve_url.starts_with(&base) {
+        if !same_origin(&approve_url, &base) {
             return Err(invalid(
                 "the vault returned an approval address that is not on the vault",
             ));
@@ -553,6 +566,7 @@ impl Daemon {
 
     pub fn vault_disconnect(&self, by: &str) -> Result<Value> {
         let _ = std::fs::remove_file(self.vault_token_file());
+        self.db.kv_set("vault.base", "");
         *self.vault.pending.lock().unwrap() = None;
         self.vault.seen.lock().unwrap().token_ok = None;
         self.record("vault.disconnected", None, None, None, Some(by), json!({}));
@@ -644,6 +658,7 @@ impl Daemon {
 
     fn vault_check_name(&self, caller: &Caller, name: &str) -> Result<()> {
         if name.is_empty()
+            || name.contains("..")
             || !name
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
@@ -686,7 +701,13 @@ impl Daemon {
         self.vault_check_name(caller, name)?;
         let (base, token) = self.vault_ready()?;
         let path = path.trim_start_matches('/');
+        // An encoded dot or slash would let a path climb out of this key's
+        // proxy to the vault's own API, which answers to the station's token.
+        let lower = path.to_ascii_lowercase();
         if path.contains("..")
+            || ["%2e", "%2f", "%5c", "%25"]
+                .iter()
+                .any(|e| lower.contains(e))
             || path.contains("://")
             || path.contains('\\')
             || path.chars().any(|c| c.is_control())
@@ -714,10 +735,16 @@ impl Daemon {
             }
             None => format!("owner@{}", self.station),
         };
+        // Check where the request really goes after the address is parsed.
+        let prefix = format!("/v1/proxy/{name}/");
+        let url = reqwest::Url::parse(&format!("{base}{prefix}{path}"))
+            .ok()
+            .filter(|u| same_origin(u.as_str(), &base) && u.path().starts_with(&prefix))
+            .ok_or_else(|| invalid("that path is not allowed"))?;
         let mut req = self
             .fleet
             .http
-            .request(m, format!("{base}/v1/proxy/{name}/{path}"))
+            .request(m, url)
             .timeout(Duration::from_secs(120))
             .bearer_auth(&token)
             .header("x-agentvault-actor", &actor);
@@ -815,6 +842,18 @@ fn describe_hours(h: Option<u64>) -> String {
         None => "never".into(),
         Some(1) => "every hour".into(),
         Some(n) => format!("every {n} hours"),
+    }
+}
+
+/// Whether two addresses share a scheme, host and port.
+fn same_origin(a: &str, b: &str) -> bool {
+    match (reqwest::Url::parse(a), reqwest::Url::parse(b)) {
+        (Ok(a), Ok(b)) => {
+            a.scheme() == b.scheme()
+                && a.host_str() == b.host_str()
+                && a.port_or_known_default() == b.port_or_known_default()
+        }
+        _ => false,
     }
 }
 

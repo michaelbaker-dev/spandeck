@@ -454,14 +454,31 @@ impl Daemon {
             }
 
             // --------------------------------------------------------- tasks
-            "delegate" => self.delegate(
-                caller,
-                s(&params, "role")?,
-                s(&params, "task")?,
-                opt(&params, "acceptance").unwrap_or(""),
-                opt(&params, "project"),
-                None,
-            )?,
+            "delegate" => {
+                // An agent delegates inside its own project only.
+                if !caller.is_owner() {
+                    if let Some(asked) = opt(&params, "project") {
+                        let own = caller
+                            .pane
+                            .as_ref()
+                            .and_then(|id| self.pane(id).ok())
+                            .and_then(|p| p.meta().project);
+                        if own.as_deref() != Some(asked) {
+                            return Err(Error::Denied(
+                                "an agent can delegate only within its own project".into(),
+                            ));
+                        }
+                    }
+                }
+                self.delegate(
+                    caller,
+                    s(&params, "role")?,
+                    s(&params, "task")?,
+                    opt(&params, "acceptance").unwrap_or(""),
+                    opt(&params, "project"),
+                    None,
+                )?
+            }
             "task.result" => {
                 let findings: Vec<String> = params
                     .get("findings")
@@ -632,7 +649,7 @@ impl Daemon {
             "rpc.forward" => {
                 // The user's request, made at a Control Deck on another station.
                 let inner = s(&params, "method")?;
-                if matches!(inner, "rpc.forward" | "station.upgrade") {
+                if matches!(inner, "rpc.forward" | "peer.call" | "station.upgrade") {
                     return Err(Error::Denied(format!("{inner} cannot be forwarded")));
                 }
                 let as_owner = Caller {

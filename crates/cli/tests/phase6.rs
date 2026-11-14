@@ -201,6 +201,23 @@ fn going_quiet_does_not_complete_a_task_only_a_result_does() {
         (Some("tester"), Some("demo/lead"), Some("alpha"))
     );
 
+    // Found in review before release: an agent could start a helper in any
+    // project by naming it, and so reach that project's files and keys.
+    project(
+        &s,
+        "other",
+        &[("tester", "same-tree", json!({"steps": []}))],
+        "",
+    );
+    let err = s
+        .call_as_pane(
+            &lead,
+            "delegate",
+            json!({"role": "tester", "task": "look around", "project": "other"}),
+        )
+        .unwrap_err();
+    assert_eq!(err.code, "denied");
+
     // Helpers cannot delegate further (depth 1).
     let err = s
         .call_as_pane(

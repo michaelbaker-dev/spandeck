@@ -53,8 +53,8 @@ spandeck project new --pane dev:claude:author   # in a repo
 
 From another device on your tailnet, open `http://<station>:7391/`. No token is needed
 there: the station asks Tailscale who is connecting, and only your own Tailscale login
-gets control. On the station itself, use the address `spandeck cc` prints (it carries a
-local token).
+gets control. On the station itself, always use the address `spandeck cc` prints (it
+carries a local token), even when you open it by its Tailscale name.
 
 For a phone, or any HTTPS need: `tailscale serve --bg 7391` and open the HTTPS name with
 the token from `spandeck cc` appended as `#token=…` once.

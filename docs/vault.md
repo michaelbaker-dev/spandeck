@@ -8,8 +8,9 @@ agents call provider APIs through spandeckd.
 ## Connect a station
 
 1. Run AgentVault on a machine in your tailnet, served over HTTPS on port 443.
-2. In the Control Deck, open **Vault**. spandeck looks for the vault among your Tailscale
-   machines. To name it yourself, add this to `~/.config/spandeck/config.toml`:
+2. In the Control Deck, open **Vault**. spandeck looks for the vault among the machines
+   signed in to your own Tailscale login. A vault on a tagged machine is not searched
+   for; name it yourself in `~/.config/spandeck/config.toml`:
    ```toml
    [vault]
    url = "https://vault-machine.your-tailnet.ts.net"
@@ -17,6 +18,9 @@ agents call provider APIs through spandeckd.
 3. Click **Connect** on a station. A small window opens on the vault's own page. Check
    the station name, approve, and the window closes. The vault passphrase is only ever
    typed there, never into the Control Deck.
+
+Once connected, the station talks only to the vault that issued its token. If the vault
+moves to another address, disconnect and connect again.
 
 The station now holds a token named `spandeck:<machine name>`. It is saved in spandeck's
 state folder, readable only by you. It can list keys and send requests through the vault,

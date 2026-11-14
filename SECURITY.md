@@ -15,7 +15,8 @@ days, not hours.
   address. It does not listen on your LAN or the internet unless you change `web_bind`.
 - **Who is trusted.** A connection over Tailscale is identified by asking the local
   Tailscale daemon who owns the connecting address. Only the same Tailscale login that
-  runs the station gets control. Identity headers are never trusted. A connection from
+  runs the station gets control, and only from another device: a connection from the
+  station's own address needs the local token. Identity headers are never trusted. A connection from
   localhost needs the station's local token.
 - **What that means.** Anyone who can sign in to your Tailscale account, or run code as
   your user on a station, controls every station. Other people's devices on a shared
@@ -34,6 +35,13 @@ days, not hours.
 
 ## Known limits
 
+- **Any program on one of your devices can act as you on your other stations.** A
+  station identifies a Tailscale connection by device and login, not by which program
+  or which user account on that device made it. So a program on your laptop, including
+  an agent running there, can call another station's API as the owner without a token.
+  Calls to a station from itself do need a token. Do not run spandeck on a machine that
+  other people have accounts on, and do not sign untrusted devices in to your Tailscale
+  login. Closing this needs a shared secret between stations and is planned.
 - No sandbox. An agent runs with your user's permissions; spandeck observes and can
   block tool calls through hooks, but a determined or confused agent is limited by your
   operating system account, not by spandeck.

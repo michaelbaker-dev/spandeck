@@ -236,6 +236,27 @@ fn agents_use_keys_through_the_vault_within_their_projects_list() {
             json!({"name": "OPENAI_API_KEY", "path": "/../GITHUB_TOKEN/user"})
         )
         .is_err());
+    // Found in review before release: an encoded "../" climbed out of the
+    // key's proxy to the vault's own API, which hands out the station's token.
+    for path in [
+        "%2e%2e/%2e%2e/tokens/self/rotate",
+        "%2E%2E/GITHUB_TOKEN/user",
+        "a%2f..%2f..%2ftokens/self",
+        "%252e%252e/tokens/self",
+    ] {
+        let err = s
+            .call_as_pane(
+                &dev,
+                "vault.call",
+                json!({"name": "OPENAI_API_KEY", "path": path, "method": "POST"}),
+            )
+            .unwrap_err();
+        assert!(
+            err.message.contains("not allowed"),
+            "{path}: {}",
+            err.message
+        );
+    }
     assert_eq!(vault.calls().len(), 1);
 
     // The ship's log says who used which key, and nothing about what was sent.
