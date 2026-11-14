@@ -173,10 +173,16 @@ impl Station {
         } else {
             "prices.auto = false\n"
         };
+        // A program that only waits stands in for the keep-awake helper.
+        let wait = if spandeck_terminal::sys::WINDOWS {
+            r#"["ping", "-n", "300", "127.0.0.1"]"#
+        } else {
+            r#"["sleep", "300"]"#
+        };
         std::fs::write(
             root.join("config/config.toml"),
             format!(
-                "station = \"{name}\"\nweb_port = {port}\nweb_bind = [\"127.0.0.1\"]\ndiscovery = false\nkeep_awake_cmd = [\"sleep\", \"300\"]\n{prices}{}\n[agents.fake]\nprogram = '{FAKE}'\n{}\n",
+                "station = \"{name}\"\nweb_port = {port}\nweb_bind = [\"127.0.0.1\"]\ndiscovery = false\nkeep_awake_cmd = {wait}\n{prices}{}\n[agents.fake]\nprogram = '{FAKE}'\n{}\n",
                 top.join(""),
                 tables
                     .join("")

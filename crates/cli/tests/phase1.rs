@@ -33,7 +33,7 @@ fn spawn_type_read_and_resize_through_the_local_api() {
 #[test]
 fn the_api_refuses_a_missing_or_wrong_token() {
     let s = Station::start("alpha");
-    let sock = s.root.join("state/spandeckd.sock");
+    let sock = s.paths().socket();
     let mut c = spandeck_core::client::Client::connect(&sock, "not-the-token").unwrap();
     let err = c.call("pane.list", json!({})).unwrap_err();
     assert_eq!(err.code, "denied");
@@ -314,11 +314,16 @@ fn an_upgrade_to_an_incompatible_binary_is_refused_and_changes_nothing() {
     let s = Station::start("alpha");
     let pane = s.fake(json!({"steps": []}), json!({}));
     s.wait_text(&pane, "[fake] session");
-    // Any program that is not spandeck. macOS keeps `true` in /usr/bin.
-    let not_spandeck = ["/bin/true", "/usr/bin/true"]
-        .into_iter()
-        .find(|p| std::path::Path::new(p).exists())
-        .expect("a `true` binary");
+    // Any program that is not spandeck. macOS keeps `true` in /usr/bin;
+    // Windows has no `true`, and `whoami` does as well.
+    let not_spandeck = [
+        "/bin/true",
+        "/usr/bin/true",
+        r"C:\Windows\System32\whoami.exe",
+    ]
+    .into_iter()
+    .find(|p| std::path::Path::new(p).exists())
+    .expect("a `true` binary");
     let err = s
         .try_call("station.upgrade", json!({"binary": not_spandeck}))
         .unwrap_err();
@@ -427,7 +432,12 @@ fn a_panes_usage_follows_its_session_file_is_priced_and_survives_a_restart() {
     let session = s.pane(&pane)["session_id"].as_str().unwrap().to_string();
     s.kill9();
     s.launch();
-    s.wait_text(&pane, &format!("[fake] RESUMED {session}"));
+    if spandeck_terminal::sys::PANE_HOST {
+        // The pane host kept the pane: the same program, the same screen.
+        s.wait_text(&pane, &format!("[fake] session {session}"));
+    } else {
+        s.wait_text(&pane, &format!("[fake] RESUMED {session}"));
+    }
     let after = wait_for_or(
         "the same usage after the restart",
         15,
