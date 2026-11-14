@@ -96,6 +96,7 @@ async function refresh() {
   try { S.deck = await api.call('deck.get'); } catch (e) { /* keep */ }
   S.loaded = true;
   update();
+  vaultAtOpen();
   migrateWorkspaces();
 }
 
@@ -632,11 +633,83 @@ async function setupPanel() {
 
 const VAULT_LABEL = { connected: 'connected', not_connected: 'not connected', locked: 'vault locked', unreachable: 'vault unreachable', token_rejected: 'token refused' };
 
+// What the station's last check found wrong, in its own sentence.
+const vaultBroken = (v) => (v?.checks || []).find(c => !c.ok);
+
 function vaultChip(s) {
   const v = s.vault;
   if (!v || !v.found) return null;
-  const cls = v.state === 'connected' ? 'ok' : v.state === 'not_connected' ? '' : 'warn';
-  return h('span', { class: 'chip vault-chip ' + cls, title: v.problem || 'AgentVault' }, 'vault: ' + (VAULT_LABEL[v.state] || v.state));
+  const broken = v.health === 'problem' ? vaultBroken(v) : null;
+  const cls = v.state === 'connected' && !broken ? 'ok' : v.state === 'not_connected' ? '' : 'warn';
+  const label = v.state === 'connected' && broken ? 'needs a look' : VAULT_LABEL[v.state] || v.state;
+  return h('span', { class: 'chip vault-chip ' + cls, title: broken?.detail || v.problem || 'AgentVault' }, 'vault: ' + label);
+}
+
+// Ask every station to check its vault now. `opened` is this page saying it
+// has just opened: a station then checks at most once a minute.
+const vaultCheckAll = (opened) => Promise.all(onlineStations().map(st =>
+  api.on(st, 'vault.check', opened ? { opened: true } : {}).then(v => ({ st, v })).catch((e) => { if (!opened) toast(`${st}: ${e.message}`, 'error'); return null; })))
+  .then(all => all.filter(Boolean));
+
+// When the Control Deck opens: each station checks its vault and repairs what
+// it can. A station that found a vault and has no working token is offered
+// once, in a bar that blocks nothing. "Not now" is kept by the station.
+let vaultAsked = false;
+async function vaultAtOpen() {
+  if (vaultAsked) return;
+  vaultAsked = true;
+  const want = (await vaultCheckAll(true)).filter(x => x.v && x.v.prompt);
+  if (want.length && !isPhone()) vaultPrompt(want.map(x => x.st), want[0].v.url);
+  // Nothing in the deck reads this; a test waits on it to know the question was settled.
+  document.body.dataset.vaultAsked = '1';
+  refreshSoon();
+}
+
+let vaultPromptBox = null;
+function vaultPrompt(stations, url) {
+  const who = stations.length === 1 ? `${stations[0]} is` : `${stations.slice(0, -1).join(', ')} and ${stations[stations.length - 1]} are`;
+  const gone = () => { if (vaultPromptBox) vaultPromptBox.remove(); vaultPromptBox = null; };
+  gone();
+  vaultPromptBox = h('div', { class: 'vault-prompt', role: 'region', 'aria-label': 'Connect to your vault', dataset: { stations: stations.join(',') } },
+    h('div', { class: 'grow' },
+      h('b', {}, 'Your AgentVault is on the network'),
+      h('div', { class: 'muted' }, `${who} not connected to the vault at ${url}, so agents there cannot use your keys. You approve once, on the vault's own page.`)),
+    h('button', { class: 'primary', onclick: () => { gone(); vaultConnect(stations); } }, stations.length > 1 ? 'Connect all' : 'Connect'),
+    h('button', { onclick: () => {
+      gone();
+      Promise.all(stations.map(st => api.on(st, 'vault.prompt', { dismissed: true }).catch(() => {}))).then(() => refreshSoon());
+      toast('You can connect at any time from the Vault screen.');
+    } }, 'Not now'));
+  document.body.append(vaultPromptBox);
+}
+// The bar goes once none of its stations needs it: connected from elsewhere, say.
+function vaultPromptSync() {
+  if (!vaultPromptBox) return;
+  const names = vaultPromptBox.dataset.stations.split(',');
+  if (!S.fleet.stations.some(s => names.includes(s.station) && s.vault?.prompt)) { vaultPromptBox.remove(); vaultPromptBox = null; }
+}
+
+// The one thing that fixes a failed check. `a` is the station's data: its
+// label is inserted as text, and only an http(s) address is ever opened.
+function vaultAction(st, a) {
+  if (!a) return null;
+  const run = a.kind === 'connect' ? () => vaultConnect([st])
+    : a.kind === 'open' ? () => { if (/^https?:\/\//.test(a.url || '')) window.open(a.url, 'spandeck-vault', 'popup,width=540,height=700'); }
+    : () => vaultCheckAll().then(() => refresh());
+  return h('button', { class: a.kind === 'connect' ? 'mini primary' : 'mini', onclick: run }, a.label || 'Fix');
+}
+
+// One station's chain from an agent to a key, as it last checked it.
+function vaultChecks(s) {
+  const v = s.vault || {};
+  if (s.state !== 'online' || !(v.checks || []).length) return null;
+  return h('div', { class: 'vault-checks', dataset: { station: s.station } },
+    h('h3', {}, `Checks on ${s.station}`, v.checked_ms ? h('small', { class: 'muted' }, ` · checked ${ago(v.checked_ms)} ago`) : null),
+    h('table', { class: 'table' }, h('tbody', {}, v.checks.map(c => h('tr', { class: c.ok ? '' : 'broken' },
+      h('td', {}, h('span', { class: 'chip ' + (c.ok ? 'ok' : 'warn') }, c.ok ? 'ok' : 'fix')),
+      h('td', {}, c.name),
+      h('td', { class: c.ok ? 'muted' : '' }, c.detail),
+      h('td', {}, c.ok ? null : vaultAction(s.station, c.action)))))));
 }
 
 // Opened at the moment of the click (or the browser blocks it), pointed at
@@ -680,6 +753,8 @@ function vaultPanel() {
               h('td', {}, s.state !== 'online' ? h('span', { class: 'muted' }, 'station ' + s.state.replace('_', ' ')) : vaultChip(s) || h('span', { class: 'muted' }, 'no vault found'),
                 v.pending ? h('small', { class: 'muted block' }, 'Waiting for your approval on the vault…') : null,
                 v.problem && v.state !== 'connected' ? h('small', { class: 'warn-text block' }, v.problem) : null,
+                v.prompt_dismissed && ['not_connected', 'token_rejected'].includes(v.state) ? h('small', { class: 'muted block' }, 'You are not reminded about this when the Control Deck opens. ',
+                  h('button', { class: 'mini', onclick: () => rpc(s.station, 'vault.prompt', { dismissed: false }).then(() => toast(`You will be reminded about ${s.station} again`)) }, 'Remind me again')) : null,
                 v.state === 'connected' && v.vault_rotation_hours !== v.rotation_hours && v.vault_rotation_hours !== undefined && (v.vault_rotation_hours ?? null) !== (v.rotation_hours ?? null) ? h('small', { class: 'warn-text block' }, 'The vault has a different rotation setting than this one.') : null),
               h('td', {}, rotation, v.next_rotation_ms && v.rotation_hours ? h('small', { class: 'muted block' }, 'next ' + new Date(v.next_rotation_ms).toLocaleString()) : null),
               h('td', {}, !can(s) ? null
@@ -687,8 +762,9 @@ function vaultPanel() {
                 : v.state === 'locked' || v.state === 'unreachable' ? h('span', { class: 'muted' }, v.state === 'locked' ? 'Unlock the vault first' : '')
                 : h('button', { class: 'primary', onclick: () => vaultConnect([s.station]) }, 'Connect')));
           }))),
+        stations.map(vaultChecks),
         h('div', { class: 'row end' },
-          h('button', { onclick: () => rpc(api.station, 'vault.refresh').then(() => refresh()) }, 'Check now'),
+          h('button', { title: 'Each station checks the vault\'s address, its lock, its own token, the keys and what its panes need, and repairs what it can', onclick: (e) => { e.target.disabled = true; vaultCheckAll().then(() => refresh()).then(draw); } }, 'Check again'),
           h('span', { class: 'grow' }),
           unconnected.length > 1 ? h('button', { class: 'primary', onclick: () => vaultConnect(unconnected) }, 'Connect all stations') : null,
           h('button', { onclick: close }, 'Close'))));
@@ -823,7 +899,7 @@ function topbar() {
     (S.trust?.requests?.length || S.trust?.outgoing) || !isPhone() ? h('button', { class: S.trust?.requests?.length ? 'attn' : '', onclick: trustPanel, title: 'Stations and browsers allowed to control your fleet' }, 'Access', S.trust?.requests?.length ? h('span', { class: 'count' }, S.trust.requests.length) : null) : null,
     isPhone() ? null : h('button', { onclick: fleetUsageDialog, title: 'Tokens and estimated cost, per station, project, pane and model' }, 'Usage'),
     isPhone() ? null : h('button', { onclick: setupPanel, title: 'MCP servers, skills and model defaults for every agent' }, 'Agent setup'),
-    isPhone() || !S.fleet.stations.some(x => x.vault?.found) ? null : h('button', { class: S.fleet.stations.some(x => x.state === 'online' && ['not_connected', 'token_rejected', 'locked'].includes(x.vault?.state)) ? 'attn' : '', onclick: vaultPanel, title: 'AgentVault: keys for agents without handing over keys' }, 'Vault'),
+    isPhone() || !S.fleet.stations.some(x => x.vault?.found) ? null : h('button', { class: S.fleet.stations.some(x => x.state === 'online' && (['not_connected', 'token_rejected', 'locked'].includes(x.vault?.state) || x.vault?.health === 'problem')) ? 'attn' : '', onclick: vaultPanel, title: 'AgentVault: keys for agents without handing over keys' }, 'Vault'),
     h('button', { class: 'danger', onclick: stopAllMenu, title: 'Interrupt running agent turns' }, 'Stop all'),
     isPhone() ? null : h('button', { onclick: palette, title: 'Ctrl+K' }, '⌘K'));
 }
@@ -2061,6 +2137,7 @@ function update() {
   const focusedTerm = [...S.terms.values()].find(t => t.el.contains(active));
   render();
   if (focusedTerm && !typing) focusedTerm.focus();
+  vaultPromptSync();
   // How many times the page was redrawn for new data. Nothing in the deck
   // reads it; a test waits on it instead of sleeping through a redraw.
   root.dataset.draws = String(++draws);

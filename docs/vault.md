@@ -19,8 +19,13 @@ agents call provider APIs through spandeckd.
    the station name, approve, and the window closes. The vault passphrase is only ever
    typed there, never into the Control Deck.
 
-Once connected, the station talks only to the vault that issued its token. If the vault
-moves to another address, disconnect and connect again.
+A Control Deck that opens on a station that found a vault and is not connected offers to
+connect it, once, in a bar at the top. **Not now** is remembered by the station; the Vault
+screen has **Remind me again**.
+
+Once connected, the station talks to the vault that issued its token. If the vault moves
+to another address, the station looks for it among your machines when the old address
+stops answering, follows the one that still accepts its token, and tells you it did.
 
 The station now holds a token named `spandeck:<machine name>`. It is saved in spandeck's
 state folder, readable only by you. It can list keys and send requests through the vault,
@@ -45,6 +50,30 @@ keys = ["OPENAI_API_KEY", "github-*"]
 ```
 
 To narrow a whole station, limit its token at the vault.
+
+## Checks
+
+spandeckd checks the whole chain when it starts, when a Control Deck opens and when you
+press **Check again** on the Vault screen. The screen lists each check per station;
+`spandeck doctor` has a `vault` line; `spandeck rpc vault.check` runs it from a terminal.
+
+| Check | What is looked at | Repaired without you |
+| --- | --- | --- |
+| Vault address | AgentVault answers at the address the station has | A vault that moved is found again |
+| Vault unlocked | The vault says it is unlocked | No: unlock it on the vault's page |
+| Station token | The vault accepts the token, and has it tied to a machine | A token overdue for rotation is swapped. A revoked one is not: **Reconnect**, and approve at the vault |
+| Keys for agents | The token can list keys, as an agent's `vault_list` does | No |
+| Agent panes | spandeck's program and socket, which every agent's vault tools use; Antigravity's plugin | Antigravity's plugin is rewritten |
+
+A problem found is put in your inbox once, not on every check.
+
+To turn the integration off on a station, or to add addresses to the search:
+
+```toml
+[vault]
+enabled = false                      # no vault is looked for or mentioned
+search = ["https://host.example:8443"]   # asked as well as your Tailscale machines
+```
 
 ## Rotation
 
@@ -82,7 +111,7 @@ the vault's Tokens page to end it at the vault too.
 | `GET /v1/status` | Find the vault: `service: "agentvault"`, `version`, `sealed` |
 | `POST /v1/token-requests` | Ask for a token; returns `request_id`, `approve_url`, `collect_code` |
 | `GET /v1/token-requests/{id}` with `X-Collect-Code` | Poll, then collect the token once; 404 after that |
-| `GET /v1/tokens/self` | The token's own scopes and rotation setting |
+| `GET /v1/tokens/self` | The token's own scopes, rotation setting and `nodes` (the machines it is tied to) |
 | `PUT /v1/tokens/self/rotation`, `POST /v1/tokens/self/rotate` | Set the interval; swap the token |
 | `GET /v1/secrets`, `GET /v1/secrets/{name}` | Key names and descriptions, never values |
 | `/v1/proxy/{name}/…` | Send a request with the key attached by the vault |

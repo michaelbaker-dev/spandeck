@@ -72,6 +72,8 @@ fn a_station_connects_only_when_the_owner_approves_on_the_vault() {
         ("vault.connect", json!({})),
         ("vault.rotation", json!({"every_hours": 1})),
         ("vault.disconnect", json!({})),
+        ("vault.check", json!({})),
+        ("vault.prompt", json!({"dismissed": true})),
     ] {
         assert_eq!(
             s.call_as_pane(&agent, m, p).unwrap_err().code,
@@ -556,6 +558,294 @@ fn the_control_deck_connects_a_station_through_a_pop_up_on_the_vault() {
     wait_for("the setting to reach the vault", 10, || {
         (s.call("vault.status", json!({}))["vault_rotation_hours"] == json!(24)).then_some(())
     });
+}
+
+fn check<'a>(v: &'a Value, id: &str) -> &'a Value {
+    v["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == json!(id))
+        .unwrap_or_else(|| panic!("no {id} check in {v}"))
+}
+
+fn alerts(s: &Station, title: &str) -> usize {
+    s.call("notify.list", json!({}))
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["title"].as_str().unwrap().contains(title))
+        .count()
+}
+
+/// Check and repair on launch: the station checks the chain from an agent to
+/// a key by itself, repairs what needs no approval, and says each thing only
+/// the owner can fix in one sentence with the one action that fixes it.
+#[test]
+fn the_station_checks_the_chain_repairs_what_it_can_and_says_what_is_left() {
+    let vault = FakeVault::start();
+    let spare = free_port();
+    // This station looks for its vault, as one on a tailnet does.
+    let s = Station::start_with("alpha", &FakeVault::search(&[vault.port, spare]), &[]);
+
+    // Nobody asked: the check ran because the daemon started.
+    let v = wait_for("the check at launch", 10, || {
+        let v = s.call("vault.status", json!({}));
+        (v["health"] == json!("not_connected")).then_some(v)
+    });
+    assert_eq!(
+        (&v["prompt"], &check(&v, "token")["action"]["kind"]),
+        (&json!(true), &json!("connect")),
+        "a vault was found and the station has no token: {v}"
+    );
+    // "Not now" is kept by the station, and can be undone.
+    assert_eq!(
+        s.call("vault.prompt", json!({"dismissed": true}))["prompt"],
+        json!(false)
+    );
+    assert_eq!(
+        s.call("vault.status", json!({}))["prompt_dismissed"],
+        json!(true)
+    );
+    assert_eq!(
+        s.call("vault.prompt", json!({"dismissed": false}))["prompt"],
+        json!(true)
+    );
+
+    // Healthy: every link is checked and nothing is said to the owner.
+    let token = connect(&s, &vault);
+    let v = s.call("vault.check", json!({}));
+    let ids: Vec<&str> = v["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["address", "lock", "token", "keys", "panes"], "{v}");
+    assert!(
+        v["health"] == json!("ok")
+            && v["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["ok"] == json!(true)),
+        "{v}"
+    );
+    assert!(check(&v, "keys")["detail"]
+        .as_str()
+        .unwrap()
+        .starts_with("3 keys"));
+    assert_eq!(v["prompt"], json!(false));
+    assert_eq!(s.log("vault.alert").len(), 0);
+
+    // Locked: only the owner can unlock it, on the vault's page.
+    vault.set_unlocked(false);
+    let v = s.call("vault.check", json!({}));
+    let lock = check(&v, "lock");
+    assert_eq!(v["health"], json!("problem"));
+    assert_eq!(
+        (
+            &lock["ok"],
+            &lock["action"]["kind"],
+            lock["action"]["url"].as_str()
+        ),
+        (&json!(false), &json!("open"), Some(vault.url().as_str())),
+        "{v}"
+    );
+    s.call("vault.check", json!({}));
+    assert_eq!(
+        alerts(&s, "The vault is locked"),
+        1,
+        "told once, not on every check"
+    );
+    let doctor = s.call("station.doctor", json!({}));
+    let line = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == json!("vault"))
+        .unwrap();
+    assert!(
+        line["ok"] == json!(false) && line["detail"].as_str().unwrap().contains("locked"),
+        "{line}"
+    );
+    vault.set_unlocked(true);
+    assert_eq!(s.call("vault.check", json!({}))["health"], json!("ok"));
+
+    // The vault moved: the station finds it again and carries on with the
+    // token it has. No new token is asked for.
+    let vault = vault.moved(spare);
+    let v = s.call("vault.check", json!({}));
+    assert_eq!(
+        (&v["health"], v["url"].as_str()),
+        (&json!("ok"), Some(vault.url().as_str())),
+        "{v}"
+    );
+    assert!(check(&v, "address")["detail"]
+        .as_str()
+        .unwrap()
+        .contains("moved"));
+    s.call(
+        "vault.call",
+        json!({"name": "OPENAI_API_KEY", "path": "/v1/models"}),
+    );
+    assert_eq!(vault.calls()[0]["token"], json!(token.clone()));
+    assert_eq!(vault.issued(), vec![token.clone()]);
+
+    // The vault is not answering anywhere: nothing to repair, said plainly.
+    vault.answer(false);
+    let v = s.call("vault.check", json!({}));
+    let address = check(&v, "address");
+    assert!(
+        address["ok"] == json!(false)
+            && address["detail"]
+                .as_str()
+                .unwrap()
+                .contains("is not answering"),
+        "{v}"
+    );
+    vault.answer(true);
+
+    // The owner untied the token from this machine at the vault.
+    vault.with_tokens("alpha", |t| t.unpinned = true);
+    let v = s.call("vault.check", json!({}));
+    assert_eq!(
+        check(&v, "token")["action"]["label"],
+        json!("Reconnect"),
+        "{v}"
+    );
+    vault.with_tokens("alpha", |t| t.unpinned = false);
+
+    // The token was revoked. A new one needs the owner's approval at the
+    // vault: the station offers that and takes no other way.
+    vault.with_tokens("alpha", |t| t.retired = true);
+    let v = s.call("vault.check", json!({}));
+    let tok = check(&v, "token");
+    assert_eq!(
+        (
+            &v["health"],
+            &tok["ok"],
+            &tok["action"]["kind"],
+            &v["prompt"]
+        ),
+        (
+            &json!("problem"),
+            &json!(false),
+            &json!("connect"),
+            &json!(true)
+        ),
+        "{v}"
+    );
+    s.call("vault.check", json!({}));
+    s.call("vault.refresh", json!({}));
+    assert_eq!(alerts(&s, "vault token was refused"), 1);
+    assert_eq!(vault.issued(), vec![token.clone()]);
+    assert_eq!(
+        std::fs::read_to_string(s.root.join("state/vault.token")).unwrap(),
+        token
+    );
+}
+
+/// With `[vault]` turned off the station looks for no vault and says nothing
+/// of one: spandeck works without it.
+#[test]
+fn a_station_with_the_vault_turned_off_asks_nothing_and_offers_nothing() {
+    let vault = FakeVault::start();
+    let s = Station::start_with(
+        "alpha",
+        &format!("{}enabled = false\n", vault.config()),
+        &[],
+    );
+    let v = s.call("vault.check", json!({}));
+    assert_eq!(
+        (&v["health"], &v["found"], &v["prompt"]),
+        (&json!("off"), &json!(false), &json!(false)),
+        "{v}"
+    );
+    assert!(s.try_call("vault.connect", json!({})).is_err());
+}
+
+/// Connect prompt at start-up, and the one place to see the checks.
+#[test]
+fn the_control_deck_offers_to_connect_once_and_shows_what_each_check_found() {
+    use common::browser::Page;
+    let vault = FakeVault::start();
+    // What the vault says of itself is data, never markup.
+    vault.inner.lock().unwrap().version = Some("<b id=planted>9</b>".into());
+    let s = station(&vault);
+    let page = Page::open(&s, 1400, 900);
+    let settled = "document.body.dataset.vaultAsked === '1'";
+    let reload = |page: &Page| {
+        page.js("(() => { window.__before = true; location.reload(); return true; })()");
+        page.wait(
+            "the deck to open again",
+            &format!("!window.__before && {settled}"),
+        );
+    };
+    let click = "(b => b ? (b.click(), true) : false)";
+    let prompt_button = |label: &str| {
+        format!("{click}([...document.querySelectorAll('.vault-prompt button')].find(b => b.innerText === '{label}'))")
+    };
+
+    // Said once, in a bar that leaves the deck usable.
+    page.wait("the offer to connect", "(p => p && p.innerText.includes('alpha is not connected') && !document.querySelector('.backdrop'))(document.querySelector('.vault-prompt'))");
+    page.wait("Not now", &prompt_button("Not now"));
+    wait_for("the station to remember", 10, || {
+        (s.call("vault.status", json!({}))["prompt_dismissed"] == json!(true)).then_some(())
+    });
+    reload(&page);
+    assert_eq!(
+        page.js("!document.querySelector('.vault-prompt')"),
+        json!(true)
+    );
+
+    // Undone from the vault screen.
+    page.js("[...document.querySelectorAll('.topbar button')].find(b => b.innerText.startsWith('Vault')).click()");
+    page.wait("Remind me again", &format!("{click}([...document.querySelectorAll('.dialog button')].find(b => b.innerText === 'Remind me again'))"));
+    wait_for("the reminder to be back on", 10, || {
+        (s.call("vault.status", json!({}))["prompt"] == json!(true)).then_some(())
+    });
+    reload(&page);
+
+    // Its one button starts the connect flow: a pop-up on the vault.
+    page.js("(() => { window.__opened = []; window.open = (u, n, f) => ({closed: false, close() {}, location: {set href(u) { window.__opened.push(u); }}}); return true; })()");
+    page.wait("Connect", &prompt_button("Connect"));
+    let opened = page.wait(
+        "the pop-up to be pointed at the vault",
+        "window.__opened.length && window.__opened[0]",
+    );
+    assert!(
+        opened
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{}/#/approve/", vault.url())),
+        "{opened}"
+    );
+    assert_eq!(vault.decide(true), 1);
+
+    // The vault screen lists what each check found.
+    page.js("[...document.querySelectorAll('.topbar button')].find(b => b.innerText.startsWith('Vault')).click()");
+    let rows = "[...document.querySelectorAll('.dialog .vault-checks tr')].map(r => r.innerText)";
+    page.wait(
+        "the checks of a connected station",
+        &format!("{rows}.some(r => r.includes('Keys for agents') && r.includes('3 keys'))"),
+    );
+    assert_eq!(
+        page.js(&format!(
+            "!document.querySelector('#planted') && {rows}.some(r => r.includes('<b id=planted>'))"
+        )),
+        json!(true),
+        "text from the vault is shown as text"
+    );
+    assert_eq!(
+        page.js("!document.querySelector('.vault-prompt')"),
+        json!(true)
+    );
+
+    // A problem shows its sentence and the one action; Check again asks now.
+    vault.set_unlocked(false);
+    page.wait("Check again", &format!("{click}([...document.querySelectorAll('.dialog button')].find(b => b.innerText === 'Check again' && !b.disabled))"));
+    page.wait("the locked vault and its action", "[...document.querySelectorAll('.dialog .vault-checks tr.broken')].some(r => r.innerText.includes('The vault is locked') && [...r.querySelectorAll('button')].some(b => b.innerText === 'Open the vault'))");
 }
 
 mod reqwest {
