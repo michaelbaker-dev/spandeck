@@ -152,10 +152,9 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 
 ## Windows (14 Nov 2026, the owner's request: a Windows PC as a full station)
 
-Stage one. Nothing here has run on Windows yet: the code type-checks for
-`x86_64-pc-windows-msvc` from Linux, and the `windows` job in CI is where it is first built,
-linked and run. Each line says what was decided and why; "unlike Unix" lines say what the
-owner gets less of.
+Built and tested on a real Windows 11 machine (rtx6000) since 14 Nov 2026; each line says
+what was decided and why, and "unlike Unix" lines say what the owner gets less of. What has
+not been tried on a real machine is said where it applies.
 
 - **Native, not WSL.** x86-64, Windows 10 1809 or later (the first with ConPTY) and Windows 11.
 - **Rule 4 of AGENTS.md now reads:** platform code lives only in `crates/terminal/src/sys/`:
@@ -179,7 +178,7 @@ owner gets less of.
   `cmd.exe`, with every argument quoted the way Rust's standard library does it so that `&`,
   `|` and `%NAME%` in an argument stay text; an argument with a line break is refused.
   Because the job ends with the daemon, no pane's program outlives a daemon crash: the
-  recommended default ("processes do not survive a daemon crash") holds by construction.
+  job belongs to the pane host (below), not to the daemon.
 - **Local socket: a named pipe**, `\\.\pipe\spandeck-<hash of the state folder>`, in place of
   the Unix socket, behind one `sys::local` interface (listener, async stream, blocking client)
   that the server, the client, the askpass helper and the tests all use. Only the same user
@@ -187,34 +186,53 @@ owner gets less of.
   the daemon must be the pipe's first creator. The client checks that the pipe it opened is
   owned by its own user before it sends its token, so a pipe another account made first under
   the same name gets nothing. The token is still required, as on Unix.
-- **Upgrade and roll back restart the panes on Windows.** Windows cannot replace a process's
-  program in place, and a pseudoconsole belongs to the process that made it. So on Windows
-  `station.upgrade`, `station.restart` and `station.update` start the new program beside the
-  old one, the old one ends (and with it every pane's program), and the new one resumes each
-  agent by its session id, exactly as after a crash. The health check, going back to the
-  previous binary, and the database saved before a schema change work as on Unix. **Unlike
-  Unix the owner loses:** every shell pane and whatever it was running; the screen and
-  scrollback of every pane; an agent's turn in progress (the conversation is kept; an agent
-  with nothing to resume is closed). The Control Deck says so before an upgrade on a Windows
-  station, and so does the command line (`station.info` and the reply to an upgrade carry
-  `live_handoff: false`). This is the Guarantee's own
-  fallback ("if live handoff does not complete, terminals are lost and agents resume by
-  session id") made the normal case. The way to parity is a small pane-host process that owns
-  the pseudoconsoles and outlives the daemon; it is not built, because none of it could be
-  run from here, and it would also be the first thing in spandeck to keep panes through a
-  daemon crash. "Live handoff is a release acceptance test on macOS and Linux" stays as it is.
+- **The pane host** (the owner's decision, 14 Nov 2026: "build the extra helper"). Windows
+  cannot replace a process's program in place, and a pseudoconsole belongs to the process
+  that made it, so on Windows the panes are not in the daemon: `spandeck-pane-host.exe`, a
+  small program of its own, owns every pseudoconsole, job and program, and the daemon is its
+  client over a named pipe only the same user can open. So an upgrade, a restart and going
+  back to the previous binary keep every terminal on Windows as they do on Unix
+  (`live_handoff` is true everywhere), and the Upgrades Guarantee and its tests are the same
+  on both. The new daemon is a new process there (on Unix it is the same one).
+  - **The screen stays in the daemon.** The host knows nothing of screens, agents or
+    projects: per pane it keeps the terminal, the exit status, and the last 8 MB the program
+    wrote, each byte numbered. At an upgrade the old daemon hands the new one its picture of
+    each screen (as on Unix) and the number of the first byte it did not take; the new one
+    asks the host for output from that byte on. Nothing is lost or shown twice unless a pane
+    writes more than 8 MB while no daemon is reading, and then the oldest of it is.
+  - **A daemon crash no longer ends the panes on Windows.** The next daemon finds them in
+    the host and rebuilds each screen by replaying what the host kept: the screen is right,
+    and scrollback goes back as far as those 8 MB. This changes a recommended default
+    ("processes do not survive a daemon crash") for Windows only; on Unix it stands. So that
+    panes nobody can reach are not kept for ever, a host with no daemon ends its panes and
+    itself after ten minutes (the log-on task restarts a failed daemon within one or two).
+    Stopping the station on purpose ends the panes and the host at once.
+  - **The host is not upgraded while it holds a pane**: it cannot be without ending them.
+    Its protocol is versioned and only grows; a daemon speaks every host protocol back to 1
+    and never asks an older host for what it does not have, so an old host keeps serving its
+    panes under a new daemon for as long as they live. A host older than the daemon is
+    replaced by itself at the first moment it holds no pane (`station.info` shows
+    `pane_host.outdated` until then). A change the old protocol cannot carry would need the
+    panes ended: such a release must say so before it is installed, and the owner decides
+    when. None exists.
+  - If the host itself dies, its panes die with it (their jobs close); the daemon says each
+    ended and starts a new host for the next pane. Agents are then resumed by session id at
+    the next daemon start, as after a reboot.
+  - On Unix the host is not used (exec in place needs none); `SPANDECK_PANE_HOST=1` turns
+    it on there, which is how it is tested on Linux.
 - **The installed program is replaced by renaming.** A running `.exe` cannot be overwritten
   but can be renamed, so an update moves `spandeck.exe` to `spandeck.exe.old` and puts the new
   one in its place; the old file is removed at the next start. `state\bin\running` and
-  `previous` are hard links as on Unix (same volume), else copies.
+  `previous` are hard links as on Unix (same volume), else copies. The same goes for the
+  pane host's file while it runs.
 - **Start at login: a per-user Scheduled Task** ("spandeckd", at log on, restart on failure,
   no time limit, runs on battery), not a Windows Service: a service runs in session 0 without
   the user's profile, PATH or the agents' logins. The task runs `spandeckd.exe`, a windowless
   program that starts `spandeck.exe daemon` with no console window and waits for it, so no
   window opens at log on and the task's restart-on-failure sees the daemon's exit code.
   **Unlike Linux with linger, the daemon runs only while the owner is logged in** (a locked
-  screen is fine; logged out is not). To have it after a reboot with nobody at the machine,
-  the owner turns on automatic log on, which is theirs to decide.
+  screen is fine; logged out is not). The owner accepted this (14 Nov 2026: the machine logs
+  on by itself).
 - **Keep-awake** is `SetThreadExecutionState`, held by `spandeck keep-awake` (the same shape
   as `caffeinate` and `systemd-inhibit`: a helper that holds the machine awake while it runs).
   The helper ends when the daemon does. It does not stop a laptop sleeping when its lid shuts.
@@ -255,21 +273,36 @@ owner gets less of.
   added to the user's PATH, the task registered. The release has `spandeck.exe`, `sd.exe` and
   `spandeckd.exe` in a `.zip`; `station.update` picks it and unpacks with the `tar.exe` Windows
   ships. Other processors (ARM64) are not built yet.
-- **Add a machine still leaves Windows machines out.** It would take: the Windows OpenSSH
-  server turned on there by the owner (it is off by default and needs an administrator), a
-  PowerShell form of the remote script, and password sign-in through `ssh.exe`'s askpass,
-  which behaves differently on Windows. None of it can be tried without a Windows machine, so
-  it is listed, not written. A Windows station can add a Mac or Linux machine: that direction
-  needs only `ssh.exe`, which Windows ships.
+- **Add a machine can add a Windows machine** (the owner's decision, 14 Nov 2026). The
+  picker lists Windows machines too. The station connects with the same `ssh` command and
+  hands the machine a Windows PowerShell 5.1 script with `install.ps1` inside it (as the Unix
+  script carries `install.sh`): install, register and run the log-on task, wait for spandeck
+  to answer, ask to join. The line that reads the script there has no `$` and no quote of
+  its own inside, so it means the same whether that machine's OpenSSH hands it to `cmd.exe`
+  (the default) or to PowerShell. The approval step is unchanged. It needs the OpenSSH
+  server on there, which Windows ships switched off and only an administrator can add, and
+  the owner logged on there (the station runs in their session, not in the SSH session,
+  which ends). Its own failure sentences: the OpenSSH server not installed or not running;
+  Windows refusing to run spandeck (Smart App Control blocks programs it does not know, and
+  releases are not signed); installed but not started because nobody is logged on. The
+  script is run on a real Windows in a test as far as its network check; a whole add of a
+  Windows machine has not been done yet. A Windows station adding another machine uses the
+  same code with `ssh.exe`; typing a password that way (askpass) is untried on Windows.
+- **Smart App Control.** Where it is on, Windows refuses programs it does not know, which
+  includes every spandeck build, since releases are not signed. The owner turned it off on
+  rtx6000. Signing the Windows release is what would make that unnecessary; it is not done.
 - **Not on Windows yet:** wake-on-LAN of a Windows station (its network card's address is
   not read), starting a stopped Windows station over SSH (`fleet.start` runs a Unix line),
   usage figures for OpenCode (where its database is on Windows is not documented), and the
   Codex sandbox repair (a Linux problem). ARM64.
-- **Tests.** CI gains a `windows` job that builds everything and runs the tests. A test that
-  needs a Unix shell, a signal or exec-in-place is marked ignored on Windows with its reason;
-  nothing changes on macOS or Linux. Windows-only tests cover what is new: ConPTY (input,
-  exit code, resize, environment, a `.cmd` file's arguments, kill ending the whole tree,
-  hang-up), the local socket on each system, and a station end to end (a shell pane over the
-  pipe, an agent's hooks, restart and resume, the state folder's access list). The scenario
-  tests written for Unix run on Windows in a step that reports without failing the job until
-  they have been seen to pass there.
+- **Tests.** On rtx6000 the whole suite runs (`cargo test --workspace`): everything passes
+  except the eight tests that drive a browser, because no Chrome is installed there; they
+  have never run on Windows. A test that needs a Unix shell, a signal or a tar.gz release is
+  marked ignored on Windows with its reason (about thirty); nothing changes on macOS or
+  Linux. Windows-only tests cover what is new: ConPTY (input, exit code, resize,
+  environment, a `.cmd` file's arguments, kill ending the whole tree, hang-up), a station
+  end to end (a shell pane over the pipe, an agent's hooks, every pane kept through a daemon
+  crash, the state folder's access list), `install.ps1` against a local release, and the
+  script Add a machine sends. The pane host and the local socket are tested on every
+  system. CI has a `windows` job with the same tests; the scenario step reports without
+  failing the job until the browser tests have been seen to pass there.

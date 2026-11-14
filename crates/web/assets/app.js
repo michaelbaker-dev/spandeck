@@ -960,14 +960,10 @@ function stopRows() {
 
 const STATION_STATE = { unreachable: 'unreachable', not_linked: 'not in this fleet', update_needed: 'on a version this station cannot control' };
 
-// A Windows station cannot keep its terminals through a restart or an update.
-const WINDOWS_RESTART = 'This station runs Windows, which cannot keep terminals through a restart: every pane is restarted. Agents go back to their conversations; shells, and a turn that is running now, are lost. If it does not come back healthy, the restart is undone.';
-
 function stationMenu(e, s) {
   e.preventDefault();
   e.stopPropagation();
   const up = s.state === 'online';
-  const live = !(s.info && s.info.live_handoff === false);
   showMenu(e.clientX, e.clientY, [
     { label: 'Open ' + s.station, action: () => go(stationUrl(s.station)) },
     up && { label: 'New pane here…', action: () => newPaneDialog(s.station) },
@@ -976,8 +972,8 @@ function stationMenu(e, s) {
     { label: 'Agent programs and versions…', action: agentsPanel },
     { label: 'Usage: tokens and estimated cost…', action: fleetUsageDialog },
     s.state === 'not_linked' && { label: `Join ${s.station}'s fleet…`, action: () => joinFleet(s.station) },
-    up && { label: live ? 'Restart spandeck here (keeps terminals)' : 'Restart spandeck here (restarts terminals)', action: () => confirmBox(`Restart spandeck on ${s.station}?`, live ? 'Every terminal and agent keeps running. If it does not come back healthy, the restart is undone.' : WINDOWS_RESTART, 'Restart', () => rpc(s.station, 'station.restart', {}).then(() => toast(`${s.station} is restarting`))) },
-    up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. ${live ? 'Terminals keep running, and a version that does not start properly is undone.' : WINDOWS_RESTART}`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`))) },
+    up && { label: 'Restart spandeck here (keeps terminals)', action: () => confirmBox(`Restart spandeck on ${s.station}?`, 'Every terminal and agent keeps running. If it does not come back healthy, the restart is undone.', 'Restart', () => rpc(s.station, 'station.restart', {}).then(() => toast(`${s.station} is restarting`))) },
+    up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`))) },
     s.state === 'unreachable' && { label: 'Wake it (same network only)', action: () => rpc(api.station, 'fleet.wake', { station: s.station }).then((r) => toast(`Sent ${r.sent} wake packets to ${s.station}. Give it a minute.`)) },
     s.state === 'unreachable' && { label: 'Start spandeck there (over SSH)', action: () => rpc(api.station, 'fleet.start', { station: s.station }).then((r) => toast(`${s.station} is ${r.state}`)) },
     s.state === 'unreachable' && { label: 'Forget this station', danger: true, action: () => confirmBox(`Forget ${s.station}?`, 'It is removed from this list. If it comes back it is listed again.', 'Forget', () => rpc(api.station, 'fleet.forget', { station: s.station })) },

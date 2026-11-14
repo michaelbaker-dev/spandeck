@@ -20,8 +20,8 @@ jobs:
           # The oldest hosted Ubuntu, so the binaries need only its glibc.
           - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, gate: true }
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, gate: true }
-          # No live handoff on Windows, so no handoff gate: its gate is the
-          # Windows station scenarios (a pane, the pipe, restart and resume).
+          # Windows keeps its panes in the pane host, not by exec: its gate is
+          # the pane host's tests and the same upgrade scenarios (phase1).
           - { os: windows-latest, target: x86_64-pc-windows-msvc, gate: false, windows: true }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
@@ -38,11 +38,11 @@ jobs:
         run: cargo test -p spandeck-terminal --test handoff && cargo test -p spandeck --test phase1 handoff
       - name: Windows station scenarios (release gate)
         if: matrix.windows
-        run: cargo test -p spandeck-terminal --test conpty --test local && cargo test -p spandeck --test windows -- --test-threads=1
+        run: cargo test -p spandeck-terminal --test conpty --test local --test host && cargo test -p spandeck --test windows --test phase1
         shell: bash
       - run: cargo build --release --locked --bin spandeck --bin sd --target ${{ matrix.target }}
         if: ${{ !matrix.windows }}
-      - run: cargo build --release --locked --bin spandeck --bin sd --bin spandeckd --target ${{ matrix.target }}
+      - run: cargo build --release --locked --bin spandeck --bin sd --bin spandeckd --bin spandeck-pane-host --target ${{ matrix.target }}
         if: matrix.windows
       - name: Package (Windows)
         if: matrix.windows
@@ -51,7 +51,7 @@ jobs:
           $name = "spandeck-${{ github.ref_name }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force dist, $name | Out-Null
           $bin = "target/${{ matrix.target }}/release"
-          Copy-Item "$bin/spandeck.exe", "$bin/sd.exe", "$bin/spandeckd.exe", README.md, LICENSE $name
+          Copy-Item "$bin/spandeck.exe", "$bin/sd.exe", "$bin/spandeckd.exe", "$bin/spandeck-pane-host.exe", README.md, LICENSE $name
           Compress-Archive -Path $name -DestinationPath "dist/$name.zip"
           $hash = (Get-FileHash -Algorithm SHA256 "dist/$name.zip").Hash.ToLower()
           # The same form sha256sum writes, in ASCII with a Unix line end.

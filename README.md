@@ -34,8 +34,9 @@ curl -fsSL https://raw.githubusercontent.com/michaelbaker-dev/spandeck/main/scri
 ```
 
 Windows (x64, Windows 10 1809 or later; in PowerShell, no administrator needed). Windows
-support is new: read "Windows" in `DECISIONS.md` for what differs, above all that an
-upgrade or restart of a Windows station restarts its panes.
+support is new: read "Windows" in `DECISIONS.md` for what differs. A Windows station runs
+while you are logged on. spandeck's programs are not signed, so a machine with Smart App
+Control on refuses to run them (and builds made from source there too): it has to be off.
 
 ```powershell
 irm https://raw.githubusercontent.com/michaelbaker-dev/spandeck/main/scripts/install.ps1 | iex

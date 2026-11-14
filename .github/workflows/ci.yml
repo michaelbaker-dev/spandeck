@@ -36,11 +36,11 @@ jobs:
   # the tests written for Windows or expected to be the same there run (the
   # terminal layer with ConPTY and the named pipe, the agent and archive
   # crates, the core's own tests, and the Windows station scenarios). The
-  # last step runs the scenario tests written for Unix; each one known to
-  # need Unix is ignored there with its reason, and the browser tests are
-  # left out by name until Chrome has been tried on this runner. That step
-  # reports without failing the job until those tests have been seen to pass
-  # on Windows; then the allowance is removed. Nothing here changes how the
+  # last step runs every scenario test; each one known to need Unix is
+  # ignored there with its reason. On a Windows machine without Chrome all
+  # of them pass except the eight that drive a browser, which have never
+  # run on Windows: that step reports without failing the job until they
+  # have been seen to pass on this runner; then the allowance is removed. Nothing here changes how the
   # macOS and Linux job reports.
   windows:
     runs-on: windows-latest
@@ -56,11 +56,10 @@ jobs:
       - name: Tests (terminal, agents, archive, core, Windows station scenarios)
         run: |
           cargo test -p spandeck-terminal -p spandeck-agents -p spandeck-archive -p spandeck-core -p spandeck-web --no-fail-fast
-          cargo test -p spandeck --test windows --no-fail-fast -- --test-threads=1
+          cargo test -p spandeck --test windows --test phase1 --no-fail-fast
       - name: Scenario tests written for Unix (reported, not yet required)
         continue-on-error: true
         run: |
-          choco install sqlite -y --no-progress
-          cargo test -p spandeck --no-fail-fast -- --skip browser --skip screenshots
+          cargo test -p spandeck --no-fail-fast
         env:
           SPANDECK_CHROME: C:\Program Files\Google\Chrome\Application\chrome.exe

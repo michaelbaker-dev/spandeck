@@ -53,18 +53,22 @@ try {
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
 
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
-    foreach ($exe in 'spandeck.exe', 'sd.exe', 'spandeckd.exe') {
+    foreach ($exe in 'spandeck.exe', 'sd.exe', 'spandeckd.exe', 'spandeck-pane-host.exe') {
         $from = Join-Path (Join-Path $tmp $name) $exe
         if (-not (Test-Path $from)) { continue }
         $to = Join-Path $binDir $exe
         # A program that is running cannot be written over, but it can be
-        # renamed: the running daemon keeps its old file until it is upgraded.
+        # renamed: the running daemon keeps its old file until it is upgraded,
+        # and the pane host keeps its own for as long as it holds a pane.
         if (Test-Path $to) {
             $old = "$to.old"
             Remove-Item -Path $old -Force -ErrorAction SilentlyContinue
             Rename-Item -Path $to -NewName ([IO.Path]::GetFileName($old))
         }
         Copy-Item -Path $from -Destination $to
+        # Freshly downloaded programs carry a mark that makes Windows ask
+        # before running them; these were just checked against their checksum.
+        Unblock-File -Path $to -ErrorAction SilentlyContinue
         Remove-Item -Path "$to.old" -Force -ErrorAction SilentlyContinue
     }
     Write-Host "Installed spandeck $version to $binDir (checksum verified)"
