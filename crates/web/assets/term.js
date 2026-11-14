@@ -57,22 +57,40 @@ export class PaneTerm {
       if (files.length && this.control) { e.preventDefault(); e.stopPropagation(); files.forEach(f => this._upload(f)); }
     }, true);
 
-    // A finger drags the history up and down. The terminal's own touch
-    // handling does not do this reliably on phones, so it is done here.
-    let touchY = null, carry = 0;
-    this.body.addEventListener('touchstart', (e) => { touchY = e.touches.length === 1 ? e.touches[0].clientY : null; carry = 0; }, { passive: true });
+    // A finger drags the history up and down. The terminal library has its
+    // own touch handling, which sees the finger first and did not scroll on a
+    // real iPhone. So this listens ahead of it (capture) and scrolls the
+    // history directly; the library never sees a drag. A tap still reaches
+    // it, to focus the terminal and bring up the keyboard.
+    let touchY = null, carry = 0, dragging = false;
+    const lineHeight = () => {
+      const row = this.term.element?.querySelector('.xterm-rows')?.firstElementChild;
+      return (row && row.getBoundingClientRect().height) || 17;
+    };
+    this.body.addEventListener('touchstart', (e) => {
+      touchY = e.touches.length === 1 ? e.touches[0].clientY : null;
+      carry = 0; dragging = false;
+    }, { capture: true, passive: true });
     this.body.addEventListener('touchmove', (e) => {
       if (touchY === null || e.touches.length !== 1) return;
       const y = e.touches[0].clientY;
-      const scale = this.term.element?.getBoundingClientRect().height / (this.term.element?.offsetHeight || 1) || 1;
-      const line = (this.term.element?.querySelector('.xterm-rows')?.firstElementChild?.getBoundingClientRect().height) || 17 * scale;
       carry += touchY - y;
       touchY = y;
+      if (!dragging && Math.abs(carry) < 6) return;
+      dragging = true;
+      const line = lineHeight();
       const lines = Math.trunc(carry / line);
       if (lines) { this.term.scrollLines(lines); carry -= lines * line; }
       e.preventDefault();
-    }, { passive: false });
-    this.body.addEventListener('touchend', () => { touchY = null; }, { passive: true });
+      e.stopPropagation();
+    }, { capture: true, passive: false });
+    const endTouch = (e) => {
+      // The end of a drag is not a tap: do not let it move the cursor or focus.
+      if (dragging) { e.preventDefault(); e.stopPropagation(); }
+      touchY = null; dragging = false;
+    };
+    this.body.addEventListener('touchend', endTouch, { capture: true, passive: false });
+    this.body.addEventListener('touchcancel', endTouch, { capture: true, passive: false });
 
     this.ro = new ResizeObserver(() => { clearTimeout(this._rt); this._rt = setTimeout(() => this.layout(), 60); });
     this.renderStrip();

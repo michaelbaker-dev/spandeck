@@ -633,7 +633,8 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     let rows = "document.querySelector('.phone-pane .xterm-rows').innerText";
     page.wait("the end of the output", &format!("{rows}.includes('1300')"));
     page.js(
-        "(() => { const el = document.querySelector('.phone-pane .term-body');
+        "(() => { // The finger lands on the terminal's own element, as on a real phone.
+           const el = document.querySelector('.phone-pane .xterm-screen');
            const at = (y) => [new Touch({identifier: 1, target: el, clientX: 100, clientY: y})];
            el.dispatchEvent(new TouchEvent('touchstart', {touches: at(200), bubbles: true, cancelable: true}));
            for (let y = 220; y <= 700; y += 20) el.dispatchEvent(new TouchEvent('touchmove', {touches: at(y), bubbles: true, cancelable: true}));
