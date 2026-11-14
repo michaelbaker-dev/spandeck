@@ -38,8 +38,20 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - v1 notifications: one inbox, browser notifications on connected clients, optional ntfy or webhook sink.
 - Backpressure: the PTY reader never waits for a client; slow clients are dropped and resynced from a snapshot.
 - Command is `spandeck`; the short command is `sd` (chosen by the user on 13 Nov 2026; note it shares a name with a find-and-replace tool some people install).
-- Local git only; no public repo until the trademark check is done.
+- Public repo at github.com/michaelbaker-dev/spandeck, Apache-2.0, releases built by CI (the user's decision on 14 Nov 2026; it replaces "local git only until the trademark check"). The trademark check has not been done.
 - One size per pane, set by whoever has control; others letterbox.
+
+## AgentVault (14 Nov 2026)
+
+- spandeck and AgentVault stay separate programs. spandeck works without a vault.
+- The vault is the only place a token is issued, and only when the owner approves on the vault's own page. The vault passphrase is never typed into the Control Deck. Approval opens in a small pop-up window on the vault's address.
+- One token per station, held by spandeckd in a file only the user can read. Panes and agents never get the token, and keys are never put in a pane's environment.
+- The token can list keys and send requests through the vault's proxy, read-only by default, and is pinned to the station's Tailscale node.
+- spandeck finds the vault by its Tailscale name; the address is never hard-coded. `[vault] url` in the config overrides it.
+- Tokens do not expire by default. Rotation is a per-station setting (never, or every N hours, at least 1) that only the owner changes; spandeckd rotates by itself.
+- The owner is told when the setting changes outside the Control Deck, or the token is swapped or refused.
+- A project names the keys its agents may use (`[vault] keys` in `.spandeck/project.toml`).
+- When a station has a token, a raw key in an agent's command is blocked and reported to the vault; one pasted into a prompt, or found in a transcript, is reported.
 
 ## Guarantees (contracts the build must meet)
 

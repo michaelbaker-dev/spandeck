@@ -1,0 +1,15 @@
+# The tests plant made-up keys to prove spandeck's scrubber and raw-key guard catch
+# them. Those are the only key-shaped strings allowed in the repo.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Made-up keys planted by tests"
+regexes = [
+  '''PLANTED''',
+  '''LIVECHECK''',
+  '''AbCdEfGhIjKlMnOpQrStUvWxYz0123456789''',
+  '''abcdefghijklmnopqrstuvwxyz0123456789''',
+  '''github_pat_11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz''',
+  '''AKIAIOSFODNN7EXAMPLE''',
+]

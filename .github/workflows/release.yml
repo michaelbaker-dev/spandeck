@@ -1,5 +1,5 @@
-# A version tag builds the three targets and publishes a GitHub release.
-# v0.4.0-beta.1 is a pre-release (the beta channel); v0.4.0 is prod.
+# A version tag builds every target and publishes a GitHub release.
+# v0.2.0-beta.1 is a pre-release (the beta channel); v0.2.0 is prod.
 name: release
 on:
   push:
@@ -11,28 +11,42 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin, gate: true }
+          # Built on Apple silicon for Intel Macs; the gate cannot run there.
+          - { os: macos-latest, target: x86_64-apple-darwin, gate: false }
+          # The oldest hosted Ubuntu, so the binaries need only its glibc.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, gate: true }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, gate: true }
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - name: Handoff acceptance test (release gate)
+        if: matrix.gate
         run: cargo test -p spandeck-terminal --test handoff && cargo test -p spandeck --test phase1 handoff
-      - run: cargo build --release --bin spandeck --target ${{ matrix.target }}
+      - run: cargo build --release --locked --bin spandeck --bin sd --target ${{ matrix.target }}
       - name: Package
         run: |
-          mkdir dist
-          tar -C target/${{ matrix.target }}/release -czf dist/spandeck-${{ github.ref_name }}-${{ matrix.target }}.tar.gz spandeck
+          name=spandeck-${{ github.ref_name }}-${{ matrix.target }}
+          mkdir -p dist "$name"
+          cp target/${{ matrix.target }}/release/spandeck target/${{ matrix.target }}/release/sd README.md LICENSE "$name/"
+          tar -czf "dist/$name.tar.gz" "$name"
+          cd dist
+          if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"; else shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"; fi
       - uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/*.tar.gz
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: dist/*
+          generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}

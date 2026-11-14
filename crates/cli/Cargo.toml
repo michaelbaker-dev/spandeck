@@ -3,6 +3,7 @@ name = "spandeck"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Always-running daemon and Control Deck for AI coding agents across machines"
 
 [[bin]]
