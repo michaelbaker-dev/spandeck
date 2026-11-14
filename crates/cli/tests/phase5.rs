@@ -641,18 +641,21 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     s.wait_text(&sh, "1300");
     let rows = "document.querySelector('.phone-pane .xterm-rows').innerText";
     page.wait("the end of the output", &format!("{rows}.includes('1300')"));
-    page.js(
-        "(() => { // The finger lands on the terminal's own element, as on a real phone.
+    // The drag is repeated until it takes: on a slow machine the first one
+    // landed while the last lines were still being drawn, and the view went
+    // back to the end (seen twice on the Mac CI runner).
+    page.wait(
+        "earlier output after dragging down",
+        &format!(
+            "(() => {{ // The finger lands on the terminal's own element, as on a real phone.
+           if (!{rows}.includes('1300')) return /1[0-2][0-9][0-9]/.test({rows});
            const el = document.querySelector('.phone-pane .xterm-screen');
-           const touch = (type, y) => { const ev = new Event(type, {bubbles: true, cancelable: true}); Object.defineProperty(ev, 'touches', {value: y === null ? [] : [{clientX: 100, clientY: y}]}); return ev; };
+           const touch = (type, y) => {{ const ev = new Event(type, {{bubbles: true, cancelable: true}}); Object.defineProperty(ev, 'touches', {{value: y === null ? [] : [{{clientX: 100, clientY: y}}]}}); return ev; }};
            el.dispatchEvent(touch('touchstart', 200));
            for (let y = 220; y <= 700; y += 20) el.dispatchEvent(touch('touchmove', y));
            el.dispatchEvent(touch('touchend', null));
-           return true; })()",
-    );
-    page.wait(
-        "earlier output after dragging down",
-        &format!("!{rows}.includes('1300') && /12[0-9][0-9]/.test({rows})"),
+           return false; }})()"
+        ),
     );
 
     // Found from a real phone's drag reports: Claude Code runs full-screen and
