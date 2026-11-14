@@ -605,6 +605,26 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
         (p["cols"].as_u64().is_some_and(|c| c < 80) && !p["controller"].is_null()).then_some(())
     });
 
+    // A bug that happened on a real phone: a finger could not scroll the
+    // terminal's history. Dragging down shows earlier output.
+    set("seq 1000 1300");
+    page.js("document.querySelector('.composer-row button[type=submit]').click()");
+    s.wait_text(&sh, "1300");
+    let rows = "document.querySelector('.phone-pane .xterm-rows').innerText";
+    page.wait("the end of the output", &format!("{rows}.includes('1300')"));
+    page.js(
+        "(() => { const el = document.querySelector('.phone-pane .term-body');
+           const at = (y) => [new Touch({identifier: 1, target: el, clientX: 100, clientY: y})];
+           el.dispatchEvent(new TouchEvent('touchstart', {touches: at(200), bubbles: true, cancelable: true}));
+           for (let y = 220; y <= 700; y += 20) el.dispatchEvent(new TouchEvent('touchmove', {touches: at(y), bubbles: true, cancelable: true}));
+           el.dispatchEvent(new TouchEvent('touchend', {touches: [], bubbles: true}));
+           return true; })()",
+    );
+    page.wait(
+        "earlier output after dragging down",
+        &format!("!{rows}.includes('1300') && /12[0-9][0-9]/.test({rows})"),
+    );
+
     // And start something new from the phone.
     page.goto("#/fleet");
     page.wait(

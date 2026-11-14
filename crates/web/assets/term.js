@@ -52,6 +52,23 @@ export class PaneTerm {
       if (files.length && this.control) { e.preventDefault(); e.stopPropagation(); files.forEach(f => this._upload(f)); }
     }, true);
 
+    // A finger drags the history up and down. The terminal's own touch
+    // handling does not do this reliably on phones, so it is done here.
+    let touchY = null, carry = 0;
+    this.body.addEventListener('touchstart', (e) => { touchY = e.touches.length === 1 ? e.touches[0].clientY : null; carry = 0; }, { passive: true });
+    this.body.addEventListener('touchmove', (e) => {
+      if (touchY === null || e.touches.length !== 1) return;
+      const y = e.touches[0].clientY;
+      const scale = this.term.element?.getBoundingClientRect().height / (this.term.element?.offsetHeight || 1) || 1;
+      const line = (this.term.element?.querySelector('.xterm-rows')?.firstElementChild?.getBoundingClientRect().height) || 17 * scale;
+      carry += touchY - y;
+      touchY = y;
+      const lines = Math.trunc(carry / line);
+      if (lines) { this.term.scrollLines(lines); carry -= lines * line; }
+      e.preventDefault();
+    }, { passive: false });
+    this.body.addEventListener('touchend', () => { touchY = null; }, { passive: true });
+
     this.ro = new ResizeObserver(() => { clearTimeout(this._rt); this._rt = setTimeout(() => this.layout(), 60); });
     this.renderStrip();
     this._tick = setInterval(() => this.renderStrip(), 1000);
