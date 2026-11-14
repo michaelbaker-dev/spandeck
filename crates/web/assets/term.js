@@ -40,11 +40,16 @@ export class PaneTerm {
     this.term = new Terminal({
       fontFamily: 'ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace',
       fontSize: opts.compact ? 11 : 13, theme: THEME, cursorBlink: true, scrollback: 5000,
-      allowProposedApi: true, disableStdin: !this.control, macOptionIsMeta: true,
+      allowProposedApi: true, disableStdin: !this.control && !opts.typeWhileWatching, macOptionIsMeta: true,
     });
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
-    this.term.onData((data) => { if (this.control && this.chan !== null) this.api.send('pane.input', { chan: this.chan, data }); });
+    this.term.onData((data) => {
+      if (this.control && this.chan !== null) this.api.send('pane.input', { chan: this.chan, data });
+      // On a phone the pane is watched at its own size, and can still be typed
+      // into: the keys go as a request of their own, without taking the size.
+      else if (!this.control && opts.typeWhileWatching) this.api.on(this.station, 'pane.input', { pane: this.pane.id, data }).catch(() => {});
+    });
     this.term.onResize(() => {});
     // Paste of images or files goes to the station as a file drop.
     this.body.addEventListener('paste', (e) => {

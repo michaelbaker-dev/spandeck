@@ -605,8 +605,20 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     page.js("document.querySelector('.composer-row button[type=submit]').click()");
     s.wait_text(&sh, "back-42");
 
-    // Fitting the pane to the phone resizes it, which watching never does.
+    // A bug that happened on a real phone: tapping the terminal brought up the
+    // keyboard, and typing did nothing. Keys typed into the terminal arrive,
+    // and the pane keeps its size.
     open("phone-sh");
+    page.wait("terminal", "document.querySelector('.phone-pane .xterm-helper-textarea') && (document.querySelector('.phone-pane .xterm-helper-textarea').focus(), true)");
+    page.tab.type_str("echo typed-$((20+3))").unwrap();
+    page.tab.press_key("Enter").unwrap();
+    s.wait_text(&sh, "typed-23");
+    assert!(
+        s.pane(&sh)["controller"].is_null(),
+        "typing did not take the pane's size"
+    );
+
+    // Fitting the pane to the phone resizes it, which watching never does.
     page.js("[...document.querySelectorAll('.phone-pane button')].find(b => b.innerText === 'Fit to screen').click()");
     wait_for("the pane to be resized to the phone", 10, || {
         let p = s.pane(&sh);

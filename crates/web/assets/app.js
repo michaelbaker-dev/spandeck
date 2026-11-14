@@ -713,7 +713,7 @@ function getTerm(st, p, where, mode) {
   const key = `${where}:${st}/${p.id}`;
   let t = S.terms.get(key);
   if (!t) {
-    t = new PaneTerm(api, st, p, { mode, onMenu: (e, term) => paneMenu(e, st, term.pane, where), onFocus: (term) => { S.focused = term.pane.id; } });
+    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', onMenu: (e, term) => paneMenu(e, st, term.pane, where), onFocus: (term) => { S.focused = term.pane.id; } });
     S.terms.set(key, t);
     t._fresh = true;
   } else t.update(p);
