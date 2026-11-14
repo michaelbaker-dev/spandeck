@@ -625,6 +625,8 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
         (p["cols"].as_u64().is_some_and(|c| c < 80) && !p["controller"].is_null()).then_some(())
     });
 
+    // (Touches are built from plain events: a desktop browser with no touch
+    // screen, as on the macOS CI machine, has no Touch constructor.)
     // A bug that happened on a real phone: a finger could not scroll the
     // terminal's history. Dragging down shows earlier output.
     set("seq 1000 1300");
@@ -635,10 +637,10 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     page.js(
         "(() => { // The finger lands on the terminal's own element, as on a real phone.
            const el = document.querySelector('.phone-pane .xterm-screen');
-           const at = (y) => [new Touch({identifier: 1, target: el, clientX: 100, clientY: y})];
-           el.dispatchEvent(new TouchEvent('touchstart', {touches: at(200), bubbles: true, cancelable: true}));
-           for (let y = 220; y <= 700; y += 20) el.dispatchEvent(new TouchEvent('touchmove', {touches: at(y), bubbles: true, cancelable: true}));
-           el.dispatchEvent(new TouchEvent('touchend', {touches: [], bubbles: true}));
+           const touch = (type, y) => { const ev = new Event(type, {bubbles: true, cancelable: true}); Object.defineProperty(ev, 'touches', {value: y === null ? [] : [{clientX: 100, clientY: y}]}); return ev; };
+           el.dispatchEvent(touch('touchstart', 200));
+           for (let y = 220; y <= 700; y += 20) el.dispatchEvent(touch('touchmove', y));
+           el.dispatchEvent(touch('touchend', null));
            return true; })()",
     );
     page.wait(
@@ -654,10 +656,10 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     std::thread::sleep(Duration::from_millis(900));
     page.js(
         "(() => { const el = document.querySelector('.phone-pane .xterm-screen');
-           const at = (y) => [new Touch({identifier: 2, target: el, clientX: 100, clientY: y})];
-           el.dispatchEvent(new TouchEvent('touchstart', {touches: at(200), bubbles: true, cancelable: true}));
-           for (let y = 220; y <= 420; y += 20) el.dispatchEvent(new TouchEvent('touchmove', {touches: at(y), bubbles: true, cancelable: true}));
-           el.dispatchEvent(new TouchEvent('touchend', {touches: [], bubbles: true}));
+           const touch = (type, y) => { const ev = new Event(type, {bubbles: true, cancelable: true}); Object.defineProperty(ev, 'touches', {value: y === null ? [] : [{clientX: 100, clientY: y}]}); return ev; };
+           el.dispatchEvent(touch('touchstart', 200));
+           for (let y = 220; y <= 420; y += 20) el.dispatchEvent(touch('touchmove', y));
+           el.dispatchEvent(touch('touchend', null));
            return true; })()",
     );
     s.wait_text(&sh, "^[[<64;");
