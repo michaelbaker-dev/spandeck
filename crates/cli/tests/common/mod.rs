@@ -31,6 +31,25 @@ pub fn free_port() -> u16 {
         .port()
 }
 
+/// Like `wait_for`, and on a timeout says what `context` returns.
+pub fn wait_for_or<T>(
+    what: &str,
+    secs: u64,
+    context: impl Fn() -> String,
+    mut f: impl FnMut() -> Option<T>,
+) -> T {
+    let start = Instant::now();
+    loop {
+        if let Some(v) = f() {
+            return v;
+        }
+        if start.elapsed() > Duration::from_secs(secs) {
+            panic!("timed out waiting for {what}\n{}", context());
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
 pub fn wait_for<T>(what: &str, secs: u64, mut f: impl FnMut() -> Option<T>) -> T {
     let start = Instant::now();
     loop {
@@ -377,6 +396,16 @@ fn rusqlite_token(db: &Path, pane: &str) -> Option<String> {
 
 impl Drop for Station {
     fn drop(&mut self) {
+        // A failing test shows what its station had to say.
+        if std::thread::panicking() {
+            if let Ok(log) = std::fs::read_to_string(self.root.join("state/spandeckd.log")) {
+                let tail: Vec<&str> = log.lines().rev().take(40).collect();
+                eprintln!("---- last lines of {}'s log ----", self.name);
+                for line in tail.into_iter().rev() {
+                    eprintln!("{}", line.chars().take(400).collect::<String>());
+                }
+            }
+        }
         if let Some(mut c) = self.child.take() {
             // SIGTERM first so panes are cleaned up with the daemon.
             unsafe { libc_kill(c.id() as i32, 15) };

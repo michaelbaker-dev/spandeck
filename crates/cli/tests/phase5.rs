@@ -417,11 +417,11 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     // Open the busy agent: the terminal, and a stop control.
     let open = |name: &str| {
         page.goto("#/fleet");
+        // The list is redrawn every few seconds: wait for this pane's row.
         page.wait(
-            "the list",
-            "!!document.querySelector('main.phone .phone-row')",
+            "the pane's row in the list",
+            &format!("(r => r ? (r.click(), true) : false)([...document.querySelectorAll('main.phone .phone-row')].find(r => r.innerText.includes('{name}')))"),
         );
-        page.js(&format!("[...document.querySelectorAll('.phone-row')].find(r => r.innerText.includes('{name}')).click()"));
         page.wait(
             "the pane on the phone",
             "!!document.querySelector('.phone-pane .xterm-rows') && !!document.querySelector('.phone-pane .composer-box')",

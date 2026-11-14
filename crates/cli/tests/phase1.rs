@@ -82,9 +82,12 @@ fn a_failed_handoff_falls_back_to_resume_by_session_id() {
     let s = Station::start("alpha");
     let pane = s.fake(json!({"steps": []}), json!({}));
     s.wait_text(&pane, "[fake] session");
-    let session = wait_for("session id", 10, || {
-        s.pane(&pane)["session_id"].as_str().map(String::from)
-    });
+    let session = wait_for_or(
+        "session id",
+        10,
+        || format!("screen:\n{}\npane: {}", s.text(&pane), s.pane(&pane)),
+        || s.pane(&pane)["session_id"].as_str().map(String::from),
+    );
 
     // A "new binary" that loses the handoff state before starting.
     let bad = s.root.join("bad-upgrade.sh");
@@ -121,9 +124,12 @@ fn after_a_daemon_crash_agents_resume_and_shells_do_not() {
         .as_str()
         .unwrap()
         .to_string();
-    let session = wait_for("session id", 10, || {
-        s.pane(&agent)["session_id"].as_str().map(String::from)
-    });
+    let session = wait_for_or(
+        "session id",
+        10,
+        || format!("screen:\n{}\npane: {}", s.text(&agent), s.pane(&agent)),
+        || s.pane(&agent)["session_id"].as_str().map(String::from),
+    );
     s.kill9();
     s.launch();
     s.wait_text(&agent, &format!("[fake] RESUMED {session}"));

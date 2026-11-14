@@ -633,6 +633,11 @@ impl Daemon {
         };
 
         let (tx, _) = broadcast::channel(1024);
+        // An agent can call in the moment it starts, with its pane's token.
+        // Hold the pane table from before the process exists until the pane
+        // is in it, so that first call waits instead of being refused.
+        // (It was refused, now and then, and the agent's session id was lost.)
+        let mut panes = self.panes.write().unwrap();
         let term = Pane::spawn(&spec, self.make_sink(&id, tx.clone()))
             .map_err(|e| invalid(format!("could not start {}: {e}", spec.program)))?;
         let now = now_ms();
@@ -679,10 +684,8 @@ impl Daemon {
             tx,
             meta: Mutex::new(meta),
         });
-        self.panes
-            .write()
-            .unwrap()
-            .insert(id.clone(), entry.clone());
+        panes.insert(id.clone(), entry.clone());
+        drop(panes);
         self.save_pane(&entry);
         let m = entry.meta();
         self.record(
