@@ -267,4 +267,30 @@ fn a_project_layout_is_saved_with_the_project_resized_and_arranged() {
         },
     );
     assert!(shown.is_object());
+
+    // A pane of another project is a guest in a layout, and says whose it is
+    // (agreed 14 Nov 2026).
+    s.call(
+        "project.new",
+        json!({"path": "~/other", "panes": [shell("logs")], "open": true}),
+    );
+    save(json!({"name": "both", "tree": {"dir": "row", "ratio": 500,
+        "a": pane("dev"), "b": {"pane": "logs", "project": "other"}}}))
+    .unwrap();
+    page.wait("the second layout's tab", "(t => t ? (t.click(), true) : false)([...document.querySelectorAll('.tab.proj')].find(t => t.innerText.endsWith('both')))");
+    page.wait(
+        "the guest and its host",
+        "document.querySelectorAll('.workspace .pane').length === 2 && !!document.querySelector('.workspace .pane .chip.guest')",
+    );
+    assert_eq!(
+        page.js("[...document.querySelectorAll('.workspace .pane')].map(el => [el.querySelector('.strip-name').innerText, el.querySelector('.chip.guest')?.innerText || ''])"),
+        json!([["dev", ""], ["logs", "from other"]]),
+        "only the pane of the other project carries the chip"
+    );
+    page.js("[...document.querySelectorAll('.tabs button')].find(b => b.innerText === 'Arrange').click()");
+    let card = page.wait(
+        "the guest's card in Arrange",
+        "document.querySelector('.arr[data-ref=\"other/logs\"] .arr-card')?.innerText",
+    );
+    assert!(card.as_str().unwrap().contains("from other"), "{card}");
 }
