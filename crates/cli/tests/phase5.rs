@@ -564,7 +564,7 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     // A bug that happened on a real phone: the redraw every few seconds took
     // the keyboard away from the message box.
     page.js("(document.querySelector('.composer-box').focus(), window.__box = document.querySelector('.composer-box'), true)");
-    std::thread::sleep(Duration::from_millis(3200));
+    page.redraw(&s, &talker);
     assert_eq!(
         page.js("document.activeElement === window.__box && document.contains(window.__box)"),
         json!(true),
@@ -797,7 +797,44 @@ fn a_phone_steps_through_a_layout_from_its_map() {
             "a": {"dir": "row", "ratio": 500, "a": pane("dev"), "b": pane("dev2")}, "b": pane("lead")}}}),
     );
 
+    // A global layout too: the phone steps through it the same way, and it
+    // may hold a pane that is in no project.
+    let loose = s.call("pane.spawn", json!({"agent": "shell", "name": "scratch"}));
+    s.call(
+        "deck.layout.save",
+        json!({"layout": {"name": "all", "tree": {"dir": "row", "ratio": 500,
+            "a": {"pane": "lead", "project": "proj", "station": "alpha"}, "b": {"id": loose["id"], "station": "alpha"}}}}),
+    );
+
     let page = Page::open(&s, 390, 844);
+    // The list follows a computer's: under the station its project, with the
+    // project's layout, Watch, then its panes; then the global layouts.
+    let list = page.wait(
+        "the list",
+        "(rows => rows.length >= 7 ? rows : null)([...document.querySelectorAll('main.phone .phone-station .phone-row, main.phone .phone-layouts .phone-row')].map(r => r.getAttribute('aria-label')))",
+    );
+    assert_eq!(
+        list,
+        json!([
+            "build, layout",
+            "Watch proj",
+            "dev, Shell, idle",
+            "dev2, Shell, idle",
+            "lead, Shell, idle",
+            "scratch, Shell, idle",
+            "all, layout"
+        ]),
+    );
+    page.wait("the global layout", "(r => r ? (r.click(), true) : false)(document.querySelector('main.phone .phone-layouts .lay-row'))");
+    page.wait(
+        "its map",
+        "location.hash === '#/l/all' && document.querySelectorAll('.lay-map button').length === 2 && !!document.querySelector('.phone-layout .xterm-rows')",
+    );
+    assert_eq!(
+        page.js("[[...document.querySelectorAll('.lay-map button')].map(b => b.getAttribute('aria-label')), document.querySelector('.lay-showing').innerText]"),
+        json!([["lead from proj, idle", "scratch, idle"], "Showing lead (from proj) · 1 of 2"])
+    );
+    page.goto("#/fleet");
     page.wait(
         "the layout's row under its station",
         "(r => r ? (r.click(), true) : false)(document.querySelector('main.phone .phone-station .lay-row'))",
@@ -851,7 +888,7 @@ fn a_phone_steps_through_a_layout_from_its_map() {
     // The bug from a real phone, on this screen too: the redraw every few
     // seconds must not take the keyboard away from the message box.
     page.js("(document.querySelector('.composer-box').focus(), window.__box = document.querySelector('.composer-box'), true)");
-    std::thread::sleep(Duration::from_millis(3200));
+    page.redraw(&s, "dev2");
     assert_eq!(
         page.js("document.activeElement === window.__box && document.contains(window.__box)"),
         json!(true),

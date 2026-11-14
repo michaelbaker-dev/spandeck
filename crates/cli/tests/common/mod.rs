@@ -570,6 +570,50 @@ pub mod browser {
             self.js(&format!("location.hash = {}", json!(hash)));
         }
 
+        /// Open another station's Control Deck in the same browser.
+        pub fn visit(&self, s: &Station) {
+            self.tab
+                .navigate_to(&format!("{}#token={}", s.url("/"), s.token()))
+                .unwrap();
+            self.wait(
+                "the other station's deck",
+                &format!(
+                    "location.port === '{}' && !!document.querySelector('.topbar') && !location.hash.includes('token')",
+                    s.port
+                ),
+            );
+        }
+
+        /// Make the page redraw for new data, as it does every few seconds,
+        /// and come back once it has: a change to `pane` is what it hears of.
+        pub fn redraw(&self, s: &Station, pane: &str) {
+            let draws = "Number(document.getElementById('app').dataset.draws || 0)";
+            let before = self.js(draws).as_u64().unwrap_or(0);
+            let muted = s.pane(pane)["muted"] == json!(true);
+            s.call("pane.set", json!({"pane": pane, "muted": !muted}));
+            self.wait("a redraw", &format!("{draws} > {before}"));
+            // What a redraw does to the keyboard, it does a moment later.
+            std::thread::sleep(Duration::from_millis(150));
+        }
+
+        /// Right-click the element `el` (a JS expression) and wait for its menu.
+        pub fn right_click(&self, el: &str) {
+            self.wait(
+                "something to right-click",
+                &format!("(el => el ? (el.dispatchEvent(new MouseEvent('contextmenu', {{bubbles: true, cancelable: true, clientX: 300, clientY: 200}})), true) : false)({el})"),
+            );
+            self.wait("the menu", "!!document.querySelector('.menu')");
+        }
+
+        /// Choose the item of the open menu whose label starts with `label`.
+        pub fn choose(&self, label: &str) {
+            let done = self.js(&format!(
+                "(i => i && !i.disabled ? (i.click(), true) : [...document.querySelectorAll('.menu-item')].map(x => x.innerText))([...document.querySelectorAll('.menu-item')].find(i => i.innerText.startsWith({})))",
+                json!(label)
+            ));
+            assert_eq!(done, json!(true), "no menu item {label:?} to choose");
+        }
+
         /// The text on a pane's terminal as the browser shows it.
         pub fn term_text(&self) -> String {
             self.js("[...document.querySelectorAll('.pane .xterm-rows')].map(r => r.innerText).join('\\n----\\n')").as_str().unwrap_or("").to_string()

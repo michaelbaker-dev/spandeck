@@ -24,13 +24,14 @@ const overlays = () => document.getElementById('overlays');
 let openMenu = null;
 export function closeMenu() { if (openMenu) { openMenu.remove(); openMenu = null; } }
 
-// items: [{label, action, danger, disabled, hint} | '-' | {title}]
+// items: [{label, action, danger, disabled, hint} | '-' | {title} | {note}]
 export function showMenu(x, y, items) {
   closeMenu();
   const menu = h('div', { class: 'menu', role: 'menu' });
   for (const it of items.filter(Boolean)) {
     if (it === '-') { menu.append(h('div', { class: 'menu-sep' })); continue; }
     if (it.title) { menu.append(h('div', { class: 'menu-title' }, it.title)); continue; }
+    if (it.note) { menu.append(h('div', { class: 'menu-note' }, it.note)); continue; }
     menu.append(h('button', {
       class: 'menu-item' + (it.danger ? ' danger' : ''), role: 'menuitem', disabled: it.disabled,
       onclick: () => { closeMenu(); it.action(); },
@@ -43,7 +44,9 @@ export function showMenu(x, y, items) {
   openMenu = menu;
 }
 addEventListener('mousedown', (e) => { if (openMenu && !openMenu.contains(e.target)) closeMenu(); }, true);
-addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); }, true);
+// Esc closes an open menu and does nothing else: it neither zooms the page out
+// nor reaches the terminal under the menu.
+addEventListener('keydown', (e) => { if (e.key === 'Escape' && openMenu) { e.stopPropagation(); closeMenu(); } }, true);
 addEventListener('blur', closeMenu);
 
 export function toast(text, kind = 'info') {
@@ -52,6 +55,30 @@ export function toast(text, kind = 'info') {
   if (!box) { box = h('div', { id: 'toasts' }); overlays().append(box); }
   box.append(t);
   setTimeout(() => t.remove(), kind === 'error' ? 7000 : 3500);
+}
+
+// Put text on the clipboard. The deck is usually opened over plain http on the
+// tailnet, where the browser offers no clipboard object: then (or when the
+// browser refuses) the text is copied the old way, from a box off screen.
+export async function copyText(text, said = 'Copied') {
+  const viaBox = () => {
+    const was = document.activeElement;
+    const box = h('textarea', { class: 'copy-buffer', readOnly: true, 'aria-hidden': 'true', tabIndex: -1 });
+    box.value = text;
+    overlays().append(box);
+    box.focus();
+    box.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    box.remove();
+    if (was && was.focus) was.focus();
+    return ok;
+  };
+  let ok = false;
+  if (navigator.clipboard?.writeText) { try { await navigator.clipboard.writeText(text); ok = true; } catch (e) { ok = false; } }
+  if (!ok) ok = viaBox();
+  toast(ok ? said : 'The browser did not allow copying. Select the text and use the browser\'s own Copy.', ok ? 'info' : 'error');
+  return ok;
 }
 
 // A modal dialog. `build(close)` returns the body; Esc and the backdrop close it.

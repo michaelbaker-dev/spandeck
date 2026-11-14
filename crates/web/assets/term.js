@@ -4,7 +4,8 @@
 // control fits the pane to its view and tells the station. Anyone else shows
 // the pane at its real size, scaled down and letterboxed.
 
-import { h, ago, dot, STATE_LABEL, stateOf, toast } from './ui.js';
+import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText } from './ui.js';
+import { paneIcon, iconName } from './icons.js';
 
 const THEME = {
   background: '#0f1318', foreground: '#d6dde6', cursor: '#6cb6ff', selectionBackground: '#2b4a6b',
@@ -39,11 +40,17 @@ export class PaneTerm {
       ondragleave: () => this.el.classList.remove('dropping'),
       ondrop: (e) => this._drop(e),
     }, this.strip, h('div', { class: 'pane-main' }, this.body, this.drawer), this.note);
+    // The element leads back to its terminal (the pane menu and tests use it).
+    this.el.paneTerm = this;
 
     this.term = new Terminal({
       fontFamily: 'ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace',
       fontSize: opts.compact ? 11 : 13, theme: THEME, cursorBlink: true, scrollback: 5000,
       allowProposedApi: true, disableStdin: !this.control && !opts.typeWhileWatching, macOptionIsMeta: true,
+      // A full-screen agent listens for the mouse, so a plain drag goes to it
+      // and selects nothing. Option (Mac) or Shift makes the drag a selection.
+      // A right-click opens our menu and leaves the selection as it is.
+      macOptionClickForcesSelection: true, rightClickSelectsWord: false,
     });
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
@@ -54,6 +61,14 @@ export class PaneTerm {
       else if (!this.control && opts.typeWhileWatching) this.api.on(this.station, 'pane.input', { pane: this.pane.id, data }).catch(() => {});
     });
     this.term.onResize(() => {});
+    // Ctrl+Shift+C copies what is selected, and Ctrl+Shift+V is left to the
+    // browser, which pastes. (Cmd-C and Cmd-V on a Mac need nothing here.)
+    this.term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== 'keydown' || !e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return true;
+      const k = e.key.toLowerCase();
+      if (k === 'c' && this.hasSelection()) { e.preventDefault(); this.copySelection(); return false; }
+      return k !== 'v';
+    });
     // Paste of images or files goes to the station as a file drop.
     this.body.addEventListener('paste', (e) => {
       const files = [...(e.clipboardData?.files || [])];
@@ -224,12 +239,30 @@ export class PaneTerm {
 
   focus() { if (this.control) this.term.focus(); }
 
+  // ---- copy and paste ----
+  hasSelection() { return this.term.hasSelection(); }
+  // True while the program in the pane takes the mouse for itself.
+  tracksMouse() { const m = this.term.modes?.mouseTrackingMode; return !!m && m !== 'none'; }
+  copySelection() {
+    const text = this.term.getSelection();
+    if (!text) { toast('Nothing is selected in this pane', 'error'); return Promise.resolve(false); }
+    return copyText(text);
+  }
+  // Sent as one paste, so several lines arrive together and nothing runs
+  // until Enter is pressed.
+  pasteText(text) {
+    if (!text) return Promise.resolve(false);
+    if (!this.control && !this.opts.typeWhileWatching) { toast('This pane is only being watched here. Take control to paste into it.', 'error'); return Promise.resolve(false); }
+    return this.api.on(this.station, 'pane.paste', { pane: this.pane.id, text, enter: false }).then(() => true).catch((e) => { toast('Could not paste: ' + e.message, 'error'); return false; });
+  }
+
   update(pane) { this.pane = pane; this.renderStrip(); }
 
-  // Shown in a layout of another project: the strip says whose pane this is.
-  setGuest(project) {
-    if ((this.guest || null) === (project || null)) return;
-    this.guest = project || null;
+  // Shown in a layout that is not its own project's, or not on its station:
+  // the strip says where the pane is from ("from web", "from web on spark2").
+  setGuest(from) {
+    if ((this.guest || null) === (from || null)) return;
+    this.guest = from || null;
     this.renderStrip();
   }
 
@@ -246,17 +279,18 @@ export class PaneTerm {
       this.drawer.replaceChildren(
         h('div', { class: 'row' }, h('b', {}, 'Agents under ' + p.name), h('span', { class: 'grow' }),
           h('button', { class: 'mini', 'aria-label': 'Slide the agents panel away', onclick: () => { this.agentsOpen = false; this.renderStrip(); } }, '›')),
-        agents.length ? h('div', { class: 'agent-rows' }, agents.map(a => h(a.open ? 'button' : 'div', { class: 'agent-row', style: { marginLeft: a.depth * 16 + 'px' }, ...(a.open ? { type: 'button', onclick: a.open, title: 'Open this pane beside this one' } : {}) },
+        agents.length ? h('div', { class: 'agent-rows' }, agents.map(a => h(a.open ? 'button' : 'div', { class: 'agent-row', style: { marginLeft: a.depth * 16 + 'px' }, ...(a.open ? { type: 'button', onclick: a.open, title: 'Open this pane' } : {}) },
           h('span', { class: 'dot ' + a.state }), h('b', {}, a.name), h('span', { class: 'muted grow' }, a.detail), h('span', { class: 'muted' }, a.activity))))
           : h('p', { class: 'muted' }, 'No agents are working under this one. Helpers it gives tasks to, and its own sub-agents, appear here.'));
     }
     // replaceChildren would print a missing piece as the word "null".
     this.strip.replaceChildren(...[
       dot(p),
+      h('span', { class: 'ico-wrap', title: iconName(p.icon) }, paneIcon(p.icon)),
       h('span', { class: 'strip-name', title: p.address }, p.name),
       p.agent !== 'shell' ? h('span', { class: 'chip' }, p.agent_name) : null,
       p.role ? h('span', { class: 'chip' }, p.role) : null,
-      this.guest ? h('span', { class: 'chip guest', title: `A guest in this layout: this pane belongs to the project ${this.guest}` }, 'from ' + this.guest) : null,
+      this.guest ? h('span', { class: 'chip guest', title: `A guest in this layout: this pane is ${this.guest}` }, this.guest) : null,
       h('span', { class: 'strip-activity' }, activity),
       p.needs_reason && s === 'needs_you' ? h('span', { class: 'strip-reason', title: p.needs_reason }, p.needs_reason) : null,
       h('span', { class: 'grow' }),
