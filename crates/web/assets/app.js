@@ -847,10 +847,17 @@ function phoneView() {
       phonePanes.clear();
       phonePanes.set(fitKey, v);
     }
-    v.head.replaceChildren(h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'),
-      p.exited ? '' : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: () => { fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
-      h('span', { class: 'grow' }),
-      h('button', { class: 'danger big', disabled: p.exited || !(p.state === 'working' || p.state === 'needs_you'), onclick: () => rpc(r.station, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')) }, 'Stop this turn'));
+    // The bar is rebuilt only when what it shows changes. Rebuilding it on
+    // every redraw made the phone put a focus ring on a button at each touch.
+    const canStop = !p.exited && (p.state === 'working' || p.state === 'needs_you');
+    const sig = `${fitted}|${p.exited}|${canStop}`;
+    if (v.sig !== sig) {
+      v.sig = sig;
+      v.head.replaceChildren(h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'),
+        p.exited ? '' : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: (e) => { e.currentTarget.blur(); fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
+        h('span', { class: 'grow' }),
+        h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(r.station, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn'));
+    }
     if (v.slot.firstChild !== t.el) v.slot.replaceChildren(t.el);
     const foot = p.exited ? (v.ended ||= h('p', { class: 'muted small' }, 'This pane has ended.')) : composer(r.station, p);
     if (v.foot.firstChild !== foot) v.foot.replaceChildren(foot);

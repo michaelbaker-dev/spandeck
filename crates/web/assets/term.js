@@ -81,7 +81,7 @@ export class PaneTerm {
       const line = lineHeight();
       const lines = Math.trunc(carry / line);
       events += 1;
-      if (lines) { this.term.scrollLines(lines); carry -= lines * line; moved += lines; }
+      if (lines) { this._scrollBy(lines); carry -= lines * line; moved += lines; }
       e.preventDefault();
       e.stopPropagation();
     }, { capture: true, passive: false });
@@ -141,6 +141,32 @@ export class PaneTerm {
     this.note.hidden = !text;
     this.note.replaceChildren(...(text ? [text, retry ? h('button', { onclick: retry }, 'Retry') : null].filter(Boolean) : []));
     if (retry && text) { clearTimeout(this._retry); this._retry = setTimeout(() => !this.disposed && retry(), 3000); }
+  }
+
+  // Keys and the like, sent to the pane whether this client holds its size or not.
+  _send(data) {
+    if (this.control && this.chan !== null) this.api.send('pane.input', { chan: this.chan, data });
+    else if (this.opts.typeWhileWatching) this.api.on(this.station, 'pane.input', { pane: this.pane.id, data }).catch(() => {});
+  }
+
+  // Scroll by a finger drag. A full-screen program (Claude Code, an editor, a
+  // pager) keeps its own history, so there is nothing of ours to move: it is
+  // told to scroll, with wheel turns if it listens for the mouse, else with
+  // arrow keys, as a desktop terminal does.
+  _scrollBy(lines) {
+    const b = this.term.buffer.active;
+    if (b.type !== 'alternate') { this.term.scrollLines(lines); return; }
+    // A wheel turn moves most programs a few lines, so fewer turns than lines.
+    const n = Math.min(Math.max(1, Math.round(Math.abs(lines) / 2)), 30);
+    const mouse = this.term.modes?.mouseTrackingMode;
+    let one;
+    if (mouse && mouse !== 'none') {
+      one = `\x1b[<${lines < 0 ? 64 : 65};${Math.ceil(this.term.cols / 2)};${Math.ceil(this.term.rows / 2)}M`;
+    } else {
+      const app = this.term.modes?.applicationCursorKeysMode;
+      one = (app ? '\x1bO' : '\x1b[') + (lines < 0 ? 'A' : 'B');
+    }
+    this._send(one.repeat(n));
   }
 
   // Fit (in control) or letterbox (watching).
