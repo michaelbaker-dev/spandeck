@@ -16,9 +16,9 @@ Read `DECISIONS.md` before changing anything. It wins over every other document.
 
 ## Status
 
-Version 0.1.0 is the first release. It was built and tested on one Linux arm64 machine.
-The macOS and Linux x86-64 binaries are built and tested by CI and have had little use
-on real machines yet. See "Not verified" below before you rely on it.
+Version 0.2.0. It is built on one Linux arm64 machine and tested there and in CI on
+macOS and Linux, and runs on one real Mac. It is young: see "Not verified" below before
+you rely on it.
 
 ## Requirements
 
