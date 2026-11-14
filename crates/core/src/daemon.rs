@@ -728,6 +728,10 @@ impl Daemon {
                 ),
                 "-c".to_string(),
                 "mcp_servers.spandeck.args=[\"mcp\"]".to_string(),
+                // Codex starts MCP servers with a bare environment. Without
+                // these the server cannot tell which pane it speaks for.
+                "-c".to_string(),
+                "mcp_servers.spandeck.env_vars=[\"SPANDECK_PANE\",\"SPANDECK_TOKEN\",\"SPANDECK_SOCKET\",\"SPANDECK_STATE_DIR\",\"SPANDECK_CONFIG_DIR\",\"SPANDECK_STATION\",\"SPANDECK_PROJECT\"]".to_string(),
             ]),
             _ => {}
         }

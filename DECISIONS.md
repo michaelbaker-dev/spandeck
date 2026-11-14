@@ -58,7 +58,7 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - spandeck finds the vault by its Tailscale name; the address is never hard-coded. `[vault] url` in the config overrides it.
 - Tokens do not expire by default. Rotation is a per-station setting (never, or every N hours, at least 1) that only the owner changes; spandeckd rotates by itself.
 - The owner is told when the setting changes outside the Control Deck, or the token is swapped or refused.
-- A project names the keys its agents may use (`[vault] keys` in `.spandeck/project.toml`).
+- Connecting a station is the only step: by default its agents may use every key the owner allowed that station's token at the vault (changed 14 Nov 2026 at the owner's request; before, a project had to list its keys). A project can narrow its agents with `[vault] keys` in `.spandeck/project.toml`.
 - When a station has a token, a raw key in an agent's command is blocked and reported to the vault; one pasted into a prompt, or found in a transcript, is reported.
 
 ## Guarantees (contracts the build must meet)

@@ -223,12 +223,10 @@ fn agents_use_keys_through_the_vault_within_their_projects_list() {
             .code,
         "denied"
     );
-    assert_eq!(
-        s.call_as_pane(&loose, "vault.list", json!({}))
-            .unwrap_err()
-            .code,
-        "denied"
-    );
+    // A pane outside any project, with nothing set up, may use what the
+    // owner allowed this station at the vault: connecting is the one step.
+    let all = s.call_as_pane(&loose, "vault.list", json!({})).unwrap();
+    assert_eq!(all["keys"].as_array().unwrap().len(), 3, "{all}");
     assert!(s
         .call_as_pane(
             &dev,

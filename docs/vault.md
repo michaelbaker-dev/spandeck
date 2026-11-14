@@ -26,9 +26,17 @@ The station now holds a token named `spandeck:<machine name>`. It is saved in sp
 state folder, readable only by you. It can list keys and send requests through the vault,
 read-only (GET) unless you widen it at the vault, and only from that machine.
 
-## Let a project use keys
+## What agents can use
 
-Name the keys in the project file. `*` matches any run of characters.
+Nothing more to set up. Once a station is connected, every agent spandeck starts on it
+(Claude Code or Codex) has three tools from spandeck's MCP server: `vault_list`,
+`vault_describe` and `vault_call`. By default an agent may use every key you allowed
+that station's token at the vault. Every call is written to the ship's log with the
+agent, key name, method, path and status, never the key.
+
+To narrow a project's agents to some keys, name them in the project file. `*` matches
+any run of characters. A call for a key the project does not name is refused before the
+vault is asked.
 
 ```toml
 # .spandeck/project.toml
@@ -36,10 +44,7 @@ Name the keys in the project file. `*` matches any run of characters.
 keys = ["OPENAI_API_KEY", "github-*"]
 ```
 
-Agents in that project get three tools from spandeck's MCP server: `vault_list`,
-`vault_describe` and `vault_call`. A call for a key the project does not name is refused
-before the vault is asked. Every call is written to the ship's log with the agent, key
-name, method, path and status, never the key.
+To narrow a whole station, limit its token at the vault.
 
 ## Rotation
 

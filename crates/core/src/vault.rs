@@ -585,15 +585,16 @@ impl Daemon {
         let Some(pane) = &caller.pane else {
             return Ok(None);
         };
+        // With nothing set up, an agent may use every key the owner allowed
+        // this station's token at the vault: connecting the station is the
+        // one step. A project that lists keys narrows its agents to those.
         let meta: PaneMeta = self.pane(pane)?.meta();
-        let project = meta.project.ok_or_else(|| {
-            Error::Denied("this pane is not in a project, so it has no keys".into())
-        })?;
+        let Some(project) = meta.project else {
+            return Ok(None);
+        };
         let (_, file) = self.project_file(&project)?;
         if file.vault.keys.is_empty() {
-            return Err(Error::Denied(format!(
-                "project {project} lists no keys. The owner adds them under [vault] keys in .spandeck/project.toml"
-            )));
+            return Ok(None);
         }
         Ok(Some(file.vault.keys))
     }
