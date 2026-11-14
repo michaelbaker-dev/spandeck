@@ -554,8 +554,8 @@ impl Daemon {
                     .filter(|p| { let m = p.meta.lock().unwrap(); m.agent == k && m.exit.is_none() })
                     .map(|p| { let m = p.meta.lock().unwrap(); json!({"id": m.id, "name": m.name, "state": m.state, "needs_reason": m.needs_reason}) })
                     .collect();
-                let version = self.agent_probe(k, std::time::Duration::from_secs(60)).version;
-                json!({"agent": k, "name": k.display(), "installed_version": version, "running": panes})
+                let probe = self.agent_probe(k, std::time::Duration::from_secs(60));
+                json!({"agent": k, "name": k.display(), "installed_version": probe.version, "health": probe.health, "running": panes})
             })
             .collect();
         json!({"station": self.station, "setup": setup, "agents": agents})

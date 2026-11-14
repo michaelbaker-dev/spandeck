@@ -923,6 +923,20 @@ impl Daemon {
                     .await
                     .map_err(|e| invalid(e.to_string()))??
             }
+            // Install an agent program again (or for the first time) with the
+            // way the owner picks, and remember the pick for this station.
+            // The caller names an agent and a way, never a command. Owner
+            // only, like `agents.update`: it changes the station.
+            "agents.install" => {
+                let a = s(&params, "agent")?;
+                let agent =
+                    AgentKind::parse(a).ok_or_else(|| invalid(format!("unknown agent {a}")))?;
+                let method = opt(&params, "method").map(String::from);
+                let (d, by) = (self.clone(), by.to_string());
+                tokio::task::spawn_blocking(move || d.agents_install(agent, method.as_deref(), &by))
+                    .await
+                    .map_err(|e| invalid(e.to_string()))??
+            }
             "agents.command" => {
                 let agent = match opt(&params, "agent") {
                     Some(a) => Some(
