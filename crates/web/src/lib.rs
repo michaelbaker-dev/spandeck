@@ -553,7 +553,7 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
             .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
             .collect();
     }
-    let hello = json!({"auth": {"ok": true, "station": web.daemon.station, "version": spandeck_core::VERSION, "client": who.client, "full": who.is_owner()}});
+    let hello = json!({"auth": {"ok": true, "station": web.daemon.station, "version": spandeck_core::VERSION, "build": assets_build(), "client": who.client, "full": who.is_owner()}});
     if sink
         .send(Message::Text(hello.to_string().into()))
         .await
@@ -933,4 +933,23 @@ async fn attach_remote(
         }
     });
     Ok((result, tx, peer_chan, task))
+}
+
+/// A short name for exactly this set of Control Deck files. A page that was
+/// loaded from an older set reloads itself when it sees a different one.
+fn assets_build() -> &'static str {
+    static BUILD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BUILD.get_or_init(|| {
+        use std::hash::{Hash, Hasher};
+        let mut names: Vec<_> = Assets::iter().collect();
+        names.sort();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for n in names {
+            n.hash(&mut h);
+            if let Some(f) = Assets::get(&n) {
+                f.data.hash(&mut h);
+            }
+        }
+        format!("{:016x}", h.finish())
+    })
 }

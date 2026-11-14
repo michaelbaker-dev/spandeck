@@ -60,6 +60,10 @@ export class Api {
             resolve(false);
             return;
           }
+          // The station was upgraded while this page was open: load the new
+          // Control Deck, so a fix on the station reaches the page by itself.
+          if (this.build && msg.auth.build && msg.auth.build !== this.build) { location.reload(); return; }
+          this.build = msg.auth.build || this.build;
           this.authError = null;
           this.station = msg.auth.station;
           this.version = msg.auth.version;
