@@ -32,12 +32,7 @@ jobs:
           key: ${{ matrix.target }}
       - name: Handoff acceptance test (release gate)
         if: matrix.gate
-        shell: bash
-        run: |
-          { cargo test -p spandeck-terminal --test handoff && cargo test -p spandeck --test phase1 handoff; } 2>&1 | tee gate.log || {
-            scripts/ci-annotate.sh "handoff gate on ${{ matrix.target }}" gate.log 100
-            exit 1
-          }
+        run: cargo test -p spandeck-terminal --test handoff && cargo test -p spandeck --test phase1 handoff
       - run: cargo build --release --locked --bin spandeck --bin sd --target ${{ matrix.target }}
       - name: Package
         run: |

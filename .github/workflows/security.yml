@@ -25,14 +25,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: gitleaks, whole history
-        run: |
-          v=8.21.2
-          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v$v/gitleaks_${v}_linux_x64.tar.gz" | tar -xz -C "$RUNNER_TEMP" gitleaks
-          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --exit-code 2 . > gitleaks.log 2>&1 || {
-            rc=$?
-            cat gitleaks.log
-            scripts/ci-annotate.sh "gitleaks (exit $rc)" gitleaks.log
-            exit $rc
-          }
-          tail -3 gitleaks.log
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

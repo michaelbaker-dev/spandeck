@@ -23,22 +23,11 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Format and lint
-        shell: bash
         run: |
           cargo fmt --all -- --check
-          cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee lint.log || {
-            grep -E "^(error|warning)" -A12 lint.log | tail -100 > lint-fail.log
-            scripts/ci-annotate.sh "lint on ${{ matrix.os }}" lint-fail.log 100
-            exit 1
-          }
+          cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests (replays, fixtures, scenarios, simulation, browser smoke, handoff)
-        shell: bash
-        run: |
-          cargo test --workspace --no-fail-fast 2>&1 | tee test.log || {
-            grep -E "^test .* FAILED|panicked at|^error|^---- .* stdout" -A8 test.log | tail -150 > failures.log
-            scripts/ci-annotate.sh "tests on ${{ matrix.os }}" failures.log 150
-            exit 1
-          }
+        run: cargo test --workspace --no-fail-fast
         env:
           # Hosted runners ship Chrome; the browser tests find it.
           SPANDECK_CHROME: ${{ matrix.os == 'macos-latest' && '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' || '/usr/bin/google-chrome' }}

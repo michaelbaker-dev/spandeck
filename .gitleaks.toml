@@ -4,8 +4,13 @@
 useDefault = true
 
 [allowlist]
-description = "Made-up keys planted by tests"
+description = "Made-up keys planted by tests, and minified vendor code"
+paths = [
+  '''crates/web/assets/vendor/''',
+]
 regexes = [
+  '''abcd1234efgh''',
+  '''eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0''',
   '''PLANTED''',
   '''LIVECHECK''',
   '''AbCdEfGhIjKlMnOpQrStUvWxYz0123456789''',
