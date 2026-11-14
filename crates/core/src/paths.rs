@@ -63,6 +63,18 @@ impl Paths {
     pub fn token_file(&self) -> PathBuf {
         self.state_dir.join("client.token")
     }
+    /// A link to the binary this daemon is running, kept so an upgrade can go
+    /// back to it even after the file at its path has been replaced.
+    pub fn running_exe(&self) -> PathBuf {
+        self.state_dir.join("bin").join("running")
+    }
+    pub fn previous_exe(&self) -> PathBuf {
+        self.state_dir.join("bin").join("previous")
+    }
+    /// The database as it was just before an upgrade that changes its schema.
+    pub fn db_before_upgrade(&self) -> PathBuf {
+        self.state_dir.join("spandeck.db.before-upgrade")
+    }
     pub fn handoff_file(&self) -> PathBuf {
         self.state_dir.join("handoff.json")
     }

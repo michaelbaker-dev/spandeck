@@ -899,10 +899,22 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::Upgrade { binary } => {
             let v = c.call("station.upgrade", json!({"binary": binary.canonicalize()?}))?;
             show(j, &v, |v| {
+                let behind: Vec<&str> = v["peers_needing_update"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|s| s.as_str())
+                    .collect();
                 format!(
-                    "upgrading {} -> {}; terminals stay open",
+                    "upgrading {} -> {}; terminals stay open. If the new version does not start properly, this station goes back to {} by itself.{}",
                     v["from"].as_str().unwrap_or(""),
-                    v["to"].as_str().unwrap_or("")
+                    v["to"].as_str().unwrap_or(""),
+                    v["from"].as_str().unwrap_or(""),
+                    if behind.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\nThese stations speak an older protocol and cannot be controlled from here until they are upgraded too: {}", behind.join(", "))
+                    }
                 )
             });
         }
@@ -993,23 +1005,129 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
         )
         .init();
 
-    let cfg = Config::load(&paths)?;
+    // Set when this image was started by an upgrade: the binary to go back to
+    // if this one fails its health check.
+    let previous = handoff
+        .as_ref()
+        .and(std::env::var_os("SPANDECK_PREVIOUS_EXE"))
+        .map(PathBuf::from);
+    std::env::remove_var("SPANDECK_PREVIOUS_EXE");
+    let rolled_back = std::env::var("SPANDECK_ROLLED_BACK").ok();
+    std::env::remove_var("SPANDECK_ROLLED_BACK");
+    // Before any terminal has been taken over, going back is just starting
+    // the previous binary on the same handoff file.
+    fn back_untouched(
+        previous: &Option<PathBuf>,
+        handoff: &Option<PathBuf>,
+        paths: &Paths,
+        reason: String,
+    ) -> anyhow::Error {
+        if let (Some(prev), Some(file)) = (previous, handoff) {
+            use std::os::unix::process::CommandExt;
+            tracing::error!(%reason, "upgrade failed before it took over; going back");
+            spandeck_core::daemon::restore_db_before_upgrade(paths);
+            let err = std::process::Command::new(prev)
+                .arg("daemon")
+                .arg("--handoff")
+                .arg(file)
+                .env("SPANDECK_ROLLED_BACK", &reason)
+                .exec();
+            return anyhow::anyhow!("{reason}; and going back failed: {err}");
+        }
+        anyhow::anyhow!(reason)
+    }
+
+    let cfg = match Config::load(&paths) {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(back_untouched(
+                &previous,
+                &handoff,
+                &paths,
+                format!("the configuration did not load: {e}"),
+            ))
+        }
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+    let socket = paths.socket();
+    let token_file = paths.token_file();
+    let saved_db = paths.db_before_upgrade();
     runtime.block_on(async move {
         // Another daemon already answering on this socket?
         if handoff.is_none() && std::os::unix::net::UnixStream::connect(paths.socket()).is_ok() {
             anyhow::bail!("spandeckd is already running on {}", paths.socket().display());
         }
-        let daemon = Daemon::start(paths, cfg, StartOpts { handoff, exe: None })?;
-        let listener = spandeck_core::server::bind(&daemon)?;
-        tokio::spawn(spandeck_core::server::serve(daemon.clone(), listener));
+        let daemon = match Daemon::start(
+            paths.clone(),
+            cfg,
+            StartOpts {
+                handoff: handoff.clone(),
+                exe: None,
+            },
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                return Err(back_untouched(
+                    &previous,
+                    &handoff,
+                    &paths,
+                    format!("the station did not start: {e}"),
+                ))
+            }
+        };
+        // From here the terminals belong to this image; going back hands them over again.
+        let mut unhealthy: Option<String> = None;
+        match spandeck_core::server::bind(&daemon) {
+            Ok(listener) => {
+                tokio::spawn(spandeck_core::server::serve(daemon.clone(), listener));
+            }
+            Err(e) => unhealthy = Some(format!("the local socket did not open: {e}")),
+        }
         if !no_web {
             match spandeck_web::start(daemon.clone()).await {
                 Ok(addrs) => tracing::info!(?addrs, "Control Deck listening"),
-                Err(e) => tracing::warn!(error = %e, "Control Deck is not available"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Control Deck is not available");
+                    if previous.is_some() {
+                        unhealthy.get_or_insert(format!("the Control Deck did not start: {e}"));
+                    }
+                }
             }
+        }
+        if let Some(prev) = &previous {
+            // After an update: a health check. Does the station answer?
+            if unhealthy.is_none() {
+                let token = std::fs::read_to_string(&token_file).unwrap_or_default();
+                let answered = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    tokio::task::spawn_blocking(move || {
+                        spandeck_core::client::Client::connect(&socket, token.trim())
+                            .and_then(|mut c| c.call("station.info", json!({})))
+                            .is_ok()
+                    }),
+                )
+                .await;
+                if !matches!(answered, Ok(Ok(true))) {
+                    unhealthy = Some("the station did not answer after starting".into());
+                }
+            }
+            // Debug builds only, for the test of going back.
+            if cfg!(debug_assertions) && std::env::var_os("SPANDECK_TEST_UNHEALTHY").is_some() {
+                unhealthy = Some("the test said so".into());
+            }
+            if let Some(reason) = unhealthy {
+                let err = daemon.roll_back(prev, &reason);
+                tracing::error!(error = %err, "could not go back to the previous binary; staying on this one");
+            } else {
+                let _ = std::fs::remove_file(&saved_db);
+            }
+        } else if let Some(reason) = unhealthy {
+            anyhow::bail!(reason);
+        }
+        if let Some(reason) = &rolled_back {
+            daemon.note_rolled_back(reason);
         }
         tracing::info!(station = %daemon.station, version = spandeck_core::VERSION, socket = %daemon.paths.socket().display(), "spandeckd ready");
 

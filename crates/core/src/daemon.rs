@@ -256,6 +256,8 @@ pub struct Inner {
     pub(crate) approvals: Mutex<HashMap<String, oneshot::Sender<ApprovalAnswer>>>,
     /// client id -> last input time: who is "at a keyboard".
     pub(crate) presence: Mutex<HashMap<String, u64>>,
+    /// When each client last had its typing into a pane written to the log.
+    pub(crate) typed: Mutex<HashMap<String, u64>>,
     pub(crate) keep_awake: Mutex<Option<std::process::Child>>,
     pub(crate) seq: AtomicU64,
     pub fleet: crate::fleet::FleetState,
@@ -344,6 +346,7 @@ impl Daemon {
             msg_tx,
             approvals: Mutex::new(HashMap::new()),
             presence: Mutex::new(HashMap::new()),
+            typed: Mutex::new(HashMap::new()),
             keep_awake: Mutex::new(None),
             seq: AtomicU64::new(0),
             web_addrs: Mutex::new(vec![]),
@@ -357,6 +360,17 @@ impl Daemon {
         };
         if !adopted {
             daemon.recover();
+        }
+        // Keep hold of this binary. A hard link costs nothing and survives the
+        // file at its path being replaced by an installer; where a link is not
+        // possible (another filesystem), rollback uses the path as it is then.
+        {
+            let link = daemon.paths.running_exe();
+            if let Some(dir) = link.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::remove_file(&link);
+            let _ = std::fs::hard_link(&daemon.exe, &link);
         }
         daemon.spawn_tasks(msg_rx);
         Ok(daemon)
@@ -1029,6 +1043,43 @@ impl Daemon {
         Ok(shown)
     }
 
+    // ------------------------------------------------------------ who was here
+
+    /// The ship's log says who opened a pane's terminal.
+    pub fn note_attach(&self, pane: &str, who: &str, client: &str, control: bool) {
+        self.record(
+            "pane.attached",
+            Some(pane),
+            None,
+            None,
+            Some(who),
+            json!({"client": client, "mode": if control { "control" } else { "watch" }}),
+        );
+    }
+
+    /// The ship's log says who typed into a pane: once when they start, and
+    /// again after five quiet minutes. Never what they typed.
+    pub fn note_input(&self, pane: &str, who: &str, client: &str) {
+        let key = format!("{pane}\u{0}{client}");
+        let now = now_ms();
+        {
+            let mut typed = self.typed.lock().unwrap();
+            let last = typed.insert(key, now).unwrap_or(0);
+            typed.retain(|_, t| now.saturating_sub(*t) < 3_600_000);
+            if now.saturating_sub(last) < 300_000 {
+                return;
+            }
+        }
+        self.record(
+            "pane.typed",
+            Some(pane),
+            None,
+            None,
+            Some(who),
+            json!({"client": client}),
+        );
+    }
+
     // ---------------------------------------------------------------- presence
 
     pub fn touch_presence(&self, client: &str) {
@@ -1186,6 +1237,50 @@ impl Daemon {
     }
 
     // ------------------------------------------------------------------ handoff
+
+    /// After an upgrade whose health check failed: hand every terminal back
+    /// to the previous binary, the same way they were handed to this one.
+    /// Returns only if that could not be done.
+    pub fn roll_back(&self, previous: &std::path::Path, reason: &str) -> std::io::Error {
+        use std::os::unix::process::CommandExt;
+        tracing::error!(reason, previous = %previous.display(), "upgrade failed its health check; going back");
+        let state = self.prepare_handoff();
+        let file = self.paths.handoff_file();
+        if let Err(e) = write_private(&file, &serde_json::to_string(&state).unwrap_or_default()) {
+            self.readopt(state);
+            return e;
+        }
+        restore_db_before_upgrade(&self.paths);
+        let err = std::process::Command::new(previous)
+            .arg("daemon")
+            .arg("--handoff")
+            .arg(&file)
+            .env_remove("SPANDECK_PREVIOUS_EXE")
+            .env("SPANDECK_ROLLED_BACK", reason)
+            .exec();
+        let _ = std::fs::remove_file(&file);
+        self.readopt(state);
+        err
+    }
+
+    /// Said once by the binary that was gone back to.
+    pub fn note_rolled_back(&self, reason: &str) {
+        self.record(
+            "station.rolled_back",
+            None,
+            None,
+            None,
+            None,
+            json!({"reason": reason, "version": VERSION}),
+        );
+        self.notify(
+            "station.rolled_back",
+            None,
+            None,
+            &format!("The upgrade of {} was undone", self.station),
+            &format!("The new version did not start properly ({reason}). This station is back on {VERSION} and every terminal was kept."),
+        );
+    }
 
     /// Describe every live pane for the next process image. Readers stop here.
     pub fn prepare_handoff(&self) -> HandoffState {
@@ -1375,4 +1470,22 @@ pub fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<
         .mode(0o600)
         .open(path)?;
     f.write_all(contents.as_bytes())
+}
+
+/// Put back the database saved before an upgrade that changed its schema, so
+/// the previous binary can open it. Changes made since are lost.
+pub fn restore_db_before_upgrade(paths: &Paths) {
+    let saved = paths.db_before_upgrade();
+    if !saved.exists() {
+        return;
+    }
+    let db = paths.db();
+    for ext in ["-wal", "-shm"] {
+        let mut side = db.clone().into_os_string();
+        side.push(ext);
+        let _ = std::fs::remove_file(side);
+    }
+    if let Err(e) = std::fs::rename(&saved, &db) {
+        tracing::error!(error = %e, "could not put back the database saved before the upgrade");
+    }
 }

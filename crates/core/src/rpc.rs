@@ -230,11 +230,15 @@ impl Daemon {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
                 self.send_text(&id, s(&params, "text")?, enter)?;
+                if caller.is_owner() {
+                    self.note_input(&id, &caller.who, &caller.client);
+                }
                 json!({"ok": true})
             }
             "pane.input" => {
                 let pane = self.pane(s(&params, "pane")?)?;
                 pane.term.write(s(&params, "data")?.as_bytes())?;
+                self.note_input(&pane.id, &caller.who, &caller.client);
                 json!({"ok": true})
             }
             "pane.resize" => {
@@ -951,13 +955,44 @@ impl Daemon {
                 self.db.schema_version()
             )));
         }
+        // Before an update: would it cut this station off from the others?
+        let new_protocol = check.get("protocol").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let left_behind: Vec<String> = self
+            .fleet
+            .peers()
+            .into_iter()
+            .filter(|p| p.state == "online" && p.protocol != new_protocol)
+            .map(|p| p.station)
+            .collect();
+        // A new schema cannot be opened by the old binary: keep the database
+        // as it is now, in case the upgrade has to be undone.
+        let saved = self.paths.db_before_upgrade();
+        let _ = std::fs::remove_file(&saved);
+        if schema_max > self.db.schema_version() {
+            let target = saved.display().to_string();
+            if let Err(e) = self.db.with(|c| c.execute("VACUUM INTO ?1", [&target])) {
+                return Err(invalid(format!(
+                    "could not save the database before upgrading ({e}); nothing was changed"
+                )));
+            }
+        }
+        // And keep the binary that is running now.
+        let previous = {
+            let (running, previous) = (self.paths.running_exe(), self.paths.previous_exe());
+            let _ = std::fs::remove_file(&previous);
+            if std::fs::rename(&running, &previous).is_ok() {
+                previous
+            } else {
+                self.exe.clone()
+            }
+        };
         self.record(
             "station.upgrading",
             None,
             None,
             None,
             Some(by),
-            json!({"to": check.get("version"), "binary": binary.display().to_string()}),
+            json!({"to": check.get("version"), "binary": binary.display().to_string(), "peers_needing_update": left_behind}),
         );
         let d = self.clone();
         std::thread::spawn(move || {
@@ -978,6 +1013,8 @@ impl Daemon {
                 .arg("daemon")
                 .arg("--handoff")
                 .arg(&file)
+                .env("SPANDECK_PREVIOUS_EXE", &previous)
+                .env_remove("SPANDECK_ROLLED_BACK")
                 .exec();
             // exec returned: the old image is still running. Take the panes back.
             tracing::error!(error = %err, "exec of the new binary failed; staying on the current binary");
@@ -985,7 +1022,7 @@ impl Daemon {
             d.readopt(state);
         });
         Ok(
-            json!({"ok": true, "from": VERSION, "to": check.get("version"), "protocol": PROTOCOL, "schema": Db::LATEST_SCHEMA}),
+            json!({"ok": true, "from": VERSION, "to": check.get("version"), "protocol": PROTOCOL, "schema": Db::LATEST_SCHEMA, "peers_needing_update": left_behind}),
         )
     }
 }

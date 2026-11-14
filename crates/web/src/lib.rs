@@ -606,6 +606,12 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                     match station {
                         None => match attach_local(&web.daemon, &pane, chan, out_tx.clone()) {
                             Ok((result, task)) => {
+                                web.daemon.note_attach(
+                                    result["pane"].as_str().unwrap_or(&pane),
+                                    &who.who,
+                                    &who.client,
+                                    control,
+                                );
                                 chans.insert(
                                     chan,
                                     Chan::Local {

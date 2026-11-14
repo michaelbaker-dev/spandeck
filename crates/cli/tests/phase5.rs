@@ -124,6 +124,16 @@ fn two_stations_find_each_other_and_one_deck_controls_both() {
     b.wait_text(id, "from-alpha-2");
     // The ship's log on bravo says who did it.
     assert!(b.log("pane.created").iter().any(|e| e["pane"] == json!(id)));
+    // Features 4.10: who typed into a pane is logged, once, without the text.
+    a.call("peer.call", json!({"station": "bravo", "method": "pane.send_text", "params": {"pane": id, "text": "echo again"}}));
+    let typed = b.log("pane.typed");
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert_eq!(typed[0]["pane"], json!(id));
+    assert!(
+        typed[0]["actor"].as_str().unwrap().contains("via alpha"),
+        "{typed:?}"
+    );
+    assert!(!typed[0].to_string().contains("from-alpha"));
 
     // An agent on alpha cannot use the gateway to reach bravo.
     let agent = a.fake(json!({"steps": []}), json!({}));
@@ -180,6 +190,13 @@ async fn a_pane_on_another_station_is_attached_through_the_gateway() {
     };
     assert_eq!(attached["result"]["station"], json!("bravo"), "{attached}");
     let chan = attached["result"]["chan"].as_u64().unwrap();
+    // Features 4.10: bravo's log says who attached, and through which station.
+    let seen = tokio::task::block_in_place(|| b.log("pane.attached"));
+    assert!(
+        seen.iter()
+            .any(|e| e["actor"].as_str().is_some_and(|a| a.contains("via alpha"))),
+        "{seen:?}"
+    );
     ws.send(Message::Text(json!({"id": null, "method": "pane.input", "params": {"chan": chan, "data": "echo via-gateway-$((3*3))\r"}}).to_string().into())).await.unwrap();
     let mut seen = Vec::new();
     let ok = tokio::time::timeout(Duration::from_secs(10), async {

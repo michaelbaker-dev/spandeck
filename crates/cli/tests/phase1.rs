@@ -133,6 +133,50 @@ fn after_a_daemon_crash_agents_resume_and_shells_do_not() {
     );
 }
 
+/// Guarantee (Upgrades): after an upgrade, a health check, and rollback to
+/// the previous binary if it fails. The terminals survive both swaps.
+#[test]
+fn an_upgrade_that_fails_its_health_check_goes_back_and_keeps_every_terminal() {
+    // The switch makes the new image report itself unhealthy. It is read
+    // only by an image started by an upgrade, and only in debug builds.
+    let s = Station::start_with("alpha", "", &[("SPANDECK_TEST_UNHEALTHY", "1")]);
+    let pane = s.fake(
+        json!({"steps": [{"say": "before-upgrade marker"}]}),
+        json!({}),
+    );
+    s.wait_text(&pane, "before-upgrade marker");
+    let before = s.call("station.info", json!({}));
+    let pane_pid = s.pane(&pane)["pid"].clone();
+
+    s.call("station.upgrade", json!({"binary": SPANDECK}));
+    let said = wait_for("the station to say it went back", 20, || {
+        s.try_call("log.query", json!({"kind": "station.rolled_back"}))
+            .ok()
+            .and_then(|l| l.get(0).cloned())
+    });
+    assert!(
+        said["data"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("test said so"),
+        "{said}"
+    );
+    let after = s.call("station.info", json!({}));
+    assert_eq!(after["pid"], before["pid"], "still the same process");
+    // The terminal went there and back: same child, old output, still usable.
+    let p = s.pane(&pane);
+    assert_eq!(p["pid"], pane_pid);
+    assert!(s.text(&pane).contains("before-upgrade marker"));
+    s.call(
+        "pane.send_text",
+        json!({"pane": pane, "text": "still here"}),
+    );
+    s.wait_text(&pane, "[fake] got: still here");
+    // The owner is told.
+    let notes = s.call("notify.list", json!({"limit": 20})).to_string();
+    assert!(notes.contains("was undone"), "{notes}");
+}
+
 #[test]
 fn an_upgrade_to_an_incompatible_binary_is_refused_and_changes_nothing() {
     let s = Station::start("alpha");

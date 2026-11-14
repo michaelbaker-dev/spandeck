@@ -60,6 +60,10 @@ To add a second station, install spandeck on it and run `spandeck fleet --join <
 station>`, then approve the code on the first station. Stations under your Tailscale
 login see each other without this, but neither controls the other until you approve.
 
+To update a station without losing its terminals: install the new release, then
+`spandeck upgrade ~/.local/bin/spandeck`. If the new version does not start properly,
+the station goes back to the one it was running and keeps every terminal.
+
 ## From your phone
 
 Open any station from a phone on your Tailscale account: `spandeck cc --qr` shows a QR
@@ -81,14 +85,11 @@ A station can only be reached while it is awake. spandeck keeps it awake while a
 is working. To keep it awake whenever spandeckd runs, add `stay_awake = true` to
 `~/.config/spandeck/config.toml`.
 
-To update a station without losing its terminals: install the new release, then
-`spandeck upgrade ~/.local/bin/spandeck`.
-
 ## What v1 does
 
 | Area | What works |
 | --- | --- |
-| Daemon | Panes survive client disconnects. An upgrade replaces the daemon in place and keeps every terminal (`spandeck upgrade <binary>`). After a crash or reboot each agent resumes its conversation by session id. |
+| Daemon | Panes survive client disconnects. An upgrade replaces the daemon in place and keeps every terminal (`spandeck upgrade <binary>`), and undoes itself if the new version fails its health check. After a crash or reboot each agent resumes its conversation by session id. |
 | Agents | Claude Code and Codex through one hook command. States, session capture, remote approval of permission prompts, stuck detection, pause / stop / kill. |
 | Projects | `.spandeck/project.toml` in the repo. Opening a project restores its panes. |
 | Fleet | Discovery over Tailscale, one deck for every station, attach through the station you opened, stop-all with three honest states (requested, confirmed, unreachable). |
