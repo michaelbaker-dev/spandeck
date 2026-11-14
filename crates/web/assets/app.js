@@ -971,6 +971,26 @@ addEventListener('keydown', (e) => {
   }
 }, false);
 
+// A phone's keyboard covers the bottom of the page without making the page
+// smaller. Size the app to what is actually visible, and while the keyboard
+// is up give the terminal the room: the bars above it step aside.
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  const fit = () => {
+    const app = document.getElementById('app');
+    app.style.height = vv.height + 'px';
+    const keyboard = vv.height < window.innerHeight * 0.78;
+    app.classList.toggle('kbd', keyboard);
+    app.classList.toggle('kbd-term', keyboard && !!document.activeElement?.closest?.('.xterm'));
+    if (keyboard) window.scrollTo(0, 0);
+  };
+  vv.addEventListener('resize', fit);
+  vv.addEventListener('scroll', fit);
+  document.addEventListener('focusin', () => setTimeout(fit, 50));
+  document.addEventListener('focusout', () => setTimeout(fit, 50));
+  fit();
+}
+
 api.onStatus(() => render());
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 api.connect().then((ok) => {

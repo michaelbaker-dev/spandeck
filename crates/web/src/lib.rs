@@ -446,14 +446,45 @@ async fn asset(uri: Uri) -> Response<Body> {
     match Assets::get(path) {
         Some(file) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
-            let mut resp = Response::new(Body::from(file.data.into_owned()));
+            // Phones hold on to scripts hard. Each of our files is asked for
+            // under a name that changes with every build, so a new build is
+            // always fetched: the page names app.js?v=…, and each script
+            // names the ones it imports the same way.
+            let mut data = file.data.into_owned();
+            let ours = !path.starts_with("vendor/");
+            if ours && (path.ends_with(".html") || path.ends_with(".js")) {
+                if let Ok(text) = String::from_utf8(data.clone()) {
+                    let v = assets_build();
+                    let text = if path.ends_with(".html") {
+                        text.replace("src=\"app.js\"", &format!("src=\"app.js?v={v}\""))
+                            .replace("href=\"app.css\"", &format!("href=\"app.css?v={v}\""))
+                    } else {
+                        text.lines()
+                            .map(|l| {
+                                if l.starts_with("import ") && l.trim_end().ends_with(".js';") {
+                                    l.trim_end().trim_end_matches(".js';").to_string()
+                                        + &format!(".js?v={v}';")
+                                } else {
+                                    l.to_string()
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
+                    data = text.into_bytes();
+                }
+            }
+            let mut resp = Response::new(Body::from(data));
             let h = resp.headers_mut();
             h.insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_str(mime.as_ref())
                     .unwrap_or(HeaderValue::from_static("application/octet-stream")),
             );
-            h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+            h.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store, must-revalidate"),
+            );
             h.insert(
                 "x-content-type-options",
                 HeaderValue::from_static("nosniff"),

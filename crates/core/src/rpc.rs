@@ -181,6 +181,21 @@ impl Daemon {
                     .await
                     .map_err(|e| invalid(e.to_string()))?
             }
+            // A Control Deck says what happened on a device the station cannot
+            // see, such as a phone. Kept in the ship's log for whoever debugs it.
+            "client.report" => {
+                let mut text = params.to_string();
+                text.truncate(4000);
+                self.record(
+                    "client.report",
+                    None,
+                    None,
+                    None,
+                    Some(&caller.who),
+                    json!({"client": caller.client, "report": serde_json::from_str::<Value>(&text).unwrap_or(json!(text))}),
+                );
+                json!({"ok": true})
+            }
             "presence.touch" => {
                 self.touch_presence(&caller.client);
                 json!({"at_keyboard": true})

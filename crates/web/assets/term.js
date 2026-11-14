@@ -62,14 +62,14 @@ export class PaneTerm {
     // real iPhone. So this listens ahead of it (capture) and scrolls the
     // history directly; the library never sees a drag. A tap still reaches
     // it, to focus the terminal and bring up the keyboard.
-    let touchY = null, carry = 0, dragging = false;
+    let touchY = null, carry = 0, dragging = false, moved = 0, events = 0, from = 0, lastReport = 0;
     const lineHeight = () => {
       const row = this.term.element?.querySelector('.xterm-rows')?.firstElementChild;
       return (row && row.getBoundingClientRect().height) || 17;
     };
     this.body.addEventListener('touchstart', (e) => {
       touchY = e.touches.length === 1 ? e.touches[0].clientY : null;
-      carry = 0; dragging = false;
+      carry = 0; dragging = false; moved = 0; events = 0; from = this.term.buffer.active.viewportY;
     }, { capture: true, passive: true });
     this.body.addEventListener('touchmove', (e) => {
       if (touchY === null || e.touches.length !== 1) return;
@@ -80,13 +80,23 @@ export class PaneTerm {
       dragging = true;
       const line = lineHeight();
       const lines = Math.trunc(carry / line);
-      if (lines) { this.term.scrollLines(lines); carry -= lines * line; }
+      events += 1;
+      if (lines) { this.term.scrollLines(lines); carry -= lines * line; moved += lines; }
       e.preventDefault();
       e.stopPropagation();
     }, { capture: true, passive: false });
     const endTouch = (e) => {
       // The end of a drag is not a tap: do not let it move the cursor or focus.
       if (dragging) { e.preventDefault(); e.stopPropagation(); }
+      // Touch scrolling cannot be tested on a real phone from the station, so
+      // the page says what a drag did. Read with: spandeck rpc log.query '{"kind":"client.report"}'
+      if (events && Date.now() - lastReport > 4000) {
+        lastReport = Date.now();
+        const b = this.term.buffer.active;
+        this.api.call('client.report', { what: 'touch-drag', build: this.api.build, mode: this.mode, control: this.control,
+          events, asked: moved, from, to: b.viewportY, base: b.baseY, rows: this.term.rows, alt: b.type,
+          mouse: this.term.modes?.mouseTrackingMode, line: Math.round(lineHeight() * 10) / 10, ua: navigator.userAgent.slice(0, 120) }).catch(() => {});
+      }
       touchY = null; dragging = false;
     };
     this.body.addEventListener('touchend', endTouch, { capture: true, passive: false });
