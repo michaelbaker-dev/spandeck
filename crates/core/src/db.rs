@@ -200,6 +200,17 @@ const MIGRATIONS: &[&str] = &[
         data    TEXT NOT NULL
     );
     "#,
+    // 6: project links. One row per direction a station knows: local
+    // `project` is linked with `other` on `station`.
+    r#"
+    CREATE TABLE project_links (
+        project TEXT NOT NULL,
+        other   TEXT NOT NULL,
+        station TEXT NOT NULL,
+        since   INTEGER NOT NULL,
+        PRIMARY KEY (project, other, station)
+    );
+    "#,
 ];
 
 pub struct Db {

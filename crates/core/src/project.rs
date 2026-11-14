@@ -350,6 +350,7 @@ impl Daemon {
         self.project_close(name, by)?;
         self.db
             .with(|c| c.execute("DELETE FROM projects WHERE name=?1", [name]))?;
+        self.links_forget(name);
         self.record(
             "project.removed",
             None,
@@ -462,6 +463,9 @@ impl Daemon {
             "problem": file.as_ref().err().map(|e| e.to_string()),
             "branch": crate::git::git(Path::new(&path), &["rev-parse", "--abbrev-ref", "HEAD"]).ok(),
             "panes": panes,
+            "links": self.links_of(name).into_iter()
+                .map(|(with, station)| json!({"with": with, "station": station}))
+                .collect::<Vec<_>>(),
         }))
     }
 

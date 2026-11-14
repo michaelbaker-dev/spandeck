@@ -12,6 +12,12 @@ use crate::relay::{split_address, MessageStore, NewMessage, TaskAuth, TASK_AUTH_
 
 const ROUTE_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 
+fn not_linked(own: &str, other: &str) -> Error {
+    Error::Denied(format!(
+        "project {other} is not linked with {own}; only the owner can link two projects"
+    ))
+}
+
 impl Daemon {
     pub fn mail(&self) -> MessageStore {
         MessageStore::new(self.db.clone(), &self.station)
@@ -65,6 +71,7 @@ impl Daemon {
             .and_then(|id| self.pane(id).ok())
             .and_then(|p| p.meta.lock().unwrap().project.clone());
         let sender = self.sender_name(caller);
+        let agent = caller.authority == Authority::Agent;
         let mut auth = None;
         if remote {
             let dest = station.unwrap_or_default();
@@ -73,7 +80,22 @@ impl Daemon {
                     "station {dest} (not in the fleet)"
                 )));
             }
-            let approved_by = if caller.authority == Authority::Agent {
+            // `project/name@station` naming a project other than the sender's
+            // own: that is what a link is for.
+            let other = match (&project, name.split_once('/')) {
+                (Some(own), Some((named, _))) if named != own => Some((own, named)),
+                _ => None,
+            };
+            let approved_by = if let Some((own, named)) = other {
+                if self.linked(own, named, dest) {
+                    // The link is the owner's approval of this route.
+                    "you (project link)".to_string()
+                } else if agent {
+                    return Err(not_linked(own, named));
+                } else {
+                    "you".to_string()
+                }
+            } else if agent {
                 // An agent's first route to another station needs one approval.
                 self.ensure_route(caller, project.as_deref().unwrap_or("-"), &sender, dest)
                     .await?
@@ -86,10 +108,19 @@ impl Daemon {
                     expires_ms: now_ms() + TASK_AUTH_MS,
                 });
             }
-        } else if name != "you" && self.pane(name).is_err() {
-            return Err(Error::NotFound(format!(
-                "no pane called {name} on this station"
-            )));
+        } else if name != "you" {
+            let Ok(target) = self.pane(name) else {
+                return Err(Error::NotFound(format!(
+                    "no pane called {name} on this station"
+                )));
+            };
+            // An agent reaches its own project, and a project linked to it.
+            let theirs = target.meta.lock().unwrap().project.clone();
+            if let (true, Some(own), Some(theirs)) = (agent, &project, &theirs) {
+                if own != theirs && !self.linked(own, theirs, &self.station) {
+                    return Err(not_linked(own, theirs));
+                }
+            }
         }
         let env = self
             .mail()

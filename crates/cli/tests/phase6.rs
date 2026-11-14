@@ -965,3 +965,189 @@ fn the_deck_shows_who_works_for_whom_and_who_is_talking() {
         std::fs::write(format!("{dir}/12-agents-drawer.png"), png).unwrap();
     }
 }
+
+/// Project links (the owner's rules, 14 Nov 2026): only the owner links two
+/// projects; across a link agents message each other and see each other's
+/// findings; without one they do neither; session history stays put.
+#[test]
+fn linked_projects_message_and_share_findings_until_unlinked() {
+    let s = Station::start("alpha");
+    let deck = project(&s, "deck", &[], "");
+    let vault = project(&s, "vault", &[], "");
+    let keeper = agent(
+        &s,
+        "vault",
+        &vault,
+        "keeper",
+        json!({"steps": [{"prompt": "plan the osprey migration"}, {"turn_end": "osprey plan drafted"}],
+               "on_input": [{"rpc": {"method": "msg.inbox"}}, {"turn_end": "read my mail"}]}),
+    );
+    s.wait_state(&keeper, "done");
+    let pilot = agent(&s, "deck", &deck, "pilot", json!({"steps": []}));
+    s.wait_text(&pilot, "[fake] session");
+    s.call_as_pane(
+        &keeper,
+        "note.add",
+        json!({"kind": "finding", "text": "tokens are minted at /v1/grant"}),
+    )
+    .unwrap();
+    let ask = json!({"to": "vault/keeper", "kind": "question", "body": "what does the puffin endpoint return?"});
+    let board = |pane: &str| {
+        s.call_as_pane(pane, "context.search", json!({"query": "grant"}))
+            .unwrap()
+    };
+
+    // Before a link: no message across, and the other board is not seen.
+    let refused = s.call_as_pane(&pilot, "msg.send", ask.clone()).unwrap_err();
+    assert_eq!(refused.code, "denied", "{refused}");
+    assert_eq!(board(&pilot), json!([]));
+
+    // An agent can neither make a link nor record one as a station would.
+    for method in ["project.link", "project.unlink", "project.link.record"] {
+        let err = s
+            .call_as_pane(&pilot, method, json!({"project": "deck", "with": "vault"}))
+            .unwrap_err();
+        assert_eq!(err.code, "denied", "{method}: {err}");
+    }
+    assert_eq!(s.call("project.links", json!({})), json!([]));
+
+    // The owner links them; doing it twice changes nothing.
+    for _ in 0..2 {
+        let made = s.call("project.link", json!({"project": "deck", "with": "vault"}));
+        assert_eq!(
+            made,
+            json!({"project": "deck", "with": "vault", "station": "alpha"})
+        );
+    }
+    let links = s.call("project.links", json!({"project": "deck"}));
+    assert_eq!(links.as_array().unwrap().len(), 1, "{links}");
+    assert!(links[0]["since_ms"].is_number());
+    assert_eq!(
+        s.call("project.get", json!({"name": "vault"}))["links"],
+        json!([{"with": "deck", "station": "alpha"}])
+    );
+
+    // The message is delivered and the reply comes back.
+    s.call_as_pane(&pilot, "msg.send", ask.clone()).unwrap();
+    s.wait_text(&keeper, "puffin endpoint");
+    let sent = s.call("msg.recent", json!({"project": "deck"}));
+    s.call_as_pane(
+        &keeper,
+        "msg.reply",
+        json!({"id": sent[0]["id"], "body": "a signed grant, see the board"}),
+    )
+    .unwrap();
+    let inbox = s.call_as_pane(&pilot, "msg.inbox", json!({})).unwrap();
+    assert!(inbox.to_string().contains("a signed grant"), "{inbox}");
+
+    // A finding posted in one is found from the other, labelled.
+    let found = board(&pilot);
+    assert_eq!(found[0]["project"], json!("vault"), "{found}");
+    assert!(found[0]["text"].as_str().unwrap().contains("/v1/grant"));
+
+    // Session history is not opened by a link.
+    wait_for("the archive to index the session", 15, || {
+        let r = s
+            .call_as_pane(&keeper, "recall", json!({"query": "osprey"}))
+            .ok()?;
+        (!r["hits"].as_array()?.is_empty()).then_some(())
+    });
+    let theirs = s
+        .call_as_pane(
+            &pilot,
+            "recall",
+            json!({"query": "osprey", "all_projects": true}),
+        )
+        .unwrap();
+    assert_eq!(theirs["hits"], json!([]), "{theirs}");
+
+    // Unlinked: both stop.
+    s.call(
+        "project.unlink",
+        json!({"project": "vault", "with": "deck"}),
+    );
+    assert_eq!(s.call("project.links", json!({})), json!([]));
+    assert_eq!(
+        s.call_as_pane(&pilot, "msg.send", ask).unwrap_err().code,
+        "denied"
+    );
+    assert_eq!(board(&pilot), json!([]));
+}
+
+/// A link between two stations: both know it, messages cross on the link
+/// alone (it is the owner's approval), findings are fetched from the other
+/// station, and a search still answers when that station is gone.
+#[test]
+fn a_link_between_stations_is_known_on_both_and_carries_messages_and_findings() {
+    let (a, mut b) = Station::pair();
+    let deck = project(&a, "deck", &[], "");
+    let vault = project(&b, "vault", &[], "");
+    let keeper = agent(&b, "vault", &vault, "keeper", reads_mail());
+    b.wait_text(&keeper, "[fake] session");
+    let pilot = agent(&a, "deck", &deck, "pilot", json!({"steps": []}));
+    a.wait_text(&pilot, "[fake] session");
+
+    a.call(
+        "project.link",
+        json!({"project": "deck", "with": "vault", "station": "bravo"}),
+    );
+    let known = b.call("project.links", json!({}));
+    assert_eq!(known.as_array().unwrap().len(), 1, "{known}");
+    assert_eq!(
+        (
+            &known[0]["project"],
+            &known[0]["with"],
+            &known[0]["station"]
+        ),
+        (&json!("vault"), &json!("deck"), &json!("alpha"))
+    );
+
+    // Each way, with no route approval asked on either station.
+    a.call_as_pane(
+        &pilot,
+        "msg.send",
+        json!({"to": "vault/keeper@bravo", "body": "which fields does the gannet contract need?"}),
+    )
+    .unwrap();
+    b.wait_text(&keeper, "gannet contract");
+    b.call_as_pane(
+        &keeper,
+        "msg.send",
+        json!({"to": "deck/pilot@alpha", "body": "name and scope, nothing else"}),
+    )
+    .unwrap();
+    wait_for("the answer to cross", 15, || {
+        let inbox = a
+            .call_as_pane(&pilot, "msg.inbox", json!({"peek": true}))
+            .ok()?;
+        inbox.to_string().contains("name and scope").then_some(())
+    });
+    for s in [&a, &b] {
+        assert_eq!(s.call("approval.list", json!({"all": true})), json!([]));
+    }
+
+    // A finding posted on bravo is found from alpha.
+    b.call_as_pane(
+        &keeper,
+        "note.add",
+        json!({"kind": "finding", "text": "tokens are minted at /v1/grant"}),
+    )
+    .unwrap();
+    let search = || {
+        a.call_as_pane(&pilot, "context.search", json!({"query": "grant"}))
+            .unwrap()
+    };
+    let found = search();
+    assert_eq!(
+        (&found[0]["project"], &found[0]["station"]),
+        (&json!("vault"), &json!("bravo")),
+        "{found}"
+    );
+
+    // With bravo gone the search still answers, and says what is missing.
+    b.kill9();
+    let found = search();
+    assert_eq!(found.as_array().unwrap().len(), 1, "{found}");
+    assert_eq!(found[0]["unreachable"], json!(true), "{found}");
+    assert_eq!(found[0]["station"], json!("bravo"));
+}

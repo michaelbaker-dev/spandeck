@@ -11,6 +11,7 @@
 //!   tasks     task records, delegation, workspaces, checkpoints, sign-offs
 //!   recipes   the review loop
 //!   memory    shared project memory and the start digest
+//!   links     project links: two projects whose agents message each other and share findings
 //!   orders    standing orders at five layers
 //!   fleet     discovery over Tailscale, trust, peer calls, stop-all
 //!   notify    the inbox and push rules
@@ -24,6 +25,7 @@ pub mod doctor;
 pub mod fleet;
 pub mod git;
 pub mod hooks;
+pub mod links;
 pub mod manage;
 pub mod memory;
 pub mod messages;

@@ -60,6 +60,8 @@ const PEER_METHODS: &[&str] = &[
     "rpc.forward",
     "fleet.view",
     "trust.revoked",
+    "project.link.record",
+    "project.link.findings",
 ];
 
 const READ_METHODS: &[&str] = &[
@@ -72,6 +74,7 @@ const READ_METHODS: &[&str] = &[
     "log.query",
     "project.list",
     "project.get",
+    "project.links",
     "fleet.view",
     "notify.list",
     "task.list",
@@ -465,6 +468,41 @@ impl Daemon {
                 json!({"ok": true})
             }
 
+            // Links are the owner's: neither list above gives an agent these.
+            "project.link" => {
+                self.project_link(
+                    s(&params, "project")?,
+                    s(&params, "with")?,
+                    opt(&params, "station"),
+                    by,
+                )
+                .await?
+            }
+            "project.unlink" => {
+                self.project_unlink(
+                    s(&params, "project")?,
+                    s(&params, "with")?,
+                    opt(&params, "station"),
+                    by,
+                )
+                .await?
+            }
+            "project.links" => json!(self.project_links(opt(&params, "project"))),
+            // The other end of a link between stations. The station named is
+            // the one whose signed call this is, never one the call names.
+            "project.link.record" | "project.link.findings" => {
+                if caller.authority != Authority::Peer {
+                    return Err(Error::Denied(format!(
+                        "{method} is for another station; use project.link"
+                    )));
+                }
+                if method == "project.link.record" {
+                    self.link_record(&caller.who, &params)?
+                } else {
+                    self.link_findings(&caller.who, &params)?
+                }
+            }
+
             // ------------------------------------------------------ messages
             "msg.send" => {
                 self.msg_send(
@@ -638,15 +676,18 @@ impl Daemon {
                         .caller_project(caller)
                         .ok_or_else(|| invalid("this pane is not in a project"))?,
                 };
-                json!(self.context_search(
-                    &project,
-                    opt(&params, "query").unwrap_or(""),
-                    params
-                        .get("limit")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(20)
-                        .min(100) as u32
-                ))
+                json!(
+                    self.board_search(
+                        &project,
+                        opt(&params, "query").unwrap_or(""),
+                        params
+                            .get("limit")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(20)
+                            .min(100) as u32
+                    )
+                    .await
+                )
             }
             "recall" => self.recall(caller, &params).await?,
             "recall.local" => {
