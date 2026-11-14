@@ -154,6 +154,39 @@ fn a_paused_agent_is_not_given_new_work_until_it_is_unpaused() {
     s.wait_text(&pane, "new work for you");
 }
 
+/// Guarantee (Tasks): the states include waiting for approval and blocked.
+/// A task is in them when its agent is, and back to running afterwards.
+#[test]
+fn a_task_says_when_it_is_waiting_for_an_approval() {
+    let s = Station::start("alpha");
+    let asks = json!({"steps": [{"prompt": "x"}, {"permission": {"name": "Bash", "command": "cargo publish"}}, {"work": 60000}]});
+    let repo = project(&s, "demo", &[("tester", "same-tree", asks)], "");
+    let lead = agent(&s, "demo", &repo, "lead", reads_mail());
+    s.wait_text(&lead, "[fake] session");
+    let out = s
+        .call_as_pane(
+            &lead,
+            "delegate",
+            json!({"role": "tester", "task": "publish it"}),
+        )
+        .unwrap();
+    let task = out["task"].as_str().unwrap().to_string();
+    let state = || s.call("task.get", json!({"task": task}))["state"].clone();
+    wait_for("the task to wait for approval", 15, || {
+        (state() == json!("waiting_for_approval")).then_some(())
+    });
+    let waiting = wait_for("the approval", 10, || {
+        s.call("approval.list", json!({})).get(0).cloned()
+    });
+    s.call(
+        "approval.answer",
+        json!({"id": waiting["id"], "allow": true}),
+    );
+    wait_for("the task to run again", 15, || {
+        (state() == json!("running")).then_some(())
+    });
+}
+
 /// Done when: an agent going quiet does not complete its task.
 #[test]
 fn going_quiet_does_not_complete_a_task_only_a_result_does() {

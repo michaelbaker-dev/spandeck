@@ -403,9 +403,16 @@ impl Daemon {
             &format!("{} needs approval", meta.name),
             summary,
         );
+        if let Some(task) = &meta.task {
+            self.task_follow(task, "running", None);
+            self.task_follow(task, "waiting_for_approval", Some(summary));
+        }
         let answer =
             tokio::time::timeout(Duration::from_secs(self.cfg.approval_timeout_secs), rx).await;
         self.approvals.lock().unwrap().remove(&id);
+        if let Some(task) = &meta.task {
+            self.task_follow(task, "running", None);
+        }
         match answer {
             Ok(Ok(a)) => Some(a),
             _ => {

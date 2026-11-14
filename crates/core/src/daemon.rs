@@ -818,8 +818,39 @@ impl Daemon {
         );
         if old != state {
             self.notify_state(&meta, old, state);
+            // A task follows its agent: stuck on the user is blocked, and
+            // working again is running. Waiting on an approval is set where
+            // the approval is asked for, and wins over blocked.
+            if let Some(task) = &meta.task {
+                match state {
+                    AgentState::NeedsYou | AgentState::Error => {
+                        self.task_follow(task, "blocked", reason.as_deref())
+                    }
+                    AgentState::Working => self.task_follow(task, "running", None),
+                    _ => {}
+                }
+            }
         }
         true
+    }
+
+    /// Move a task to a state its agent has put it in, where the task's
+    /// state machine allows it. A finished task is never moved.
+    pub(crate) fn task_follow(&self, task: &str, to: &str, why: Option<&str>) {
+        let Ok(now) = self.task_get(task) else {
+            return;
+        };
+        let from = now["state"].as_str().unwrap_or("");
+        if from == to || !crate::tasks::transition_allowed(from, to) {
+            return;
+        }
+        // Blocked never replaces waiting for approval: that is the more exact answer.
+        let _ = self.task_set_state(
+            task,
+            to,
+            json!({"resume": {"waiting_on": why}}),
+            "the agent's state",
+        );
     }
 
     /// Fallback observer for agent panes whose hooks have not reported.
