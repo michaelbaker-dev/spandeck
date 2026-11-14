@@ -289,6 +289,8 @@ pub struct Inner {
     /// Agent programs: versions read, updates running, restarts owed.
     pub(crate) agents: crate::agents::AgentsState,
     pub(crate) prices: crate::prices::PricesState,
+    /// A machine being added to the fleet from the Control Deck.
+    pub(crate) adding: crate::add::AddState,
 }
 
 #[derive(Clone)]
@@ -378,6 +380,7 @@ impl Daemon {
             deck_lock: Mutex::new(()),
             agents: Default::default(),
             prices: Default::default(),
+            adding: Default::default(),
         }));
         daemon.prices_load();
         let _ = std::fs::write(daemon.paths.pid_file(), std::process::id().to_string());

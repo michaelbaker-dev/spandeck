@@ -14,6 +14,7 @@
 //!   links     project links: two projects whose agents message each other and share findings
 //!   orders    standing orders at five layers
 //!   fleet     discovery over Tailscale, trust, peer calls, stop-all
+//!   add       add a machine from the Control Deck: SSH in, install, start, ask to join
 //!   notify    the inbox and push rules
 //!   agents    agent programs here: found, versioned, installed when missing, updated
 //!   setup     fleet-wide agent setup: MCP servers, skills, model defaults
@@ -22,6 +23,7 @@
 //!   usage     what each pane's agent has used, and the station's totals
 //!   prices    the public list of model prices and context windows, fetched daily
 
+pub mod add;
 pub mod agents;
 pub mod client;
 pub mod daemon;

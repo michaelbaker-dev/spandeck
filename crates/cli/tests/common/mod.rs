@@ -1156,6 +1156,9 @@ pub mod fake_releases {
             if std::fs::hard_link(super::SPANDECK, &bin).is_err() {
                 std::fs::copy(super::SPANDECK, &bin).unwrap();
             }
+            // A release carries the short command too; the install script
+            // expects it. A second link, which tar stores as a link.
+            std::fs::hard_link(&bin, dir.path().join(&name).join("sd")).unwrap();
             let out = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(format!("tar -cf - {name} | gzip -1 > {name}.tar.gz"))

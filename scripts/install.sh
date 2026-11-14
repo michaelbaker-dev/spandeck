@@ -2,9 +2,11 @@
 # Install the latest spandeck release for this machine.
 #   curl -fsSL https://raw.githubusercontent.com/michaelbaker-dev/spandeck/main/scripts/install.sh | sh
 # Options (environment): SPANDECK_VERSION=v0.1.0  SPANDECK_BIN_DIR=$HOME/.local/bin
+#   SPANDECK_RELEASES=<address of a copy of the release page>
 set -eu
 repo=michaelbaker-dev/spandeck
 bin_dir=${SPANDECK_BIN_DIR:-$HOME/.local/bin}
+releases=${SPANDECK_RELEASES:-https://github.com/$repo/releases}
 
 case "$(uname -s)" in
   Darwin) os=apple-darwin ;;
@@ -20,12 +22,12 @@ target=$arch-$os
 
 version=${SPANDECK_VERSION:-}
 if [ -z "$version" ]; then
-  version=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest" | sed 's#.*/tag/##')
+  version=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$releases/latest" | sed 's#.*/tag/##')
 fi
 case "$version" in v*) ;; *) echo "could not find the latest release of $repo" >&2; exit 1 ;; esac
 
 name=spandeck-$version-$target
-url=https://github.com/$repo/releases/download/$version/$name.tar.gz
+url=$releases/download/$version/$name.tar.gz
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 echo "Downloading $name"

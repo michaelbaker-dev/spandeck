@@ -65,6 +65,18 @@ const PEER_METHODS: &[&str] = &[
     "project.link.findings",
 ];
 
+/// Methods that act from the station the owner is using and are never
+/// passed on to another one, in either direction.
+const NOT_FORWARDED: &[&str] = &[
+    "rpc.forward",
+    "peer.call",
+    "station.upgrade",
+    "fleet.candidates",
+    "fleet.add",
+    "fleet.add_status",
+    "fleet.add_cancel",
+];
+
 const READ_METHODS: &[&str] = &[
     "station.info",
     "station.doctor",
@@ -163,7 +175,12 @@ impl Daemon {
         Ok(())
     }
 
-    pub async fn dispatch(&self, caller: &Caller, method: &str, params: Value) -> Result<Value> {
+    pub async fn dispatch(
+        &self,
+        caller: &Caller,
+        method: &str,
+        mut params: Value,
+    ) -> Result<Value> {
         match caller.authority {
             Authority::Owner => {}
             Authority::Agent if AGENT_METHODS.contains(&method) => {}
@@ -750,7 +767,7 @@ impl Daemon {
             "rpc.forward" => {
                 // The user's request, made at a Control Deck on another station.
                 let inner = s(&params, "method")?;
-                if matches!(inner, "rpc.forward" | "peer.call" | "station.upgrade") {
+                if NOT_FORWARDED.contains(&inner) {
                     return Err(Error::Denied(format!("{inner} cannot be forwarded")));
                 }
                 let as_owner = Caller {
@@ -769,6 +786,16 @@ impl Daemon {
             "peer.call" => {
                 // Gateway: the Control Deck you opened fans out to its peers.
                 let station = s(&params, "station")?;
+                // Refused here, before anything leaves this station: a
+                // password must not travel to another one.
+                if station != self.station
+                    && opt(&params, "method").is_some_and(|m| NOT_FORWARDED.contains(&m))
+                {
+                    return Err(Error::Denied(format!(
+                        "{} cannot be forwarded: call the station you are using",
+                        opt(&params, "method").unwrap_or_default()
+                    )));
+                }
                 if station == self.station {
                     Box::pin(self.dispatch(
                         caller,
@@ -972,6 +999,24 @@ impl Daemon {
             "fleet.wake" => self.fleet_wake(s(&params, "station")?, by)?,
             "fleet.start" => self.fleet_start(s(&params, "station")?, by).await?,
             "fleet.forget" => self.forget_station(s(&params, "station")?)?,
+
+            // ------------------------------------------------ add a machine
+            // The owner's alone, and only at the station they are using:
+            // none of the lists above has these, and they are not forwarded.
+            "fleet.candidates" => self.add_candidates(),
+            "fleet.add_status" => self.add_status(),
+            "fleet.add" => {
+                // The password leaves the request here and lives only in
+                // the connection that uses it.
+                let password = match params.as_object_mut().and_then(|o| o.remove("password")) {
+                    Some(Value::String(text)) if !text.is_empty() => {
+                        Some(crate::add::Secret::new(text))
+                    }
+                    _ => None,
+                };
+                self.add_start(s(&params, "machine")?, s(&params, "user")?, password, by)?
+            }
+            "fleet.add_cancel" => self.add_cancel(by),
 
             _ => return Err(Error::NotFound(format!("method {method}"))),
         })

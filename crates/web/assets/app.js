@@ -28,6 +28,7 @@ const S = {
   deck: { layouts: [], pins: [] }, // global layouts and pins: one document for the fleet
   loaded: false,         // the first answers have arrived
   approvals: [],         // across the fleet
+  adding: null,          // a machine being added to the fleet from this station
   notes: [],             // notification inbox (this station)
   terms: new Map(),      // key -> PaneTerm
   focused: null,
@@ -92,6 +93,7 @@ async function refresh() {
   S.approvals = lists.flat();
   try { S.notes = await api.call('notify.list', { limit: 60 }); } catch (e) { /* keep */ }
   try { S.trust = await api.call('trust.status'); } catch (e) { /* keep */ }
+  try { S.adding = await api.call('fleet.add_status'); addChanged(); } catch (e) { /* keep */ }
   // Always from the station the deck was opened on: every station has the same copy.
   try { S.deck = await api.call('deck.get'); } catch (e) { /* keep */ }
   S.loaded = true;
@@ -109,6 +111,8 @@ api.onEvent((ev) => {
     for (const t of S.terms.values()) if (t.station === api.station && t.pane.id === ev.pane) t.resizedBy(ev.data.controller, ev.data.cols, ev.data.rows);
     return;
   }
+  // A line from a machine being added: shown as it arrives, nothing re-read.
+  if (ev.kind === 'fleet.add.output') { if (addDlg) addDlg.line(ev.data); return; }
   if (ev.kind === 'notify.new') notifyBrowser(ev.data);
   if (ev.kind === 'connection.restored') { for (const t of S.terms.values()) t.attach(); }
   if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events|vault|trust|deck)\./.test(ev.kind)) refreshSoon();
@@ -992,6 +996,137 @@ function stationTile(s) {
       up && !agents.length ? h('span', { class: 'muted' }, 'No agents running') : null));
 }
 
+// ---- add a machine ----
+// The last tile of the fleet. The station the deck is open on connects to a
+// machine of the owner's over SSH, installs spandeck there and has it ask to
+// join; the owner then approves the code, as for any station. What the
+// machine prints is text from somewhere else: it is only ever inserted as text.
+const ADD_STEPS = [['connecting', 'Connect over SSH'], ['installing', 'Download and install spandeck'], ['starting', 'Start it, now and at login'], ['joining', 'Ask to join this fleet']];
+const ADD_STAGE = { connecting: 'Connecting over SSH…', installing: 'Installing spandeck…', starting: 'Starting spandeck…', joining: 'Asking to join this fleet…', approve: 'Waiting for your approval', joined: 'Approved. Waiting for it to appear…', needs_password: 'It asks for a password', failed: 'It was not added' };
+let addDlg = null;
+const addActive = () => (S.adding && S.adding.stage !== 'done' ? S.adding : null);
+const addAnswer = (a, yes) => rpc(api.station, yes ? 'trust.approve' : 'trust.deny', { request: a.request });
+const addClear = () => api.call('fleet.add_cancel').catch(() => {}).then(() => { S.adding = null; refreshSoon(30); });
+
+// Called when the station's answer about an add arrives.
+function addChanged() {
+  if (addDlg) return addDlg.redraw();
+  const a = S.adding;
+  if (a && a.stage === 'done') { toast(`${a.station || a.name} is in your fleet`); addClear(); }
+}
+
+function addBody(a) {
+  if (a.stage === 'approve') return [
+    h('div', {}, 'spandeck is installed there and asks to join. It shows the code ', h('b', { class: 'code' }, a.code), '.'),
+    h('div', { class: 'row end' }, h('button', { class: 'mini', onclick: (e) => { e.stopPropagation(); addAnswer(a, false); } }, 'Refuse'), h('button', { class: 'mini primary', onclick: (e) => { e.stopPropagation(); addAnswer(a, true); } }, 'Approve'))];
+  if (a.stage === 'failed') return [h('div', { class: 'warn-text' }, a.problem?.text || 'It was not added.')];
+  if (a.stage === 'needs_password') return [h('div', {}, `It asks for a password for ${a.user}. Open this to enter it.`)];
+  return [h('div', {}, ADD_STAGE[a.stage] || a.stage), h('div', { class: 'muted add-last' }, a.lines?.length ? a.lines[a.lines.length - 1] : '')];
+}
+
+function addTile() {
+  const a = addActive();
+  if (!a) return h('button', { class: 'tile add-tile', onclick: () => addMachineDialog(), title: 'Install spandeck on another of your machines and bring it into this fleet' },
+    h('span', { class: 'add-plus', 'aria-hidden': 'true' }, '+'), h('span', {}, 'Add a machine'));
+  const mark = a.stage === 'failed' ? 'error' : a.stage === 'approve' || a.stage === 'needs_password' ? 'needs_you' : 'working';
+  return h('div', { class: 'tile add-tile busy ' + mark, role: 'button', tabIndex: 0, onclick: () => addMachineDialog(), onkeydown: (e) => { if (e.key === 'Enter') addMachineDialog(); } },
+    h('div', { class: 'tile-head' }, h('span', { class: 'dot ' + mark }), h('b', {}, a.name), h('span', { class: 'chip' }, 'being added'), h('span', { class: 'grow' }), h('span', { class: 'muted' }, a.os || '')),
+    addBody(a));
+}
+
+// The same on a phone: a row under the stations.
+function addRow() {
+  const a = addActive();
+  if (!a) return h('button', { class: 'wide add-row', onclick: () => addMachineDialog() }, '+ Add a machine');
+  return h('div', { class: 'phone-station add-row', role: 'button', tabIndex: 0, onclick: () => addMachineDialog() },
+    h('div', { class: 'row' }, h('span', { class: 'dot ' + (a.stage === 'failed' ? 'error' : a.running ? 'working' : 'needs_you') }), h('b', {}, a.name), h('span', { class: 'muted' }, 'being added')),
+    addBody(a));
+}
+
+function addMachineDialog() {
+  if (addDlg) return;
+  let info = null, picked = null, shown = null, again = false;
+  const plain = { autocapitalize: 'none', autocorrect: 'off', spellcheck: false, autocomplete: 'off' };
+  let lastUser = '';
+  try { lastUser = localStorage.getItem('spandeck.addUser') || ''; } catch (e) { /* no storage */ }
+  const user = h('input', { ...plain, placeholder: 'the short name of your account there', value: lastUser, 'aria-label': 'User name on that machine' });
+  const pass = h('input', { ...plain, type: 'password', placeholder: 'password', 'aria-label': 'Password on that machine' });
+  const log = h('pre', { class: 'add-log', 'aria-label': 'What the machine printed' });
+  const box = h('div', { class: 'add-dialog' });
+  const setLog = (lines) => { const end = log.scrollHeight - log.scrollTop - log.clientHeight < 30; log.textContent = (lines || []).join('\n'); if (end) log.scrollTop = log.scrollHeight; };
+  const start = (machine, name, password) => {
+    try { localStorage.setItem('spandeck.addUser', user.value.trim()); } catch (e) { /* no storage */ }
+    const params = { machine, user: user.value.trim() };
+    // The password goes in this one request and is dropped from the page.
+    if (password) params.password = password;
+    pass.value = '';
+    return api.call('fleet.add', params).then((a) => { S.adding = a; again = false; redraw(); update(); }).catch((e) => toast(e.message, 'error'));
+  };
+  const load = () => api.call('fleet.candidates').then((r) => { info = r; redraw(); }).catch((e) => { info = { enabled: true, tailscale: true, machines: [], error: e.message }; redraw(); });
+  const closeBtn = (label = 'Close') => h('button', { onclick: () => d.close() }, label);
+  const form = (fields, okLabel, submit) => h('form', { onsubmit: (e) => { e.preventDefault(); submit(); } }, fields, h('div', { class: 'row end' }, closeBtn('Cancel'), h('button', { class: 'primary', type: 'submit' }, okLabel)));
+
+  function picker() {
+    if (!info) return [h('p', { class: 'muted' }, 'Looking for your machines…')];
+    if (!info.enabled) return [
+      h('p', {}, `Adding a machine is turned off on ${info.station}.`),
+      h('p', { class: 'muted' }, `It lets ${info.station} connect to another of your machines over SSH and install spandeck there, so it is off until you say so. To turn it on, put this line in ${info.station}'s config.toml and restart spandeck there:`),
+      h('pre', { class: 'add-log' }, 'add_machines = true'),
+      h('div', { class: 'row end' }, closeBtn())];
+    if (info.error || !info.tailscale) return [h('p', { class: 'warn-text' }, info.error || `Tailscale is not answering on ${info.station}, so your machines cannot be listed.`), h('div', { class: 'row end' }, closeBtn())];
+    if (!info.machines.length) return [
+      h('p', {}, 'No Mac or Linux machine under your Tailscale login is online that is not already a station.'),
+      h('p', { class: 'muted' }, 'Phones, Windows and tagged machines are not listed. A machine that is asleep is listed once it wakes.'),
+      h('div', { class: 'row end' }, h('button', { onclick: () => { info = null; redraw(); load(); } }, 'Look again'), closeBtn())];
+    const m = info.machines.find(x => x.id === picked);
+    return [
+      h('p', { class: 'muted' }, 'Your Mac and Linux machines that are online and not stations yet:'),
+      h('div', { class: 'list' }, info.machines.map(x => h('button', { class: 'list-row add-machine' + (x.id === picked ? ' first' : ''), type: 'button', 'aria-pressed': x.id === picked, onclick: () => { picked = x.id; redraw(); user.focus(); } },
+        h('b', {}, x.name), h('span', { class: 'muted' }, `${x.os} · ${x.address}`), x.tailscale_ssh ? h('span', { class: 'chip ok', title: 'Tailscale SSH is on there, so no password is needed' }, 'Tailscale SSH') : null))),
+      m ? form(field(`Your user name on ${m.name}`, user, `${info.station} connects to ${m.name} over SSH as this user and runs the spandeck install script there. If Tailscale SSH or an SSH key already lets it in, no password is asked.`),
+        'Connect and install', () => { if (user.value.trim()) start(m.id, m.name); else user.focus(); }) : h('div', { class: 'row end' }, closeBtn('Cancel'))];
+  }
+
+  function view(a) {
+    const passForm = (label) => form(field(`Password for ${a.user} on ${a.name}`, pass, 'Used once, for this connection. It is not saved, logged or shown anywhere.'), label, () => { if (pass.value) start(a.machine, a.name, pass.value); else pass.focus(); });
+    if (a.stage === 'needs_password') return [h('p', {}, `${a.name} asks for a password: neither Tailscale SSH nor an SSH key let ${api.station} in as ${a.user}.`), passForm('Connect and install')];
+    if (a.stage === 'failed') return [
+      h('p', { class: 'warn-text' }, a.problem?.text || 'It was not added.'), log,
+      a.problem?.kind === 'wrong_password' ? passForm('Try again')
+        : h('div', { class: 'row end' }, h('button', { onclick: () => { addClear(); d.close(); } }, 'Close'), h('button', { class: 'primary', onclick: () => { picked = a.machine; user.value = a.user; again = true; redraw(); if (!info) load(); } }, 'Try again'))];
+    if (a.stage === 'approve') return [
+      h('p', {}, `spandeck is installed and running on ${a.name}. It asks to join this fleet as `, h('b', {}, a.station), ' and shows the code ', h('b', { class: 'code' }, a.code), '.'),
+      h('p', { class: 'muted' }, 'Approve only if you started this: it will be able to control every station.'),
+      h('div', { class: 'row end' }, h('button', { onclick: () => addAnswer(a, false) }, 'Refuse'), h('button', { class: 'primary', onclick: () => addAnswer(a, true) }, 'Approve')), log];
+    if (a.stage === 'joined') return [h('p', {}, `Approved. Waiting for ${a.station || a.name} to appear…`), log];
+    if (a.stage === 'done') return [h('p', {}, h('b', {}, a.station || a.name), ' is in your fleet.'),
+      h('div', { class: 'row end' }, h('button', { onclick: () => { addClear(); d.close(); } }, 'Done'), h('button', { class: 'primary', onclick: () => { addClear(); d.close(); go(stationUrl(a.station || a.name)); } }, 'Open it'))];
+    const at = ADD_STEPS.findIndex(s => s[0] === a.stage);
+    return [
+      h('p', {}, `Adding ${a.name} as ${a.user}.`),
+      h('ol', { class: 'add-steps' }, ADD_STEPS.map(([, label], i) => h('li', { class: i < at ? 'done' : i === at ? 'now' : '' }, h('span', { 'aria-hidden': 'true' }, i < at ? '✓' : i === at ? '›' : '·'), label + (i === at ? '…' : '')))),
+      log,
+      h('div', { class: 'row end' }, h('button', { class: 'danger', onclick: () => addClear() }, 'Stop'), closeBtn('Hide'))];
+  }
+
+  function redraw() {
+    const a = again ? null : S.adding;
+    if (a) setLog(a.lines);
+    // Only a change of step redraws: the boxes being typed in are left alone.
+    const key = JSON.stringify(a ? [a.id, a.stage, a.problem?.kind, a.code] : [picked, info && [info.enabled, info.tailscale, info.error, info.machines.map(x => x.id)]]);
+    if (key === shown) return;
+    shown = key;
+    box.replaceChildren(...(a ? view(a) : picker()).flat().filter(Boolean));
+    const first = box.querySelector(a ? 'input' : '.list-row.first ~ * input, form input');
+    if (first) first.focus();
+  }
+
+  const d = dialog('Add a machine', () => box, { onClose: () => { addDlg = null; pass.value = ''; } });
+  addDlg = { redraw, line: (data) => { if (S.adding && data.id === S.adding.id) { S.adding.lines = [...(S.adding.lines || []), data.line]; setLog(S.adding.lines); } } };
+  redraw();
+  if (!S.adding) load();
+}
+
 const thumbs = new Map();
 // The last lines that have something on them (a screen is mostly blank rows).
 function thumbText(lines) {
@@ -1732,7 +1867,7 @@ const awayText = (st, info) => `${st} is ${STATION_STATE[info.state] || 'unreach
 function fleetView() {
   const stations = S.fleet.stations.slice().sort((a, b) => (b.needs_you || 0) - (a.needs_you || 0) || (b.self ? 1 : 0) - (a.self ? 1 : 0));
   return shell(h('main', { class: 'station-main' }, h('div', { class: 'fleet' }, stopRows(),
-    h('div', { class: 'tiles' }, stations.map(stationTile)),
+    h('div', { class: 'tiles' }, stations.map(stationTile), addTile()),
     stations.length <= 1 ? h('p', { class: 'muted hint' }, 'Other stations appear here on their own: any machine under your Tailscale login that runs spandeckd.') : null)));
 }
 
@@ -2066,7 +2201,7 @@ function phoneList() {
     h('section', {}, h('h2', {}, 'Approvals'), S.approvals.length ? S.approvals.map(a => approvalRow(a)) : h('p', { class: 'muted' }, 'Nothing is waiting for approval.')),
     h('section', {}, h('h2', {}, 'Needs you'), blockers.length ? blockers.map(x => line(x.st, x.p, whereOf(x.st, x.p))) : h('p', { class: 'muted' }, 'No agent is blocked.')),
     pins.length ? h('section', { class: 'phone-pinned' }, h('h2', {}, 'Pinned'), pins.map(x => x.p ? line(x.st, x.p, whereOf(x.st, x.p)) : x.lay ? layRow(x.lay, layShort(x.lay)) : h('div', { class: 'phone-row muted' }, x.gone))) : null,
-    h('section', {}, h('h2', {}, 'Stations'), stationsByName().map(station)),
+    h('section', {}, h('h2', {}, 'Stations'), stationsByName().map(station), addRow()),
     globals.length ? h('section', { class: 'phone-layouts' }, h('h2', {}, 'Layouts'), globals.map(x => layRow(x, 'every station'))) : null,
     stopRows(),
     h('section', {}, h('button', { class: 'wide', onclick: fleetUsageDialog }, 'Usage: tokens and estimated cost')),
