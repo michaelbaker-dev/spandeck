@@ -228,13 +228,19 @@ pub fn service_definition(
 /// Where the profile that lets Codex's sandbox work is installed.
 pub const CODEX_SANDBOX_PROFILE_PATH: &str = "/etc/apparmor.d/spandeck-codex-bwrap";
 
-/// An AppArmor profile for Codex's own copy of bubblewrap, and nothing else.
-pub const CODEX_SANDBOX_PROFILE: &str = r#"# Installed by `spandeck doctor --fix`.
-# Codex runs each command in a sandbox built with its own copy of bubblewrap.
-# Ubuntu stops unprivileged programs from setting up the network inside such a
-# sandbox unless a profile allows it. This allows it for Codex's bubblewrap only.
+/// AppArmor profiles for bubblewrap, the program Codex builds its sandbox
+/// with: the system's copy, which Codex uses when there is one, and Codex's own.
+pub const CODEX_SANDBOX_PROFILE: &str = r#"# Installed by `spandeck doctor --fix`. Version 2.
+# Codex runs each command in a sandbox built with bubblewrap. Ubuntu stops
+# unprivileged programs from setting up such a sandbox unless a profile allows
+# it. These allow it for bubblewrap only: the system's copy, which Codex uses
+# when it is installed, and the copy that ships with Codex.
 abi <abi/4.0>,
 include <tunables/global>
+
+profile spandeck-bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}
 
 profile spandeck-codex-bwrap /home/*/.codex/packages/*/releases/*/codex-resources/bwrap flags=(unconfined) {
   userns,
@@ -251,7 +257,8 @@ pub fn codex_sandbox_blocked(home: &std::path::Path) -> bool {
     let restricted =
         std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
             .is_ok_and(|v| v.trim() == "1");
-    restricted
-        && home.join(".codex/packages").is_dir()
-        && !std::path::Path::new(CODEX_SANDBOX_PROFILE_PATH).exists()
+    // An older version of the profile covered only Codex's own copy, which
+    // Codex does not use when the system has one: that still counts as blocked.
+    let installed = std::fs::read_to_string(CODEX_SANDBOX_PROFILE_PATH).unwrap_or_default();
+    restricted && home.join(".codex/packages").is_dir() && installed != CODEX_SANDBOX_PROFILE
 }

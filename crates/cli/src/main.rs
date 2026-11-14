@@ -1273,8 +1273,8 @@ fn fix_with_sudo() -> anyhow::Result<()> {
     }
     println!(
         "Codex cannot run commands on this machine: the system blocks the sandbox Codex uses.\n\
-         This installs one AppArmor profile, {CODEX_SANDBOX_PROFILE_PATH}, that allows it for\n\
-         Codex's own sandbox program only. Nothing else on the system changes.\n\
+         This installs one AppArmor file, {CODEX_SANDBOX_PROFILE_PATH}, that allows it for\n\
+         the sandbox program (bubblewrap) only. Nothing else on the system changes.\n\
          It needs your password once. Press Ctrl-C to skip.\n"
     );
     let tmp = std::env::temp_dir().join(format!("spandeck-codex-bwrap.{}", std::process::id()));
