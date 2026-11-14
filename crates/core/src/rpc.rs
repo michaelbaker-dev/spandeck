@@ -90,6 +90,7 @@ const READ_METHODS: &[&str] = &[
     "stop.list",
     "integration.status",
     "archive.sessions",
+    "usage.summary",
     "setup.get",
     "agents.status",
     "deck.get",
@@ -229,12 +230,13 @@ impl Daemon {
                 opts.cwd = opts.cwd.map(|c| self.expand_path(&c));
                 let pane = self.spawn_pane(opts)?;
                 self.write_instructions(&pane.meta());
-                pane.view(&self.station)
+                self.pane_view(&pane)
             }
             "pane.list" => json!(self.pane_views()),
-            "pane.get" => self
-                .pane(&self.target_pane(caller, &params)?)?
-                .view(&self.station),
+            "pane.get" => {
+                let pane = self.pane(&self.target_pane(caller, &params)?)?;
+                self.pane_view(&pane)
+            }
             "pane.text" => {
                 let pane = self.pane(&self.target_pane(caller, &params)?)?;
                 let history = params.get("history").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -284,9 +286,10 @@ impl Daemon {
                 self.resize(s(&params, "pane")?, cols, rows, &caller.client)?;
                 json!({"ok": true})
             }
-            "pane.rename" => self
-                .rename_pane(s(&params, "pane")?, s(&params, "name")?)?
-                .view(&self.station),
+            "pane.rename" => {
+                let pane = self.rename_pane(s(&params, "pane")?, s(&params, "name")?)?;
+                self.pane_view(&pane)
+            }
             "pane.set" => {
                 let pane = self.pane(s(&params, "pane")?)?;
                 {
@@ -303,7 +306,7 @@ impl Daemon {
                 }
                 self.save_pane(&pane);
                 self.emit("pane.updated", Some(&pane.id), None, json!({}));
-                pane.view(&self.station)
+                self.pane_view(&pane)
             }
             "pane.pause" => {
                 self.pause(
@@ -326,7 +329,7 @@ impl Daemon {
             }
             "pane.restart" => {
                 let pane = self.restart_pane(s(&params, "pane")?, flag(&params, "fresh"), by)?;
-                pane.view(&self.station)
+                self.pane_view(&pane)
             }
             "pane.close" => {
                 self.close(s(&params, "pane")?, by)?;
@@ -714,6 +717,9 @@ impl Daemon {
             }
 
             "archive.sessions" => json!(self.archive.sessions()),
+            "usage.summary" => {
+                self.usage_summary(params.get("today_from_ms").and_then(|v| v.as_u64()))
+            }
             "archive.restore" => {
                 json!({"path": self.archive.restore(s(&params, "session")?).map_err(Error::Other)?})
             }
@@ -981,13 +987,13 @@ impl Daemon {
                 (m.state, m.exit.is_some())
             };
             if exited || states.contains(&state) {
-                let mut v = pane.view(&self.station);
+                let mut v = self.pane_view(&pane);
                 v["timed_out"] = json!(false);
                 return Ok(v);
             }
             // Lagged or an unrelated event: just look again.
             if tokio::time::timeout_at(deadline, rx.recv()).await.is_err() {
-                let mut v = pane.view(&self.station);
+                let mut v = self.pane_view(&pane);
                 v["timed_out"] = json!(true);
                 return Ok(v);
             }

@@ -19,6 +19,8 @@
 //!   setup     fleet-wide agent setup: MCP servers, skills, model defaults
 //!   deck      fleet-wide deck document: global layouts and pins
 //!   vault     AgentVault: station token, key use through the vault's proxy
+//!   usage     what each pane's agent has used, and the station's totals
+//!   prices    the public list of model prices and context windows, fetched daily
 
 pub mod agents;
 pub mod client;
@@ -36,6 +38,7 @@ pub mod messages;
 pub mod notify;
 pub mod orders;
 pub mod paths;
+pub mod prices;
 pub mod project;
 pub mod recipes;
 pub mod relay;
@@ -44,6 +47,7 @@ pub mod server;
 pub mod setup;
 pub mod tasks;
 pub mod trust;
+pub mod usage;
 pub mod vault;
 
 pub use daemon::{Authority, BusEvent, Caller, Daemon, Error, StartOpts, PROTOCOL, VERSION};

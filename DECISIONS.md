@@ -19,9 +19,10 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - **Standing orders at five layers** (fleet, group, station, project, role), as guidance and as enforced rules.
 - **Review loop is the first recipe**: three rounds, stall check, sign-off before push.
 - **Activity strip on every pane.** Tree, timeline, heat view are v1.5.
+- **Usage per agent** (the owner's request on 14 Nov 2026; before, usage and cost views were not in v1): each pane shows its agent's model, tokens and context, with an estimated cost; the station and the fleet show totals. See Usage and cost.
 - **Phone**: status, blockers, approval requests and stop controls; and, since 0.2 (the owner's request on 14 Nov 2026), talking to any pane: a message box that can be typed or dictated into, the keys a phone lacks, fitting the pane to the screen, and starting a pane. In the browser; no native app.
 - **Station-to-station SSH** uses short-lived certificates spandeck issues per task (v1.5, with cross-station delegation).
-- Not in v1: Windows, desktop shell, native iPhone app and widget, Officer of the Deck, usage and cost views, fleet updates and channels (of spandeck itself), common config, cross-station delegation, flow view, agent tree and timeline. (OpenCode and Antigravity adapters were on this list until 14 Nov 2026: see Agent programs.)
+- Not in v1: Windows, desktop shell, native iPhone app and widget, Officer of the Deck, fleet updates and channels (of spandeck itself), common config, cross-station delegation, flow view, agent tree and timeline. (OpenCode and Antigravity adapters were on this list until 14 Nov 2026: see Agent programs.)
 
 ## Pre-build resolutions (13 Nov 2026)
 
@@ -30,7 +31,7 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - spandeckd listens on localhost and the tailnet address. Tailnet connections are identified by a Tailscale whois on the real address and must be the owner's login; they then need the fleet key (stations) or an approved token (browsers). Localhost needs a token. Serve identity headers are never trusted.
 - Every pane gets a pane-scoped token. Enforced on cross-station calls; advisory on the same station.
 - OSC 7501 is read when present, never required.
-- v1 activity strip shows state, current tool and elapsed time (no context gauge or cost).
+- The activity strip shows state, current tool and elapsed time, and since 14 Nov 2026 the model and a context gauge (before: no context gauge or cost).
 - Fleet, group and station orders live in `~/.config/spandeck/orders.toml`; project and role orders in `.spandeck/orders.toml` in the repo.
 - Cross-station in v1: discovery, fleet view, attach, stop, recall search, message relay. An agent's first route to another station needs one approval.
 - The v1 enforcement table covers Claude Code and Codex.
@@ -66,6 +67,14 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - OpenCode and Antigravity are agents a pane can run, wired to spandeck's tools and skill when the pane starts. Neither can block a tool call or pass an approval to the Control Deck, so their rules are guidance.
 - A pane started for an agent that is not installed on its station installs it first, in the pane, with the vendor's own install command. That command is fixed in the code (HTTPS only) or set in the station's own config; it never comes from a caller or another station.
 - The owner can see each agent's version on each station and update one or all of them. After an update that changed the version, an idle pane of that agent restarts into its conversation; a pane in a turn, or waiting on the owner, restarts when it is next idle. Updating is the owner's to do: an agent cannot.
+
+## Usage and cost (14 Nov 2026, the owner's request)
+
+- Token counts are only what an agent wrote in its own session data: Claude Code's and Codex's session files, OpenCode's session database. Antigravity keeps nothing spandeck can read, and is shown as not reported. Nothing is typed in by the owner.
+- Counted per conversation and per model, sub-agents included under the model that ran them; a model call written more than once is counted once. A new conversation starts from zero; the station keeps its totals.
+- Cost is an estimate at list prices and is called that wherever it appears, with the list's source and date: a subscription is not billed per token.
+- Prices and context windows come from a public list (models.dev) that spandeckd fetches by itself once a day and keeps. The request carries nothing about the owner or a project. No price or window size is written into the code; a model the list does not name has no price. `[prices]` in the config is an optional override, never needed.
+- The context gauge uses the window the session data states (Codex), else the list's.
 
 ## Guarantees (contracts the build must meet)
 

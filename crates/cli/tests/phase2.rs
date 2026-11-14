@@ -424,7 +424,13 @@ fn screenshots_of_every_view() {
     let dir =
         std::path::PathBuf::from(std::env::var("SPANDECK_SHOTS").expect("set SPANDECK_SHOTS"));
     std::fs::create_dir_all(&dir).unwrap();
-    let s = Station::start("spark2");
+    let prices = fake_prices::Prices::start();
+    let s = Station::start_with("spark2", &prices.config(), &[]);
+    // What each agent's session file says it used.
+    let used = |id: &str, model: &str, side: bool, n: [u64; 4]| {
+        json!({"transcript": {"type": "assistant", "isSidechain": side, "message": {"id": id, "model": model,
+            "usage": {"input_tokens": n[0], "output_tokens": n[1], "cache_read_input_tokens": n[2], "cache_creation_input_tokens": n[3]}}}})
+    };
     let repo = s.git_repo("api");
     std::fs::create_dir_all(repo.join(".spandeck")).unwrap();
     std::fs::write(
@@ -442,17 +448,17 @@ fn screenshots_of_every_view() {
     let dev = spawn(
         "dev",
         "author",
-        json!({"steps": [{"say": "● I'll add the importer and its tests."}, {"prompt": "add the importer"}, {"tool": {"name": "Edit", "file": "src/importer.rs"}}, {"say": "● Running the test suite…"}, {"work": 600000}]}),
+        json!({"steps": [{"say": "● I'll add the importer and its tests."}, {"prompt": "add the importer"}, used("m1", "claude-opus-5-5", false, [2100, 18400, 6_120_000, 410_000]), used("m2", "claude-haiku-5-5", true, [900, 3200, 880_000, 120_000]), used("m3", "claude-opus-5-5", false, [40, 900, 618_000, 3100]), {"tool": {"name": "Edit", "file": "src/importer.rs"}}, {"say": "● Running the test suite…"}, {"work": 600000}]}),
     );
     spawn(
         "reviewer",
         "reviewer",
-        json!({"steps": [{"prompt": "clean the build"}, {"say": "I need to remove the build directory first."}, {"permission": {"name": "Bash", "command": "rm -rf build && cargo build --release"}}, {"sleep": 600000}]}),
+        json!({"steps": [{"prompt": "clean the build"}, used("m1", "claude-fable-5-2", false, [310, 4200, 164_000, 22_000]), {"say": "I need to remove the build directory first."}, {"permission": {"name": "Bash", "command": "rm -rf build && cargo build --release"}}, {"sleep": 600000}]}),
     );
     spawn(
         "tester",
         "tester",
-        json!({"steps": [{"prompt": "run tests"}, {"tool": {"name": "Bash", "command": "cargo test"}}, {"turn_end": "All 42 tests pass."}]}),
+        json!({"steps": [{"prompt": "run tests"}, used("m1", "claude-experimental-9", false, [120, 800, 31_000, 9000]), {"tool": {"name": "Bash", "command": "cargo test"}}, {"turn_end": "All 42 tests pass."}]}),
     );
     s.call(
         "pane.send_text",
@@ -591,6 +597,20 @@ fn screenshots_of_every_view() {
         "!!document.querySelector('.dialog [aria-label=\"Server name\"]')",
     );
     shoot(&page, "6-agent-setup");
+    let close = "(document.querySelector('.dialog .icon-btn').click(), true)";
+    page.js(close);
+    page.js("[...document.querySelectorAll('.topbar button')].find(b => b.innerText === 'Usage').click()");
+    page.wait("fleet usage", "!!document.querySelector('.usage-station')");
+    shoot(&page, "13-fleet-usage");
+    page.js(close);
+    page.goto(&format!("/s/spark2/p/{dev}"));
+    page.wait("the gauge", "!!document.querySelector('.strip .usage-ctx')");
+    page.js("document.querySelector('.strip .usage-ctx').click()");
+    page.wait(
+        "pane usage",
+        "!!document.querySelector('.usage-dialog .facts')",
+    );
+    shoot(&page, "14-pane-usage");
     let phone = Page::open(&s, 390, 844);
     phone.wait("phone", "!!document.querySelector('main.phone .approval')");
     shoot(&phone, "7-phone");
@@ -601,6 +621,13 @@ fn screenshots_of_every_view() {
     );
     phone.js("(document.querySelector('.composer-box').value = 'run the tests and tell me what fails', true)");
     shoot(&phone, "8-phone-pane");
+    phone.js("document.querySelector('.phone-usage').click()");
+    phone.wait(
+        "phone usage",
+        "!!document.querySelector('.usage-dialog .facts')",
+    );
+    shoot(&phone, "15-phone-pane-usage");
+    phone.js("(document.querySelector('.dialog .icon-btn').click(), true)");
     phone.goto("/s/spark2/l/api/build");
     phone.wait(
         "phone layout",
@@ -628,6 +655,13 @@ fn screenshots_of_every_view() {
     );
     phone.js("(document.querySelector('main.phone').scrollTop = 330, true)");
     shoot(&phone, "7b-phone-list-stations");
+    phone.js("[...document.querySelectorAll('main.phone button')].find(b => b.innerText.startsWith('Usage')).click()");
+    phone.wait(
+        "phone fleet usage",
+        "!!document.querySelector('.usage-station')",
+    );
+    shoot(&phone, "16-phone-fleet-usage");
+    phone.js("(document.querySelector('.dialog .icon-btn').click(), true)");
     let fresh = Page::open_signed_out(&s, 390, 844);
     fresh.js("document.querySelector('main.login button').click()");
     fresh.wait("code", "!!document.querySelector('.big-code')");
@@ -757,7 +791,8 @@ fn a_new_browser_shows_a_code_and_opens_the_deck_once_it_is_approved() {
 #[test]
 fn a_dialog_keeps_the_keyboard_while_a_pane_is_open() {
     use common::browser::Page;
-    let s = Station::start("alpha");
+    let prices = fake_prices::Prices::start();
+    let s = Station::start_with("alpha", &prices.config(), &[]);
     let pane = s.call(
         "pane.spawn",
         json!({"program": "/bin/sh", "name": "sh", "cwd": s.root.join("home")}),
@@ -786,4 +821,48 @@ fn a_dialog_keeps_the_keyboard_while_a_pane_is_open() {
         !s.text(&pane).contains("ject"),
         "nothing typed went to the terminal"
     );
+
+    // Asked for on 14 Nov 2026: the strip shows the agent's model and how
+    // full its context is, and the pane's Usage dialog shows the totals and
+    // an estimated cost that is called an estimate.
+    page.js("document.querySelector('.dialog .icon-btn').click()");
+    let agent = s.fake(
+        json!({"steps": [{"prompt": "go"}, {"transcript": {"type": "assistant", "message": {
+            "id": "msg_1", "model": "claude-opus-5-5",
+            "usage": {"input_tokens": 100, "output_tokens": 250,
+                      "cache_read_input_tokens": 700000, "cache_creation_input_tokens": 50}}}}]}),
+        json!({"name": "dev"}),
+    );
+    page.goto(&format!("/s/alpha/p/{agent}"));
+    let strip = page.wait(
+        "the model and the context gauge in the strip",
+        "(m => m && document.querySelector('.strip .usage-ctx .gauge i') && document.querySelector('.strip .usage-ctx').title.includes('at list prices') ? [m.innerText, document.querySelector('.strip .usage-ctx').innerText, document.querySelector('.strip .usage-ctx').title] : false)(document.querySelector('.strip .usage-model'))",
+    );
+    assert_eq!(strip[0], json!("opus-5-5"));
+    assert_eq!(strip[1], json!("70%"), "700,150 of the list's 1,000,000");
+    let title = strip[2].as_str().unwrap();
+    assert!(
+        title.contains("Model: claude-opus-5-5")
+            && title.contains("Context: 700,150 tokens of 1,000,000"),
+        "{title}"
+    );
+    page.js("document.querySelector('.strip .icon-btn').click()");
+    page.wait("the pane menu", "!!document.querySelector('.menu')");
+    page.choose("Usage");
+    let text = page.wait(
+        "the usage dialog",
+        "(d => d && d.innerText.includes('Est. cost') ? d.innerText : false)(document.querySelector('.dialog'))",
+    );
+    let text = text.as_str().unwrap();
+    for part in [
+        "claude-opus-5-5",
+        "Total\n700k", // 100 + 250 + 700,000 + 50
+        "Estimated cost",
+        "$0.15", // 100 x 4 + 250 x 20 + 700,000 x 0.2 + 50 x 5, per million
+        "an estimate at list prices from 127.0.0.1",
+        "What you actually pay depends on your plan.",
+        "No sub-agent usage",
+    ] {
+        assert!(text.contains(part), "no {part:?} in:\n{text}");
+    }
 }

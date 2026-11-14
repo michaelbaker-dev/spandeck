@@ -6,6 +6,7 @@
 
 pub mod normalize;
 pub mod scrub;
+pub mod usage;
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -28,6 +29,8 @@ pub struct Archive {
     /// Held in memory only, so the daemon can report them as exposed; never
     /// written anywhere by the archive.
     found: Mutex<Vec<(String, String)>>,
+    /// Token usage of the conversations asked about since the daemon started.
+    usage: Mutex<std::collections::HashMap<String, usage::Tracked>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,9 +105,11 @@ impl Archive {
             END;
             "#,
         )?;
+        conn.execute_batch(usage::SCHEMA)?;
         Ok(Archive {
             conn: Mutex::new(conn),
             found: Mutex::new(vec![]),
+            usage: Mutex::new(Default::default()),
         })
     }
 
@@ -117,13 +122,16 @@ impl Archive {
         project: Option<&str>,
         pane: Option<&str>,
     ) {
-        let conn = self.conn.lock().unwrap();
-        let _ = conn.execute(
-            "INSERT INTO sessions(id,agent,path,project,pane) VALUES(?1,?2,?3,?4,?5)
+        {
+            let conn = self.conn.lock().unwrap();
+            let _ = conn.execute(
+                "INSERT INTO sessions(id,agent,path,project,pane) VALUES(?1,?2,?3,?4,?5)
              ON CONFLICT(id) DO UPDATE SET path=excluded.path, active=1,
                project=COALESCE(excluded.project, project), pane=COALESCE(excluded.pane, pane)",
-            params![id, agent, path, project, pane],
-        );
+                params![id, agent, path, project, pane],
+            );
+        }
+        self.track_usage(id, agent, path, project, pane);
     }
 
     /// The commit the project is at; stamped on entries captured from now on.

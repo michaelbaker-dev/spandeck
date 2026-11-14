@@ -1,0 +1,2 @@
+{"parentUuid":null,"logicalParentUuid":"a6","isSidechain":false,"type":"system","subtype":"compact_boundary","content":"Conversation compacted","isMeta":false,"timestamp":"2026-11-14T00:20:00.000Z","uuid":"c1","compactMetadata":{"trigger":"auto","preTokens":403586,"postTokens":900},"sessionId":"s1"}
+{"parentUuid":"c1","isSidechain":false,"promptId":"p2","type":"user","isVisibleInTranscriptOnly":true,"isCompactSummary":true,"message":{"role":"user","content":"summary of the conversation so far"},"uuid":"u5","timestamp":"2026-11-14T00:20:01.000Z","sessionId":"s1"}

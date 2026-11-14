@@ -110,6 +110,34 @@ From the Control Deck, right-click a station (or use the commands on any station
 - A station that is off stays in the list as unreachable. One that does not start at
   login is marked; fix that with `spandeck service --install`.
 
+## Usage and cost
+
+Each agent pane shows the model in use and how full its context is, in the strip above
+its terminal. Click it, or choose **Usage** in the pane's menu, for the token counts
+(input, output, cache read and write), a table per model, and an estimated cost.
+**Usage** in the top bar adds up every station: per model, per project and per pane, for
+today and for all time.
+
+- The token counts are the agent's own: spandeck reads them from Claude Code's and
+  Codex's session files and OpenCode's session database as they grow. Sub-agents are
+  included, under the model that ran them. Antigravity records nothing spandeck can
+  read, so its panes say "not reported by this agent". A conversation spandeck
+  never followed is not in the totals.
+- **Cost is an estimate at list prices.** spandeck fetches a public price list
+  ([models.dev](https://models.dev)) once a day and keeps a copy, so it works offline.
+  What you actually pay depends on your plan: a subscription is not billed per token.
+  A model the list does not name is shown with its tokens and "no price".
+- The context gauge uses the window size the session file states (Codex) or, when it
+  states none, the one in the price list.
+- A model is looked up by the id in the session file, under its provider; if that is
+  not listed, by the id in lower case without a `[…]` suffix, a `provider/` prefix or a
+  trailing date. Prices that rise above a context size (tiers) are not applied.
+
+Advanced: `[prices]` in `~/.config/spandeck/config.toml` takes `auto = false` (never
+fetch), `url = "…"` (another list in the same shape) and your own figures per model, in
+dollars per million tokens, which replace the list's:
+`[prices.model."claude-opus-5-5"]` with `input`, `output`, `cache_read`, `cache_write`.
+
 ## From your phone
 
 Open any station from a phone on your Tailscale account: `spandeck cc --qr` shows a QR
@@ -142,6 +170,7 @@ is working. To keep it awake whenever spandeckd runs, add `stay_awake = true` to
 | Working together | Messages as records (`send`, `inbox`, `reply`, `ack`) through an MCP server; delegation with task records; worktree per writing helper; checkpoint and diff; sign-off bound to a commit; the review loop; shared project memory; session archive with `recall`. |
 | Standing orders | Rules and guidance at five layers. Rules are enforced by hooks and shown as enforced only where the agent can really be blocked. |
 | API keys | Optional [AgentVault](https://github.com/michaelbaker-dev/agentvault) integration: agents use keys through the vault and never see them. See `docs/vault.md`. |
+| Usage | Model, tokens and context per pane; totals per station, project and model for today and all time; cost estimated from a public price list fetched daily. |
 | Agent setup | MCP servers, skills and default model and effort, set once and applied on every station; run a command (`/login`, `/model …`) in one agent or all of them. |
 
 ## Not verified

@@ -356,3 +356,87 @@ fn doctor_reports_on_the_station() {
     }
     assert_eq!(d["ok"], json!(true));
 }
+
+/// Asked for by the owner on 14 Nov 2026: each pane shows its agent's model,
+/// tokens, context and an estimated cost, with nothing typed in. The numbers
+/// follow the session file as it grows, are priced from the fetched list,
+/// survive a daemon restart, and start again with a new conversation.
+#[test]
+fn a_panes_usage_follows_its_session_file_is_priced_and_survives_a_restart() {
+    let prices = fake_prices::Prices::start();
+    let mut s = Station::start_with("alpha", &prices.config(), &[]);
+    let reply = |output: u64| {
+        json!({"transcript": {"type": "assistant", "message": {
+            "id": "msg_1", "model": "claude-opus-5-5-20260901",
+            "usage": {"input_tokens": 100, "output_tokens": output,
+                      "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 50}}}})
+    };
+    // One model call written as two lines, the second with the final count.
+    let pane = s.fake(
+        json!({"steps": [{"prompt": "go"}, reply(10), reply(200), {"turn_end": "done"}]}),
+        json!({"name": "dev"}),
+    );
+    let priced = |s: &Station| {
+        let u = s.pane(&pane)["usage"].clone();
+        (u["total_tokens"] == json!(1350) && !u["cost_estimate"].is_null()).then_some(u)
+    };
+    let u = wait_for_or(
+        "the pane's usage, priced",
+        15,
+        || s.pane(&pane)["usage"].to_string(),
+        || priced(&s),
+    );
+    assert_eq!(u["model"], json!("claude-opus-5-5-20260901"));
+    assert_eq!(
+        (
+            u["input_tokens"].clone(),
+            u["output_tokens"].clone(),
+            u["cache_read_tokens"].clone(),
+            u["cache_write_tokens"].clone()
+        ),
+        (json!(100), json!(200), json!(1000), json!(50))
+    );
+    assert_eq!(u["context_tokens"], json!(1150));
+    // The session file states no window: the list's is used, and said so.
+    assert_eq!(u["context_window"], json!(1_000_000));
+    assert_eq!(u["context_window_source"], json!("price list"));
+    assert_eq!(u["turns"], json!(1));
+    assert_eq!(u["source"], json!("Claude Code session file"));
+    assert_eq!(u["price_source"], json!(prices.url()));
+    // 100 x 4 + 200 x 20 + 1000 x 0.2 + 50 x 5, per million.
+    let cost = u["cost_estimate"].as_f64().unwrap();
+    assert!((cost - 0.00485).abs() < 1e-9, "{cost}");
+    assert_eq!(u["by_model"][0]["model"], json!("claude-opus-5-5-20260901"));
+    assert_eq!(u["by_model"][0]["cost_estimate"], u["cost_estimate"]);
+
+    let sum = s.call("usage.summary", json!({}));
+    assert_eq!(sum["all"]["total_tokens"], json!(1350));
+    assert_eq!(sum["today"]["total_tokens"], json!(1350));
+    assert_eq!(sum["panes"][0]["name"], json!("dev"));
+    assert_eq!(sum["panes"][0]["all"]["cost_estimate"], u["cost_estimate"]);
+    assert_eq!(sum["all"]["by_model"][0]["turns"], json!(1));
+
+    let session = s.pane(&pane)["session_id"].as_str().unwrap().to_string();
+    s.kill9();
+    s.launch();
+    s.wait_text(&pane, &format!("[fake] RESUMED {session}"));
+    let after = wait_for_or(
+        "the same usage after the restart",
+        15,
+        || s.pane(&pane)["usage"].to_string(),
+        || priced(&s),
+    );
+    assert_eq!(after["cost_estimate"], u["cost_estimate"]);
+    assert_eq!(after["price_fetched_ms"], u["price_fetched_ms"]);
+
+    // A new conversation starts from nothing; the station's total keeps it.
+    s.call("pane.restart", json!({"pane": pane, "fresh": true}));
+    wait_for("the new conversation's empty usage", 10, || {
+        let p = s.pane(&pane);
+        (p["session_id"] != json!(session) && p["usage"]["total_tokens"].is_null()).then_some(())
+    });
+    assert_eq!(
+        s.call("usage.summary", json!({}))["all"]["total_tokens"],
+        json!(1350)
+    );
+}

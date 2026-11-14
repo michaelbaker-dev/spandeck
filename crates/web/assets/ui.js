@@ -127,3 +127,72 @@ export function dot(p) {
   const s = stateOf(p);
   return h('span', { class: 'dot ' + s, title: p.needs_reason || STATE_LABEL[s] || s });
 }
+
+// ---- usage: tokens, context, estimated cost ----
+// Numbers for people (12.4k, 1.2M); the exact figure goes in the tooltip.
+export function fmtTokens(n) {
+  if (n === null || n === undefined) return '—';
+  const one = (v, unit) => (v >= 100 ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, '')) + unit;
+  if (n < 1000) return String(n);
+  if (n < 1e6) return one(n / 1e3, 'k');
+  if (n < 1e9) return one(n / 1e6, 'M');
+  return one(n / 1e9, 'B');
+}
+export const exact = (n) => (n === null || n === undefined) ? 'unknown' : Number(n).toLocaleString('en-US');
+export function fmtCost(c) {
+  if (c === null || c === undefined) return '—';
+  if (c === 0) return '$0';
+  if (c < 0.01) return '<$0.01';
+  return '$' + (c >= 100 ? Math.round(c).toLocaleString('en-US') : c.toFixed(2));
+}
+// "claude-opus-5-5-20260901" is "opus-5-5" in a narrow strip.
+export function modelShort(model) {
+  if (!model) return '';
+  return String(model).replace(/\[.*$/, '').replace(/^.*\//, '').replace(/[-@]\d{8}$/, '').replace(/-\d{4}-\d{2}-\d{2}$/, '').replace(/^claude-/, '');
+}
+// The context as a share of the window, or as a count when no window is known.
+export function contextText(u) {
+  if (!u || u.context_tokens === null || u.context_tokens === undefined) return '';
+  return u.context_pct !== null && u.context_pct !== undefined ? `${u.context_pct}%` : fmtTokens(u.context_tokens);
+}
+// One short phrase for a muted line: "opus-5-5 · 62%".
+export function usageBrief(u) {
+  if (!u || !u.model) return '';
+  return [modelShort(u.model), contextText(u)].filter(Boolean).join(' · ');
+}
+export function costLine(u) {
+  if (!u || u.total_tokens === null || u.total_tokens === undefined) return '';
+  if (!u.price_source) return 'Cost: price list not fetched yet';
+  const missing = (u.unpriced_models || []).map(m => `no price for ${m}`).join(', ');
+  if (u.cost_estimate === null || u.cost_estimate === undefined) return 'Cost: ' + (missing || 'not estimated');
+  return `Estimated cost at list prices: ${fmtCost(u.cost_estimate)}${missing ? ` (${missing})` : ''}`;
+}
+// The full numbers, for a tooltip.
+export function usageTitle(u) {
+  if (!u) return '';
+  if (u.total_tokens === null || u.total_tokens === undefined) return u.note === 'not reported by this agent' ? 'Usage is not reported by this agent' : 'No usage reported yet';
+  return [
+    `Model: ${u.model || 'unknown'}`,
+    u.context_tokens !== null && u.context_tokens !== undefined
+      ? `Context: ${exact(u.context_tokens)} tokens` + (u.context_window ? ` of ${exact(u.context_window)} (${u.context_pct}%; window from the ${u.context_window_source})` : ' (window not known)') : null,
+    `Input ${exact(u.input_tokens)} · output ${exact(u.output_tokens)}`,
+    `Cache read ${exact(u.cache_read_tokens)} · cache write ${exact(u.cache_write_tokens)}`,
+    `Total ${exact(u.total_tokens)} tokens` + (u.turns !== null && u.turns !== undefined ? ` in ${u.turns} turn${u.turns === 1 ? '' : 's'}` : ''),
+    costLine(u),
+  ].filter(Boolean).join('\n');
+}
+// The model's short name and a small context gauge: two pieces, so a narrow
+// strip can drop them one after the other.
+export function usageGauge(u, onclick) {
+  if (!u || !u.model) return [];
+  const title = usageTitle(u);
+  const pct = u.context_pct;
+  const level = pct >= 90 ? ' full' : pct >= 70 ? ' high' : '';
+  const ctx = contextText(u);
+  const attrs = (cls) => ({ class: cls, title, ...(onclick ? { role: 'button', tabIndex: 0, onclick, onkeydown: (e) => { if (e.key === 'Enter') onclick(e); } } : {}) });
+  return [
+    h('span', { ...attrs('usage-model'), 'aria-label': `Model ${u.model}` }, modelShort(u.model)),
+    ctx ? h('span', { ...attrs('usage-ctx' + level), 'aria-label': `Context ${ctx}` },
+      pct !== null && pct !== undefined ? h('span', { class: 'gauge' }, h('i', { style: { width: Math.max(2, Math.min(100, pct)) + '%' } })) : null, ctx) : null,
+  ].filter(Boolean);
+}
