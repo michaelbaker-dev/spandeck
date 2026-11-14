@@ -464,6 +464,45 @@ fn screenshots_of_every_view() {
         page.js("document.querySelector('.arr[data-ref]').dataset.zone = 'right'");
         shoot(&page, "2c-arrange");
         page.js("[...document.querySelectorAll('.tabs button')].find(b => b.innerText === 'Done arranging').click()");
+
+        // A guest pane from another project, and how Arrange lists the panes.
+        let web = s.git_repo("web");
+        s.call(
+            "project.new",
+            json!({"path": web, "panes": [{"name": "logs", "agent": "shell"}], "open": true}),
+        );
+        s.call("pane.spawn", json!({"agent": "shell", "name": "scratch"}));
+        s.call("project.layout.save", json!({"project": "api", "layout": {"name": "with-logs", "tree": {"dir": "row", "ratio": 600,
+            "a": {"pane": names[0]}, "b": {"pane": "logs", "project": "web"}}}}));
+        page.wait("guest layout tab", "(t => t ? (t.click(), true) : false)([...document.querySelectorAll('.tab.proj')].find(t => t.innerText.endsWith('with-logs')))");
+        page.wait(
+            "guest",
+            "!!document.querySelector('.workspace .pane .chip.guest')",
+        );
+        shoot(&page, "2d-guest-in-layout");
+        page.js("[...document.querySelectorAll('.tabs button')].find(b => b.innerText === 'Arrange').click()");
+        page.wait("arrange", "!!document.querySelector('.side-section')");
+        shoot(&page, "2e-arrange-guest");
+        page.js("[...document.querySelectorAll('.tabs button')].find(b => b.innerText === 'Done arranging').click()");
+        page.js("document.querySelector('.side-project [aria-label=\"Project menu\"]').click()");
+        page.js("[...document.querySelectorAll('.menu-item')].find(b => b.innerText.startsWith('Link with')).click()");
+        shoot(&page, "2f-link-dialog");
+        page.js("document.querySelector('.dialog .icon-btn').click()");
+        // Linked projects. A station that cannot link yet is shown as if it
+        // had: the page is told api and web are linked.
+        if s.try_call("project.link", json!({"project": "api", "with": "web"}))
+            .is_err()
+        {
+            page.js("(() => { const parse = JSON.parse; JSON.parse = (t) => { const v = parse(t); if (Array.isArray(v?.result)) for (const x of v.result) if (x && x.definition && x.name === 'api') x.links = [{ with: 'web', station: 'spark2' }]; return v; }; return true; })()");
+        }
+        page.wait(
+            "linked",
+            "!!document.querySelector('.sidebar .chip.linked')",
+        );
+        shoot(&page, "2g-linked-layout");
+        page.js("[...document.querySelectorAll('.tab')].find(t => t.innerText.endsWith('Watch') && t.innerText.startsWith('api')).click()");
+        page.wait("watch", "!!document.querySelector('.watch-card.guest')");
+        shoot(&page, "2h-watch-linked");
         page.js("[...document.querySelectorAll('.tab')].find(t => t.innerText === 'Deck').click()");
     }
     page.goto(&format!("/s/spark2/p/{dev}"));
@@ -491,6 +530,14 @@ fn screenshots_of_every_view() {
     );
     phone.js("(document.querySelector('.composer-box').value = 'run the tests and tell me what fails', true)");
     shoot(&phone, "8-phone-pane");
+    phone.goto("/s/spark2/l/api/build");
+    phone.wait(
+        "phone layout",
+        "document.querySelectorAll('.lay-map button').length === 3 && !!document.querySelector('.phone-layout .xterm-rows')",
+    );
+    shoot(&phone, "8b-phone-layout");
+    phone.js("document.querySelectorAll('.lay-map button')[2].click()");
+    shoot(&phone, "8c-phone-layout-third");
     let fresh = Page::open_signed_out(&s, 390, 844);
     fresh.js("document.querySelector('main.login button').click()");
     fresh.wait("code", "!!document.querySelector('.big-code')");

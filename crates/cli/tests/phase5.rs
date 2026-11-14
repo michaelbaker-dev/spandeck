@@ -778,3 +778,100 @@ async fn live_tailscale_a_local_program_needs_a_token_and_stations_need_the_flee
     assert_eq!(peer("station.info").await.0, 401);
     drop(tokio::task::spawn_blocking(move || drop(s)).await);
 }
+
+/// The phone's layout map (agreed prototype, screen 4): a project layout is
+/// stepped through one pane at a time, from a small map of it.
+#[test]
+fn a_phone_steps_through_a_layout_from_its_map() {
+    use common::browser::Page;
+    let s = Station::start("alpha");
+    let shell = |n: &str| json!({"name": n, "agent": "shell"});
+    s.call(
+        "project.new",
+        json!({"path": "~/proj", "panes": [shell("dev"), shell("dev2"), shell("lead")], "open": true}),
+    );
+    let pane = |n: &str| json!({"pane": n});
+    s.call(
+        "project.layout.save",
+        json!({"project": "proj", "layout": {"name": "build", "tree": {"dir": "col", "ratio": 600,
+            "a": {"dir": "row", "ratio": 500, "a": pane("dev"), "b": pane("dev2")}, "b": pane("lead")}}}),
+    );
+
+    let page = Page::open(&s, 390, 844);
+    page.wait(
+        "the layout's row under its station",
+        "(r => r ? (r.click(), true) : false)(document.querySelector('main.phone .phone-station .lay-row'))",
+    );
+    page.wait(
+        "the map",
+        "document.querySelectorAll('.lay-map button').length === 3 && !!document.querySelector('.phone-layout .composer-box')",
+    );
+    let boxes = page.js("[...document.querySelectorAll('.lay-map button')].map(b => { const r = b.getBoundingClientRect(); return { label: b.getAttribute('aria-label'), now: b.getAttribute('aria-current'), x: Math.round(r.left), y: Math.round(r.top), w: r.width, h: r.height }; })");
+    let labels: Vec<&str> = boxes
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["dev, idle", "dev2, idle", "lead, idle"]);
+    assert_eq!(boxes[0]["now"], json!("true"), "{boxes}");
+    assert!(boxes[1]["now"].is_null(), "{boxes}");
+    // The map is the layout's shape: dev beside dev2, lead under both.
+    assert!(
+        boxes[0]["x"].as_i64() < boxes[1]["x"].as_i64()
+            && boxes[0]["y"] == boxes[1]["y"]
+            && boxes[2]["y"].as_i64() > boxes[0]["y"].as_i64(),
+        "{boxes}"
+    );
+    assert!(
+        boxes
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b["w"].as_f64() >= Some(44.0) && b["h"].as_f64() >= Some(44.0)),
+        "every box is big enough for a finger: {boxes}"
+    );
+    let showing = "document.querySelector('.lay-showing').innerText";
+    assert_eq!(page.js(showing), json!("Showing dev · 1 of 3"));
+
+    // Tap the second box: that pane is shown, and the message box is its.
+    page.js("document.querySelectorAll('.lay-map button')[1].click()");
+    page.wait(
+        "the second pane",
+        &format!(
+            "{showing} === 'Showing dev2 · 2 of 3' && document.querySelector('.phone-layout .pane')?.dataset.pane === {} && !!document.querySelector('.phone-layout .xterm-rows')",
+            s.pane("dev2")["id"]
+        ),
+    );
+    assert_eq!(
+        page.js("document.querySelectorAll('.lay-map button')[1].getAttribute('aria-current')"),
+        json!("true")
+    );
+    page.js("(document.querySelector('.composer-box').value = 'echo map-$((40+2))', true)");
+    // The bug from a real phone, on this screen too: the redraw every few
+    // seconds must not take the keyboard away from the message box.
+    page.js("(document.querySelector('.composer-box').focus(), window.__box = document.querySelector('.composer-box'), true)");
+    std::thread::sleep(Duration::from_millis(3200));
+    assert_eq!(
+        page.js("document.activeElement === window.__box && document.contains(window.__box)"),
+        json!(true),
+        "the message box keeps the keyboard through a redraw"
+    );
+    page.js("document.querySelector('.composer-row button[type=submit]').click()");
+    s.wait_text("dev2", "map-42");
+    assert!(!s.text("dev").contains("map-42"), "{}", s.text("dev"));
+
+    // A swipe to the left over the terminal goes on to the next pane.
+    page.js(
+        "(() => { const el = document.querySelector('.phone-layout .xterm-screen');
+           const touch = (type, x) => { const ev = new Event(type, {bubbles: true, cancelable: true}); Object.defineProperty(ev, 'touches', {value: x === null ? [] : [{clientX: x, clientY: 420}]}); return ev; };
+           el.dispatchEvent(touch('touchstart', 300));
+           for (let x = 280; x >= 120; x -= 20) el.dispatchEvent(touch('touchmove', x));
+           el.dispatchEvent(touch('touchend', null));
+           return true; })()",
+    );
+    page.wait(
+        "the third pane after a swipe",
+        &format!("{showing} === 'Showing lead · 3 of 3'"),
+    );
+}

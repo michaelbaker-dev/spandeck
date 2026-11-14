@@ -226,6 +226,13 @@ export class PaneTerm {
 
   update(pane) { this.pane = pane; this.renderStrip(); }
 
+  // Shown in a layout of another project: the strip says whose pane this is.
+  setGuest(project) {
+    if ((this.guest || null) === (project || null)) return;
+    this.guest = project || null;
+    this.renderStrip();
+  }
+
   renderStrip() {
     const p = this.pane, s = stateOf(p);
     const activity = p.exited ? 'ended'
@@ -249,6 +256,7 @@ export class PaneTerm {
       h('span', { class: 'strip-name', title: p.address }, p.name),
       p.agent !== 'shell' ? h('span', { class: 'chip' }, p.agent_name) : null,
       p.role ? h('span', { class: 'chip' }, p.role) : null,
+      this.guest ? h('span', { class: 'chip guest', title: `A guest in this layout: this pane belongs to the project ${this.guest}` }, 'from ' + this.guest) : null,
       h('span', { class: 'strip-activity' }, activity),
       p.needs_reason && s === 'needs_you' ? h('span', { class: 'strip-reason', title: p.needs_reason }, p.needs_reason) : null,
       h('span', { class: 'grow' }),
