@@ -130,8 +130,11 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
         }
         if let Some(dns) = &dns {
             hosts.push(format!("{dns}:{p}"));
-            // Behind `tailscale serve`, the browser sees the bare HTTPS name.
+            // Behind `tailscale serve`, the browser sees the bare HTTPS name,
+            // or the name with whichever port serve was given. The name
+            // belongs to this machine alone, so any port of it is ours.
             hosts.push(dns.clone());
+            hosts.push(format!("{dns}:*"));
         }
     }
     hosts.sort();
@@ -162,7 +165,15 @@ fn origin_ok(web: &Web, headers: &HeaderMap) -> Result<(), (StatusCode, &'static
     let Some(host) = host else {
         return Err((StatusCode::BAD_REQUEST, "missing Host"));
     };
-    if !web.hosts.read().unwrap().contains(&host) {
+    let any_port = format!(
+        "{}:*",
+        host.rsplit_once(':').map(|(h, _)| h).unwrap_or(&host)
+    );
+    let ours = {
+        let hosts = web.hosts.read().unwrap();
+        hosts.contains(&host) || hosts.contains(&any_port)
+    };
+    if !ours {
         return Err((StatusCode::FORBIDDEN, "this Host is not served here"));
     }
     if let Some(origin) = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
