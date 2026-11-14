@@ -272,14 +272,22 @@ impl Transport for FleetState {
     }
 }
 
-fn tailscale_bin() -> Option<&'static str> {
-    [
-        "tailscale",
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-        "/usr/local/bin/tailscale",
-    ]
-    .into_iter()
-    .find(|p| {
+/// Tailscale's command-line program: on PATH, else where its installer
+/// puts it (macOS: inside the app; Windows: `%ProgramFiles%\Tailscale`).
+fn tailscale_bin() -> Option<String> {
+    let mut places = vec![
+        "tailscale".to_string(),
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale".to_string(),
+        "/usr/local/bin/tailscale".to_string(),
+    ];
+    if spandeck_terminal::sys::WINDOWS {
+        let programs = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
+        places = vec![
+            "tailscale.exe".to_string(),
+            format!(r"{programs}\Tailscale\tailscale.exe"),
+        ];
+    }
+    places.into_iter().find(|p| {
         std::process::Command::new(p)
             .arg("version")
             .stdout(std::process::Stdio::null())
@@ -290,8 +298,8 @@ fn tailscale_bin() -> Option<&'static str> {
 }
 
 fn tailscale_json(args: &[&str]) -> Option<Value> {
-    static BIN: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
-    let bin = (*BIN.get_or_init(tailscale_bin))?;
+    static BIN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let bin = BIN.get_or_init(tailscale_bin).as_ref()?;
     let out = std::process::Command::new(bin).args(args).output().ok()?;
     if !out.status.success() {
         return None;

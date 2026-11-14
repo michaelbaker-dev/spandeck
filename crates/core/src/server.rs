@@ -1,4 +1,5 @@
-//! The local API: newline-delimited JSON over a Unix socket.
+//! The local API: newline-delimited JSON over the local socket (a Unix
+//! socket; a named pipe on Windows).
 //!
 //!   -> {"id":1,"token":"…","method":"pane.list","params":{}}
 //!   <- {"id":1,"result":[…]}            or  {"id":1,"error":{"code":"…","message":"…"}}
@@ -8,8 +9,8 @@
 //! should re-read whatever state it shows.
 
 use serde_json::{json, Value};
+use spandeck_terminal::sys::local::{Listener, Stream};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::daemon::{Daemon, Error};
@@ -18,23 +19,15 @@ pub fn error_json(e: &Error) -> Value {
     json!({"code": e.code(), "message": e.to_string()})
 }
 
-pub fn bind(daemon: &Daemon) -> std::io::Result<UnixListener> {
-    let path = daemon.paths.socket();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    // A stale socket file from a previous run (or the previous image).
-    let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path)?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(listener)
+/// Open the local socket. Only this user can connect to it.
+pub fn bind(daemon: &Daemon) -> std::io::Result<Listener> {
+    Listener::bind(&daemon.paths.socket())
 }
 
-pub async fn serve(daemon: Daemon, listener: UnixListener) {
+pub async fn serve(daemon: Daemon, mut listener: Listener) {
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
+            Ok(stream) => {
                 let d = daemon.clone();
                 tokio::spawn(async move {
                     if let Err(e) = connection(d, stream).await {
@@ -50,8 +43,8 @@ pub async fn serve(daemon: Daemon, listener: UnixListener) {
     }
 }
 
-async fn connection(daemon: Daemon, stream: UnixStream) -> std::io::Result<()> {
-    let (read, mut write) = stream.into_split();
+async fn connection(daemon: Daemon, stream: Stream) -> std::io::Result<()> {
+    let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read).lines();
     let conn_id = crate::paths::new_id("c");
     while let Some(line) = lines.next_line().await? {

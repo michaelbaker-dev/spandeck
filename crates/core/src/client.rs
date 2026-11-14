@@ -2,17 +2,17 @@
 //! (which must start fast) and by tests.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use spandeck_terminal::sys::local::{self, Conn};
 
 use crate::paths::Paths;
 
 pub struct Client {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    reader: BufReader<Conn>,
+    writer: Conn,
     token: String,
     next_id: u64,
 }
@@ -40,7 +40,7 @@ fn io_err(e: std::io::Error) -> ClientError {
 
 impl Client {
     pub fn connect(socket: &Path, token: &str) -> Result<Client, ClientError> {
-        let stream = UnixStream::connect(socket).map_err(|e| ClientError {
+        let stream = local::connect(socket).map_err(|e| ClientError {
             code: "not_running".into(),
             message: format!(
                 "spandeckd is not running ({}: {e}). Start it with `spandeck daemon`.",

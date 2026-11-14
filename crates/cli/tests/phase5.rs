@@ -124,8 +124,7 @@ fn another_station_is_restarted_and_a_stopped_one_is_started_from_the_deck() {
         ),
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    spandeck_terminal::sys::set_executable(&script).unwrap();
     let bravo_is = |a: &Station, want: &str| {
         a.call("fleet.refresh", json!({}))["stations"]
             .as_array()
@@ -927,9 +926,8 @@ impl Drop for KillAtEnd {
 }
 
 fn executable(path: &std::path::Path, text: &str) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::write(path, text).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    spandeck_terminal::sys::set_executable(path).unwrap();
 }
 
 /// Every file under `dir` that holds `needle`.

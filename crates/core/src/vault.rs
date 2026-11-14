@@ -196,17 +196,9 @@ impl Daemon {
     /// Save a token so that a crash at any point leaves a usable token on disk:
     /// written beside the old one, flushed, then swapped in.
     fn vault_save_token(&self, token: &str) -> std::io::Result<()> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         let tmp = self.vault_token_file().with_extension("token.new");
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.write_all(token.as_bytes())?;
-        f.sync_all()?;
+        // Readable by the user only, and on disk before it is swapped in.
+        spandeck_terminal::sys::write_private(&tmp, token.as_bytes())?;
         std::fs::rename(&tmp, self.vault_token_file())?;
         if let Some(base) = self.vault_base() {
             self.db.kv_set("vault.base", &base);
@@ -741,9 +733,7 @@ impl Daemon {
     /// program and the socket that must be there. Antigravity reads it from a
     /// plugin on disk, which is put right here if it is missing or stale.
     fn vault_probe_panes(&self) -> std::result::Result<String, String> {
-        use std::os::unix::fs::PermissionsExt;
-        let runs = std::fs::metadata(&self.exe)
-            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+        let runs = spandeck_terminal::sys::is_executable(&self.exe);
         if !runs {
             return Err(format!("spandeck's own program is missing at {}, so the vault tools cannot start in any pane: install spandeck again.", self.exe.display()));
         }

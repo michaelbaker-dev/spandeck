@@ -2321,8 +2321,6 @@ dependencies = [
  "clap",
  "futures-util",
  "headless_chrome",
- "libc",
- "nix",
  "qrcode",
  "reqwest",
  "serde",
@@ -2330,6 +2328,7 @@ dependencies = [
  "sha2",
  "spandeck-agents",
  "spandeck-core",
+ "spandeck-terminal",
  "spandeck-web",
  "tempfile",
  "tokio",
@@ -2371,8 +2370,6 @@ dependencies = [
  "base64 0.23.1",
  "hmac",
  "insta",
- "libc",
- "nix",
  "proptest",
  "regex",
  "reqwest",
@@ -2405,8 +2402,10 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracing",
  "vt100",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

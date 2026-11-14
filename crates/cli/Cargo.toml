@@ -21,8 +21,14 @@ path = "src/main.rs"
 name = "spandeck-fake-agent"
 path = "src/bin/fake_agent.rs"
 
+# Windows only in practice: the program the log-on task runs. It has no
+# console window and starts `spandeck daemon` without one (DECISIONS.md,
+# "Windows"). Built everywhere so it cannot rot; shipped in the Windows zip.
+[[bin]]
+name = "spandeckd"
+path = "src/bin/spandeckd.rs"
+
 [dependencies]
-nix.workspace = true
 spandeck-core.workspace = true
 spandeck-web.workspace = true
 spandeck-agents.workspace = true
@@ -33,14 +39,13 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
-libc.workspace = true
+spandeck-terminal.workspace = true
 base64.workspace = true
 qrcode = { version = "0.14.1", default-features = false }
 
 [dev-dependencies]
 axum.workspace = true
 headless_chrome = { version = "1", default-features = false }
-libc.workspace = true
 tempfile.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true

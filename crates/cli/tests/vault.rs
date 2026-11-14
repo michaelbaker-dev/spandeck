@@ -1,7 +1,6 @@
 //! AgentVault integration (docs/specs/spandeck-agentvault.md), against a fake
 //! vault that follows the contract. Phases 1 to 3 of the spandeck side.
 mod common;
-use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 use common::fake_vault::FakeVault;
@@ -105,10 +104,9 @@ fn a_station_connects_only_when_the_owner_approves_on_the_vault() {
     let token_file = s.root.join("state/vault.token");
     let token = std::fs::read_to_string(&token_file).unwrap();
     assert_eq!(vault.issued(), vec![token.clone()]);
-    assert_eq!(
-        std::fs::metadata(&token_file).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    // Unix: the file's own bits. Windows has none: the state folder's
+    // access list is what keeps the file to this user (`sys::private_dir`).
+    assert!(spandeck_terminal::sys::file_mode(&token_file).is_none_or(|m| m == 0o600));
 
     // The token is in no API reply, no log entry and no pane's environment.
     let pane = s.call(

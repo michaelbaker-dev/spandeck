@@ -309,26 +309,17 @@ impl Agent {
     }
 }
 
-static SAVED: std::sync::Mutex<Option<libc::termios>> = std::sync::Mutex::new(None);
+static SAVED: std::sync::Mutex<Option<spandeck_terminal::sys::RawInput>> =
+    std::sync::Mutex::new(None);
 
+/// Keys one at a time, no echo, Ctrl-C as a byte: how an agent's TUI reads.
 fn raw_terminal() {
-    // SAFETY: plain termios calls on stdin with a zeroed, then filled, struct.
-    unsafe {
-        let mut t: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(0, &mut t) == 0 {
-            *SAVED.lock().unwrap() = Some(t);
-            t.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
-            t.c_cc[libc::VMIN] = 1;
-            t.c_cc[libc::VTIME] = 0;
-            libc::tcsetattr(0, libc::TCSANOW, &t);
-        }
-    }
+    *SAVED.lock().unwrap() = Some(spandeck_terminal::sys::stdin_raw());
 }
 
 fn restore_terminal() {
-    if let Some(t) = *SAVED.lock().unwrap() {
-        // SAFETY: restores the attributes raw_terminal saved.
-        unsafe { libc::tcsetattr(0, libc::TCSANOW, &t) };
+    if let Some(saved) = SAVED.lock().unwrap().as_mut() {
+        saved.restore();
     }
 }
 

@@ -610,7 +610,11 @@ impl Daemon {
                 "-o",
                 "UserKnownHostsFile={known_hosts}",
                 "-o",
-                "GlobalKnownHostsFile=/dev/null",
+                if spandeck_terminal::sys::WINDOWS {
+                    "GlobalKnownHostsFile=NUL"
+                } else {
+                    "GlobalKnownHostsFile=/dev/null"
+                },
                 "-o",
                 "HashKnownHosts=no",
                 "-o",
@@ -736,11 +740,8 @@ main </dev/null
             .with_file_name(format!("a{}.sock", &random_token()[..8]));
         let _ = std::fs::remove_file(&sock);
         let nonce = random_token();
-        let listener = tokio::net::UnixListener::bind(&sock).map_err(|_| "no_ssh")?;
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
-        }
+        let listener =
+            spandeck_terminal::sys::local::Listener::bind(&sock).map_err(|_| "no_ssh")?;
         struct Tidy(PathBuf, tokio::task::JoinHandle<()>);
         impl Drop for Tidy {
             fn drop(&mut self) {
@@ -891,16 +892,16 @@ main </dev/null
 /// prompt (the first password was wrong) gets nothing, so ssh gives up
 /// instead of trying again.
 async fn askpass_serve(
-    listener: tokio::net::UnixListener,
+    mut listener: spandeck_terminal::sys::local::Listener,
     nonce: String,
     mut password: Option<Secret>,
     asked: Arc<AtomicBool>,
 ) {
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
+        let Ok(stream) = listener.accept().await else {
             return;
         };
-        let (read, mut write) = stream.into_split();
+        let (read, mut write) = tokio::io::split(stream);
         let mut lines = BufReader::new(read.take(4096)).lines();
         let two = tokio::time::timeout(Duration::from_secs(5), async {
             let nonce = lines.next_line().await.ok().flatten()?;

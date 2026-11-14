@@ -28,8 +28,7 @@ fn arg_printer(s: &Station) -> String {
         "#!/bin/sh\nfor a in \"$@\"; do echo \"ARG<$a>\"; done\nsleep 60\n",
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    spandeck_terminal::sys::set_executable(&path).unwrap();
     path.display().to_string()
 }
 
@@ -451,10 +450,9 @@ fn a_station_that_was_away_gets_the_deck_when_it_is_seen_again() {
 
 /// An executable script in `dir`.
 fn script(dir: &std::path::Path, name: &str, body: &str) -> String {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    spandeck_terminal::sys::set_executable(&path).unwrap();
     path.display().to_string()
 }
 

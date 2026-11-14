@@ -149,3 +149,105 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - A test needs a reason: a Guarantee, a phase's acceptance criterion, or a real bug. No tests of trivial code, no mocks of our own modules.
 - Every-change tier under 90 seconds; merge tier under 10 minutes. A flaky test is fixed or deleted within a day.
 - The station link sits behind a swappable transport so the message relay runs under Turmoil.
+
+## Windows (14 Nov 2026, the owner's request: a Windows PC as a full station)
+
+Stage one. Nothing here has run on Windows yet: the code type-checks for
+`x86_64-pc-windows-msvc` from Linux, and the `windows` job in CI is where it is first built,
+linked and run. Each line says what was decided and why; "unlike Unix" lines say what the
+owner gets less of.
+
+- **Native, not WSL.** x86-64, Windows 10 1809 or later (the first with ConPTY) and Windows 11.
+- **Rule 4 of AGENTS.md now reads:** platform code lives only in `crates/terminal/src/sys/`:
+  `unix.rs`, `windows.rs`, and `mod.rs` which picks one. Everything that differs by system
+  (terminals, the local socket, private files, process control, the shell, start at login,
+  keep-awake) is behind that one interface, and no other file in any crate names `cfg(unix)`,
+  `cfg(windows)`, `nix`, `libc` or `windows-sys`. A value that differs (a folder, a command)
+  is asked of `sys`, not chosen with a `cfg` where it is used. Two exceptions, each one line:
+  `spandeckd.rs` (the attribute that makes it a windowless program) and a test that cannot run
+  on a system carries `#[cfg_attr(windows, ignore = "<the reason>")]`. `pty.rs` keeps the
+  types every system shares. Reason: the rule was written so a Windows port replaces one
+  place; it is now a folder instead of a file because the port is more than the PTY.
+- **Terminals: ConPTY** (`CreatePseudoConsole`), one per pane, with the program started by
+  `CreateProcessW` inside a job object that is ended when it closes. Kill is ending the job
+  (the whole tree, as `killpg` is on Unix). Hang-up is closing the pseudoconsole, which tells
+  every program on it to close. Interrupt is Ctrl-C typed into the pane, as on Unix. A pane's
+  exit is its first program's exit code (there are no signals, so `ExitInfo::Signal` never
+  appears). A program that is a `.cmd` or `.bat` file (npm's `claude.cmd`) is run through
+  `cmd.exe /d /s /c`; an argument `cmd.exe` would read as a command is refused, not passed on.
+  Because the job ends with the daemon, no pane's program outlives a daemon crash: the
+  recommended default ("processes do not survive a daemon crash") holds by construction.
+- **Local socket: a named pipe**, `\\.\pipe\spandeck-<hash of the state folder>`, in place of
+  the Unix socket, behind one `sys::local` interface (listener, async stream, blocking client)
+  that the server, the client, the askpass helper and the tests all use. Only the same user
+  can open it: the pipe's access list names that user alone, remote clients are refused, and
+  the daemon must be the pipe's first creator. The client checks that the pipe it opened is
+  owned by its own user before it sends its token, so a pipe another account made first under
+  the same name gets nothing. The token is still required, as on Unix.
+- **Upgrade and roll back restart the panes on Windows.** Windows cannot replace a process's
+  program in place, and a pseudoconsole belongs to the process that made it. So on Windows
+  `station.upgrade`, `station.restart` and `station.update` start the new program beside the
+  old one, the old one ends (and with it every pane's program), and the new one resumes each
+  agent by its session id, exactly as after a crash. The health check, going back to the
+  previous binary, and the database saved before a schema change work as on Unix. **Unlike
+  Unix the owner loses:** every shell pane and whatever it was running; the screen and
+  scrollback of every pane; an agent's turn in progress (the conversation is kept; an agent
+  with nothing to resume is closed). The Control Deck says so before an upgrade on a Windows
+  station (`station.info` carries `live_handoff: false`). This is the Guarantee's own
+  fallback ("if live handoff does not complete, terminals are lost and agents resume by
+  session id") made the normal case. The way to parity is a small pane-host process that owns
+  the pseudoconsoles and outlives the daemon; it is not built, because none of it could be
+  run from here, and it would also be the first thing in spandeck to keep panes through a
+  daemon crash. "Live handoff is a release acceptance test on macOS and Linux" stays as it is.
+- **The installed program is replaced by renaming.** A running `.exe` cannot be overwritten
+  but can be renamed, so an update moves `spandeck.exe` to `spandeck.exe.old` and puts the new
+  one in its place; the old file is removed at the next start. `state\bin\running` and
+  `previous` are hard links as on Unix (same volume), else copies.
+- **Start at login: a per-user Scheduled Task** ("spandeckd", at log on, restart on failure,
+  no time limit, runs on battery), not a Windows Service: a service runs in session 0 without
+  the user's profile, PATH or the agents' logins. The task runs `spandeckd.exe`, a windowless
+  program that starts `spandeck.exe daemon` with no console window and waits for it, so no
+  window opens at log on and the task's restart-on-failure sees the daemon's exit code.
+  **Unlike Linux with linger, the daemon runs only while the owner is logged in** (a locked
+  screen is fine; logged out is not). To have it after a reboot with nobody at the machine,
+  the owner turns on automatic log on, which is theirs to decide.
+- **Keep-awake** is `SetThreadExecutionState`, held by `spandeck keep-awake` (the same shape
+  as `caffeinate` and `systemd-inhibit`: a helper that holds the machine awake while it runs).
+  The helper ends when the daemon does. It does not stop a laptop sleeping when its lid shuts.
+- **Shells.** A shell pane runs PowerShell 7 (`pwsh.exe`) when installed, else Windows
+  PowerShell, else `cmd.exe`. One shell line (an install or update command from the catalogue)
+  runs through `powershell -NoProfile -ExecutionPolicy Bypass -Command`. Install-before-launch
+  is not a second script in another language: on Windows the pane runs
+  `spandeck install-then-launch`, the same steps written in Rust (say what was found, show the
+  command, run it in the pane, Ctrl-C skips, start the first copy that answers).
+- **The agent catalogue has Windows commands per agent**, read from each vendor's
+  documentation on 14 Nov 2026; an agent whose vendor documents no native Windows install is
+  not offered an install there, and one that does not run on native Windows says so.
+- **Folders.** State in `%LOCALAPPDATA%\spandeck`, config in `%APPDATA%\spandeck`
+  (`SPANDECK_STATE_DIR` and `SPANDECK_CONFIG_DIR` still win). Home is `%USERPROFILE%`; `~` means
+  that. A program name is looked for with each extension in `PATHEXT`. Paths are compared as
+  the file system compares them (by the file's identity, not its spelling).
+- **Private files** (the client token, the fleet key, the vault token, agent setup): the
+  state and config folders get an access list of the user, SYSTEM and Administrators only,
+  not inherited from the parent, when the daemon starts; files written in them inherit it.
+  That is what a default profile folder already has; setting it makes it true when
+  `SPANDECK_STATE_DIR` points somewhere else. Administrators can read them, as root can on Unix.
+- **Tailscale** is asked through its CLI on every system (`tailscale status --json`,
+  `whois --json`), never LocalAPI, so Windows needs only the program's place:
+  `tailscale.exe` on PATH, else `%ProgramFiles%\Tailscale\tailscale.exe`.
+- **Install and update.** `scripts/install.ps1` is `install.sh` for Windows: the release zip
+  for `x86_64-pc-windows-msvc`, SHA-256 checked, installed in `%LOCALAPPDATA%\Programs\spandeck`,
+  added to the user's PATH, the task registered. The release has `spandeck.exe`, `sd.exe` and
+  `spandeckd.exe` in a `.zip`; `station.update` picks it and unpacks with the `tar.exe` Windows
+  ships. Other processors (ARM64) are not built yet.
+- **Add a machine still leaves Windows machines out.** It would take: the Windows OpenSSH
+  server turned on there by the owner (it is off by default and needs an administrator), a
+  PowerShell form of the remote script, and password sign-in through `ssh.exe`'s askpass,
+  which behaves differently on Windows. None of it can be tried without a Windows machine, so
+  it is listed, not written. A Windows station can add a Mac or Linux machine: that direction
+  needs only `ssh.exe`, which Windows ships.
+- **Tests.** CI gains a `windows` job that builds everything and runs the tests. A test that
+  needs a Unix shell or exec-in-place is marked ignored on Windows with its reason; nothing is
+  skipped silently and nothing changes on macOS or Linux. Windows-only tests cover what is
+  new: a ConPTY round trip, the pipe refusing nothing to its own user, the command line
+  built for `.cmd` files.

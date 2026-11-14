@@ -197,6 +197,13 @@ pub trait Adapter: Send + Sync {
     }
 }
 
+/// Is this station a Windows machine? Plain code, not a `cfg`: what differs
+/// there (install commands, a hook's command line) is chosen where it is
+/// used, and both forms are compiled and tested on every system.
+pub fn on_windows() -> bool {
+    std::env::consts::OS == "windows"
+}
+
 pub fn adapter(kind: AgentKind) -> Option<&'static dyn Adapter> {
     match kind {
         AgentKind::Claude => Some(&claude::ClaudeCode),

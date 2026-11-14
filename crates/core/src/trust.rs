@@ -87,18 +87,8 @@ fn mac(key: &[u8], parts: &[&[u8]]) -> Hmac<Sha256> {
 }
 
 fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension("new");
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.write_all(text.as_bytes())?;
-    }
+    spandeck_terminal::sys::write_private(&tmp, text.as_bytes())?;
     std::fs::rename(&tmp, path)
 }
 

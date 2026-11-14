@@ -96,8 +96,7 @@ fn a_failed_handoff_falls_back_to_resume_by_session_id() {
         format!("#!/bin/sh\nif [ \"$1\" = handoff-check ]; then exec {SPANDECK} handoff-check; fi\nrm -f \"$3\"\nexec {SPANDECK} daemon\n"),
     )
     .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o755)).unwrap();
+    spandeck_terminal::sys::set_executable(&bad).unwrap();
     let before = s.call("station.info", json!({}));
     s.call("station.upgrade", json!({"binary": bad}));
     wait_for("the new image", 15, || {

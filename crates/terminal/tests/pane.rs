@@ -1,3 +1,6 @@
+//! Unix: a pane is a PTY. `tests/conpty.rs` is the same for Windows.
+#![cfg(unix)]
+
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 

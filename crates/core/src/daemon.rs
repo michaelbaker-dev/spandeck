@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spandeck_agents::{adapter, install, kind_from_command, AgentKind, AgentState, LaunchOpts};
 use spandeck_archive::Archive;
-use spandeck_terminal::{ExitInfo, Pane, PaneEvent, PaneHandoff, ScreenInfo, Signal, SpawnSpec};
+use spandeck_terminal::{
+    sys, ExitInfo, Pane, PaneEvent, PaneHandoff, ScreenInfo, Signal, SpawnSpec,
+};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::db::Db;
@@ -330,10 +332,12 @@ impl Daemon {
     pub fn start(paths: Paths, cfg: Config, opts: StartOpts) -> anyhow::Result<Daemon> {
         std::fs::create_dir_all(&paths.state_dir)?;
         std::fs::create_dir_all(&paths.config_dir)?;
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&paths.state_dir, std::fs::Permissions::from_mode(0o700));
+        // The state folder holds the tokens and the fleet key; the config
+        // folder can hold credentials for MCP servers. Windows protects a
+        // file through its folder, so both are made private there.
+        let _ = sys::private_dir(&paths.state_dir);
+        if sys::WINDOWS {
+            let _ = sys::private_dir(&paths.config_dir);
         }
         let db = Arc::new(Db::open(&paths.db())?);
         let archive = Archive::open(&paths.archive_db())?;
@@ -352,7 +356,7 @@ impl Daemon {
             .or_else(|| std::env::var_os("SPANDECK_BIN").map(PathBuf::from))
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| PathBuf::from("spandeck"));
-        let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
+        let home = crate::paths::home_dir();
         let station = cfg.station.clone();
         let trust = Arc::new(crate::trust::TrustState::load(&paths)?);
         let daemon = Daemon(Arc::new(Inner {
@@ -401,7 +405,11 @@ impl Daemon {
                 let _ = std::fs::create_dir_all(dir);
             }
             let _ = std::fs::remove_file(&link);
-            let _ = std::fs::hard_link(&daemon.exe, &link);
+            if std::fs::hard_link(&daemon.exe, &link).is_err() && sys::WINDOWS {
+                // Windows will not let the installed file be written over
+                // while it runs, so without a link a copy is what going back needs.
+                let _ = std::fs::copy(&daemon.exe, &link);
+            }
         }
         daemon.spawn_tasks(msg_rx);
         Ok(daemon)
@@ -694,10 +702,7 @@ impl Daemon {
             (None, Some(p)) => (p.clone(), opts.args.clone()),
             (None, None) => {
                 agent = AgentKind::Shell;
-                (
-                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
-                    vec![],
-                )
+                sys::default_shell()
             }
         };
 
@@ -727,11 +732,7 @@ impl Daemon {
         }
         let mut env = opts.env.clone();
         env.extend(agent_env);
-        let exe_dir = self
-            .exe
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
+        let exe_dir = self.exe.parent().map(PathBuf::from).unwrap_or_default();
         let path = std::env::var("PATH").unwrap_or_default();
         env.extend([
             ("SPANDECK_PANE".to_string(), id.clone()),
@@ -744,11 +745,7 @@ impl Daemon {
             ("SPANDECK_STATION".to_string(), self.station.clone()),
             (
                 "PATH".to_string(),
-                if exe_dir.is_empty() {
-                    path.clone()
-                } else {
-                    format!("{path}:{exe_dir}")
-                },
+                crate::paths::path_with(&path, &[exe_dir]),
             ),
         ]);
         if let Some(project) = &opts.project {
@@ -1162,8 +1159,8 @@ impl Daemon {
         let meta = old.meta();
         let resume = if fresh { None } else { self.resumable(&meta) };
         if meta.exit.is_none() {
-            let _ = old.term.signal(Signal::SIGHUP);
-            let _ = old.term.signal(Signal::SIGKILL);
+            let _ = old.term.signal(Signal::Hangup);
+            let _ = old.term.signal(Signal::Kill);
             // The old program's exit must be seen before the pane is reused,
             // or it would be taken for the new one's.
             let start = std::time::Instant::now();
@@ -1336,12 +1333,12 @@ impl Daemon {
         let p = self.pane(id)?;
         let meta = p.meta();
         if meta.exit.is_none() {
-            let _ = p.term.signal(Signal::SIGHUP);
+            let _ = p.term.signal(Signal::Hangup);
             let p2 = p.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(1500));
                 if p2.term.exit_info().is_none() {
-                    let _ = p2.term.signal(Signal::SIGKILL);
+                    let _ = p2.term.signal(Signal::Kill);
                 }
             });
         }
@@ -1360,8 +1357,8 @@ impl Daemon {
     pub fn close(&self, id: &str, by: &str) -> Result<()> {
         let p = self.pane(id)?;
         if p.meta.lock().unwrap().exit.is_none() {
-            let _ = p.term.signal(Signal::SIGHUP);
-            let _ = p.term.signal(Signal::SIGKILL);
+            let _ = p.term.signal(Signal::Hangup);
+            let _ = p.term.signal(Signal::Kill);
         }
         self.panes.write().unwrap().remove(&p.id);
         let _ = self.db.with(|c| {
@@ -1498,7 +1495,7 @@ impl Daemon {
                     .cfg
                     .keep_awake_cmd
                     .clone()
-                    .unwrap_or_else(default_keep_awake_cmd);
+                    .unwrap_or_else(|| sys::keep_awake_cmd(&self.exe));
                 if let Some((prog, args)) = cmd.split_first() {
                     match std::process::Command::new(prog)
                         .args(args)
@@ -1548,11 +1545,7 @@ impl Daemon {
             // A child left over from a handoff that did not complete: its
             // terminal is lost, so end it before resuming the conversation.
             if let Some(pid) = pid.map(|p| p as i32).filter(|p| *p > 1) {
-                if is_our_child(pid) {
-                    let _ =
-                        nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid), Signal::SIGKILL);
-                    let _ = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(pid), None);
-                }
+                sys::end_leftover_child(pid);
             }
             let Ok(meta) = serde_json::from_str::<PaneMeta>(&meta) else {
                 continue;
@@ -1626,7 +1619,6 @@ impl Daemon {
     /// to the previous binary, the same way they were handed to this one.
     /// Returns only if that could not be done.
     pub fn roll_back(&self, previous: &std::path::Path, reason: &str) -> std::io::Error {
-        use std::os::unix::process::CommandExt;
         tracing::error!(reason, previous = %previous.display(), "upgrade failed its health check; going back");
         let state = self.prepare_handoff();
         let file = self.paths.handoff_file();
@@ -1635,13 +1627,14 @@ impl Daemon {
             return e;
         }
         restore_db_before_upgrade(&self.paths);
-        let err = std::process::Command::new(previous)
-            .arg("daemon")
-            .arg("--handoff")
-            .arg(&file)
-            .env_remove("SPANDECK_PREVIOUS_EXE")
-            .env("SPANDECK_ROLLED_BACK", reason)
-            .exec();
+        let err = sys::replace_process(
+            std::process::Command::new(previous)
+                .arg("daemon")
+                .arg("--handoff")
+                .arg(&file)
+                .env_remove("SPANDECK_PREVIOUS_EXE")
+                .env("SPANDECK_ROLLED_BACK", reason),
+        );
         let _ = std::fs::remove_file(&file);
         self.readopt(state);
         err
@@ -1667,10 +1660,12 @@ impl Daemon {
     }
 
     /// Describe every live pane for the next process image. Readers stop here.
+    /// Where there is no live handoff (Windows) no pane is described: the
+    /// next daemon resumes agents by session id, as after a crash.
     pub fn prepare_handoff(&self) -> HandoffState {
         let mut panes = vec![];
         for p in self.list_panes() {
-            if p.meta.lock().unwrap().exit.is_some() {
+            if !sys::LIVE_HANDOFF || p.meta.lock().unwrap().exit.is_some() {
                 continue;
             }
             match p.term.prepare_handoff(2000) {
@@ -1707,6 +1702,24 @@ impl Daemon {
             }
         };
         let _ = std::fs::remove_file(file);
+        if !sys::LIVE_HANDOFF {
+            // The daemon before this one ended, and its panes with it. This
+            // is the upgrade on such a system, not a failure: say it
+            // happened, then resume each agent by its session id.
+            if state.version != 1 {
+                return false;
+            }
+            self.record(
+                "station.upgraded",
+                None,
+                None,
+                None,
+                None,
+                json!({"from": state.from_version, "to": VERSION, "panes": 0, "adopted": 0, "live": false}),
+            );
+            self.recover();
+            return true;
+        }
         if state.version != 1 || state.pid != std::process::id() {
             tracing::error!("handoff state is not for this process; resuming agents by session id");
             return false;
@@ -1788,6 +1801,8 @@ impl Daemon {
             "started_ms": self.started_ms,
             "labels": self.cfg.labels,
             "os": std::env::consts::OS,
+            // False on Windows: an upgrade or restart there restarts every pane.
+            "live_handoff": sys::LIVE_HANDOFF,
             "arch": std::env::consts::ARCH,
             "panes": panes.iter().filter(|p| p.meta.lock().unwrap().exit.is_none()).count(),
             "working": count(AgentState::Working),
@@ -1831,35 +1846,26 @@ fn name_in_use(name: &str, project: Option<&str>, station: &str) -> Error {
     ))
 }
 
-fn default_keep_awake_cmd() -> Vec<String> {
-    let v: &[&str] = if cfg!(target_os = "macos") {
-        &["caffeinate", "-i"]
-    } else {
-        &[
-            "systemd-inhibit",
-            "--what=sleep:idle",
-            "--who=spandeck",
-            "--why=agents are working",
-            "sleep",
-            "infinity",
-        ]
-    };
-    v.iter().map(|s| s.to_string()).collect()
-}
-
 fn load_average() -> Option<f64> {
-    let mut avg = [0f64; 1];
-    // SAFETY: valid pointer to one f64.
-    let n = unsafe { libc::getloadavg(avg.as_mut_ptr(), 1) };
-    (n == 1).then_some(avg[0])
+    sys::load_average()
 }
 
-fn is_our_child(pid: i32) -> bool {
-    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-    matches!(
-        waitpid(nix::unistd::Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG)),
-        Ok(WaitStatus::StillAlive)
-    )
+/// A command and its arguments as one line for the shell that
+/// `sys::shell_line` runs: `sh` on Unix, PowerShell on Windows.
+pub fn shell_join(argv: &[String]) -> String {
+    if sys::WINDOWS {
+        // `&` runs a quoted name; a quote inside single quotes is doubled.
+        let quoted: Vec<String> = argv
+            .iter()
+            .map(|a| format!("'{}'", a.replace('\'', "''")))
+            .collect();
+        format!("& {}", quoted.join(" "))
+    } else {
+        argv.iter()
+            .map(|a| shell_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 pub fn shell_quote(s: &str) -> String {
@@ -1874,15 +1880,7 @@ pub fn shell_quote(s: &str) -> String {
 }
 
 pub fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(contents.as_bytes())
+    sys::write_private(path, contents.as_bytes())
 }
 
 /// Put back the database saved before an upgrade that changed its schema, so

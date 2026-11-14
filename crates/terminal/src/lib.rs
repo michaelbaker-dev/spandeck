@@ -1,13 +1,13 @@
 //! spandeck terminal layer: PTYs, server-side screen state, and panes.
 //!
-//! Platform code (PTY, signals) lives in `pty.rs` only, so a Windows port
-//! replaces one file.
+//! Platform code lives in `sys` only: `sys/unix.rs` and `sys/windows.rs`
+//! behind one interface (DECISIONS.md, "Windows").
 
 pub mod pane;
 pub mod pty;
 pub mod screen;
+pub mod sys;
 
-pub use nix::sys::signal::Signal;
 pub use pane::{Pane, PaneEvent, PaneHandoff, Sink};
-pub use pty::{pid_alive, ExitInfo, Pty, SpawnSpec};
+pub use pty::{pid_alive, ExitInfo, Pty, Signal, SpawnSpec};
 pub use screen::{Screen, ScreenEvent, ScreenInfo, DEFAULT_HISTORY};

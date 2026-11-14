@@ -4,16 +4,13 @@
 //! for a client. The sink it calls must not block; slow clients are the
 //! caller's problem (they are dropped and resynced from a snapshot).
 
-use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use nix::sys::signal::Signal;
-
-use crate::pty::{ExitInfo, Pty, SpawnSpec};
+use crate::pty::{ExitInfo, Pty, PtyWriter, Signal, SpawnSpec};
 use crate::screen::{Screen, ScreenEvent, ScreenInfo};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +37,7 @@ pub struct PaneHandoff {
 pub struct Pane {
     pty: Pty,
     screen: Arc<Mutex<Screen>>,
-    writer: Mutex<File>,
+    writer: Mutex<PtyWriter>,
     exited: Arc<Mutex<Option<ExitInfo>>>,
     /// Set to stop the reader thread without closing the PTY (handoff).
     detach: Arc<AtomicBool>,
@@ -80,9 +77,9 @@ impl Pane {
         let detach = Arc::new(AtomicBool::new(false));
         let bytes_out = Arc::new(AtomicU64::new(0));
         let last_output_ms = Arc::new(AtomicU64::new(now_ms()));
-        let mut reader = File::from(pty.try_clone_master()?);
-        let writer = File::from(pty.try_clone_master()?);
-        let mut reply_writer = File::from(pty.try_clone_master()?);
+        let mut reader = pty.reader()?;
+        let writer = pty.writer()?;
+        let mut reply_writer = pty.writer()?;
         let pid = pty.pid();
 
         let handle = {
@@ -96,21 +93,17 @@ impl Pane {
                 .spawn(move || {
                     let mut buf = vec![0u8; 64 * 1024];
                     loop {
-                        // Poll so a detach request is noticed without output arriving.
-                        let mut pfd = [nix::poll::PollFd::new(
-                            std::os::fd::AsFd::as_fd(&reader),
-                            nix::poll::PollFlags::POLLIN,
-                        )];
-                        match nix::poll::poll(&mut pfd, 200u16) {
-                            Ok(0) => {
+                        // Wait in short steps so a detach request is noticed
+                        // without output arriving.
+                        match reader.ready() {
+                            Ok(false) => {
                                 if detach.load(Ordering::SeqCst) {
                                     return;
                                 }
                                 continue;
                             }
-                            Err(nix::errno::Errno::EINTR) => continue,
                             Err(_) => break,
-                            Ok(_) => {}
+                            Ok(true) => {}
                         }
                         if detach.load(Ordering::SeqCst) {
                             return;
@@ -143,7 +136,7 @@ impl Pane {
                             }
                         }
                     }
-                    let info = wait_exit(pid);
+                    let info = reader.exit_status();
                     *exited.lock().unwrap() = Some(info);
                     sink(PaneEvent::Exited(info));
                 })?
@@ -221,17 +214,19 @@ impl Pane {
     /// Stop the reader and describe this pane for the next process image.
     /// The PTY stays open and is marked to survive exec.
     pub fn prepare_handoff(&self, max_history: usize) -> io::Result<PaneHandoff> {
+        if !crate::sys::LIVE_HANDOFF {
+            // The reader is left running: the pane stays in service.
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "a terminal cannot be handed to another process on this system",
+            ));
+        }
         self.detach.store(true, Ordering::SeqCst);
         if let Some(h) = self.reader.lock().unwrap().take() {
             let _ = h.join();
         }
         let mut screen = self.screen.lock().unwrap();
-        let fd = {
-            let w = self.writer.lock().unwrap();
-            nix::unistd::dup(std::os::fd::AsFd::as_fd(&*w))?
-        };
-        // `dup` gives a descriptor without CLOEXEC: exactly what must cross exec.
-        let raw = std::os::fd::IntoRawFd::into_raw_fd(fd);
+        let raw = self.pty.handoff_fd()?;
         Ok(PaneHandoff {
             master_fd: raw,
             pid: self.pty.pid(),
@@ -240,21 +235,4 @@ impl Pane {
             snapshot: screen.snapshot_ansi(max_history),
         })
     }
-}
-
-fn wait_exit(pid: i32) -> ExitInfo {
-    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-    use nix::unistd::Pid;
-    // The PTY closed, so the child is exiting; give it a moment to be reapable.
-    for _ in 0..200 {
-        match waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::Exited(_, code)) => return ExitInfo::Code(code),
-            Ok(WaitStatus::Signaled(_, sig, _)) => return ExitInfo::Signal(sig as i32),
-            Ok(WaitStatus::StillAlive) => thread::sleep(std::time::Duration::from_millis(10)),
-            Ok(_) => {}
-            Err(nix::errno::Errno::EINTR) => {}
-            Err(_) => return ExitInfo::Unknown,
-        }
-    }
-    ExitInfo::Unknown
 }

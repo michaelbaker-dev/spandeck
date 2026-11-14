@@ -322,7 +322,7 @@ fn askpass(socket: &str) -> i32 {
     let prompt = std::env::args().nth(1).unwrap_or_default();
     let nonce = std::env::var("SPANDECK_ASKPASS_NONCE").unwrap_or_default();
     let answer = (|| -> std::io::Result<Vec<u8>> {
-        let mut s = std::os::unix::net::UnixStream::connect(socket)?;
+        let mut s = spandeck_terminal::sys::local::connect(std::path::Path::new(socket))?;
         s.set_read_timeout(Some(Duration::from_secs(10)))?;
         let prompt: String = prompt.chars().filter(|c| !c.is_control()).collect();
         s.write_all(format!("{nonce}\n{prompt}\n").as_bytes())?;
@@ -344,6 +344,22 @@ fn askpass(socket: &str) -> i32 {
 fn main() {
     if let Ok(socket) = std::env::var("SPANDECK_ASKPASS_SOCK") {
         std::process::exit(askpass(&socket));
+    }
+    // Two helpers the daemon starts itself, never typed by a person. Their
+    // arguments are another program's, so they are not parsed as spandeck's.
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    match raw.first().map(String::as_str) {
+        // Windows: what a pane runs when its agent's program is missing.
+        Some("install-then-launch") => {
+            std::process::exit(spandeck_core::agents::install_then_launch_main(&raw[1..]))
+        }
+        // Windows: hold the machine awake until the daemon (a pid) ends.
+        Some("keep-awake") => {
+            let pid = raw.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+            let ok = spandeck_terminal::sys::hold_awake(pid).is_ok();
+            std::process::exit(i32::from(!ok));
+        }
+        _ => {}
     }
     let cli = Cli::parse();
     let code = match run(cli) {
@@ -413,7 +429,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Cmd::Service { install } => {
             let exe = std::env::current_exe()?;
-            let home = PathBuf::from(std::env::var("HOME")?);
+            let home = spandeck_core::paths::home_dir();
             let (path, body, enable) = spandeck_core::doctor::service_definition(&exe, &home);
             if install {
                 if let Some(dir) = path.parent() {
@@ -1092,19 +1108,22 @@ fn hook_main(paths: &Paths, agent: &str) -> i32 {
     }
 }
 
-/// Close descriptors inherited from a previous image whose handoff we are not
-/// adopting, so orphaned terminals do not stay half-open.
-fn close_inherited_fds() {
-    for fd in 3..1024 {
-        // SAFETY: nothing has opened a descriptor yet in this process image.
-        unsafe { libc::close(fd) };
-    }
-}
-
 fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::Result<i32> {
+    use spandeck_terminal::sys;
     if handoff.is_none() {
-        close_inherited_fds();
+        // Descriptors inherited from a previous image whose handoff is not
+        // being adopted: closed, so orphaned terminals do not stay half-open.
+        sys::close_inherited();
     }
+    // Windows: an upgrade starts this daemon beside the one it replaces,
+    // which then ends. Its pipe, port and database are free once it is gone.
+    if let Some(pid) = std::env::var("SPANDECK_WAIT_PID")
+        .ok()
+        .and_then(|p| p.parse::<u32>().ok())
+    {
+        sys::wait_for_exit(pid, std::time::Duration::from_secs(20));
+    }
+    std::env::remove_var("SPANDECK_WAIT_PID");
     // Children and the next program image find the same station through these.
     std::env::set_var("SPANDECK_STATE_DIR", &paths.state_dir);
     std::env::set_var("SPANDECK_CONFIG_DIR", &paths.config_dir);
@@ -1153,15 +1172,15 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
         reason: String,
     ) -> anyhow::Error {
         if let (Some(prev), Some(file)) = (previous, handoff) {
-            use std::os::unix::process::CommandExt;
             tracing::error!(%reason, "upgrade failed before it took over; going back");
             spandeck_core::daemon::restore_db_before_upgrade(paths);
-            let err = std::process::Command::new(prev)
-                .arg("daemon")
-                .arg("--handoff")
-                .arg(file)
-                .env("SPANDECK_ROLLED_BACK", &reason)
-                .exec();
+            let err = spandeck_terminal::sys::replace_process(
+                std::process::Command::new(prev)
+                    .arg("daemon")
+                    .arg("--handoff")
+                    .arg(file)
+                    .env("SPANDECK_ROLLED_BACK", &reason),
+            );
             return anyhow::anyhow!("{reason}; and going back failed: {err}");
         }
         anyhow::anyhow!(reason)
@@ -1186,7 +1205,7 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
     let saved_db = paths.db_before_upgrade();
     runtime.block_on(async move {
         // Another daemon already answering on this socket?
-        if handoff.is_none() && std::os::unix::net::UnixStream::connect(paths.socket()).is_ok() {
+        if handoff.is_none() && sys::local::connect(&paths.socket()).is_ok() {
             anyhow::bail!("spandeckd is already running on {}", paths.socket().display());
         }
         let daemon = match Daemon::start(
@@ -1258,7 +1277,9 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
                     let installed = std::env::current_exe().and_then(|me| {
                         let tmp = to.with_extension("new");
                         std::fs::copy(&me, &tmp)?;
-                        std::fs::rename(&tmp, to)
+                        // Windows: `to` may be running (a `sd` command, a
+                        // hook); it is moved aside, not written over.
+                        sys::replace_file(&tmp, to)
                     });
                     if let Err(e) = installed {
                         tracing::warn!(error = %e, to = %to.display(), "the new version runs, but could not replace the installed binary");
@@ -1273,12 +1294,7 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
         }
         tracing::info!(station = %daemon.station, version = spandeck_core::VERSION, socket = %daemon.paths.socket().display(), "spandeckd ready");
 
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        let mut int = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-        tokio::select! {
-            _ = term.recv() => {}
-            _ = int.recv() => {}
-        }
+        sys::shutdown_signal().await?;
         tracing::info!("spandeckd stopping");
         let _ = std::fs::remove_file(daemon.paths.socket());
         Ok(0)
@@ -1306,7 +1322,7 @@ fn fix_with_sudo() -> anyhow::Result<()> {
     use spandeck_core::doctor::{
         codex_sandbox_blocked, CODEX_SANDBOX_PROFILE, CODEX_SANDBOX_PROFILE_PATH,
     };
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
+    let home = spandeck_core::paths::home_dir();
     if !codex_sandbox_blocked(&home) {
         println!("Nothing here needs an administrator.");
         return Ok(());

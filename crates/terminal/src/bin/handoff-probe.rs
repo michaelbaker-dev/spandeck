@@ -4,7 +4,6 @@
 //!   handoff-probe run <statefile>     spawn a ticking child, then exec `adopt`
 //!   handoff-probe adopt <statefile>   adopt the PTY, verify nothing was lost
 
-use std::os::unix::process::CommandExt;
 use std::time::{Duration, Instant};
 
 use spandeck_terminal::{ExitInfo, Pane, PaneHandoff, Signal, SpawnSpec};
@@ -38,6 +37,10 @@ fn wait_for(pane: &Pane, what: &str, pred: impl Fn(&[u64]) -> bool) -> Vec<u64> 
 }
 
 fn main() {
+    if !spandeck_terminal::sys::LIVE_HANDOFF {
+        eprintln!("this system has no live handoff");
+        std::process::exit(64);
+    }
     let args: Vec<String> = std::env::args().collect();
     let (mode, statefile) = (args[1].as_str(), args[2].as_str());
     match mode {
@@ -64,9 +67,10 @@ fn main() {
             std::fs::write(statefile, serde_json::to_vec(&state).unwrap()).unwrap();
             // Let output pile up unread in the kernel while "the upgrade happens".
             std::thread::sleep(Duration::from_millis(300));
-            let err = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["adopt", statefile])
-                .exec();
+            let err = spandeck_terminal::sys::replace_process(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["adopt", statefile]),
+            );
             eprintln!("exec failed: {err}");
             std::process::exit(3);
         }
@@ -89,7 +93,7 @@ fn main() {
                 assert_eq!(w[1], w[0] + 1, "gap or duplicate in {after:?}");
             }
             // Still the parent: we can signal the child and collect its status.
-            pane.signal(Signal::SIGTERM).unwrap();
+            pane.signal(Signal::Terminate).unwrap();
             let start = Instant::now();
             let exit = loop {
                 if let Some(e) = pane.exit_info() {

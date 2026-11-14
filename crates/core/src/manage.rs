@@ -24,10 +24,13 @@ pub fn release_target() -> Option<String> {
     let os = match std::env::consts::OS {
         "macos" => "apple-darwin",
         "linux" => "unknown-linux-gnu",
+        "windows" => "pc-windows-msvc",
         _ => return None,
     };
-    match std::env::consts::ARCH {
-        a @ ("aarch64" | "x86_64") => Some(format!("{a}-{os}")),
+    match (std::env::consts::ARCH, os) {
+        // The only Windows release so far.
+        ("aarch64", "pc-windows-msvc") => None,
+        (a @ ("aarch64" | "x86_64"), _) => Some(format!("{a}-{os}")),
         _ => None,
     }
 }
@@ -313,12 +316,19 @@ impl Daemon {
                 "note": "This station already runs the latest release."}));
         }
         let name = format!("spandeck-{tag}-{target}");
-        let archive = fetch(format!("{base}/download/{tag}/{name}.tar.gz"))
+        // A Windows release is a .zip holding spandeck.exe.
+        let windows = spandeck_terminal::sys::WINDOWS;
+        let (ext, program) = if windows {
+            ("zip", "spandeck.exe")
+        } else {
+            ("tar.gz", "spandeck")
+        };
+        let archive = fetch(format!("{base}/download/{tag}/{name}.{ext}"))
             .await?
             .bytes()
             .await
             .map_err(|e| invalid(format!("the download did not finish: {e}")))?;
-        let published = fetch(format!("{base}/download/{tag}/{name}.tar.gz.sha256"))
+        let published = fetch(format!("{base}/download/{tag}/{name}.{ext}.sha256"))
             .await?
             .text()
             .await
@@ -336,17 +346,19 @@ impl Daemon {
         let dir: PathBuf = self.paths.state_dir.join("releases").join(&tag);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir)?;
-        let file = dir.join("release.tar.gz");
+        let file = dir.join(format!("release.{ext}"));
         std::fs::write(&file, &archive)?;
+        // The tar that Windows ships (bsdtar) reads .zip as well; it works
+        // the kind out by itself, so it is not told gzip there.
         let unpack = tokio::process::Command::new("tar")
-            .arg("-xzf")
+            .arg(if windows { "-xf" } else { "-xzf" })
             .arg(&file)
             .arg("-C")
             .arg(&dir)
             .output()
             .await
             .map_err(|e| invalid(format!("could not run tar: {e}")))?;
-        let binary = dir.join(&name).join("spandeck");
+        let binary = dir.join(&name).join(program);
         if !unpack.status.success() || !binary.is_file() {
             return Err(invalid(
                 "the release could not be unpacked; nothing was changed",

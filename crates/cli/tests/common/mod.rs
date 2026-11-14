@@ -204,6 +204,8 @@ impl Station {
             .env("SPANDECK_CONFIG_DIR", self.root.join("config"))
             .env("SPANDECK_FAKE_DIR", self.root.join("fake"))
             .env("HOME", self.root.join("home"))
+            // Windows: the home folder is the profile.
+            .env("USERPROFILE", self.root.join("home"))
             .env("SPANDECK_LOG", "warn")
             .env_remove("SPANDECK_SOCKET")
             .env_remove("SPANDECK_TOKEN")
@@ -249,7 +251,7 @@ impl Station {
                 code: "io".into(),
                 message: e.to_string(),
             })?;
-        let mut c = Client::connect(&self.root.join("state/spandeckd.sock"), token.trim())?;
+        let mut c = Client::connect(&self.paths().socket(), token.trim())?;
         c.set_timeout(Some(Duration::from_secs(60)));
         Ok(c)
     }
@@ -274,7 +276,7 @@ impl Station {
             let db = rusqlite_token(&self.root.join("state/spandeck.db"), pane);
             db.unwrap_or_else(|| panic!("no token for pane {pane}"))
         };
-        let mut c = Client::connect(&self.root.join("state/spandeckd.sock"), &token)?;
+        let mut c = Client::connect(&self.paths().socket(), &token)?;
         c.set_timeout(Some(Duration::from_secs(60)));
         c.call(method, params)
     }
@@ -375,7 +377,7 @@ impl Station {
     /// Freeze or thaw the daemon: to its peers it looks unreachable, while
     /// its panes keep running.
     pub fn signal(&self, sig: i32) {
-        unsafe { libc_kill(self.pid() as i32, sig) };
+        kill_pid(self.pid() as i32, sig);
     }
 
     pub fn kill9(&mut self) {
@@ -441,10 +443,13 @@ impl Drop for Station {
             }
         }
         if let Some(mut c) = self.child.take() {
-            // SIGTERM first so panes are cleaned up with the daemon.
-            unsafe { libc_kill(c.id() as i32, 15) };
+            // SIGTERM first so panes are cleaned up with the daemon. (On
+            // Windows ending the daemon ends its panes: their jobs close.)
+            if !spandeck_terminal::sys::WINDOWS {
+                kill_pid(c.id() as i32, 15);
+            }
             let start = Instant::now();
-            while start.elapsed() < Duration::from_secs(2) {
+            while !spandeck_terminal::sys::WINDOWS && start.elapsed() < Duration::from_secs(2) {
                 if let Ok(Some(_)) = c.try_wait() {
                     return;
                 }
@@ -456,14 +461,16 @@ impl Drop for Station {
     }
 }
 
-/// Send a signal to a process the harness did not start itself.
+/// Send a signal to a process, with the system's own `kill`. Windows has no
+/// signals: a test that needs one is marked ignored there, with its reason.
 pub fn kill_pid(pid: i32, sig: i32) {
-    unsafe { libc_kill(pid, sig) };
-}
-
-extern "C" {
-    #[link_name = "kill"]
-    fn libc_kill(pid: i32, sig: i32) -> i32;
+    if spandeck_terminal::sys::WINDOWS {
+        panic!("this test sends a signal, which Windows does not have");
+    }
+    let _ = Command::new("kill")
+        .arg(format!("-{sig}"))
+        .arg(pid.to_string())
+        .status();
 }
 
 pub mod browser {

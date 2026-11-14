@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use spandeck_agents::{adapter, catalogue, AgentKind, AgentState, LaunchOpts};
 
-use crate::daemon::{invalid, shell_quote, Daemon, Result};
+use spandeck_terminal::sys;
+
+use crate::daemon::{invalid, shell_join, Daemon, Result};
 use crate::paths::{new_id, now_ms};
 
 /// How long a version that was read stays good.
@@ -143,40 +145,41 @@ fn tail(text: &str, max: usize) -> String {
 impl Daemon {
     /// Folders agent programs are installed in, besides PATH.
     pub(crate) fn agent_dirs(&self) -> Vec<PathBuf> {
-        catalogue::WELL_KNOWN_DIRS
+        catalogue::well_known_dirs()
             .iter()
-            .map(|d| match d.strip_prefix("~/") {
-                Some(rest) => self.home.join(rest),
-                None => PathBuf::from(d),
-            })
+            .filter_map(|d| expand_dir(d, &self.home))
             .collect()
     }
 
     /// PATH with those folders added, for a command spandeck runs itself.
     fn agent_path_env(&self) -> String {
-        let mut path = std::env::var("PATH").unwrap_or_default();
-        for d in self.agent_dirs() {
-            path.push(':');
-            path.push_str(&d.display().to_string());
-        }
-        path
+        crate::paths::path_with(
+            &std::env::var("PATH").unwrap_or_default(),
+            &self.agent_dirs(),
+        )
     }
 
     /// Every copy of a program, in the order they are looked for: a path as
     /// given, else on PATH, else in the folders the vendors' installers use.
     /// Two names for one file count once.
     pub(crate) fn find_programs(&self, name: &str) -> Vec<PathBuf> {
-        if name.contains('/') {
-            let p = PathBuf::from(name);
-            return if runnable(&p) { vec![p] } else { vec![] };
+        // A name stands for one file on Unix; on Windows for `name.exe`,
+        // `name.cmd` and so on, in PATHEXT's order.
+        let names = sys::executable_names(name);
+        if is_path(name) {
+            return std::iter::once(name.to_string())
+                .chain(names)
+                .map(PathBuf::from)
+                .find(runnable)
+                .into_iter()
+                .collect();
         }
-        let path = std::env::var("PATH").unwrap_or_default();
+        let path = std::env::var_os("PATH").unwrap_or_default();
         let mut seen = HashSet::new();
-        path.split(':')
-            .filter(|d| !d.is_empty())
-            .map(PathBuf::from)
+        std::env::split_paths(&path)
+            .filter(|d| !d.as_os_str().is_empty())
             .chain(self.agent_dirs())
-            .map(|d| d.join(name))
+            .flat_map(|d| names.iter().map(|n| d.join(n)).collect::<Vec<_>>())
             .filter(runnable)
             .filter(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())))
             .collect()
@@ -206,12 +209,7 @@ impl Daemon {
             .get(kind.as_str())
             .and_then(|a| a.install_cmd.as_ref())
             .filter(|c| !c.is_empty())
-            .map(|c| {
-                c.iter()
-                    .map(|a| shell_quote(a))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            });
+            .map(|c| shell_join(c));
         if let Some(command) = configured {
             return vec![InstallMethod {
                 id: "config".into(),
@@ -258,7 +256,7 @@ impl Daemon {
     /// Every agent this station keeps track of: the catalogue, and any agent
     /// whose config says how to read its version or update it.
     pub(crate) fn agent_kinds(&self) -> Vec<AgentKind> {
-        let mut kinds: Vec<AgentKind> = catalogue::CATALOGUE.iter().map(|p| p.kind).collect();
+        let mut kinds: Vec<AgentKind> = catalogue::all().iter().map(|p| p.kind).collect();
         for (name, a) in &self.cfg.agents {
             let described = a.version_cmd.is_some() || a.update_cmd.is_some();
             if let Some(k) = AgentKind::parse(name).filter(|k| adapter(*k).is_some()) {
@@ -298,7 +296,7 @@ impl Daemon {
         let result = match child {
             Err(e) => Ran {
                 ended: Ended::NotRun {
-                    missing: e.kind() == std::io::ErrorKind::NotFound && !program.contains('/'),
+                    missing: e.kind() == std::io::ErrorKind::NotFound && !is_path(program),
                 },
                 text: format!("could not run {program}: {e}"),
             },
@@ -573,7 +571,7 @@ impl Daemon {
         // same way, where the vendor documents how.
         let by_method = || {
             let line = self.agent_method_chosen(kind)?.update?;
-            Some(vec!["sh".to_string(), "-c".to_string(), line])
+            Some(sys::shell_line(&line))
         };
         configured.or_else(by_method).or_else(|| {
             let p = catalogue::program(kind)?;
@@ -766,7 +764,7 @@ impl Daemon {
         let (d, by) = (self.clone(), by.to_string());
         std::thread::spawn(move || {
             let _in_runtime = runtime.as_ref().map(|h| h.enter());
-            let argv = ["sh".to_string(), "-c".to_string(), chosen.command.clone()];
+            let argv = sys::shell_line(&chosen.command);
             let ran = d.run_captured(&argv, UPDATE_LIMIT);
             // Whether it worked is what the program says afterwards, not the
             // installer's exit code.
@@ -906,12 +904,9 @@ echo "The install command finished, but there is still no $prog in the folders s
 exit 127"#;
         // The probe that said "missing" or "broken" must not outlive the install.
         self.agents.probes.lock().unwrap().remove(&kind);
-        let dirs = self
-            .agent_dirs()
-            .iter()
-            .map(|d| d.display().to_string())
-            .collect::<Vec<_>>()
-            .join(":");
+        let dirs = crate::paths::path_with("", &self.agent_dirs());
+        // `path_with` starts from an empty PATH, which leaves a separator in front.
+        let dirs = dirs.trim_start_matches([':', ';']).to_string();
         let configured_ask = self
             .cfg
             .agents
@@ -925,6 +920,21 @@ exit 127"#;
             Some((path, problem)) => (path.display().to_string(), plain(problem)),
             None => Default::default(),
         };
+        if sys::WINDOWS {
+            // The same steps, done by spandeck itself: there is no `sh`.
+            let mut wrapped = vec![
+                "install-then-launch".to_string(),
+                kind.display().to_string(),
+                program.to_string(),
+                dirs,
+                install.to_string(),
+                found,
+                problem,
+                ask,
+            ];
+            wrapped.extend(args);
+            return (self.exe.display().to_string(), wrapped);
+        }
         let mut wrapped = vec![
             "-c".to_string(),
             SCRIPT.to_string(),
@@ -946,9 +956,143 @@ fn method_key(kind: AgentKind) -> String {
     format!("agents.method.{}", kind.as_str())
 }
 
+// Takes `&PathBuf` because it is used as a filter over lists of them.
+#[allow(clippy::ptr_arg)]
 fn runnable(p: &PathBuf) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    sys::is_executable(p)
+}
+
+/// Does this name say where the program is, or only what it is called?
+fn is_path(name: &str) -> bool {
+    name.contains('/') || (sys::WINDOWS && (name.contains('\\') || name.contains(':')))
+}
+
+/// A folder from the catalogue: `~/…` is under the home folder, and
+/// `%NAME%\…` under the folder that variable names (left out when it is not set).
+fn expand_dir(dir: &str, home: &std::path::Path) -> Option<PathBuf> {
+    if let Some(rest) = dir.strip_prefix("~/") {
+        return Some(home.join(rest));
+    }
+    if let Some((var, rest)) = dir.strip_prefix('%').and_then(|d| d.split_once('%')) {
+        let base = std::env::var_os(var).filter(|v| !v.is_empty())?;
+        return Some(PathBuf::from(base).join(rest.trim_start_matches(['\\', '/'])));
+    }
+    Some(PathBuf::from(dir))
+}
+
+/// `spandeck install-then-launch`: what a Windows pane runs when its agent's
+/// program is missing or does not start. The Unix pane runs the shell script
+/// in `install_then_launch`; these are the same steps and the same words.
+/// Arguments: name, program, folders to look in afterwards, the install
+/// command, the copy that does not start and what it said (both empty when
+/// none was found), the arguments that ask its version (empty: only look
+/// for it); the rest are the agent's own arguments. Returns the exit code.
+pub fn install_then_launch_main(argv: &[String]) -> i32 {
+    let [name, prog, dirs, cmd, found, problem, ask, rest @ ..] = argv else {
+        eprintln!("install-then-launch: not enough arguments");
+        return 64;
+    };
+    // Ctrl-C ends the installer, not this program, which says what happened.
+    sys::ignore_interrupt();
+    if found.is_empty() {
+        println!("{name} is not installed on this station (there is no {prog} in the folders spandeck looks in).");
+        println!("spandeck will install it now with:\n\n    {cmd}\n\nPress Ctrl-C to skip.\n");
+    } else {
+        println!("{name} is installed on this station but does not start.\n\n    found:   {found}\n    it said: {problem}\n");
+        println!("spandeck will reinstall it now with:\n\n    {cmd}\n\nPress Ctrl-C to skip.\n");
+    }
+    let line = sys::shell_line(cmd);
+    let status = std::process::Command::new(&line[0])
+        .args(&line[1..])
+        .status();
+    if sys::interrupted() {
+        let did = if found.is_empty() {
+            "installed"
+        } else {
+            "reinstalled"
+        };
+        println!("\nSkipped: {name} was not {did}, so this pane has nothing to start. Install it, then restart this pane.");
+        return 130;
+    }
+    // Whether it worked is judged by the program answering, not by the
+    // installer's exit code. The first copy that answers is started; one
+    // that is slow to answer is started too, and never stopped.
+    let ask: Vec<&str> = ask.split_whitespace().collect();
+    let names = sys::executable_names(prog);
+    let candidates: Vec<PathBuf> = if is_path(prog) {
+        std::iter::once(prog.clone())
+            .chain(names)
+            .map(PathBuf::from)
+            .collect()
+    } else {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path)
+            .chain(std::env::split_paths(dirs))
+            .filter(|d| !d.as_os_str().is_empty())
+            .flat_map(|d| names.iter().map(|n| d.join(n)).collect::<Vec<_>>())
+            .collect()
+    };
+    let mut seen: Option<(PathBuf, String)> = None;
+    for c in candidates.iter().filter(|c| runnable(c)) {
+        if !ask.is_empty() {
+            let answer = std::process::Command::new(c)
+                .args(&ask)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn();
+            let failed = match answer {
+                Err(e) => Some(e.to_string()),
+                Ok(mut child) => {
+                    let start = Instant::now();
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(s)) if s.success() => break None,
+                            Ok(Some(_)) => {
+                                let out = child.wait_with_output().ok();
+                                let text = out
+                                    .map(|o| {
+                                        format!(
+                                            "{}\n{}",
+                                            String::from_utf8_lossy(&o.stdout),
+                                            String::from_utf8_lossy(&o.stderr)
+                                        )
+                                    })
+                                    .unwrap_or_default();
+                                break Some(catalogue::error_line(&text).unwrap_or_default());
+                            }
+                            // Slow is not broken: it is started, and left alone.
+                            _ if start.elapsed() > VERSION_LIMIT => break None,
+                            _ => std::thread::sleep(Duration::from_millis(100)),
+                        }
+                    }
+                }
+            };
+            if let Some(said) = failed {
+                seen.get_or_insert((c.clone(), said));
+                continue;
+            }
+        }
+        println!();
+        return match std::process::Command::new(c).args(rest).status() {
+            Ok(s) => s.code().unwrap_or(1),
+            Err(e) => {
+                println!("{} could not be started: {e}", c.display());
+                1
+            }
+        };
+    }
+    println!();
+    if let Some((path, said)) = seen {
+        println!("The install command ran, but {name} still does not start.\n\n    found:   {}\n    it said: {said}\n\nFix the problem above, then restart this pane.", path.display());
+        return 1;
+    }
+    if !status.is_ok_and(|s| s.success()) {
+        println!("The install command failed, so {name} was not started. Fix the problem above, then restart this pane.");
+        return 1;
+    }
+    println!("The install command finished, but there is still no {prog} in the folders spandeck looks in. Set [agents.<name>] program in spandeck's config.toml to where it was installed.");
+    127
 }
 
 /// Run something that may wait a few seconds without holding up the event

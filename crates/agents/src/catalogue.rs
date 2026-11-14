@@ -7,15 +7,21 @@
 //! vendor's documentation or a package registry on 14 Nov 2026 (`source`
 //! says where); a way to install that could not be confirmed is left out.
 //!
-//! Gemini CLI and Grok are not listed: their install and update commands
-//! were not checked against the vendors' documentation.
+//! Gemini CLI and Grok are not listed: spandeck has no adapter for either.
+//! (For when one is written: on 14 Nov 2026 Gemini CLI's documentation
+//! listed Windows 11 24H2 and later only, installed with npm; Grok Build
+//! documented a PowerShell installer.)
+//!
+//! Windows has its own list (`CATALOGUE_WINDOWS`), read from the same
+//! pages on the same day: a PowerShell line where the vendor documents one,
+//! npm, and WinGet for Claude Code. `all()` gives the list for this system.
 
 use crate::AgentKind;
 
 /// One way to install an agent program.
 pub struct Method {
-    /// `script` (the vendor's own installer, always first: the default),
-    /// `npm` or `brew`.
+    /// `script` (the vendor's own installer, first wherever there is one:
+    /// the default), `npm`, `brew`, or on Windows `winget`.
     pub id: &'static str,
     pub label: &'static str,
     /// The tool that must be on the station for this to be offered.
@@ -165,6 +171,139 @@ pub const CATALOGUE: &[Program] = &[
     },
 ];
 
+/// The Windows list. Each line is run by Windows PowerShell
+/// (`powershell -NoProfile -ExecutionPolicy Bypass -Command <line>`).
+pub const CATALOGUE_WINDOWS: &[Program] = &[
+    Program {
+        kind: AgentKind::Claude,
+        program: "claude",
+        version_args: &["--version"],
+        methods: &[
+            Method {
+                id: "script",
+                label: "Anthropic's install script",
+                tool: None,
+                install: "irm https://claude.ai/install.ps1 | iex",
+                update: None,
+                source: "code.claude.com/docs/en/setup, Native Install, Windows PowerShell",
+            },
+            Method {
+                id: "npm",
+                label: "npm",
+                tool: Some("npm"),
+                install: "npm install -g @anthropic-ai/claude-code@latest",
+                update: Some("npm install -g @anthropic-ai/claude-code@latest"),
+                source: "code.claude.com/docs/en/setup, Install with npm (win32-x64 is a listed platform; the same line upgrades)",
+            },
+            Method {
+                id: "winget",
+                label: "WinGet",
+                tool: Some("winget"),
+                install: "winget install Anthropic.ClaudeCode",
+                update: Some("winget upgrade Anthropic.ClaudeCode"),
+                source: "code.claude.com/docs/en/setup, WinGet",
+            },
+        ],
+        update_args: &["update"],
+        source: "code.claude.com/docs/en/setup (`claude update`)",
+    },
+    Program {
+        kind: AgentKind::Codex,
+        program: "codex",
+        version_args: &["--version"],
+        methods: &[
+            // The README wraps this line in `powershell -ExecutionPolicy
+            // ByPass -c "…"`, which is how spandeck runs every line here.
+            Method {
+                id: "script",
+                label: "OpenAI's install script",
+                tool: None,
+                install: "irm https://chatgpt.com/codex/install.ps1 | iex",
+                update: None,
+                source: "github.com/openai/codex README, Windows (PowerShell)",
+            },
+            Method {
+                id: "npm",
+                label: "npm",
+                tool: Some("npm"),
+                install: "npm install -g @openai/codex",
+                update: None,
+                source: "github.com/openai/codex README",
+            },
+        ],
+        // Not confirmed for Windows in OpenAI's documentation: it is the
+        // command `codex --help` 0.169.0 listed on Linux.
+        update_args: &["update"],
+        source: "`codex --help` 0.169.0 on Linux (update); not confirmed on Windows",
+    },
+    // OpenCode's page has no PowerShell installer and says "Windows package
+    // managers are not supported": npm is the only documented command.
+    Program {
+        kind: AgentKind::OpenCode,
+        program: "opencode",
+        version_args: &["--version"],
+        methods: &[Method {
+            id: "npm",
+            label: "npm",
+            tool: Some("npm"),
+            install: "npm install -g @opencode/cli",
+            update: None,
+            source: "opencode.ai/docs",
+        }],
+        update_args: &["upgrade"],
+        source: "`opencode upgrade --help` 2.3.0 on Linux; not confirmed on Windows",
+    },
+    Program {
+        kind: AgentKind::Antigravity,
+        program: "agy",
+        version_args: &["--version"],
+        methods: &[Method {
+            id: "script",
+            label: "Google's install script",
+            tool: None,
+            install: "irm https://antigravity.google/cli/install.ps1 | iex",
+            update: None,
+            source: "antigravity.google/docs/getting-started?tab=cli, Windows (PowerShell)",
+        }],
+        update_args: &["update"],
+        source: "`agy --help` 1.5.9 on Linux (update); not confirmed on Windows",
+    },
+];
+
+/// The catalogue for the system this station runs on.
+pub fn all() -> &'static [Program] {
+    if crate::on_windows() {
+        CATALOGUE_WINDOWS
+    } else {
+        CATALOGUE
+    }
+}
+
+/// Where the vendors' Windows installers put their programs. `~` is the
+/// home folder (`%USERPROFILE%`); `%NAME%` is that environment variable.
+/// Claude Code: `%USERPROFILE%\.local\bin` (its setup page, uninstall).
+/// Codex: `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` (its install.ps1).
+/// Antigravity: `%LOCALAPPDATA%\agy\bin` (its getting-started page).
+/// npm: `%AppData%\npm` (docs.npmjs.com, folders). A new program's folder
+/// reaches the daemon's PATH only at its next start, so these matter more
+/// than on Unix.
+pub const WELL_KNOWN_DIRS_WINDOWS: &[&str] = &[
+    "~/.local/bin",
+    r"%LOCALAPPDATA%\Programs\OpenAI\Codex\bin",
+    r"%LOCALAPPDATA%\agy\bin",
+    r"%APPDATA%\npm",
+    "~/.opencode/bin",
+    "~/.cargo/bin",
+];
+
+pub fn well_known_dirs() -> &'static [&'static str] {
+    if crate::on_windows() {
+        WELL_KNOWN_DIRS_WINDOWS
+    } else {
+        WELL_KNOWN_DIRS
+    }
+}
+
 /// Where agent programs are installed, besides PATH. `~` is the home folder.
 /// A daemon started by the login service often has a shorter PATH than the
 /// user's shell, and the vendors' installers use these.
@@ -177,7 +316,7 @@ pub const WELL_KNOWN_DIRS: &[&str] = &[
 ];
 
 pub fn program(kind: AgentKind) -> Option<&'static Program> {
-    CATALOGUE.iter().find(|p| p.kind == kind)
+    all().iter().find(|p| p.kind == kind)
 }
 
 /// The version in what a program prints for `--version`: the first word that
@@ -241,6 +380,41 @@ mod tests {
         }
         assert_eq!(parse_version("command not found"), None);
         assert_eq!(parse_version(""), None);
+    }
+
+    /// The same rule for the Windows list: a vendor's PowerShell script
+    /// fetched over HTTPS, or one named package from npm or WinGet.
+    #[test]
+    fn windows_install_commands_are_a_vendor_script_over_https_or_one_package() {
+        for p in CATALOGUE_WINDOWS {
+            for (i, m) in p.methods.iter().enumerate() {
+                assert!(m.id != "script" || i == 0, "a script is the default");
+                for line in std::iter::once(m.install).chain(m.update) {
+                    let ok = match m.id {
+                        "script" => {
+                            line.starts_with("irm https://")
+                                && line.ends_with(" | iex")
+                                && m.tool.is_none()
+                        }
+                        "npm" => line.starts_with("npm install -g ") && m.tool == Some("npm"),
+                        "winget" => {
+                            (line.starts_with("winget install ")
+                                || line.starts_with("winget upgrade "))
+                                && m.tool == Some("winget")
+                        }
+                        _ => false,
+                    };
+                    let rest = line.strip_suffix(" | iex").unwrap_or(line);
+                    let plain = !line.contains("http://")
+                        && !rest.contains([';', '&', '`', '$', '>', '<', '|', '(', '{']);
+                    assert!(ok && plain, "{}: {line}", p.program);
+                }
+            }
+            // Every agent on Unix is on Windows too, under the same name.
+            let unix = CATALOGUE.iter().find(|u| u.kind == p.kind).unwrap();
+            assert_eq!(unix.program, p.program);
+        }
+        assert_eq!(CATALOGUE_WINDOWS.len(), CATALOGUE.len());
     }
 
     /// An install command is run on the owner's machine without asking again,

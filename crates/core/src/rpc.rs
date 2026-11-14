@@ -1221,7 +1221,6 @@ impl Daemon {
         std::thread::spawn(move || {
             // Let the reply reach the caller first.
             std::thread::sleep(Duration::from_millis(250));
-            use std::os::unix::process::CommandExt;
             let state = d.prepare_handoff();
             let file = d.paths.handoff_file();
             if let Err(e) = crate::daemon::write_private(
@@ -1232,19 +1231,23 @@ impl Daemon {
                 d.readopt(state);
                 return;
             }
-            let err = std::process::Command::new(&binary)
-                .arg("daemon")
-                .arg("--handoff")
-                .arg(&file)
-                .env("SPANDECK_PREVIOUS_EXE", &previous)
-                .env(
-                    "SPANDECK_INSTALL_TO",
-                    install_to.clone().unwrap_or_default(),
-                )
-                .env_remove("SPANDECK_ROLLED_BACK")
-                .exec();
-            // exec returned: the old image is still running. Take the panes back.
-            tracing::error!(error = %err, "exec of the new binary failed; staying on the current binary");
+            // Unix: this process becomes the new binary and keeps every
+            // terminal. Windows: the new binary starts beside this one, which
+            // then ends, and the new one resumes the agents.
+            let err = spandeck_terminal::sys::replace_process(
+                std::process::Command::new(&binary)
+                    .arg("daemon")
+                    .arg("--handoff")
+                    .arg(&file)
+                    .env("SPANDECK_PREVIOUS_EXE", &previous)
+                    .env(
+                        "SPANDECK_INSTALL_TO",
+                        install_to.clone().unwrap_or_default(),
+                    )
+                    .env_remove("SPANDECK_ROLLED_BACK"),
+            );
+            // It returned: the old image is still running. Take the panes back.
+            tracing::error!(error = %err, "starting the new binary failed; staying on the current binary");
             let _ = std::fs::remove_file(&file);
             d.readopt(state);
         });

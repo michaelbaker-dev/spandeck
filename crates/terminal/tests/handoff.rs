@@ -1,4 +1,6 @@
-//! Guarantee (Upgrades): live handoff is a release acceptance test.
+//! Guarantee (Upgrades): live handoff is a release acceptance test on macOS
+//! and Linux. Windows has no live handoff (DECISIONS.md, "Windows").
+#![cfg(unix)]
 
 use std::process::Command;
 

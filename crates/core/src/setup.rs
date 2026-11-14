@@ -453,17 +453,10 @@ impl Daemon {
         std::fs::create_dir_all(&self.paths.config_dir)?;
         let tmp = self.setup_file().with_extension("json.tmp");
         // MCP server settings can carry credentials: readable by the user only.
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)?;
-            f.write_all(&serde_json::to_vec_pretty(setup).map_err(|e| invalid(e.to_string()))?)?;
-        }
+        spandeck_terminal::sys::write_private(
+            &tmp,
+            &serde_json::to_vec_pretty(setup).map_err(|e| invalid(e.to_string()))?,
+        )?;
         std::fs::rename(&tmp, self.setup_file())?;
         let mut problems = self.apply_skills(setup);
         // Antigravity reads the shared MCP servers from spandeck's plugin.
@@ -544,7 +537,7 @@ impl Daemon {
 
     pub fn setup_view(&self) -> Value {
         let setup = self.setup();
-        let agents: Vec<Value> = spandeck_agents::catalogue::CATALOGUE
+        let agents: Vec<Value> = spandeck_agents::catalogue::all()
             .iter()
             .map(|entry| {
                 let k = entry.kind;

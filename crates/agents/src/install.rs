@@ -73,7 +73,18 @@ fn takes_matcher(event: &str) -> bool {
     )
 }
 
-fn hook_command(kind: AgentKind, bin: &str) -> String {
+fn hook_command(kind: AgentKind, bin: &str, windows: bool) -> String {
+    if windows {
+        // PowerShell: `&` runs a quoted path, a quote inside single quotes
+        // is doubled, and `#` starts a comment as it does in sh.
+        return format!(
+            "& '{}' hook {} {}{}",
+            bin.replace('\'', "''"),
+            kind.as_str(),
+            MARKER,
+            HOOKS_VERSION
+        );
+    }
     format!(
         "'{}' hook {} {}{}",
         bin.replace('\'', "'\\''"),
@@ -83,9 +94,28 @@ fn hook_command(kind: AgentKind, bin: &str) -> String {
     )
 }
 
+/// One hook entry. On Windows, Claude Code runs a hook's command in Git
+/// Bash when that is installed and in PowerShell when it is not
+/// (code.claude.com/docs/en/hooks, read 14 Nov 2026); no one line is right
+/// in both, so the entry names PowerShell, which every Windows has. Codex
+/// documents no way to name the shell there: the same line is written and
+/// is unverified (DECISIONS.md, "Windows").
+fn hook_entry(kind: AgentKind, bin: &str, timeout: u64, windows: bool) -> Value {
+    let mut entry =
+        json!({"type": "command", "command": hook_command(kind, bin, windows), "timeout": timeout});
+    if windows && kind == AgentKind::Claude {
+        entry["shell"] = json!("powershell");
+    }
+    entry
+}
+
 /// The `hooks` object for an agent. Also used at launch time (`--settings`)
 /// so a pane spandeck starts works with no global install.
 pub fn hooks_block(kind: AgentKind, bin: &str) -> Value {
+    hooks_block_for(kind, bin, crate::on_windows())
+}
+
+fn hooks_block_for(kind: AgentKind, bin: &str, windows: bool) -> Value {
     let mut hooks = Map::new();
     for (event, timeout) in events(kind) {
         let mut group = Map::new();
@@ -94,7 +124,7 @@ pub fn hooks_block(kind: AgentKind, bin: &str) -> Value {
         }
         group.insert(
             "hooks".into(),
-            json!([{"type": "command", "command": hook_command(kind, bin), "timeout": timeout}]),
+            json!([hook_entry(kind, bin, *timeout, windows)]),
         );
         hooks.insert(event.to_string(), json!([Value::Object(group)]));
     }
@@ -260,6 +290,30 @@ pub fn status(kind: AgentKind, home: &Path) -> Result<Status> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows: the hook line must run in PowerShell, which Claude Code is
+    /// told to use, with a path that has a space or a quote in it (a user
+    /// folder such as `C:\Users\Mary O'Neil`), and must still be found
+    /// again as ours.
+    #[test]
+    fn a_windows_hook_names_powershell_and_keeps_the_marker() {
+        let bin = r"C:\Users\Mary O'Neil\AppData\Local\Programs\spandeck\spandeck.exe";
+        let block = hooks_block_for(AgentKind::Claude, bin, true);
+        let entry = &block["PreToolUse"][0]["hooks"][0];
+        assert_eq!(entry["shell"], "powershell");
+        let command = entry["command"].as_str().unwrap();
+        assert_eq!(
+            command,
+            format!(
+                r"& 'C:\Users\Mary O''Neil\AppData\Local\Programs\spandeck\spandeck.exe' hook claude # spandeck-managed v{HOOKS_VERSION}"
+            )
+        );
+        assert!(is_ours(entry));
+        assert_eq!(marker_version(command), Some(HOOKS_VERSION));
+        // Unix entries are as they were: no shell is named.
+        let unix = hooks_block_for(AgentKind::Claude, "/usr/bin/spandeck", false);
+        assert!(unix["PreToolUse"][0]["hooks"][0].get("shell").is_none());
+    }
 
     #[test]
     fn install_is_reversible_and_leaves_other_hooks_alone() {

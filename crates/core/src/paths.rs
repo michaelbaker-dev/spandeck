@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use spandeck_terminal::sys;
 
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -12,15 +13,16 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// `SPANDECK_STATE_DIR` / `SPANDECK_CONFIG_DIR`, else under the home directory.
+    /// `SPANDECK_STATE_DIR` / `SPANDECK_CONFIG_DIR`, else under the home
+    /// directory, where this system keeps such things.
     pub fn from_env() -> Paths {
-        let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()));
+        let (state, config) = sys::default_dirs(&home_dir());
         let state_dir = std::env::var_os("SPANDECK_STATE_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/state/spandeck"));
+            .unwrap_or(state);
         let config_dir = std::env::var_os("SPANDECK_CONFIG_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".config/spandeck"));
+            .unwrap_or(config);
         Paths {
             state_dir,
             config_dir,
@@ -39,15 +41,19 @@ impl Paths {
         if let Some(p) = std::env::var_os("SPANDECK_SOCKET") {
             return PathBuf::from(p);
         }
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(self.state_dir.as_os_str().as_encoded_bytes());
+        let tag: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        // Windows: a named pipe, which is not a file. One per state folder.
+        if let Some(pipe) = sys::local::pipe_name(&tag) {
+            return pipe;
+        }
         let path = self.state_dir.join("spandeckd.sock");
         // Unix socket paths are limited to about 100 bytes. A state directory
         // deeper than that gets a short, stable stand-in.
         if path.as_os_str().len() <= 100 {
             return path;
         }
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::digest(self.state_dir.as_os_str().as_encoded_bytes());
-        let tag: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
         let dir = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .filter(|d| d.is_dir())
@@ -246,11 +252,25 @@ impl Config {
 }
 
 pub fn hostname() -> String {
-    nix::unistd::gethostname()
-        .ok()
-        .and_then(|h| h.into_string().ok())
+    sys::hostname()
         .map(|h| h.split('.').next().unwrap_or(&h).to_string())
         .unwrap_or_else(|| "station".into())
+}
+
+/// The user's home folder (`$HOME`; `%USERPROFILE%` on Windows).
+pub fn home_dir() -> PathBuf {
+    std::env::home_dir()
+        .filter(|h| !h.as_os_str().is_empty())
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// A PATH value with more folders at its end, joined this system's way.
+pub fn path_with(path: &str, more: &[PathBuf]) -> String {
+    let dirs = std::env::split_paths(path)
+        .chain(more.iter().filter(|d| !d.as_os_str().is_empty()).cloned());
+    std::env::join_paths(dirs)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
 }
 
 pub fn now_ms() -> u64 {
@@ -262,11 +282,8 @@ pub fn now_ms() -> u64 {
 
 /// 32 random bytes as hex, from the OS.
 pub fn random_token() -> String {
-    use std::io::Read;
     let mut buf = [0u8; 32];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut buf))
-        .expect("the OS random source is available");
+    sys::random_bytes(&mut buf).expect("the OS random source is available");
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
