@@ -235,6 +235,15 @@ impl Daemon {
                 }
                 json!({"ok": true})
             }
+            "pane.paste" => {
+                let id = self.target_pane(caller, &params)?;
+                if !caller.is_owner() {
+                    return Err(Error::Denied("pasting into a pane is for the user".into()));
+                }
+                self.paste(&id, s(&params, "text")?, flag(&params, "enter"))?;
+                self.note_input(&id, &caller.who, &caller.client);
+                json!({"ok": true})
+            }
             "pane.input" => {
                 let pane = self.pane(s(&params, "pane")?)?;
                 pane.term.write(s(&params, "data")?.as_bytes())?;

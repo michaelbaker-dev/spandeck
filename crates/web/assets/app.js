@@ -789,18 +789,19 @@ const PHONE_KEYS = [['Esc', '\x1b'], ['Tab', '\t'], ['↑', '\x1b[A'], ['↓', '
 const KEY_NAMES = { '↑': 'Up', '↓': 'Down', '←': 'Left', '→': 'Right', '⏎': 'Enter', '^C': 'Control C' };
 const composers = new Map();
 const phoneFit = new Set();
+const phonePanes = new Map();
 
 // Kept per pane, so a redraw does not throw away what you are writing.
 function composer(st, p) {
   const key = `${st}/${p.id}`;
   let c = composers.get(key);
   if (c) return c;
-  const box = h('textarea', { class: 'composer-box', rows: 2, placeholder: p.agent === 'shell' ? 'Type a command' : 'Message the agent. You can dictate with the keyboard microphone.', 'aria-label': 'Message', enterkeyhint: 'send' });
+  const box = h('textarea', { class: 'composer-box', rows: 2, placeholder: p.agent === 'shell' ? 'Type or paste a command' : 'Type, paste or dictate a message', 'aria-label': 'Message', enterkeyhint: 'send' });
   const send = async () => {
-    // One message: line breaks would each be taken as Enter by the terminal.
-    const text = (p.agent === 'shell' ? box.value : box.value.replace(/\s*\n+\s*/g, ' ')).trim();
+    // Sent as a paste, so a message of several lines arrives as one.
+    const text = box.value.trim();
     if (!text) return;
-    await rpc(st, 'pane.send_text', { pane: p.id, text, enter: true });
+    await rpc(st, 'pane.paste', { pane: p.id, text, enter: true });
     box.value = '';
   };
   const key1 = (bytes) => rpc(st, 'pane.input', { pane: p.id, data: bytes });
@@ -837,12 +838,23 @@ function phoneView() {
     const fitKey = `${r.station}/${p.id}`;
     const fitted = phoneFit.has(fitKey);
     const t = fitted ? getTerm(r.station, p, 'phone-fit', 'control') : getTerm(r.station, p, 'phone', 'watch');
-    return h('main', { class: 'phone phone-pane' },
-      h('div', { class: 'row' }, h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'),
-        p.exited ? null : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: () => { fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
-        h('span', { class: 'grow' }),
-        h('button', { class: 'danger big', disabled: p.exited || !(p.state === 'working' || p.state === 'needs_you'), onclick: () => rpc(r.station, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')) }, 'Stop this turn')),
-      t.el, p.exited ? h('p', { class: 'muted small' }, 'This pane has ended.') : composer(r.station, p));
+    // The page is redrawn every few seconds. The terminal and the message
+    // box stay where they are, so the keyboard does not close while you type.
+    let v = phonePanes.get(fitKey);
+    if (!v) {
+      v = { head: h('div', { class: 'row' }), slot: h('div', { class: 'keep' }), foot: h('div', { class: 'keep' }) };
+      v.main = h('main', { class: 'phone phone-pane' }, v.head, v.slot, v.foot);
+      phonePanes.clear();
+      phonePanes.set(fitKey, v);
+    }
+    v.head.replaceChildren(h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'),
+      p.exited ? '' : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: () => { fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
+      h('span', { class: 'grow' }),
+      h('button', { class: 'danger big', disabled: p.exited || !(p.state === 'working' || p.state === 'needs_you'), onclick: () => rpc(r.station, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')) }, 'Stop this turn'));
+    if (v.slot.firstChild !== t.el) v.slot.replaceChildren(t.el);
+    const foot = p.exited ? (v.ended ||= h('p', { class: 'muted small' }, 'This pane has ended.')) : composer(r.station, p);
+    if (v.foot.firstChild !== foot) v.foot.replaceChildren(foot);
+    return v.main;
   }
   const all = S.fleet.stations.flatMap(s => liveAgents(s.station).map(p => ({ st: s.station, p })));
   const blockers = all.filter(x => x.p.agent !== 'shell' && (x.p.state === 'needs_you' || x.p.state === 'error'));
@@ -918,7 +930,10 @@ function render() {
   else if (r.view === 'pane') main = paneView(r.station, r.pane);
   else if (r.view === 'station') main = stationView(r.station);
   else main = fleetView();
-  root.replaceChildren(topbar(), main);
+  // A view that is already on the page stays attached: replacing it would
+  // take the keyboard away from whatever is being typed into.
+  if (root.children.length === 2 && root.children[1] === main) root.replaceChild(topbar(), root.children[0]);
+  else root.replaceChildren(topbar(), main);
   for (const [key, t] of S.terms) {
     if (!t._used) { t.dispose(); S.terms.delete(key); }
     else if (t._fresh) { t._fresh = false; t.mount(); }

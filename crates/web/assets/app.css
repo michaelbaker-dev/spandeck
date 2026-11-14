@@ -154,3 +154,4 @@ input, select, textarea { width: 100%; } textarea { resize: vertical; }
 .composer .mic.on { outline: 2px solid var(--bad, #e5484d); }
 .phone-pane .pane { min-height: 38dvh; }
 .phone-pane .pane { touch-action: none; overscroll-behavior: contain; }
+.phone-pane .keep { display: contents; }

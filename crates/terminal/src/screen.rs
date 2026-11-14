@@ -332,6 +332,11 @@ impl Screen {
         });
     }
 
+    /// Whether the program asked for pastes to be marked as pastes.
+    pub fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     pub fn info(&self) -> ScreenInfo {
         let mode = *self.term.mode();
         let cursor = self.term.grid().cursor.point;

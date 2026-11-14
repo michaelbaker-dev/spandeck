@@ -188,6 +188,10 @@ impl Pane {
         self.screen.lock().unwrap().info()
     }
 
+    pub fn bracketed_paste(&self) -> bool {
+        self.screen.lock().unwrap().bracketed_paste()
+    }
+
     pub fn text(&self) -> String {
         self.screen.lock().unwrap().text()
     }

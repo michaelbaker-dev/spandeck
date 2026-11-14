@@ -903,6 +903,37 @@ impl Daemon {
         Ok(())
     }
 
+    /// Paste text into a pane the way a terminal does. A program that asked
+    /// for pastes to be marked (Claude Code, Codex, modern shells) gets the
+    /// text as one paste, line breaks kept. Otherwise an agent gets it as one
+    /// line, since each line break would send a half-finished message, and a
+    /// shell gets it as typed.
+    pub fn paste(&self, id: &str, text: &str, enter: bool) -> Result<()> {
+        let p = self.pane(id)?;
+        let text = text.replace("\r\n", "\n");
+        // A paste cannot carry the marker that ends a paste.
+        let text = text.replace("\x1b[201~", "").replace("\x1b[200~", "");
+        if p.term.bracketed_paste() {
+            p.term
+                .write(format!("\x1b[200~{}\x1b[201~", text.replace('\n', "\r")).as_bytes())?;
+        } else if p.meta().agent.is_agent() {
+            let one_line = text
+                .split('\n')
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            p.term.write(one_line.as_bytes())?;
+        } else {
+            p.term.write(text.replace('\n', "\r").as_bytes())?;
+        }
+        if enter {
+            std::thread::sleep(Duration::from_millis(60));
+            p.term.write(b"\r")?;
+        }
+        Ok(())
+    }
+
     pub fn resize(&self, id: &str, cols: u16, rows: u16, client: &str) -> Result<()> {
         let p = self.pane(id)?;
         p.term.resize(cols.clamp(2, 500), rows.clamp(1, 300))?;

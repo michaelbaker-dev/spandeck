@@ -561,7 +561,15 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
         ));
     };
     set("hello from\nmy phone");
+    // A bug that happened on a real phone: the redraw every few seconds took
+    // the keyboard away from the message box.
+    page.js("(document.querySelector('.composer-box').focus(), window.__box = document.querySelector('.composer-box'), true)");
     std::thread::sleep(Duration::from_millis(3200));
+    assert_eq!(
+        page.js("document.activeElement === window.__box && document.contains(window.__box)"),
+        json!(true),
+        "the message box keeps the keyboard through a redraw"
+    );
     assert_eq!(
         page.js("document.querySelector('.composer-box').value"),
         json!("hello from\nmy phone"),
