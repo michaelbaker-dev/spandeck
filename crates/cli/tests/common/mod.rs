@@ -23,12 +23,21 @@ pub struct Station {
     scripts: std::sync::atomic::AtomicU32,
 }
 
+/// A port for a test station. Asking the system for "any free port" and then
+/// letting go of it lets another test, or a daemon that restarts and listens
+/// again, be given the same one: that made tests fail on small CI machines.
+/// So each test binary hands out its own run of ports, below the range the
+/// system uses for outgoing connections, and never hands one out twice.
 pub fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let base = 20000 + (std::process::id() * 131) % 9000;
+    loop {
+        let port = (base + NEXT.fetch_add(1, Ordering::SeqCst) % 1000) as u16;
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// Like `wait_for`, and on a timeout says what `context` returns.
