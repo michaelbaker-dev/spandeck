@@ -138,8 +138,13 @@ fn an_upgrade_to_an_incompatible_binary_is_refused_and_changes_nothing() {
     let s = Station::start("alpha");
     let pane = s.fake(json!({"steps": []}), json!({}));
     s.wait_text(&pane, "[fake] session");
+    // Any program that is not spandeck. macOS keeps `true` in /usr/bin.
+    let not_spandeck = ["/bin/true", "/usr/bin/true"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .expect("a `true` binary");
     let err = s
-        .try_call("station.upgrade", json!({"binary": "/bin/true"}))
+        .try_call("station.upgrade", json!({"binary": not_spandeck}))
         .unwrap_err();
     assert!(err.message.contains("handoff check"), "{}", err.message);
     s.call("pane.send_text", json!({"pane": pane, "text": "fine"}));
