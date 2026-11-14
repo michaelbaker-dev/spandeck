@@ -1,0 +1,16 @@
+spandeck
+Copyright 2026 the spandeck authors. Licensed under the Apache License, Version 2.0.
+
+Product marks
+
+The Control Deck shows the marks of Claude (Anthropic), Gemini (Google) and
+OpenCode beside panes that run those programs, to say which program a pane runs.
+They are trademarks of their owners. spandeck is not affiliated with, endorsed
+by or sponsored by any of them. The shapes are taken from Simple Icons
+(https://simpleicons.org), which publishes them under CC0-1.0; the trademarks
+remain with their owners and their brand guidelines apply.
+
+Bundled software
+
+crates/web/assets/vendor/xterm.js and addon-fit.js are xterm.js, MIT licence;
+see crates/web/assets/vendor/XTERM-LICENSE.txt.

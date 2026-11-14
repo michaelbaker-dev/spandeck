@@ -82,7 +82,9 @@ fn one_setup_reaches_every_station_and_every_new_agent() {
             .as_str()
             .unwrap()
             .to_string();
-        let screen = s.wait_text(&claude, "ARG<--mcp-config>").replace('\n', "");
+        // Wait for the last argument: the screen fills in pieces, and reading it
+        // at the first sight of --mcp-config sometimes caught it half printed.
+        let screen = s.wait_text(&claude, "ARG<mcp__spandeck>").replace('\n', "");
         assert!(
             screen.contains("ARG<--model>ARG<opus>ARG<--effort>ARG<high>"),
             "{screen}"

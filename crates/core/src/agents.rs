@@ -498,9 +498,9 @@ impl Daemon {
         args: Vec<String>,
     ) -> (String, Vec<String>) {
         const SCRIPT: &str = r#"name=$1; prog=$2; PATH="$PATH:$3"; cmd=$4; shift 4
+trap 'echo; echo "Skipped: $name was not installed, so this pane has nothing to start. Install it, then restart this pane."; exit 130' INT
 printf '%s is not installed on this station (%s was not found).\n' "$name" "$prog"
 printf 'spandeck will install it now with:\n\n    %s\n\nPress Ctrl-C to skip.\n\n' "$cmd"
-trap 'echo; echo "Skipped: $name was not installed, so this pane has nothing to start. Install it, then restart this pane."; exit 130' INT
 sh -c "$cmd" || { echo; echo "The install command failed, so $name was not started. Fix the problem above, then restart this pane."; exit 1; }
 trap - INT
 if command -v "$prog" >/dev/null 2>&1; then echo; exec "$prog" "$@"; fi

@@ -220,7 +220,7 @@ function pickPane(then, ctx) {
 
 // ------------------------------------------------------------------ dialogs
 
-const AGENT_CHOICES = [['claude', 'Claude Code'], ['codex', 'Codex'], ['shell', 'Shell']];
+const AGENT_CHOICES = [['claude', 'Claude Code'], ['codex', 'Codex'], ['opencode', 'OpenCode'], ['antigravity', 'Antigravity'], ['shell', 'Shell']];
 
 function newPaneDialog(st, project, then) {
   dialog('New pane on ' + st, (close) => {
@@ -255,7 +255,7 @@ function newProjectDialog(st) {
     const rows = h('div', { class: 'slots' });
     const addRow = (n = '', a = 'claude', r = '') => rows.append(h('div', { class: 'slot' },
       h('input', { placeholder: 'pane name', value: n, 'aria-label': 'Pane name' }),
-      h('select', { 'aria-label': 'Agent' }, ['claude', 'codex', 'shell'].map(x => h('option', { value: x, selected: x === a }, x))),
+      h('select', { 'aria-label': 'Agent' }, AGENT_CHOICES.map(([x, label]) => h('option', { value: x, selected: x === a }, label))),
       h('input', { placeholder: 'role (optional)', value: r, 'aria-label': 'Role' }),
       h('button', { type: 'button', class: 'icon-btn', title: 'Remove', onclick: (e) => e.target.closest('.slot').remove() }, '✕')));
     addRow('dev', 'claude', 'author');
@@ -529,6 +529,38 @@ function commandDialog(st, pane) {
 }
 
 // MCP servers, skills and model defaults: set once, applied on every station.
+// Which agent programs each station has, at what version, and updating them.
+async function agentsPanel() {
+  const stations = S.fleet.stations.filter(s => s.state === 'online').map(s => s.station);
+  const load = () => Promise.all(stations.map(st => api.on(st, 'agents.status').then(rows => ({ st, rows })).catch(e => ({ st, rows: [], problem: e.message }))));
+  let all = await load();
+  dialog('Agent programs', (close) => {
+    const body = h('div', {});
+    const update = (st, agent) => rpc(st, 'agents.update', agent ? { agent } : {}).then((r) => {
+      toast(r.started?.length ? `${st}: updating ${r.started.map(x => x.name).join(', ')}` : `${st}: nothing to update`);
+      setTimeout(redraw, 1500);
+    });
+    const draw = () => body.replaceChildren(
+      h('p', { class: 'muted' }, 'An update restarts that program\'s agents and they go back to their conversations. An agent in the middle of a turn is restarted when it finishes, not interrupted. A program that is not installed is installed the first time you start a pane for it.'),
+      h('div', { class: 'row end' }, h('button', { class: 'primary', onclick: () => Promise.all(stations.map(st => update(st))) }, 'Update everything on every station')),
+      all.map(({ st, rows, problem }) => h('div', {},
+        h('div', { class: 'row' }, h('h3', {}, st), h('span', { class: 'grow' }), rows.some(r => r.installed && r.can_update !== false) ? h('button', { class: 'mini', onclick: () => update(st) }, 'Update all here') : null),
+        problem ? h('p', { class: 'warn-text' }, problem) : null,
+        h('div', { class: 'list' }, rows.map(r => h('div', { class: 'note row' },
+          paneIcon(r.agent), h('b', {}, r.name),
+          h('span', { class: r.installed ? '' : 'muted' }, r.installed ? (r.version || 'installed, version not read') : 'not installed'),
+          r.panes ? h('span', { class: 'muted' }, `· ${r.panes} running`) : null,
+          r.updating ? h('span', { class: 'chip warn' }, 'updating…') : null,
+          r.last_update && !r.updating ? h('span', { class: 'muted', title: r.last_update.message || '' }, r.last_update.ok ? `· updated ${ago(r.last_update.at_ms)} ago` : '· last update failed') : null,
+          h('span', { class: 'grow' }),
+          r.installed && r.can_update !== false ? h('button', { class: 'mini', disabled: !!r.updating, onclick: () => update(st, r.agent) }, 'Update') : null))))),
+      h('div', { class: 'row end' }, h('button', { onclick: redraw }, 'Check again'), h('button', { onclick: close }, 'Close')));
+    const redraw = async () => { all = await load(); draw(); };
+    draw();
+    return body;
+  });
+}
+
 async function setupPanel() {
   let view;
   try { view = await api.call('setup.get'); } catch (e) { return toast(e.message, 'error'); }
@@ -715,6 +747,7 @@ function stationMenu(e, s) {
     up && { label: 'New pane here…', action: () => newPaneDialog(s.station) },
     up && { label: 'New project here…', action: () => newProjectDialog(s.station) },
     up && { label: 'Check this station', action: () => doctorPanel(s.station) },
+    { label: 'Agent programs and versions…', action: agentsPanel },
     s.state === 'not_linked' && { label: `Join ${s.station}'s fleet…`, action: () => joinFleet(s.station) },
     up && { label: 'Restart spandeck here (keeps terminals)', action: () => confirmBox(`Restart spandeck on ${s.station}?`, 'Every terminal and agent keeps running. If it does not come back healthy, the restart is undone.', 'Restart', () => rpc(s.station, 'station.restart', {}).then(() => toast(`${s.station} is restarting`))) },
     up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`))) },
