@@ -512,9 +512,13 @@ impl Daemon {
 trap 'echo; echo "Skipped: $name was not installed, so this pane has nothing to start. Install it, then restart this pane."; exit 130' INT
 printf '%s is not installed on this station (%s was not found).\n' "$name" "$prog"
 printf 'spandeck will install it now with:\n\n    %s\n\nPress Ctrl-C to skip.\n\n' "$cmd"
-sh -c "$cmd" || { echo; echo "The install command failed, so $name was not started. Fix the problem above, then restart this pane."; exit 1; }
+sh -c "$cmd" </dev/tty; status=$?
 trap - INT
+# Whether it worked is judged by the program being there, not by the
+# installer's exit code: Codex's installer ends by offering to start Codex
+# and reports failure when that last step cannot run, after a good install.
 if command -v "$prog" >/dev/null 2>&1; then echo; exec "$prog" "$@"; fi
+if [ "$status" -ne 0 ]; then echo; echo "The install command failed, so $name was not started. Fix the problem above, then restart this pane."; exit 1; fi
 echo; echo "The install command finished, but $prog is still not found. Set [agents.<name>] program in spandeck's config.toml to where it was installed."
 exit 127"#;
         // The probe that said "missing" must not outlive the install.
