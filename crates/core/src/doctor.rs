@@ -168,6 +168,28 @@ pub fn service_definition(
     exe: &std::path::Path,
     home: &std::path::Path,
 ) -> (std::path::PathBuf, String, String) {
+    // A login service starts with a bare PATH. Give it the one the user has
+    // now, so the daemon finds the agent programs (`claude`, `codex`) they do.
+    let mut dirs: Vec<String> = vec![home.join(".local/bin").display().to_string()];
+    if let Some(dir) = exe.parent().filter(|d| !d.as_os_str().is_empty()) {
+        dirs.push(dir.display().to_string());
+    }
+    dirs.extend(
+        std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .map(String::from),
+    );
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|d| {
+        d.starts_with('/') && !d.contains(['"', '<', '>', '&', '\n', '%']) && seen.insert(d.clone())
+    });
+    for d in ["/usr/local/bin", "/usr/bin", "/bin"] {
+        if seen.insert(d.to_string()) {
+            dirs.push(d.to_string());
+        }
+    }
+    let search = dirs.join(":");
     let exe = exe.display();
     if cfg!(target_os = "macos") {
         let path = home.join("Library/LaunchAgents/dev.spandeck.spandeckd.plist");
@@ -177,6 +199,7 @@ pub fn service_definition(
 <plist version="1.0"><dict>
   <key>Label</key><string>dev.spandeck.spandeckd</string>
   <key>ProgramArguments</key><array><string>{exe}</string><string>daemon</string></array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>{search}</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ProcessType</key><string>Interactive</string>
@@ -188,7 +211,7 @@ pub fn service_definition(
     } else {
         let path = home.join(".config/systemd/user/spandeckd.service");
         let body = format!(
-            "[Unit]\nDescription=spandeck daemon\nAfter=network-online.target\n\n[Service]\nExecStart={exe} daemon\nRestart=on-failure\nRestartSec=2\n# An upgrade replaces the process image in place; do not kill panes with it.\nKillMode=process\n\n[Install]\nWantedBy=default.target\n"
+            "[Unit]\nDescription=spandeck daemon\nAfter=network-online.target\n\n[Service]\nEnvironment=\"PATH={search}\"\nExecStart={exe} daemon\nRestart=on-failure\nRestartSec=2\n# An upgrade replaces the process image in place; do not kill panes with it.\nKillMode=process\n\n[Install]\nWantedBy=default.target\n"
         );
         (path, body, "systemctl --user daemon-reload && systemctl --user enable --now spandeckd && loginctl enable-linger $USER".to_string())
     }
