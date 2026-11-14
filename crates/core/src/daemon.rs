@@ -1489,6 +1489,7 @@ impl Daemon {
             "load": load_average(),
             "macs": crate::manage::mac_addresses(),
             "service": crate::doctor::service_installed(&self.home),
+            "codex_sandbox_blocked": crate::doctor::codex_sandbox_blocked(&self.home),
             "setup": {"updated_ms": self.setup().updated_ms},
             "vault": self.vault_view(),
         })

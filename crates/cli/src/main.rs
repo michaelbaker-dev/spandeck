@@ -42,7 +42,11 @@ enum Cmd {
     /// What this station is doing.
     Status,
     /// Check this station's setup.
-    Doctor,
+    Doctor {
+        /// Fix what needs an administrator: asks for your password with sudo.
+        #[arg(long)]
+        fix: bool,
+    },
     /// Print the Control Deck address (with the localhost token).
     Cc {
         /// Also show a QR code to open the Control Deck on a phone.
@@ -413,7 +417,10 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 s.trim_end().to_string()
             });
         }
-        Cmd::Doctor => {
+        Cmd::Doctor { fix } => {
+            if fix {
+                fix_with_sudo()?;
+            }
             let v = c.call("station.doctor", json!({}))?;
             show(j, &v, |v| {
                 v["checks"]
@@ -1243,5 +1250,40 @@ fn on_station(
             json!({"station": st, "method": method, "params": params}),
         ),
         None => c.call(method, params),
+    }
+}
+
+/// The repairs that need root. Each says what it does before sudo asks.
+fn fix_with_sudo() -> anyhow::Result<()> {
+    use spandeck_core::doctor::{
+        codex_sandbox_blocked, CODEX_SANDBOX_PROFILE, CODEX_SANDBOX_PROFILE_PATH,
+    };
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
+    if !codex_sandbox_blocked(&home) {
+        println!("Nothing here needs an administrator.");
+        return Ok(());
+    }
+    println!(
+        "Codex cannot run commands on this machine: the system blocks the sandbox Codex uses.\n\
+         This installs one AppArmor profile, {CODEX_SANDBOX_PROFILE_PATH}, that allows it for\n\
+         Codex's own sandbox program only. Nothing else on the system changes.\n"
+    );
+    let tmp = std::env::temp_dir().join(format!("spandeck-codex-bwrap.{}", std::process::id()));
+    std::fs::write(&tmp, CODEX_SANDBOX_PROFILE)?;
+    let script = format!(
+        "install -m 644 -o root -g root '{}' '{CODEX_SANDBOX_PROFILE_PATH}' && apparmor_parser -r '{CODEX_SANDBOX_PROFILE_PATH}'",
+        tmp.display()
+    );
+    let status = std::process::Command::new("sudo")
+        .args(["sh", "-c", &script])
+        .status();
+    let _ = std::fs::remove_file(&tmp);
+    match status {
+        Ok(s) if s.success() => {
+            println!("Done. Start a new Codex pane; panes already open pick it up on their next command.");
+            Ok(())
+        }
+        Ok(_) => anyhow::bail!("the profile was not installed"),
+        Err(e) => anyhow::bail!("could not run sudo: {e}"),
     }
 }

@@ -44,6 +44,14 @@ impl Daemon {
             true,
             format!("schema {schema} of {}", Db::LATEST_SCHEMA),
         );
+        if codex_sandbox_blocked(&self.home) {
+            add(
+                "Codex sandbox",
+                false,
+                false,
+                "Codex cannot run commands here: this system blocks the sandbox Codex uses. Run `spandeck doctor --fix` once (it asks for your password)".into(),
+            );
+        }
         let service = service_installed(&self.home);
         add(
             "service",
@@ -215,4 +223,35 @@ pub fn service_definition(
         );
         (path, body, "systemctl --user daemon-reload && systemctl --user enable --now spandeckd && loginctl enable-linger $USER".to_string())
     }
+}
+
+/// Where the profile that lets Codex's sandbox work is installed.
+pub const CODEX_SANDBOX_PROFILE_PATH: &str = "/etc/apparmor.d/spandeck-codex-bwrap";
+
+/// An AppArmor profile for Codex's own copy of bubblewrap, and nothing else.
+pub const CODEX_SANDBOX_PROFILE: &str = r#"# Installed by `spandeck doctor --fix`.
+# Codex runs each command in a sandbox built with its own copy of bubblewrap.
+# Ubuntu stops unprivileged programs from setting up the network inside such a
+# sandbox unless a profile allows it. This allows it for Codex's bubblewrap only.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile spandeck-codex-bwrap /home/*/.codex/packages/*/releases/*/codex-resources/bwrap flags=(unconfined) {
+  userns,
+}
+"#;
+
+/// On Ubuntu 23.10 and later, Codex cannot run any command until its sandbox
+/// program is allowed to use user namespaces. True when that is the case
+/// here and the fix has not been installed. It needs root, once.
+pub fn codex_sandbox_blocked(home: &std::path::Path) -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    let restricted =
+        std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+            .is_ok_and(|v| v.trim() == "1");
+    restricted
+        && home.join(".codex/packages").is_dir()
+        && !std::path::Path::new(CODEX_SANDBOX_PROFILE_PATH).exists()
 }
