@@ -719,6 +719,10 @@ impl Daemon {
                 servers.insert("spandeck".into(), json!({"command": bin, "args": ["mcp"]}));
                 args.push("--mcp-config".to_string());
                 args.push(json!({"mcpServers": servers}).to_string());
+                // spandeck's own tools are not asked about one by one: what an
+                // agent may do with them is decided by spandeck, and logged.
+                args.push("--allowedTools".to_string());
+                args.push("mcp__spandeck".to_string());
             }
             AgentKind::Codex => args.extend([
                 "-c".to_string(),
@@ -730,6 +734,8 @@ impl Daemon {
                 "mcp_servers.spandeck.args=[\"mcp\"]".to_string(),
                 // Codex starts MCP servers with a bare environment. Without
                 // these the server cannot tell which pane it speaks for.
+                "-c".to_string(),
+                "mcp_servers.spandeck.default_tools_approval_mode=\"approve\"".to_string(),
                 "-c".to_string(),
                 "mcp_servers.spandeck.env_vars=[\"SPANDECK_PANE\",\"SPANDECK_TOKEN\",\"SPANDECK_SOCKET\",\"SPANDECK_STATE_DIR\",\"SPANDECK_CONFIG_DIR\",\"SPANDECK_STATION\",\"SPANDECK_PROJECT\"]".to_string(),
             ]),
