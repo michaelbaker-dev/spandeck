@@ -1137,22 +1137,21 @@ mod tests {
         );
     }
 
-    /// The script a Windows machine is sent, run the way it arrives there:
-    /// through cmd.exe (OpenSSH's default shell on Windows), into a
-    /// PowerShell that reads it from standard input. With the release
-    /// address pointing nowhere it must parse as a whole, say where it is,
-    /// and stop at the network check: nothing is installed and nothing on
-    /// this machine is changed.
+    /// The script a Windows machine is sent, read the way it is there: by a
+    /// Windows PowerShell that takes it from standard input and runs it.
+    /// With the release address pointing nowhere it must parse as a whole,
+    /// say where it is, and stop at the network check: nothing is installed
+    /// and nothing on this machine is changed. (Over SSH the same line
+    /// passes through cmd.exe first, which this cannot show.)
     #[test]
     #[cfg_attr(not(windows), ignore = "needs Windows PowerShell")]
     fn the_windows_script_runs_from_standard_input_and_reports_its_steps() {
         use std::io::Write;
         let script = windows_script("alpha", Some("http://127.0.0.1:9"), JoinBy::Code);
-        let line = format!(
-            "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command {WINDOWS_READS_STDIN}"
-        );
-        let mut child = std::process::Command::new("cmd.exe")
-            .args(["/d", "/s", "/c", &line])
+        let mut child = std::process::Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive"])
+            .args(["-ExecutionPolicy", "Bypass", "-Command"])
+            .arg(WINDOWS_READS_STDIN.trim_matches('"'))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
