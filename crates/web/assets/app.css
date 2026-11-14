@@ -139,3 +139,7 @@ input, select, textarea { width: 100%; } textarea { resize: vertical; }
   button, .btn { min-height: 40px; }
   .approval .row { flex-wrap: wrap; } .approval .row button { flex: 1; justify-content: center; }
 }
+
+/* Sign-in and access */
+.big-code { font: 600 2rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .18em; margin: .4rem 0; }
+.code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }

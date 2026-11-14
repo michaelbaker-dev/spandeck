@@ -4,7 +4,7 @@ An always-running daemon (`spandeckd`) and a web Control Deck for running AI cod
 agents (Claude Code, Codex) in panes across your machines.
 
 - **Stations**: every machine under your Tailscale login that runs spandeckd. They find
-  and trust each other with no pairing step.
+  each other by themselves; you approve each one into your fleet once.
 - **Crew**: agents in panes. Hooks report what each one is doing: working, needs you,
   done, error.
 - **Control Deck**: the web app every station serves. Zoom from fleet to station to pane.
@@ -51,10 +51,14 @@ spandeck cc                    # print the Control Deck address
 spandeck project new --pane dev:claude:author   # in a repo
 ```
 
-From another device on your tailnet, open `http://<station>:7391/`. No token is needed
-there: the station asks Tailscale who is connecting, and only your own Tailscale login
-gets control. On the station itself, always use the address `spandeck cc` prints (it
-carries a local token), even when you open it by its Tailscale name.
+From another device on your tailnet, open `http://<station>:7391/`. The first time, the
+page shows a code and asks you to approve the browser: run `spandeck approve <code>` on
+the station, or approve it under **Access** in a Control Deck that is already signed in.
+On the station itself, use the address `spandeck cc` prints (it carries a local token).
+
+To add a second station, install spandeck on it and run `spandeck fleet --join <first
+station>`, then approve the code on the first station. Stations under your Tailscale
+login see each other without this, but neither controls the other until you approve.
 
 For a phone, or any HTTPS need: `tailscale serve --bg 7391` and open the HTTPS name with
 the token from `spandeck cc` appended as `#token=…` once.

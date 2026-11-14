@@ -13,14 +13,18 @@ days, not hours.
 
 - **Where it listens.** spandeckd listens on localhost and on the machine's Tailscale
   address. It does not listen on your LAN or the internet unless you change `web_bind`.
-- **Who is trusted.** A connection over Tailscale is identified by asking the local
-  Tailscale daemon who owns the connecting address. Only the same Tailscale login that
-  runs the station gets control, and only from another device: a connection from the
-  station's own address needs the local token. Identity headers are never trusted. A connection from
-  localhost needs the station's local token.
-- **What that means.** Anyone who can sign in to your Tailscale account, or run code as
-  your user on a station, controls every station. Other people's devices on a shared
-  tailnet do not.
+- **Who is trusted.** Two things, both required. First, the connection must come from
+  a device under the same Tailscale login as the station; the station asks its local
+  Tailscale daemon, and never trusts identity headers. Second, the caller must prove
+  itself, because Tailscale says which device is calling, not which program on it:
+  - another **station** signs every call with the fleet key. A station gets the key
+    only when you approve its request on a station that already has it;
+  - a **browser** holds a token it was given when you approved it, once, on a station
+    or in a Control Deck that was already signed in;
+  - on the station itself, the local token from `spandeck cc`.
+- **What that means.** A program on one of your devices that has neither the fleet key
+  nor a token gets nothing. Anyone who can run code as your user on a station can read
+  that station's key and tokens, and so controls the fleet.
 - **Agents are not the owner.** Each pane has its own token. Agents can message, delegate
   and search history; they never get a call that administers a station. Text from agents,
   other stations and session history is shown as text and labelled as quoted, never run
@@ -35,13 +39,15 @@ days, not hours.
 
 ## Known limits
 
-- **Any program on one of your devices can act as you on your other stations.** A
-  station identifies a Tailscale connection by device and login, not by which program
-  or which user account on that device made it. So a program on your laptop, including
-  an agent running there, can call another station's API as the owner without a token.
-  Calls to a station from itself do need a token. Do not run spandeck on a machine that
-  other people have accounts on, and do not sign untrusted devices in to your Tailscale
-  login. Closing this needs a shared secret between stations and is planned.
+- Approving a station or a browser gives it control of every station. Check the code
+  it shows matches the one you are asked to approve.
+- A signed-in browser's token does not expire. Sign it out under Access in the Control
+  Deck (or `spandeck trust --revoke`); stations that are off at the time learn of it only
+  from a later sign-out. Joining another fleet replaces the key and signs every browser
+  out.
+- Signed station calls are accepted for two minutes, so stations' clocks must roughly
+  agree, and a captured call could be replayed within that time by someone who can
+  already read your Tailscale traffic.
 - No sandbox. An agent runs with your user's permissions; spandeck observes and can
   block tool calls through hooks, but a determined or confused agent is limited by your
   operating system account, not by spandeck.

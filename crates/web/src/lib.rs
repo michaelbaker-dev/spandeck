@@ -83,6 +83,8 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
     let app = Router::new()
         .route("/api/rpc", post(http_rpc))
         .route("/api/peer/rpc", post(peer_rpc))
+        .route("/api/device/request", post(device_request))
+        .route("/api/device/collect", post(device_collect))
         .route("/api/ws", get(ws_upgrade))
         .fallback(get(asset))
         .layer(DefaultBodyLimit::max(100 << 20))
@@ -212,34 +214,42 @@ async fn caller(
 ) -> Result<Caller, (StatusCode, &'static str)> {
     let client = client_id(headers, addr);
     match identify(web, addr.ip()).await {
-        Remote::Loopback => {
-            // A trusted loopback station (tests only) speaks for the user.
-            if web.daemon.fleet.trust_loopback_peers && headers.contains_key("x-spandeck-station") {
+        // Tailscale says which device is connecting, not which program on
+        // it. So every caller also proves itself: a station in this fleet
+        // with a signature, a browser with a token the owner approved.
+        Remote::Loopback | Remote::Owner { .. } => {
+            if let Some(station) = gateway_station(web, headers) {
                 return Ok(Caller {
                     authority: Authority::Owner,
                     pane: None,
                     client,
-                    who: "you".into(),
+                    who: format!("you (via {station})"),
                 });
             }
-            let token = token
-                .or_else(|| bearer(headers))
-                .ok_or((StatusCode::UNAUTHORIZED, "a token is needed on localhost"))?;
-            web.daemon
-                .caller_for_token(&token, &client)
-                .ok_or((StatusCode::UNAUTHORIZED, "wrong token"))
+            let token = token.or_else(|| bearer(headers)).ok_or((
+                StatusCode::UNAUTHORIZED,
+                "sign in: this browser has no token for this station",
+            ))?;
+            web.daemon.caller_for_token(&token, &client).ok_or((
+                StatusCode::UNAUTHORIZED,
+                "sign in: this browser's token is not accepted here",
+            ))
         }
-        Remote::Owner { .. } => Ok(Caller {
-            authority: Authority::Owner,
-            pane: None,
-            client,
-            who: "you".into(),
-        }),
         Remote::Stranger(_) => Err((
             StatusCode::FORBIDDEN,
             "this device is not under your Tailscale login",
         )),
     }
+}
+
+/// A station in this fleet relaying its own user's attach: it signs its name.
+fn gateway_station(web: &Web, headers: &HeaderMap) -> Option<String> {
+    let station = headers.get("x-spandeck-station")?.to_str().ok()?;
+    let sig = headers.get("x-spandeck-sig")?.to_str().ok()?;
+    web.daemon
+        .trust
+        .verify("ws", station.as_bytes(), sig)
+        .then(|| station.to_string())
 }
 
 fn refuse(e: (StatusCode, &'static str)) -> axum::response::Response {
@@ -281,32 +291,132 @@ async fn http_rpc(
     }
 }
 
-/// Another station calling. Only a device under the same login is a station.
-async fn peer_rpc(
+/// A browser on one of the owner's devices asks to be signed in. Nothing is
+/// granted until the owner approves it at a station.
+async fn device_request(
     State(web): State<Web>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> axum::response::Response {
+    device_call(&web, &addr, &headers, |ip| {
+        web.daemon.trust_request(
+            "device",
+            body.get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("a browser"),
+            ip,
+        )
+    })
+    .await
+}
+
+async fn device_collect(
+    State(web): State<Web>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> axum::response::Response {
+    let get = |k: &str| body.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    device_call(&web, &addr, &headers, |ip| {
+        web.daemon.trust_collect(get("id"), get("collect"), ip)
+    })
+    .await
+}
+
+async fn device_call(
+    web: &Web,
+    addr: &SocketAddr,
+    headers: &HeaderMap,
+    f: impl FnOnce(&str) -> spandeck_core::daemon::Result<Value>,
+) -> axum::response::Response {
+    if let Err(e) = origin_ok(web, headers) {
+        return refuse(e);
+    }
+    if matches!(identify(web, addr.ip()).await, Remote::Stranger(_)) {
+        return refuse((
+            StatusCode::FORBIDDEN,
+            "this device is not under your Tailscale login",
+        ));
+    }
+    match f(&addr.ip().to_string()) {
+        Ok(result) => Json(json!({"result": result})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": error_json(&e)})),
+        )
+            .into_response(),
+    }
+}
+
+/// Another station calling. Only a device under the same login is a station.
+async fn peer_rpc(
+    State(web): State<Web>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    raw: axum::body::Bytes,
+) -> axum::response::Response {
     // A browser must never reach this endpoint.
     if headers.contains_key(header::ORIGIN) {
         return refuse((StatusCode::FORBIDDEN, "not for browsers"));
     }
+    let Ok(body) = serde_json::from_slice::<Value>(&raw) else {
+        return refuse((StatusCode::BAD_REQUEST, "not JSON"));
+    };
     let from = body
         .get("from")
         .and_then(|f| f.as_str())
         .unwrap_or("?")
         .to_string();
-    let trusted = match identify(&web, addr.ip()).await {
-        Remote::Owner { .. } => true,
-        Remote::Loopback => web.daemon.fleet.trust_loopback_peers,
-        Remote::Stranger(_) => false,
-    };
-    if !trusted {
+    if matches!(identify(&web, addr.ip()).await, Remote::Stranger(_)) {
         return refuse((StatusCode::FORBIDDEN, "not a station under this login"));
     }
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = body.get("params").cloned().unwrap_or(json!({}));
+    // What any device under the owner's login may ask without the fleet key:
+    // who are you, and to be let in. Nothing is granted until the owner approves.
+    let asker = addr.ip().to_string();
+    let open = match method {
+        "station.hello" => Some(Ok(json!({
+            "station": web.daemon.station,
+            "version": spandeck_core::VERSION,
+            "protocol": spandeck_core::PROTOCOL,
+            "fleet": web.daemon.trust.fleet_id(),
+        }))),
+        "fleet.join.request" => Some(
+            web.daemon.trust_request(
+                "station",
+                params
+                    .get("station")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or(&from),
+                &asker,
+            ),
+        ),
+        "fleet.join.collect" => Some(web.daemon.trust_collect(
+            params.get("id").and_then(|s| s.as_str()).unwrap_or(""),
+            params.get("collect").and_then(|s| s.as_str()).unwrap_or(""),
+            &asker,
+        )),
+        _ => None,
+    };
+    if let Some(out) = open {
+        return match out {
+            Ok(result) => Json(json!({"result": result})).into_response(),
+            Err(e) => Json(json!({"error": error_json(&e)})).into_response(),
+        };
+    }
+    // Everything else needs the fleet key, over the exact bytes received.
+    let signed = headers
+        .get("x-spandeck-sig")
+        .and_then(|s| s.to_str().ok())
+        .is_some_and(|sig| web.daemon.trust.verify("rpc", &raw, sig));
+    if !signed {
+        return refuse((
+            StatusCode::UNAUTHORIZED,
+            "not in this fleet: join it first, and approve the request on this station",
+        ));
+    }
     let who = Caller {
         authority: Authority::Peer,
         pane: None,
@@ -727,6 +837,11 @@ async fn attach_remote(
     req.headers_mut().insert(
         "x-spandeck-station",
         HeaderValue::from_str(&daemon.station).map_err(|e| e.to_string())?,
+    );
+    req.headers_mut().insert(
+        "x-spandeck-sig",
+        HeaderValue::from_str(&daemon.trust.sign("ws", daemon.station.as_bytes()))
+            .map_err(|e| e.to_string())?,
     );
     let (ws, _) = tokio::time::timeout(
         std::time::Duration::from_secs(4),

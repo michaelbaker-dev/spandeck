@@ -125,7 +125,21 @@ enum Cmd {
         fleet: bool,
     },
     /// The fleet: every station under your Tailscale login.
-    Fleet,
+    Fleet {
+        /// Ask this station to let this one into its fleet. Approve it there.
+        #[arg(long, value_name = "STATION")]
+        join: Option<String>,
+    },
+    /// Approve a station or browser that asked to be let in, by the code it shows.
+    Approve { code: String },
+    /// Refuse a station or browser that asked to be let in.
+    Deny { code: String },
+    /// Requests waiting for you, and browsers signed in here.
+    Trust {
+        /// Stop trusting a signed-in browser, by its id.
+        #[arg(long, value_name = "DEVICE")]
+        revoke: Option<String>,
+    },
     /// Agent hook integrations.
     Integration {
         #[command(subcommand)]
@@ -765,7 +779,62 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     .join("\n")
             });
         }
-        Cmd::Fleet => {
+        cmd @ (Cmd::Approve { .. } | Cmd::Deny { .. }) => {
+            let (method, code) = match cmd {
+                Cmd::Approve { code } => ("trust.approve", code),
+                Cmd::Deny { code } => ("trust.deny", code),
+                _ => unreachable!(),
+            };
+            let v = c.call(method, json!({"request": code}))?;
+            show(j, &v, |v| {
+                format!(
+                    "{} {} {}",
+                    if v["approved"] == json!(true) {
+                        "approved"
+                    } else {
+                        "refused"
+                    },
+                    v["kind"].as_str().unwrap_or(""),
+                    v["name"].as_str().unwrap_or("")
+                )
+            });
+        }
+        Cmd::Trust { revoke } => {
+            if let Some(device) = revoke {
+                c.call("device.revoke", json!({"device": device}))?;
+            }
+            let v = c.call("trust.status", json!({}))?;
+            show(j, &v, |v| {
+                let mut out = vec![format!("fleet {}", v["fleet"].as_str().unwrap_or(""))];
+                for r in v["requests"].as_array().into_iter().flatten() {
+                    out.push(format!(
+                        "waiting: {} {} from {}  code {}   (spandeck approve {})",
+                        r["kind"].as_str().unwrap_or(""),
+                        r["name"].as_str().unwrap_or(""),
+                        r["from"].as_str().unwrap_or(""),
+                        r["code"].as_str().unwrap_or(""),
+                        r["code"].as_str().unwrap_or("")
+                    ));
+                }
+                for d in v["devices"].as_array().into_iter().flatten() {
+                    out.push(format!(
+                        "signed in: {}  {}  from {}",
+                        d["id"].as_str().unwrap_or(""),
+                        d["name"].as_str().unwrap_or(""),
+                        d["from"].as_str().unwrap_or("")
+                    ));
+                }
+                out.join("\n")
+            });
+        }
+        Cmd::Fleet {
+            join: Some(station),
+        } => {
+            c.call("fleet.refresh", json!({}))?;
+            let v = c.call("fleet.join", json!({"station": station}))?;
+            show(j, &v, |v| v["next"].as_str().unwrap_or("").to_string());
+        }
+        Cmd::Fleet { join: None } => {
             let v = c.call("fleet.refresh", json!({}))?;
             show(j, &v, |v| {
                 v["stations"]

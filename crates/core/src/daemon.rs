@@ -19,7 +19,7 @@ use crate::paths::{new_id, now_ms, random_token, Config, Paths};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Bumped when stations can no longer talk to an older peer.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -259,6 +259,8 @@ pub struct Inner {
     pub(crate) keep_awake: Mutex<Option<std::process::Child>>,
     pub(crate) seq: AtomicU64,
     pub fleet: crate::fleet::FleetState,
+    /// The fleet key, and requests to be let in.
+    pub trust: Arc<crate::trust::TrustState>,
     pub web_addrs: Mutex<Vec<String>>,
     pub vault: crate::vault::VaultState,
 }
@@ -324,8 +326,10 @@ impl Daemon {
             .unwrap_or_else(|| PathBuf::from("spandeck"));
         let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
         let station = cfg.station.clone();
+        let trust = Arc::new(crate::trust::TrustState::load(&paths)?);
         let daemon = Daemon(Arc::new(Inner {
-            fleet: crate::fleet::FleetState::new(&cfg),
+            fleet: crate::fleet::FleetState::new(&cfg, trust.clone()),
+            trust,
             paths,
             cfg,
             db,

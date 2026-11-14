@@ -10,7 +10,7 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - **v1 runs on macOS and Linux.** Windows later, so platform code stays isolated (`crates/terminal/src/pty.rs`).
 - **Name**: spandeck; daemon spandeckd; the command center is the Control Deck; machines are stations, agents are crew, the event log is the ship's log.
 - **Live handoff on upgrade, no per-pane host process.** The old daemon execs the new binary in place (same pid, inherited PTY descriptors). After a crash or reboot each agent resumes its conversation by session id.
-- **Stations under the same Tailscale login trust each other automatically.** That is the user's authority at the Control Deck; an agent reaching another station gets only what its task grants.
+- **Stations under the same Tailscale login find each other automatically, and each joins the fleet on the owner's approval, once** (changed 14 Nov 2026; before, they trusted each other with no step). Tailscale identifies a device, not a program on it, so a station also signs its calls with a fleet key and a browser on another device holds a token the owner approved. An agent reaching another station gets only what its task grants.
 - **Agent messages are stored records** sent and received through tools (send, inbox, reply, ack), never keystrokes. A typed one-line nudge only wakes an idle agent.
 - **A durable task record** exists for delegated, scheduled and recipe work. A pane you are just talking to has none.
 - **Workspaces**: the agent you talk to stays in the main checkout; a delegated helper that writes gets its own worktree and branch; review-loop reviewers read a snapshot at the commit; testers read the same tree. Sign-off is bound to the commit reviewed.
@@ -27,7 +27,7 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 
 - One `spandeck hook` command for every vendor. Claude Code: hooks first. Codex: hooks where accepted, screen detection otherwise; the Codex adapter is fixture-tested and unverified until a live canary runs.
 - Remote approval is in v1: the permission hook holds for an answer from the Control Deck or phone, then falls back to the terminal prompt on timeout.
-- spandeckd listens on localhost and the tailnet address. Tailnet connections are identified by a Tailscale whois on the real address; the owner's login gets full control. Localhost needs a token. Serve identity headers are never trusted. QR pairing is deferred.
+- spandeckd listens on localhost and the tailnet address. Tailnet connections are identified by a Tailscale whois on the real address and must be the owner's login; they then need the fleet key (stations) or an approved token (browsers). Localhost needs a token. Serve identity headers are never trusted.
 - Every pane gets a pane-scoped token. Enforced on cross-station calls; advisory on the same station.
 - OSC 7501 is read when present, never required.
 - v1 activity strip shows state, current tool and elapsed time (no context gauge or cost).
@@ -40,6 +40,14 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - Command is `spandeck`; the short command is `sd` (chosen by the user on 13 Nov 2026; note it shares a name with a find-and-replace tool some people install).
 - Public repo at github.com/michaelbaker-dev/spandeck, Apache-2.0, releases built by CI (the user's decision on 14 Nov 2026; it replaces "local git only until the trademark check"). The trademark check has not been done.
 - One size per pane, set by whoever has control; others letterbox.
+
+## Fleet and device sign-in (0.2, 14 Nov 2026)
+
+- Every station starts as a fleet of one with its own key. `spandeck fleet --join <station>` asks another station for its key; the owner approves there, matching a code shown on both sides. The asking station then replaces its key.
+- Calls between stations carry a signature over the exact request, good for two minutes. A task authorization from another station is trusted because the call that carries it is signed.
+- A browser on another device asks to sign in, shows a code, and gets a token when the owner approves at a station (`spandeck approve <code>`) or in a signed-in Control Deck. Any station in the fleet accepts the token. It can be revoked.
+- Without the key or a token, a device under the owner's login can only ask a station its name and ask to be let in.
+- There is no switch that turns this off, in tests or otherwise.
 
 ## AgentVault (14 Nov 2026)
 

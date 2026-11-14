@@ -59,6 +59,7 @@ const PEER_METHODS: &[&str] = &[
     "recall.local",
     "rpc.forward",
     "fleet.view",
+    "trust.revoked",
 ];
 
 const READ_METHODS: &[&str] = &[
@@ -87,6 +88,7 @@ const READ_METHODS: &[&str] = &[
     "archive.sessions",
     "setup.get",
     "vault.status",
+    "trust.status",
 ];
 
 fn p<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T> {
@@ -117,6 +119,15 @@ impl Daemon {
                 pane: None,
                 client: client.to_string(),
                 who: "you".into(),
+            });
+        }
+        // A browser on another device that the owner signed in.
+        if let Some(device) = self.device_for_token(token) {
+            return Some(Caller {
+                authority: Authority::Owner,
+                pane: None,
+                client: client.to_string(),
+                who: format!("you (device {device})"),
             });
         }
         self.pane_by_token(token).map(|p| Caller {
@@ -684,6 +695,30 @@ impl Daemon {
             }
 
             // --------------------------------------------------- agent setup
+            // ---------------------------------------------------------- trust
+            "trust.status" => self.trust_view(),
+            "trust.approve" => self.trust_decide(s(&params, "request")?, true, &caller.who)?,
+            "trust.deny" => self.trust_decide(s(&params, "request")?, false, &caller.who)?,
+            "fleet.join" => self.fleet_join(s(&params, "station")?).await?,
+            "device.revoke" => {
+                let id = s(&params, "device")?;
+                let out = self.device_revoke(id, &caller.who)?;
+                // Tell the rest of the fleet; a station that is off learns later.
+                for peer in self.fleet.peers() {
+                    if peer.state == "online" {
+                        let _ = self
+                            .fleet
+                            .call(&peer.station, "trust.revoked", json!({"device": id}))
+                            .await;
+                    }
+                }
+                out
+            }
+            "trust.revoked" => {
+                self.device_revoked_elsewhere(s(&params, "device")?);
+                json!({"ok": true})
+            }
+
             // ---------------------------------------------------------- vault
             "vault.status" => self.vault_view(),
             "vault.refresh" => {
@@ -955,7 +990,7 @@ impl Daemon {
     }
 }
 
-fn constant_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_eq(a: &str, b: &str) -> bool {
     a.len() == b.len()
         && a.bytes()
             .zip(b.bytes())

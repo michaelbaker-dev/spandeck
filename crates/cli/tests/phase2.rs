@@ -76,14 +76,32 @@ async fn requests_without_a_token_or_from_another_origin_are_refused() {
         403
     );
 
-    // The station-to-station endpoint does not accept loopback callers or browsers.
+    // The station-to-station endpoint refuses a caller that cannot sign with
+    // the fleet key, and any browser.
     let peer = http()
         .post(s.url("/api/peer/rpc"))
         .json(&json!({"method": "station.info", "from": "x"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(peer.status().as_u16(), 403);
+    assert_eq!(peer.status().as_u16(), 401);
+    let forged = http()
+        .post(s.url("/api/peer/rpc"))
+        .header("x-spandeck-station", "x")
+        .header("x-spandeck-sig", "1.aaaa.bbbb")
+        .json(&json!({"method": "rpc.forward", "params": {"method": "pane.list"}, "from": "x"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status().as_u16(), 401);
+    let browser = http()
+        .post(s.url("/api/peer/rpc"))
+        .header("origin", &good_origin)
+        .json(&json!({"method": "station.hello", "from": "x"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(browser.status().as_u16(), 403);
 
     // An agent's own token works over HTTP too, with an agent's limits.
     let pane = tokio::task::block_in_place(|| s.fake(json!({"steps": []}), json!({})));
@@ -439,4 +457,118 @@ fn screenshots_of_every_view() {
     let phone = Page::open(&s, 390, 844);
     phone.wait("phone", "!!document.querySelector('main.phone .approval')");
     shoot(&phone, "7-phone");
+}
+
+/// 0.2 step 1, done when: a program with no device token is refused; a
+/// browser is signed in only by the owner's approval, once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_browser_is_signed_in_only_when_the_owner_approves_it() {
+    let s = tokio::task::spawn_blocking(|| Station::start("alpha"))
+        .await
+        .unwrap();
+    let post = |path: &'static str, body: Value| {
+        let url = s.url(path);
+        async move {
+            let r = http().post(url).json(&body).send().await.unwrap();
+            (
+                r.status().as_u16(),
+                r.json::<Value>().await.unwrap_or(Value::Null),
+            )
+        }
+    };
+    let (status, asked) = post("/api/device/request", json!({"name": "Mike's phone <b>"})).await;
+    assert_eq!(status, 200, "{asked}");
+    let asked = asked["result"].clone();
+    let collect = json!({"id": asked["id"], "collect": asked["collect"]});
+    assert_eq!(
+        post("/api/device/collect", collect.clone()).await.1["result"]["status"],
+        json!("waiting")
+    );
+    // Asking grants nothing.
+    assert_eq!(rpc(&s, None, None, None, "pane.list").await.0, 401);
+    // Someone who does not hold the asker's secret cannot collect.
+    let (_, wrong) = post(
+        "/api/device/collect",
+        json!({"id": asked["id"], "collect": "guess"}),
+    )
+    .await;
+    assert!(wrong["result"].is_null(), "{wrong}");
+
+    // The owner sees the request, with the same code the browser shows.
+    let view = tokio::task::block_in_place(|| s.call("trust.status", json!({})));
+    let req = &view["requests"][0];
+    assert_eq!(
+        (req["kind"].clone(), req["code"].clone()),
+        (json!("device"), asked["code"].clone())
+    );
+    assert_eq!(
+        req["name"],
+        json!("Mike's phone b"),
+        "the name is plain text"
+    );
+    tokio::task::block_in_place(|| s.call("trust.approve", json!({"request": asked["code"]})));
+
+    let (_, got) = post("/api/device/collect", collect.clone()).await;
+    let token = got["result"]["token"]
+        .as_str()
+        .expect("a token")
+        .to_string();
+    // Handed over once.
+    assert_eq!(
+        post("/api/device/collect", collect).await.1["result"]["status"],
+        json!("gone")
+    );
+    // The token is the owner's authority, and a changed one is nothing.
+    assert_eq!(rpc(&s, Some(&token), None, None, "pane.list").await.0, 200);
+    let mut forged = token.clone();
+    forged.replace_range(
+        forged.len() - 1..,
+        if token.ends_with('0') { "1" } else { "0" },
+    );
+    assert_eq!(rpc(&s, Some(&forged), None, None, "pane.list").await.0, 401);
+    // Nothing the station says or logs contains the token.
+    let log =
+        tokio::task::block_in_place(|| s.call("log.query", json!({"limit": 500}))).to_string();
+    assert!(!log.contains(&token) && !view.to_string().contains(&token));
+
+    // Revoked: refused from then on.
+    let device = tokio::task::block_in_place(|| s.call("trust.status", json!({})))["devices"][0]
+        ["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    tokio::task::block_in_place(|| s.call("device.revoke", json!({"device": device})));
+    assert_eq!(rpc(&s, Some(&token), None, None, "pane.list").await.0, 401);
+}
+
+/// 0.2 step 1: the same sign-in, as the owner meets it in a browser.
+#[test]
+fn a_new_browser_shows_a_code_and_opens_the_deck_once_it_is_approved() {
+    use common::browser::Page;
+    let s = Station::start("alpha");
+    let page = Page::open_signed_out(&s, 1100, 700);
+    page.wait(
+        "the sign-in button",
+        "!!document.querySelector('main.login button')",
+    );
+    assert!(
+        s.call("trust.status", json!({}))["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "opening the page asks for nothing by itself"
+    );
+    page.js("document.querySelector('main.login button').click()");
+    let shown = page.wait("the code", "document.querySelector('.big-code')?.innerText");
+    let waiting = wait_for("the request to reach the station", 10, || {
+        s.call("trust.status", json!({}))["requests"]
+            .get(0)
+            .cloned()
+    });
+    assert_eq!(waiting["code"], shown, "both sides show the same code");
+    s.call("trust.approve", json!({"request": waiting["id"]}));
+    page.wait("the deck to open", "!!document.querySelector('.topbar')");
+    // It is listed, and can be signed out.
+    let devices = s.call("trust.status", json!({}))["devices"].clone();
+    assert_eq!(devices.as_array().unwrap().len(), 1, "{devices}");
 }

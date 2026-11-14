@@ -36,6 +36,7 @@ pub mod rpc;
 pub mod server;
 pub mod setup;
 pub mod tasks;
+pub mod trust;
 pub mod vault;
 
 pub use daemon::{Authority, BusEvent, Caller, Daemon, Error, StartOpts, PROTOCOL, VERSION};

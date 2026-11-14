@@ -55,23 +55,25 @@ impl Station {
         Station::start_on(name, free_port(), extra, env)
     }
 
-    /// Two stations on this machine that list each other as peers. Loopback
-    /// peers are trusted only because the test says so.
+    /// Two stations on this machine that list each other as peers and are in
+    /// one fleet: they were given the same fleet key before they started.
     pub fn pair() -> (Station, Station) {
+        let (a, b) = Station::strangers(Some("5a".repeat(32)));
+        (a, b)
+    }
+
+    /// Two stations that can see each other. With no key given, each starts
+    /// its own fleet, as two fresh installs would.
+    pub fn strangers(shared_key: Option<String>) -> (Station, Station) {
         let (pa, pb) = (free_port(), free_port());
-        let env = [("SPANDECK_TRUST_LOOPBACK_PEERS", "1")];
-        let a = Station::start_on(
-            "alpha",
-            pa,
-            &format!("peers = [\"127.0.0.1:{pb}\"]\n"),
-            &env,
-        );
-        let b = Station::start_on(
-            "bravo",
-            pb,
-            &format!("peers = [\"127.0.0.1:{pa}\"]\n"),
-            &env,
-        );
+        let key = shared_key.as_deref();
+        let a = Station::start_keyed("alpha", pa, &format!("peers = [\"127.0.0.1:{pb}\"]\n"), key);
+        let b = Station::start_keyed("bravo", pb, &format!("peers = [\"127.0.0.1:{pa}\"]\n"), key);
+        let want = if key.is_some() {
+            "online"
+        } else {
+            "not_linked"
+        };
         for s in [&a, &b] {
             wait_for("the stations to find each other", 20, || {
                 let v = s.call("fleet.refresh", json!({}));
@@ -79,7 +81,7 @@ impl Station {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .filter(|x| x["state"] == json!("online"))
+                    .filter(|x| x["state"] == json!("online") || x["state"] == json!(want))
                     .count()
                     == 2)
                     .then_some(())
@@ -89,6 +91,22 @@ impl Station {
     }
 
     pub fn start_on(name: &str, port: u16, extra: &str, env: &[(&str, &str)]) -> Station {
+        let mut s = Station::prepare(name, port, extra, env);
+        s.launch();
+        s
+    }
+
+    fn start_keyed(name: &str, port: u16, extra: &str, key: Option<&str>) -> Station {
+        let mut s = Station::prepare(name, port, extra, &[]);
+        if let Some(key) = key {
+            std::fs::create_dir_all(s.root.join("state")).unwrap();
+            std::fs::write(s.root.join("state/fleet.key"), key).unwrap();
+        }
+        s.launch();
+        s
+    }
+
+    fn prepare(name: &str, port: u16, extra: &str, env: &[(&str, &str)]) -> Station {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         std::fs::create_dir_all(root.join("config")).unwrap();
@@ -112,7 +130,7 @@ impl Station {
             ),
         )
         .unwrap();
-        let mut s = Station {
+        Station {
             name: name.to_string(),
             root,
             port,
@@ -123,9 +141,7 @@ impl Station {
                 .collect(),
             _dir: Some(dir),
             scripts: std::sync::atomic::AtomicU32::new(0),
-        };
-        s.launch();
-        s
+        }
     }
 
     pub fn launch(&mut self) {
@@ -438,6 +454,15 @@ pub mod browser {
 
     impl Page {
         pub fn open(s: &Station, width: u32, height: u32) -> Page {
+            Page::open_as(s, width, height, true)
+        }
+
+        /// A browser that has never been given a token for this station.
+        pub fn open_signed_out(s: &Station, width: u32, height: u32) -> Page {
+            Page::open_as(s, width, height, false)
+        }
+
+        fn open_as(s: &Station, width: u32, height: u32, signed_in: bool) -> Page {
             let path = chrome()
                 .expect("no Chrome found: set SPANDECK_CHROME to a Chrome or Chromium binary");
             let browser = headless_chrome::Browser::new(
@@ -451,9 +476,14 @@ pub mod browser {
             )
             .unwrap();
             let tab = browser.new_tab().unwrap();
-            tab.navigate_to(&format!("{}#token={}", s.url("/"), s.token()))
-                .unwrap();
-            tab.wait_for_element(".topbar").unwrap();
+            if signed_in {
+                tab.navigate_to(&format!("{}#token={}", s.url("/"), s.token()))
+                    .unwrap();
+                tab.wait_for_element(".topbar").unwrap();
+            } else {
+                tab.navigate_to(&s.url("/")).unwrap();
+                tab.wait_for_element("main.login").unwrap();
+            }
             Page {
                 _browser: browser,
                 tab,

@@ -60,6 +60,7 @@ async function refresh() {
   const lists = await Promise.all(stations.map(st => api.on(st, 'approval.list').catch(() => [])));
   S.approvals = lists.flat();
   try { S.notes = await api.call('notify.list', { limit: 60 }); } catch (e) { /* keep */ }
+  try { S.trust = await api.call('trust.status'); } catch (e) { /* keep */ }
   update();
 }
 
@@ -74,7 +75,7 @@ api.onEvent((ev) => {
   }
   if (ev.kind === 'notify.new') notifyBrowser(ev.data);
   if (ev.kind === 'connection.restored') { for (const t of S.terms.values()) t.attach(); }
-  if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events|vault)\./.test(ev.kind)) refreshSoon();
+  if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events|vault|trust)\./.test(ev.kind)) refreshSoon();
 });
 
 function notifyBrowser(n) {
@@ -291,6 +292,38 @@ function approvalRow(a, close) {
     h('div', { class: 'row' }, reason,
       h('button', { class: 'primary', onclick: () => answer(true) }, 'Allow'),
       h('button', { class: 'danger', onclick: () => answer(false) }, 'Deny')));
+}
+
+// Stations and browsers asking to be let in. Approving one gives it control
+// of every station, so the code shown here must match the one it shows.
+function trustPanel() {
+  dialog('Stations and browsers', (close) => {
+    const t = S.trust || {};
+    const answer = (r, yes) => rpc(api.station, yes ? 'trust.approve' : 'trust.deny', { request: r.id }).then(close);
+    return h('div', {},
+      h('h3', {}, 'Asking to be let in'),
+      (t.requests || []).length ? h('div', { class: 'list' }, t.requests.map(r => h('div', { class: 'note unread' },
+        h('div', {}, h('b', {}, r.kind === 'station' ? `Station ${r.name}` : r.name), h('span', { class: 'muted' }, ` · from ${r.from}`)),
+        h('div', {}, 'It shows the code ', h('b', { class: 'code' }, r.code), '. Approve only if you started this and the codes match: it will be able to control every station.'),
+        h('div', { class: 'row end' }, h('button', { class: 'mini', onclick: () => answer(r, false) }, 'Refuse'), h('button', { class: 'mini primary', onclick: () => answer(r, true) }, 'Approve')))))
+        : h('p', { class: 'muted' }, 'Nothing is waiting.'),
+      t.outgoing ? h('p', { class: t.outgoing.problem ? 'warn-text' : '' }, t.outgoing.problem
+        ? `Joining ${t.outgoing.station}'s fleet did not finish: ${t.outgoing.problem}.`
+        : `Waiting for ${t.outgoing.station} to approve this station. It should show the code ${t.outgoing.code}.`) : null,
+      h('h3', {}, 'Browsers signed in here'),
+      (t.devices || []).length ? h('div', { class: 'list' }, t.devices.map(d => h('div', { class: 'note' },
+        h('div', { class: 'row' }, h('b', {}, d.name), h('span', { class: 'muted' }, ` · from ${d.from} · ${ago(d.approved_ms)} ago`), h('span', { class: 'grow' }),
+          h('button', { class: 'mini danger', onclick: () => rpc(api.station, 'device.revoke', { device: d.id }).then(close) }, 'Sign out')))))
+        : h('p', { class: 'muted' }, 'None. A browser on another device asks to sign in the first time it opens the Control Deck.'),
+      h('p', { class: 'muted' }, `Fleet ${t.fleet || ''}. To add a station, run "spandeck fleet --join ${api.station}" on it, then approve it here.`));
+  });
+}
+
+function joinFleet(station) {
+  rpc(api.station, 'fleet.join', { station }).then((r) => dialog(`Joining ${station}'s fleet`, () => h('div', {},
+    h('p', {}, 'This station asked to join. It shows the code ', h('b', { class: 'code' }, r.code), '.'),
+    h('p', {}, `On ${station}, open its Control Deck and approve the request with that code, or run "spandeck approve ${r.code}" there.`),
+    h('p', { class: 'muted' }, 'This station then leaves its own fleet. Browsers signed in to it sign in again.'))));
 }
 
 function approvalsPanel() {
@@ -578,6 +611,7 @@ function topbar() {
     needs ? h('span', { class: 'chip needs', title: 'Agents waiting for you' }, `${needs} need${needs === 1 ? 's' : ''} you`) : null,
     h('button', { class: S.approvals.length ? 'attn' : '', onclick: approvalsPanel }, 'Approvals', S.approvals.length ? h('span', { class: 'count' }, S.approvals.length) : null),
     h('button', { onclick: inboxPanel }, 'Inbox', unread ? h('span', { class: 'count' }, unread) : null),
+    (S.trust?.requests?.length || S.trust?.outgoing) || !isPhone() ? h('button', { class: S.trust?.requests?.length ? 'attn' : '', onclick: trustPanel, title: 'Stations and browsers allowed to control your fleet' }, 'Access', S.trust?.requests?.length ? h('span', { class: 'count' }, S.trust.requests.length) : null) : null,
     isPhone() ? null : h('button', { onclick: setupPanel, title: 'MCP servers, skills and model defaults for every agent' }, 'Agent setup'),
     isPhone() || !S.fleet.stations.some(x => x.vault?.found) ? null : h('button', { class: S.fleet.stations.some(x => x.state === 'online' && ['not_connected', 'token_rejected', 'locked'].includes(x.vault?.state)) ? 'attn' : '', onclick: vaultPanel, title: 'AgentVault: keys for agents without handing over keys' }, 'Vault'),
     h('button', { class: 'danger', onclick: stopAllMenu, title: 'Interrupt running agent turns' }, 'Stop all'),
@@ -600,6 +634,7 @@ function stationTile(s) {
       { label: 'Open ' + s.station, action: () => go(stationUrl(s.station)) },
       up && { label: 'New pane here…', action: () => newPaneDialog(s.station) },
       up && { label: 'New project here…', action: () => newProjectDialog(s.station) },
+      s.state === 'not_linked' && { label: `Join ${s.station}'s fleet…`, action: () => joinFleet(s.station) },
       up && { label: 'Stop every agent here', danger: true, action: () => rpc(api.station, 'stop.all', { scope: s.station === api.station ? 'station' : s.station }) },
     ]); },
   },
@@ -607,7 +642,7 @@ function stationTile(s) {
     up ? h('div', { class: 'tile-stats' },
       h('span', {}, h('b', {}, s.working ?? 0), ' working'), h('span', { class: s.needs_you ? 'needs' : '' }, h('b', {}, s.needs_you ?? 0), ' need you'),
       s.load != null ? h('span', { class: 'muted' }, 'load ' + Number(s.load).toFixed(1)) : null, s.keep_awake ? h('span', { class: 'chip' }, 'kept awake') : null, vaultChip(s))
-      : h('div', { class: 'tile-stats warn-text' }, s.state === 'update_needed' ? 'Needs an update before it can be controlled' : `Unreachable · last seen ${ago(s.last_seen_ms)} ago`),
+      : h('div', { class: 'tile-stats warn-text' }, s.state === 'update_needed' ? 'Needs an update before it can be controlled' : s.state === 'not_linked' ? `Not in this fleet. On ${s.station}, run "spandeck fleet --join ${api.station}", then approve it under Access.` : `Unreachable · last seen ${ago(s.last_seen_ms)} ago`),
     h('div', { class: 'tile-agents' }, agents.slice(0, 8).map(p => h('div', { class: 'agent-line' }, dot(p), h('span', {}, p.name), h('span', { class: 'muted' }, p.tool || p.needs_reason || STATE_LABEL[stateOf(p)]))),
       up && !agents.length ? h('span', { class: 'muted' }, 'No agents running') : null));
 }
@@ -770,12 +805,50 @@ function phoneView() {
     h('section', {}, h('button', { class: 'danger big wide', onclick: () => confirmBox('Stop the whole fleet?', 'Every running agent turn on every station is interrupted.', 'Stop everything', () => rpc(api.station, 'stop.all', { scope: 'fleet' })) }, 'Stop every agent in the fleet')));
 }
 
+// A browser on another device asks a station to let it in, shows the code the
+// owner must see on the other side, and waits for the answer.
+async function signIn() {
+  const post = (path, body) => fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
+  const show = (...kids) => root.replaceChildren(h('main', { class: 'login' }, h('h1', {}, 'spandeck'), ...kids));
+  const again = () => h('button', { onclick: () => { S.signIn = false; signIn(); } }, 'Ask again');
+  S.signIn = true;
+  const ua = navigator.userAgent;
+  const name = (/iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android phone' : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows PC' : /Linux/.test(ua) ? 'Linux computer' : 'A device')
+    + ' (' + (/Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'browser') + ')';
+  let asked;
+  try { asked = (await post('/api/device/request', { name })).result; } catch (e) { asked = null; }
+  if (!asked) return show(h('p', { class: 'warn-text' }, 'This station did not accept the request. Check this device is on your Tailscale account.'), again());
+  show(h('p', {}, 'Approve this browser on a station. It shows the code'),
+    h('p', { class: 'big-code' }, asked.code),
+    h('p', {}, `In a Control Deck that is already signed in, open Access and approve "${name}". Or on ${asked.station}, run:`),
+    h('p', { class: 'pre' }, `spandeck approve ${asked.code}`),
+    h('p', { class: 'muted' }, 'Approve only if the codes match. This page continues by itself.'));
+  for (;;) {
+    await new Promise(r => setTimeout(r, 2000));
+    let got;
+    try { got = (await post('/api/device/collect', { id: asked.id, collect: asked.collect })).result; } catch (e) { continue; }
+    if (!got || got.status === 'waiting') continue;
+    if (got.status === 'approved' && got.token) {
+      localStorage.setItem('spandeck.token', got.token);
+      location.reload();
+      return;
+    }
+    return show(h('p', { class: 'warn-text' }, got.status === 'denied' ? 'The request was refused.' : 'The request ran out of time.'), again());
+  }
+}
+
 // ------------------------------------------------------------------- render
 
 function render() {
   if (!api.connected && api.authError) {
-    root.replaceChildren(h('main', { class: 'login' }, h('h1', {}, 'spandeck'), h('p', {}, api.authError),
-      h('p', { class: 'muted' }, 'On this computer, run `spandeck cc` and open the address it prints. From another device, open this station by its Tailscale name while signed in to the same Tailscale account.')));
+    if (S.signIn) return;
+    const needsSignIn = /^sign in/.test(api.authError);
+    root.replaceChildren(h('main', { class: 'login' }, h('h1', {}, 'spandeck'),
+      needsSignIn ? h('p', {}, 'This browser is not signed in to your fleet yet.') : h('p', {}, api.authError),
+      needsSignIn ? h('button', { class: 'primary', onclick: signIn }, 'Sign in this browser') : null,
+      h('p', { class: 'muted' }, needsSignIn
+        ? 'You approve it once, on a station or in a Control Deck that is already signed in. On the station itself you can instead run "spandeck cc" and open the address it prints.'
+        : 'On this computer, run "spandeck cc" and open the address it prints. From another device, open this station by its Tailscale name while signed in to the same Tailscale account.')));
     return;
   }
   closeMenu();

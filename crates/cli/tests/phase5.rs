@@ -14,6 +14,95 @@ use serde_json::{json, Value};
 const SIGSTOP: i32 = if cfg!(target_os = "macos") { 17 } else { 19 };
 const SIGCONT: i32 = if cfg!(target_os = "macos") { 19 } else { 18 };
 
+/// 0.2 step 1, done when: a station without the fleet key is refused by every
+/// station call; two stations join with one approval.
+#[test]
+fn a_station_joins_the_fleet_only_when_the_owner_approves_it_there() {
+    let (a, b) = Station::strangers(None);
+    let state_of = |s: &Station, name: &str| {
+        s.call("fleet.refresh", json!({}))["stations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["station"] == json!(name))
+            .map(|x| x["state"].clone())
+    };
+    assert_eq!(state_of(&a, "bravo"), Some(json!("not_linked")));
+    // Seeing a station is not controlling it.
+    let err = a
+        .try_call(
+            "peer.call",
+            json!({"station": "bravo", "method": "pane.list", "params": {}}),
+        )
+        .unwrap_err();
+    assert!(err.message.contains("not in this fleet"), "{}", err.message);
+    assert!(b
+        .call("pane.list", json!({}))
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // bravo asks to join alpha's fleet. Both sides show the same code.
+    let asked = b.call("fleet.join", json!({"station": "alpha"}));
+    let waiting = a.call("trust.status", json!({}));
+    let req = &waiting["requests"][0];
+    assert_eq!(
+        (
+            req["kind"].clone(),
+            req["name"].clone(),
+            req["code"].clone()
+        ),
+        (json!("station"), json!("bravo"), asked["code"].clone())
+    );
+    // Until alpha's owner says yes, nothing changes.
+    std::thread::sleep(Duration::from_millis(1800));
+    assert_eq!(state_of(&b, "alpha"), Some(json!("not_linked")));
+
+    a.call("trust.approve", json!({"request": asked["code"]}));
+    wait_for("bravo to take the fleet key", 15, || {
+        (state_of(&b, "alpha") == Some(json!("online"))).then_some(())
+    });
+    assert_eq!(
+        a.call("trust.status", json!({}))["fleet"],
+        b.call("trust.status", json!({}))["fleet"]
+    );
+    wait_for("alpha to see bravo in the fleet", 15, || {
+        (state_of(&a, "bravo") == Some(json!("online"))).then_some(())
+    });
+    let panes = a.call(
+        "peer.call",
+        json!({"station": "bravo", "method": "pane.list", "params": {}}),
+    );
+    assert!(panes.is_array());
+    // The key itself is never shown.
+    let key = std::fs::read_to_string(a.root.join("state/fleet.key")).unwrap();
+    for s in [&a, &b] {
+        let said = format!(
+            "{}{}",
+            s.call("trust.status", json!({})),
+            s.call("log.query", json!({"limit": 500}))
+        );
+        assert!(!said.contains(key.trim()));
+    }
+}
+
+/// A refused request hands over nothing.
+#[test]
+fn a_refused_station_stays_out() {
+    let (a, b) = Station::strangers(None);
+    let asked = b.call("fleet.join", json!({"station": "alpha"}));
+    a.call("trust.deny", json!({"request": asked["code"]}));
+    wait_for("bravo to hear the refusal", 15, || {
+        b.call("trust.status", json!({}))["outgoing"]["problem"]
+            .as_str()
+            .map(String::from)
+    });
+    assert_ne!(
+        a.call("trust.status", json!({}))["fleet"],
+        b.call("trust.status", json!({}))["fleet"]
+    );
+}
+
 #[test]
 fn two_stations_find_each_other_and_one_deck_controls_both() {
     let (a, b) = Station::pair();
@@ -339,7 +428,7 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
 /// Run with `cargo test -- --ignored live_tailscale`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
-async fn live_tailscale_identity_trusts_the_same_login_without_a_token() {
+async fn live_tailscale_a_local_program_needs_a_token_and_stations_need_the_fleet_key() {
     let status: Value = serde_json::from_slice(
         &std::process::Command::new("tailscale")
             .args(["status", "--json"])
@@ -372,15 +461,39 @@ async fn live_tailscale_identity_trusts_the_same_login_without_a_token() {
         s.launch();
     });
     let client = reqwest::Client::new();
-    // Over the tailnet address: no token, identified as the owner by whois.
-    let r = client
-        .post(format!("http://{ip}:{port}/api/rpc"))
-        .json(&json!({"method": "station.doctor", "params": {}}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status().as_u16(), 200);
-    let body: Value = r.json().await.unwrap();
+    let token = s.token();
+    let rpc = |host: String, token: Option<String>, method: &'static str| {
+        let client = client.clone();
+        async move {
+            let mut req = client
+                .post(format!("http://{host}/api/rpc"))
+                .json(&json!({"method": method, "params": {}}));
+            if let Some(t) = token {
+                req = req.bearer_auth(t);
+            }
+            let r = req.send().await.unwrap();
+            (
+                r.status().as_u16(),
+                r.json::<Value>().await.unwrap_or(Value::Null),
+            )
+        }
+    };
+    // Tailscale says which device is calling, not which program. A program on
+    // this machine calling the station's own Tailscale address gets nothing
+    // without a token, exactly as on localhost.
+    assert_eq!(
+        rpc(format!("{ip}:{port}"), None, "station.info").await.0,
+        401
+    );
+    assert_eq!(
+        rpc(format!("127.0.0.1:{port}"), None, "station.info")
+            .await
+            .0,
+        401
+    );
+    // With the token it is the owner, and the station sees Tailscale.
+    let (status, body) = rpc(format!("{ip}:{port}"), Some(token), "station.doctor").await;
+    assert_eq!(status, 200, "{body}");
     let ts = body["result"]["checks"]
         .as_array()
         .unwrap()
@@ -389,24 +502,28 @@ async fn live_tailscale_identity_trusts_the_same_login_without_a_token() {
         .unwrap()
         .clone();
     assert_eq!(ts["ok"], json!(true), "{ts}");
-    // The same station on loopback still needs a token.
-    let r = client
-        .post(format!("http://127.0.0.1:{port}/api/rpc"))
-        .json(&json!({"method": "station.info", "params": {}}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status().as_u16(), 401);
-    // And the tailnet address answers station-to-station calls from this login.
-    let r = client
-        .post(format!("http://{ip}:{port}/api/peer/rpc"))
-        .json(&json!({"method": "station.info", "from": "probe"}))
-        .send()
-        .await
-        .unwrap();
+    // The tailnet address says who it is to a device under this login, and
+    // refuses station calls that are not signed with the fleet key.
+    let peer = |method: &'static str| {
+        let client = client.clone();
+        let url = format!("http://{ip}:{port}/api/peer/rpc");
+        async move {
+            let r = client
+                .post(url)
+                .json(&json!({"method": method, "from": "probe"}))
+                .send()
+                .await
+                .unwrap();
+            (
+                r.status().as_u16(),
+                r.json::<Value>().await.unwrap_or(Value::Null),
+            )
+        }
+    };
     assert_eq!(
-        r.json::<Value>().await.unwrap()["result"]["station"],
+        peer("station.hello").await.1["result"]["station"],
         json!("live")
     );
+    assert_eq!(peer("station.info").await.0, 401);
     drop(tokio::task::spawn_blocking(move || drop(s)).await);
 }

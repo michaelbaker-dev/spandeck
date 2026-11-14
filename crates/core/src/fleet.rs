@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ pub struct Peer {
     pub addr: String,
     pub version: String,
     pub protocol: u32,
-    /// online | unreachable | update_needed
+    /// online | unreachable | update_needed | not_linked
     pub state: String,
     pub last_seen_ms: u64,
     /// Its own `station.info`, as of last contact.
@@ -54,14 +54,13 @@ pub struct FleetState {
     peers: Mutex<BTreeMap<String, Peer>>,
     whois: Mutex<HashMap<IpAddr, (u64, Remote)>>,
     me: Mutex<Option<(u64, Option<TailnetSelf>)>>,
-    /// Tests and single-machine development only: treat peers on loopback as
-    /// trusted stations. Never set this on a real station.
-    pub trust_loopback_peers: bool,
+    /// Signs calls to other stations with the fleet key.
+    pub trust: Arc<crate::trust::TrustState>,
     pub station: String,
 }
 
 impl FleetState {
-    pub fn new(cfg: &Config) -> FleetState {
+    pub fn new(cfg: &Config, trust: Arc<crate::trust::TrustState>) -> FleetState {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .connect_timeout(Duration::from_millis(1500))
@@ -72,8 +71,7 @@ impl FleetState {
             peers: Mutex::new(BTreeMap::new()),
             whois: Mutex::new(HashMap::new()),
             me: Mutex::new(None),
-            trust_loopback_peers: std::env::var("SPANDECK_TRUST_LOOPBACK_PEERS")
-                .is_ok_and(|v| v == "1"),
+            trust,
             station: cfg.station.clone(),
         }
     }
@@ -199,11 +197,42 @@ impl FleetState {
         method: &str,
         params: Value,
     ) -> std::result::Result<Value, String> {
-        let resp = self
+        self.post(addr, method, params, true).await
+    }
+
+    /// A call any device under the owner's login may make without the fleet
+    /// key: who are you, and asking to join.
+    pub async fn call_open(
+        &self,
+        addr: &str,
+        method: &str,
+        params: Value,
+    ) -> std::result::Result<Value, String> {
+        self.post(addr, method, params, false).await
+    }
+
+    async fn post(
+        &self,
+        addr: &str,
+        method: &str,
+        params: Value,
+        signed: bool,
+    ) -> std::result::Result<Value, String> {
+        let body =
+            json!({"method": method, "params": params, "from": self.station, "protocol": PROTOCOL})
+                .to_string()
+                .into_bytes();
+        let mut req = self
             .http
             .post(format!("http://{addr}/api/peer/rpc"))
             .header("x-spandeck-station", &self.station)
-            .json(&json!({"method": method, "params": params, "from": self.station, "protocol": PROTOCOL}))
+            .header("content-type", "application/json");
+        if signed {
+            // The signature covers the exact bytes sent.
+            req = req.header("x-spandeck-sig", self.trust.sign("rpc", &body));
+        }
+        let resp = req
+            .body(body)
             .send()
             .await
             .map_err(|e| format!("unreachable: {e}"))?;
@@ -276,7 +305,8 @@ fn tailscale_whois(ip: IpAddr) -> Option<Value> {
 
 impl Daemon {
     /// Find stations: every online device under the same login is asked whether
-    /// it runs spandeck. No pairing step.
+    /// it runs spandeck. Only those holding the same fleet key are trusted;
+    /// the rest are listed as not linked until the owner joins them.
     pub(crate) async fn discover_peers(&self) {
         let mut candidates: Vec<String> = self.cfg.peers.clone();
         if self.cfg.discovery {
@@ -318,10 +348,27 @@ impl Daemon {
         let probes = candidates.iter().map(|addr| {
             let addr = addr.clone();
             async move {
-                let r = tokio::time::timeout(
-                    Duration::from_millis(2500),
-                    self.fleet.call_addr(&addr, "station.info", json!({})),
-                )
+                let r = tokio::time::timeout(Duration::from_millis(2500), async {
+                    let hello = self
+                        .fleet
+                        .call_open(&addr, "station.hello", json!({}))
+                        .await;
+                    match hello {
+                        // Same fleet: ask for the full picture, signed.
+                        Ok(h)
+                            if h.get("fleet").and_then(|f| f.as_str())
+                                == Some(self.trust.fleet_id().as_str()) =>
+                        {
+                            self.fleet.call_addr(&addr, "station.info", json!({})).await
+                        }
+                        Ok(mut h) => {
+                            h["not_linked"] = json!(true);
+                            Ok(h)
+                        }
+                        // A station from before fleets existed still answers this.
+                        Err(_) => self.fleet.call_addr(&addr, "station.info", json!({})).await,
+                    }
+                })
                 .await;
                 (addr, r.ok().and_then(|r| r.ok()))
             }
@@ -345,7 +392,9 @@ impl Daemon {
                     continue;
                 }
                 let protocol = info.get("protocol").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
-                let state = if protocol == PROTOCOL {
+                let state = if info.get("not_linked").is_some() {
+                    "not_linked"
+                } else if protocol == PROTOCOL {
                     "online"
                 } else {
                     "update_needed"
