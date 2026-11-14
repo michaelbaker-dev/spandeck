@@ -139,3 +139,121 @@ fn the_state_folder_is_kept_to_this_user() {
         "nothing is inherited from the folder above:\n{listing}"
     );
 }
+
+/// A stand-in for the release page: `/latest` redirects to the tag, and the
+/// zip and its checksum are served from memory.
+fn release_server(zip: Vec<u8>, checksum: String) -> u16 {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let (zip, checksum) = (zip.clone(), checksum.clone());
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                let _ = reader.read_line(&mut first);
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                    line.clear();
+                }
+                let mut parts = first.split_whitespace();
+                let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+                let (status, extra, body): (&str, String, Vec<u8>) = if path == "/latest" {
+                    ("302 Found", "Location: /tag/v9.9.9\r\n".into(), vec![])
+                } else if path == "/tag/v9.9.9" {
+                    ("200 OK", String::new(), vec![])
+                } else if path.ends_with(".zip") {
+                    ("200 OK", String::new(), zip)
+                } else if path.ends_with(".zip.sha256") {
+                    ("200 OK", String::new(), checksum.into_bytes())
+                } else {
+                    ("404 Not Found", String::new(), vec![])
+                };
+                let mut stream = stream;
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\n{extra}Content-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                if method != "HEAD" {
+                    let _ = stream.write_all(&body);
+                }
+            });
+        }
+    });
+    port
+}
+
+/// install.ps1, in Windows PowerShell, against a local release: it finds the
+/// latest version, checks the download against its checksum, and puts the
+/// programs in the folder named. It is told not to touch the PATH or set up
+/// start at log on, so nothing of the machine's own is changed. A release
+/// whose checksum does not match installs nothing.
+#[test]
+fn install_ps1_installs_a_release_that_matches_its_checksum_and_no_other() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let name = "spandeck-v9.9.9-x86_64-pc-windows-msvc";
+    let stage = dir.path().join(name);
+    std::fs::create_dir_all(&stage).unwrap();
+    for exe in ["spandeck.exe", "sd.exe"] {
+        std::fs::copy(SPANDECK, stage.join(exe)).unwrap();
+    }
+    let zip = dir.path().join("release.zip");
+    let made = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command"])
+        .arg(format!(
+            "Compress-Archive -Path '{}' -DestinationPath '{}'",
+            stage.display(),
+            zip.display()
+        ))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let bytes = std::fs::read(&zip).unwrap();
+    let hash: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/install.ps1");
+    let install = |port: u16, to: &std::path::Path| {
+        std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .env("SPANDECK_RELEASES", format!("http://127.0.0.1:{port}"))
+            .env("SPANDECK_BIN_DIR", to)
+            .env("SPANDECK_NO_SERVICE", "1")
+            .env("SPANDECK_NO_PATH", "1")
+            .env_remove("SPANDECK_VERSION")
+            .output()
+            .unwrap()
+    };
+
+    let good = release_server(bytes.clone(), format!("{hash}  {name}.zip\n"));
+    let to = dir.path().join("bin");
+    for round in ["a first install", "over a copy already there"] {
+        let out = install(good, &to);
+        let said = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{round}: {said}");
+        assert!(said.contains("checksum verified"), "{round}: {said}");
+        let ran = std::process::Command::new(to.join("spandeck.exe"))
+            .arg("handoff-check")
+            .output()
+            .unwrap();
+        assert!(ran.status.success(), "{round}: the installed program runs");
+        assert!(to.join("sd.exe").is_file());
+    }
+
+    let bad = release_server(bytes, format!("{}  {name}.zip\n", "0".repeat(64)));
+    let nowhere = dir.path().join("bin-bad");
+    let out = install(bad, &nowhere);
+    assert!(!out.status.success());
+    assert!(!nowhere.join("spandeck.exe").exists());
+}

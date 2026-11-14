@@ -105,14 +105,7 @@ async fn requests_without_a_token_or_from_another_origin_are_refused() {
 
     // An agent's own token works over HTTP too, with an agent's limits.
     let pane = tokio::task::block_in_place(|| s.fake(json!({"steps": []}), json!({})));
-    let pane_token = std::process::Command::new("sqlite3")
-        .arg(s.root.join("state/spandeck.db"))
-        .arg(format!("SELECT token FROM panes WHERE id='{pane}'"))
-        .output()
-        .unwrap();
-    let pane_token = String::from_utf8_lossy(&pane_token.stdout)
-        .trim()
-        .to_string();
+    let pane_token = s.pane_token(&pane);
     assert_eq!(
         rpc(&s, Some(&pane_token), None, None, "pane.list").await.0,
         200
@@ -125,6 +118,7 @@ async fn requests_without_a_token_or_from_another_origin_are_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 async fn a_websocket_must_authenticate_in_its_first_message() {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};

@@ -1078,12 +1078,12 @@ function addMachineDialog() {
       h('div', { class: 'row end' }, closeBtn('Not now'), h('button', { class: 'primary', onclick: () => api.call('fleet.add_enable', { on: true }).then(() => { info = null; redraw(); load(); }).catch((e) => toast(e.message, 'error')) }, `Turn it on for ${info.station}`))];
     if (info.error || !info.tailscale) return [h('p', { class: 'warn-text' }, info.error || `Tailscale is not answering on ${info.station}, so your machines cannot be listed.`), h('div', { class: 'row end' }, closeBtn())];
     if (!info.machines.length) return [
-      h('p', {}, 'No Mac or Linux machine under your Tailscale login is online that is not already a station.'),
-      h('p', { class: 'muted' }, 'Phones, Windows and tagged machines are not listed. A machine that is asleep is listed once it wakes.'),
+      h('p', {}, 'No Mac, Linux or Windows machine under your Tailscale login is online that is not already a station.'),
+      h('p', { class: 'muted' }, 'Phones and tagged machines are not listed. A machine that is asleep is listed once it wakes. A Windows machine needs its OpenSSH server turned on first.'),
       h('div', { class: 'row end' }, h('button', { onclick: () => { info = null; redraw(); load(); } }, 'Look again'), closeBtn())];
     const m = info.machines.find(x => x.id === picked);
     return [
-      h('p', { class: 'muted' }, 'Your Mac and Linux machines that are online and not stations yet:'),
+      h('p', { class: 'muted' }, 'Your Mac, Linux and Windows machines that are online and not stations yet:'),
       h('div', { class: 'list' }, info.machines.map(x => h('button', { class: 'list-row add-machine' + (x.id === picked ? ' first' : ''), type: 'button', 'aria-pressed': x.id === picked, onclick: () => { picked = x.id; redraw(); user.focus(); } },
         h('b', {}, x.name), h('span', { class: 'muted' }, `${x.os} · ${x.address}`), x.tailscale_ssh ? h('span', { class: 'chip ok', title: 'Tailscale SSH is on there, so no password is needed' }, 'Tailscale SSH') : null))),
       m ? form(field(`Your user name on ${m.name}`, user, `${info.station} connects to ${m.name} over SSH as this user and runs the spandeck install script there. If Tailscale SSH or an SSH key already lets it in, no password is asked.`),

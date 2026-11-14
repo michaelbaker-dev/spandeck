@@ -28,6 +28,8 @@ use crate::paths::{new_id, now_ms, random_token};
 /// The script the README tells a person to run. The same text is sent to the
 /// machine being added, so the two cannot drift apart.
 const INSTALL_SH: &str = include_str!("../../../scripts/install.sh");
+/// The same for a Windows machine.
+const INSTALL_PS1: &str = include_str!("../../../scripts/install.ps1");
 
 /// How long one add may take from connecting to the join request.
 const ADD_TIMEOUT: Duration = Duration::from_secs(600);
@@ -124,8 +126,8 @@ fn host_of(addr: &str) -> &str {
     addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr)
 }
 
-/// Mac and Linux machines under the owner's login that are online and are
-/// not stations. Phones, tagged machines, shared machines and Windows are out.
+/// Mac, Linux and Windows machines under the owner's login that are online
+/// and are not stations. Phones, tagged machines and shared machines are out.
 fn candidates(status: &Value, stations: &[Peer]) -> Vec<Candidate> {
     let Some(me) = status.pointer("/Self/UserID").and_then(|u| u.as_i64()) else {
         return vec![];
@@ -154,7 +156,7 @@ fn candidates(status: &Value, stations: &[Peer]) -> Vec<Candidate> {
             || !truthy(peer, "Online")
             || truthy(peer, "ShareeNode")
             || filled(peer, "Tags")
-            || !matches!(os.as_str(), "macOS" | "linux")
+            || !matches!(os.as_str(), "macOS" | "linux" | "windows")
         {
             continue;
         }
@@ -198,7 +200,12 @@ fn candidates(status: &Value, stations: &[Peer]) -> Vec<Candidate> {
         out.push(Candidate {
             id,
             name,
-            os: if os == "macOS" { "macOS" } else { "Linux" }.to_string(),
+            os: match os.as_str() {
+                "macOS" => "macOS",
+                "windows" => "Windows",
+                _ => "Linux",
+            }
+            .to_string(),
             address: address.to_string(),
             tailscale_ssh: filled(peer, "sshHostKeys"),
         });
@@ -373,13 +380,18 @@ impl Daemon {
         let known = self.known_hosts_file().display().to_string();
         let changed = self.add_update(id, |j| {
             let name = &j.name;
+            let windows = j.os == "Windows";
             let text = match kind {
+                "ssh_off" if windows => format!("The OpenSSH server is not installed or not running on {name}: on that machine open Settings, System, Optional features, add OpenSSH Server, then in a PowerShell window run as administrator: Start-Service sshd; Set-Service sshd -StartupType Automatic. Then try again."),
+                "blocked" => format!("Windows on {name} refused to run spandeck: Smart App Control (or another application control policy) blocks programs it does not know, and spandeck's releases are not signed. spandeck was downloaded there but cannot run until that is turned off in Windows Security, App & browser control, Smart App Control settings; Windows does not let it be turned on again without a reset, so that is yours to decide."),
+                "start" if windows => format!("spandeck was installed on {name} but did not start: it starts when you log on there, so log on at that machine (a Windows station runs only while you are logged on), or run `spandeck daemon` there to see why."),
+                "no_password_login" if windows => format!("{name} refused without asking for a password, so its OpenSSH server does not take passwords: allow PasswordAuthentication in C:\\ProgramData\\ssh\\sshd_config there, or give this station's SSH key access (for an administrator account that is C:\\ProgramData\\ssh\\administrators_authorized_keys), then try again."),
                 "ssh_off" => format!("SSH is not turned on on {name}: on a Mac turn on Remote Login in System Settings, General, Sharing; on Linux install and start the SSH server; or turn on Tailscale SSH there; then try again."),
                 "wrong_password" => format!("{name} did not accept that user name and password: check both and try again."),
                 "no_password_login" => format!("{name} refused without asking for a password, so it does not take passwords over SSH: turn on password login or Tailscale SSH there, or give this station's SSH key access, then try again."),
                 "unreachable" => format!("{name} did not answer, so it is probably asleep or off: wake it, check that Tailscale is connected there, and try again."),
                 "host_key" => format!("{name} answered with a different SSH host key than the one saved for it before, so nothing was sent: if that machine was reinstalled, delete the line for {} from {known} and try again; if it was not, do not connect.", j.address),
-                "unsupported" => format!("spandeck has no release for {name}'s system: it runs on macOS and Linux, on Apple silicon, arm64 and x86-64."),
+                "unsupported" => format!("spandeck has no release for {name}'s system: it runs on macOS and Linux on Apple silicon, arm64 and x86-64, and on Windows on x86-64."),
                 "network" => format!("{name} could not reach GitHub to download spandeck: check its internet connection and try again."),
                 "install" => format!("The install script failed on {name}: its last lines are below, and the install command in the README, run on that machine, shows the same."),
                 "start" => format!("spandeck was installed on {name} but did not start: on that machine run `spandeck daemon` to see why."),
@@ -628,11 +640,28 @@ impl Daemon {
                 "-l",
                 "{user}",
                 "{host}",
-                "sh",
-                "-s",
             ]
             .iter()
             .map(|s| s.to_string())
+            // What reads the script there. Windows: PowerShell reads all of
+            // standard input, then runs it. The line has no `$` and no
+            // quote of its own inside, so it means the same whether that
+            // machine's OpenSSH hands it to cmd.exe (the default) or to
+            // PowerShell.
+            .chain(if job.os == "Windows" {
+                vec![
+                    "powershell".to_string(),
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-ExecutionPolicy".to_string(),
+                    "Bypass".to_string(),
+                    "-Command".to_string(),
+                    WINDOWS_READS_STDIN.to_string(),
+                ]
+            } else {
+                vec!["sh".to_string(), "-s".to_string()]
+            })
             .collect()
         });
         template
@@ -649,7 +678,10 @@ impl Daemon {
     /// login, then the join request. Lines that begin `@spandeck` tell this
     /// station how far it got. It only uses commands every release has, since
     /// the release it installs may be older than this station.
-    fn add_script(&self, join: JoinBy) -> String {
+    fn add_script(&self, join: JoinBy, os: &str) -> String {
+        if os == "Windows" {
+            return self.add_script_windows(join);
+        }
         let releases = match &self.cfg.update.url {
             Some(url) if !url.contains('\'') => {
                 format!("SPANDECK_RELEASES='{}'\n", url.trim_end_matches('/'))
@@ -716,6 +748,92 @@ main </dev/null
         )
     }
 
+    /// What runs on a Windows machine: the same steps in Windows PowerShell
+    /// 5.1, with `install.ps1` inside it. The start step registers the task
+    /// that starts spandeck at log on and runs it; a Windows station runs in
+    /// the owner's logged-on session, never in the SSH session, which ends.
+    fn add_script_windows(&self, join: JoinBy) -> String {
+        windows_script(&self.station, self.cfg.update.url.as_deref(), join)
+    }
+}
+
+/// The line a Windows machine is given over SSH: PowerShell reads all of
+/// standard input, then runs it as one script.
+const WINDOWS_READS_STDIN: &str = "\"[Console]::In.ReadToEnd() | Invoke-Expression\"";
+
+fn windows_script(station: &str, releases: Option<&str>, join: JoinBy) -> String {
+    {
+        let releases = match releases {
+            Some(url) if !url.contains('\'') => {
+                format!("$env:SPANDECK_RELEASES = '{}'\n", url.trim_end_matches('/'))
+            }
+            _ => String::new(),
+        };
+        let join_lines = match join {
+            JoinBy::Code => format!(
+                r#"$out = (& $bin --json fleet --join '{station}' 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0) {{ Write-Output $out; Fail 'join' }}
+if ($out -match '"code":\s*"([A-Z0-9]+)"') {{ Say "code $($Matches[1])" }} else {{ Fail 'join' }}"#
+            ),
+        };
+        format!(
+            r#"$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+function Say($m) {{ Write-Output "@spandeck $m" }}
+function Fail($kind) {{ Say "fail $kind"; exit 1 }}
+# Smart App Control, or another policy, refusing a program it does not know.
+function Blocked($e) {{ return ("$e" -match 'Application Control|blocked by|0x800711C7|4551') }}
+Say 'step install'
+$arch = if ($env:PROCESSOR_ARCHITEW6432) {{ $env:PROCESSOR_ARCHITEW6432 }} else {{ $env:PROCESSOR_ARCHITECTURE }}
+if ($arch -ne 'AMD64') {{ Write-Output "This machine's processor is $arch. There is no spandeck release for it."; Fail 'unsupported' }}
+{releases}if (-not $env:SPANDECK_RELEASES) {{ $env:SPANDECK_RELEASES = 'https://github.com/michaelbaker-dev/spandeck/releases' }}
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+try {{
+    $probe = [Net.WebRequest]::Create("$($env:SPANDECK_RELEASES)/latest"); $probe.Method = 'HEAD'; $probe.Timeout = 20000
+    $probe.GetResponse().Close()
+}} catch {{ Write-Output "This machine could not reach $($env:SPANDECK_RELEASES)"; Fail 'network' }}
+# The install script sets up start at log on itself; here that is its own step.
+$env:SPANDECK_NO_SERVICE = '1'
+$install = @'
+{INSTALL_PS1}
+'@
+try {{ & ([scriptblock]::Create($install)) }}
+catch {{
+    Write-Output "$_"
+    if ("$_" -match '\(404\)') {{ Fail 'unsupported' }}
+    Fail 'install'
+}}
+# From here programs are run and their exit codes read: what one writes to
+# its error output must not count as this script failing (it does in 5.1).
+$ErrorActionPreference = 'Continue'
+$binDir = if ($env:SPANDECK_BIN_DIR) {{ $env:SPANDECK_BIN_DIR }} else {{ Join-Path $env:LOCALAPPDATA 'Programs\spandeck' }}
+$bin = Join-Path $binDir 'spandeck.exe'
+Say 'step start'
+try {{ & $bin service --install | Out-Null }}
+catch {{ Write-Output "$_"; if (Blocked $_) {{ Fail 'blocked' }}; Fail 'start' }}
+if ($LASTEXITCODE -ne 0) {{ Fail 'start' }}
+$task = Join-Path (Join-Path $env:APPDATA 'spandeck') 'start-at-login.ps1'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $task
+if ($LASTEXITCODE -ne 0) {{ Write-Output 'The task that starts spandeck at log on could not be registered.'; Fail 'start' }}
+$n = 0
+while ($true) {{
+    $ok = $false
+    try {{ & $bin status *> $null; $ok = ($LASTEXITCODE -eq 0) }} catch {{ if (Blocked $_) {{ Write-Output "$_"; Fail 'blocked' }} }}
+    if ($ok) {{ break }}
+    $n++
+    if ($n -gt 30) {{ Write-Output 'spandeck was installed but did not start. It starts when you are logged on at this machine.'; Fail 'start' }}
+    Start-Sleep -Seconds 1
+}}
+Write-Output 'spandeck is running.'
+Say 'step join'
+{join_lines}
+exit 0
+"#
+        )
+    }
+}
+
+impl Daemon {
     /// Connect, install, start and ask to join. `Ok` is the join code the new
     /// station shows; `Err` is the kind of problem.
     async fn add_install(
@@ -776,7 +894,7 @@ main </dev/null
             .spawn()
             .map_err(|_| "no_ssh")?;
         if let Some(mut stdin) = child.stdin.take() {
-            let script = self.add_script(join);
+            let script = self.add_script(join, &job.os);
             tokio::spawn(async move {
                 let _ = stdin.write_all(script.as_bytes()).await;
                 let _ = stdin.shutdown().await;
@@ -827,6 +945,7 @@ main </dev/null
                     ("code", c) => code = Some(c.to_string()),
                     ("fail", kind) => {
                         failed = Some(match kind {
+                            "blocked" => "blocked",
                             "unsupported" => "unsupported",
                             "network" => "network",
                             "start" => "start",
@@ -1016,5 +1135,50 @@ mod tests {
             ),
             "connect"
         );
+    }
+
+    /// The script a Windows machine is sent, run the way it arrives there:
+    /// through cmd.exe (OpenSSH's default shell on Windows), into a
+    /// PowerShell that reads it from standard input. With the release
+    /// address pointing nowhere it must parse as a whole, say where it is,
+    /// and stop at the network check: nothing is installed and nothing on
+    /// this machine is changed.
+    #[test]
+    #[cfg_attr(not(windows), ignore = "needs Windows PowerShell")]
+    fn the_windows_script_runs_from_standard_input_and_reports_its_steps() {
+        use std::io::Write;
+        let script = windows_script("alpha", Some("http://127.0.0.1:9"), JoinBy::Code);
+        let line = format!(
+            "powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command {WINDOWS_READS_STDIN}"
+        );
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/d", "/s", "/c", &line])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).to_string();
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(said.contains("@spandeck step install"), "{said}\n{err}");
+        assert!(said.contains("@spandeck fail network"), "{said}\n{err}");
+        assert!(!said.contains("@spandeck step start"), "{said}");
+        assert_eq!(out.status.code(), Some(1), "{said}\n{err}");
+    }
+
+    /// The script holds install.ps1 between `@'` and `'@`: a line in it that
+    /// began with `'@` would end the text early and run the rest as code.
+    #[test]
+    fn install_ps1_can_be_carried_inside_the_windows_script() {
+        assert!(!INSTALL_PS1.lines().any(|l| l.starts_with("'@")));
+        let script = windows_script("alpha", None, JoinBy::Code);
+        assert!(script.contains("fleet --join 'alpha'"));
     }
 }

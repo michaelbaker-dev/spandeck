@@ -166,9 +166,11 @@ there.
    **Turn it on**. It is off by default because it lets that station run commands on your
    other machines; only you can turn it on, and you can turn it off again from the same
    dialog. (`add_machines = true` in that station's `config.toml` does the same.)
-2. Click the tile and pick a machine. It lists the Mac and Linux machines under your
-   Tailscale login that are online and not stations yet (no phones, Windows or tagged
-   machines).
+2. Click the tile and pick a machine. It lists the Mac, Linux and Windows machines under
+   your Tailscale login that are online and not stations yet (no phones or tagged
+   machines). A Windows machine needs its OpenSSH server on (Settings, System, Optional
+   features, OpenSSH Server; then `Start-Service sshd`), and you logged on there: a Windows
+   station runs in your logged-on session.
 3. Give your user name on that machine. If Tailscale SSH is on there, or the station
    already has an SSH key that works, nothing more is asked. Otherwise you are asked for
    the password. It is used for that one connection and is not saved or logged.

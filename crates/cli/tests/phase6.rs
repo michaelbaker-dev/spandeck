@@ -18,7 +18,7 @@ fn project(
     let mut toml = format!("name = \"{name}\"\n{extra}\n");
     for (role, placement, script) in roles {
         let path = s.script_file(script);
-        toml.push_str(&format!("[roles.{role}]\nagent = \"fake\"\nplacement = \"{placement}\"\nargs = [\"--script\", \"{}\"]\n", path.display()));
+        toml.push_str(&format!("[roles.{role}]\nagent = \"fake\"\nplacement = \"{placement}\"\nargs = [\"--script\", '{}']\n", path.display()));
     }
     std::fs::create_dir_all(repo.join(".spandeck")).unwrap();
     std::fs::write(repo.join(".spandeck/project.toml"), toml).unwrap();
@@ -708,15 +708,7 @@ fn the_mcp_server_gives_an_agent_the_spandeck_tools() {
         "msg.send",
         json!({"to": "mcp-user", "body": "hello over mcp"}),
     );
-    let token = String::from_utf8(
-        std::process::Command::new("sqlite3")
-            .arg(s.root.join("state/spandeck.db"))
-            .arg(format!("SELECT token FROM panes WHERE id='{pane}'"))
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
+    let token = s.pane_token(&pane);
     let mut child = std::process::Command::new(SPANDECK)
         .arg("mcp")
         .env("SPANDECK_STATE_DIR", s.root.join("state"))

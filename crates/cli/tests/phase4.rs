@@ -135,6 +135,7 @@ fn a_project_created_closed_and_reopened_restores_its_panes_and_agents() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn a_folder_that_already_has_a_definition_is_registered_as_it_is() {
     let s = Station::start("alpha");
     let repo = s.git_repo("kept");

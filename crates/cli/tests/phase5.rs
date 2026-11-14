@@ -261,6 +261,7 @@ fn two_stations_find_each_other_and_one_deck_controls_both() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 async fn a_pane_on_another_station_is_attached_through_the_gateway() {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -1164,7 +1165,8 @@ exec env -i PATH={remote_bin}:/usr/bin:/bin HOME={c}/home SPANDECK_STATE_DIR={c}
         .iter()
         .map(|m| m["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["charlie", "studio"], "{listed}");
+    // Windows machines are listed since they can be stations (14 Nov 2026).
+    assert_eq!(names, ["charlie", "studio", "winbox"], "{listed}");
     assert_eq!(listed["machines"][1]["tailscale_ssh"], json!(true));
 
     // Only the owner, at this station: not an agent, and not through another station.
@@ -1247,7 +1249,13 @@ exec env -i PATH={remote_bin}:/usr/bin:/bin HOME={c}/home SPANDECK_STATE_DIR={c}
     );
     // A station is no longer a machine to add.
     let listed = a.call("fleet.candidates", json!({}));
-    assert_eq!(listed["machines"].as_array().unwrap().len(), 1, "{listed}");
+    let left: Vec<&str> = listed["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["name"].as_str())
+        .collect();
+    assert_eq!(left, ["studio", "winbox"], "{listed}");
 
     // The audit log: who, which machine, which user, how it went.
     let log = a.log("fleet.add");

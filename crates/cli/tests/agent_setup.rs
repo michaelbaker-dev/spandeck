@@ -820,6 +820,7 @@ fn screenshots_of_agent_programs() {
 /// middle of a turn is not interrupted: it restarts when the turn is over.
 /// And updating is the owner's to do, never an agent's.
 #[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn an_update_shows_the_new_version_and_restarts_each_pane_into_its_conversation() {
     let tools = tempfile::tempdir().unwrap();
     let t = tools.path();

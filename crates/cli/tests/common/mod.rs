@@ -224,6 +224,28 @@ impl Station {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
+        // A test must never start the owner's own agent programs. On
+        // Windows the test machine's PATH has their folders; without them a
+        // test whose stand-in is missing fails instead of starting one.
+        if spandeck_terminal::sys::WINDOWS {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let kept = std::env::split_paths(&path).filter(|d| {
+                let d = d.to_string_lossy().to_lowercase();
+                ![
+                    r"\.local\bin",
+                    r"\openai\codex",
+                    r"\agy\",
+                    r"\npm",
+                    r"\.opencode",
+                ]
+                .iter()
+                .any(|agent| d.contains(agent))
+            });
+            cmd.env("PATH", std::env::join_paths(kept).unwrap());
+            // The folders the catalogue looks in beyond PATH hang off these.
+            cmd.env("LOCALAPPDATA", self.root.join("home"));
+            cmd.env("APPDATA", self.root.join("home"));
+        }
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
@@ -290,6 +312,12 @@ impl Station {
         let mut c = Client::connect(&self.paths().socket(), &token)?;
         c.set_timeout(Some(Duration::from_secs(60)));
         c.call(method, params)
+    }
+
+    /// A pane's own token, as the station's database has it.
+    pub fn pane_token(&self, pane: &str) -> String {
+        rusqlite_token(&self.root.join("state/spandeck.db"), pane)
+            .unwrap_or_else(|| panic!("no token for pane {pane}"))
     }
 
     pub fn script_file(&self, script: &Value) -> PathBuf {
@@ -431,14 +459,16 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 fn rusqlite_token(db: &Path, pane: &str) -> Option<String> {
-    // The sqlite3 CLI keeps the harness free of a second SQLite build.
-    let out = Command::new("sqlite3")
-        .arg(db)
-        .arg(format!("SELECT token FROM panes WHERE id='{}' OR json_extract(meta,'$.name')='{}' ORDER BY created DESC LIMIT 1", pane.replace('\'', ""), pane.replace('\'', "")))
-        .output()
-        .ok()?;
-    let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!t.is_empty()).then_some(t)
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
+    conn.query_row(
+        "SELECT token FROM panes WHERE id=?1 OR json_extract(meta,'$.name')=?1 ORDER BY created DESC LIMIT 1",
+        [pane],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .filter(|t| !t.is_empty())
 }
 
 impl Drop for Station {

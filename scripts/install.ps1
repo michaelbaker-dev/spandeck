@@ -3,6 +3,7 @@
 # Options (environment): SPANDECK_VERSION=v0.3.0   SPANDECK_BIN_DIR=<folder>
 #   SPANDECK_RELEASES=<address of a copy of the release page>
 #   SPANDECK_NO_SERVICE=1   do not set spandeck to start when you log on
+#   SPANDECK_NO_PATH=1      do not add the folder to your PATH
 # Works in Windows PowerShell 5.1 and PowerShell 7. Needs no administrator.
 $ErrorActionPreference = 'Stop'
 # Windows PowerShell 5.1 can default to TLS 1.0, which GitHub refuses.
@@ -73,7 +74,7 @@ finally {
 }
 
 # The user's own PATH (no administrator needed). New terminals pick it up.
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$userPath = if ($env:SPANDECK_NO_PATH) { $binDir } else { [Environment]::GetEnvironmentVariable('Path', 'User') }
 $entries = @()
 if ($userPath) { $entries = $userPath -split ';' | Where-Object { $_ } }
 if (-not ($entries | Where-Object { $_.TrimEnd('\') -ieq $binDir.TrimEnd('\') })) {
