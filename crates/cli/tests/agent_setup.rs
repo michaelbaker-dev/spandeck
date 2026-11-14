@@ -1,7 +1,8 @@
 //! Agent setup: MCP servers, skills and model defaults set once in the
 //! Control Deck and applied to every agent on every station; and running a
 //! command in agents from the deck. And the other document every station
-//! shares: the deck's global layouts and pins.
+//! shares: the deck's global layouts and pins. And the agent programs
+//! themselves: installed when missing, their versions shown, updated.
 mod common;
 use common::*;
 use serde_json::{json, Value};
@@ -444,4 +445,207 @@ fn a_station_that_was_away_gets_the_deck_when_it_is_seen_again() {
         a.call("fleet.refresh", json!({}));
         (b.try_call("deck.get", json!({})).ok()? == a.call("deck.get", json!({}))).then_some(())
     });
+}
+
+/// An executable script in `dir`.
+fn script(dir: &std::path::Path, name: &str, body: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path.display().to_string()
+}
+
+/// The owner: "we need an auto install for any station that doesn't have
+/// these installed: they should run the install script if it's not installed
+/// before trying to launch the agent", and the new agents "need to be set up
+/// with MCP/skills automatically".
+#[test]
+fn a_missing_agent_is_installed_in_its_pane_and_then_started_with_spandecks_tools() {
+    let tools = tempfile::tempdir().unwrap();
+    let t = tools.path();
+    let source = script(
+        t,
+        "agent.src",
+        "for a in \"$@\"; do echo \"ARG<$a>\"; done\necho \"CONFIG<$OPENCODE_CONFIG_CONTENT>\"\necho AGENT-STARTED\nsleep 60",
+    );
+    let (opencode, agy) = (t.join("opencode"), t.join("agy"));
+    let s = Station::start_with(
+        "alpha",
+        &format!(
+            "[agents.opencode]\nprogram = \"{}\"\ninstall_cmd = [\"cp\", \"{source}\", \"{}\"]\n[agents.antigravity]\nprogram = \"{}\"\ninstall_cmd = [\"sleep\", \"30\"]\n",
+            opencode.display(),
+            opencode.display(),
+            agy.display()
+        ),
+        &[],
+    );
+    let home = s.root.join("home");
+    let spawn = |agent: &str| {
+        s.call("pane.spawn", json!({"agent": agent, "cwd": home}))["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    // Not installed: the pane says so, shows the command, runs it, and then
+    // starts the agent, wired to spandeck.
+    let pane = spawn("opencode");
+    let screen = s.wait_text(&pane, "AGENT-STARTED");
+    assert!(
+        screen.contains("OpenCode is not installed on this station"),
+        "{screen}"
+    );
+    let flat = screen.replace('\n', "");
+    assert!(
+        flat.contains(&format!("cp {source} {}", opencode.display())),
+        "the install command is shown as it is run: {screen}"
+    );
+    let session = s.pane(&pane)["session_id"].as_str().unwrap().to_string();
+    assert!(session.starts_with("ses_"), "{session}");
+    assert!(
+        flat.contains(&format!("ARG<--session>ARG<{session}>ARG<--standalone>")),
+        "{screen}"
+    );
+    assert!(
+        flat.contains("CONFIG<{\"mcp\":{\"spandeck\":{")
+            && flat.contains(&format!("\"SPANDECK_PANE\":\"{pane}\"")),
+        "{screen}"
+    );
+    let skill = s.root.join("state/agent-skills/opencode/spandeck/SKILL.md");
+    assert!(flat.contains(skill.parent().unwrap().parent().unwrap().to_str().unwrap()));
+    assert!(std::fs::read_to_string(skill)
+        .unwrap()
+        .contains("name: spandeck"));
+
+    // Ctrl-C skips the install: the pane ends, and says why.
+    let pane = spawn("antigravity");
+    s.wait_text(&pane, "Press Ctrl-C to skip");
+    s.call(
+        "pane.send_text",
+        json!({"pane": pane, "text": "\u{3}", "enter": false}),
+    );
+    s.wait_text(&pane, "Skipped: Antigravity was not installed");
+    wait_for("the skipped pane to end", 10, || {
+        (s.pane(&pane)["exited"] == json!(true)).then_some(())
+    });
+    // Antigravity is wired through a plugin folder of spandeck's own.
+    let plugin = home.join(".gemini/config/plugins/spandeck");
+    let read = |f: &str| std::fs::read_to_string(plugin.join(f)).unwrap();
+    assert!(read("mcp_config.json").contains("\"spandeck\""));
+    assert!(read("hooks.json").contains("hook antigravity"));
+    assert!(read("skills/spandeck/SKILL.md").contains("name: spandeck"));
+
+    // No install command known: refused, in words.
+    let err = s
+        .try_call(
+            "pane.spawn",
+            json!({"agent": "fake", "program": t.join("nothing"), "cwd": home}),
+        )
+        .unwrap_err();
+    assert!(
+        err.message.contains("knows no install command"),
+        "{}",
+        err.message
+    );
+}
+
+/// The owner: "show the version of any agent and have a way to update them
+/// ... then restart them automatically and reload the session". A pane in the
+/// middle of a turn is not interrupted: it restarts when the turn is over.
+/// And updating is the owner's to do, never an agent's.
+#[test]
+fn an_update_shows_the_new_version_and_restarts_each_pane_into_its_conversation() {
+    let tools = tempfile::tempdir().unwrap();
+    let t = tools.path();
+    let version = t.join("version");
+    std::fs::write(&version, "fake-agent 1.0.0\n").unwrap();
+    let missing = t.join("missing").display().to_string();
+    let s = Station::start_with(
+        "alpha",
+        &format!(
+            "[agents.fake]\nversion_cmd = [\"cat\", \"{v}\"]\nupdate_cmd = [\"sh\", \"-c\", \"echo fake-agent 2.0.0 > {v}\"]\n[agents.claude]\nprogram = \"{missing}\"\n[agents.codex]\nprogram = \"{missing}\"\n[agents.opencode]\nprogram = \"{missing}\"\n[agents.antigravity]\nprogram = \"{missing}\"\n",
+            v = version.display()
+        ),
+        &[],
+    );
+    let row = |agent: &str| {
+        s.call("agents.status", json!({}))
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["agent"] == json!(agent))
+            .unwrap_or_else(|| panic!("no row for {agent}"))
+            .clone()
+    };
+
+    let idle = s.fake(json!({"steps": []}), json!({"name": "idle"}));
+    let busy = s.fake(
+        json!({"steps": [{"prompt": "go"}, {"work": 2500}, {"turn_end": "done"}]}),
+        json!({"name": "busy"}),
+    );
+    s.wait_state(&busy, "working");
+    let session = |pane: &str| {
+        wait_for("the pane's session", 10, || {
+            s.pane(pane)["session_id"].as_str().map(String::from)
+        })
+    };
+    let (idle_session, busy_session) = (session(&idle), session(&busy));
+
+    let fake = row("fake");
+    assert_eq!(
+        (&fake["installed"], &fake["version"], &fake["panes"]),
+        (&json!(true), &json!("1.0.0"), &json!(2)),
+        "{fake}"
+    );
+    let agy = row("antigravity");
+    assert_eq!(
+        (&agy["installed"], &agy["version"]),
+        (&json!(false), &Value::Null)
+    );
+    // The fleet view gets the same from station.info, with no extra call.
+    let brief = s.call("station.info", json!({}))["agents"].clone();
+    assert!(
+        brief
+            .as_array()
+            .unwrap()
+            .contains(&json!({"agent": "fake", "installed": true, "version": "1.0.0"})),
+        "{brief}"
+    );
+
+    // An agent cannot update the station's programs.
+    let err = s
+        .call_as_pane(&idle, "agents.update", json!({}))
+        .unwrap_err();
+    assert_eq!(err.code, "denied");
+
+    let started = s.call("agents.update", json!({"agent": "fake"}));
+    assert_eq!(
+        started["started"],
+        json!([{"agent": "fake", "name": "Fake agent", "from": "1.0.0"}])
+    );
+    // The idle pane comes back in its conversation; the busy one is left
+    // alone until its turn ends, and then does the same.
+    s.wait_text(&idle, &format!("[fake] RESUMED {idle_session}"));
+    let busy_screen = s.text(&busy);
+    assert!(
+        busy_screen.contains("[fake] working") && !busy_screen.contains("RESUMED"),
+        "{busy_screen}"
+    );
+    s.wait_text(&busy, &format!("[fake] RESUMED {busy_session}"));
+
+    let fake = row("fake");
+    assert_eq!(fake["version"], json!("2.0.0"));
+    let last = &fake["last_update"];
+    assert_eq!(
+        (&last["ok"], &last["from"], &last["to"]),
+        (&json!(true), &json!("1.0.0"), &json!("2.0.0")),
+        "{last}"
+    );
+    let logged = &s.log("agents.updated")[0]["data"];
+    assert_eq!(
+        (&logged["restarted"], &logged["restart_when_idle"]),
+        (&json!([idle]), &json!([busy])),
+        "{logged}"
+    );
 }

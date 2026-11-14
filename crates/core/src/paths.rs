@@ -104,6 +104,13 @@ pub struct AgentLauncher {
     /// Program to run instead of the agent's default (`claude`, `codex`).
     pub program: Option<String>,
     pub args: Vec<String>,
+    /// For tests and unusual setups: the command that installs the program
+    /// when it is missing, instead of the vendor's own installer.
+    pub install_cmd: Option<Vec<String>>,
+    /// The command that updates it, instead of the program's own.
+    pub update_cmd: Option<Vec<String>>,
+    /// The command that prints its version, instead of `<program> --version`.
+    pub version_cmd: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

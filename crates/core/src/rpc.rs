@@ -91,6 +91,7 @@ const READ_METHODS: &[&str] = &[
     "integration.status",
     "archive.sessions",
     "setup.get",
+    "agents.status",
     "deck.get",
     "vault.status",
     "trust.status",
@@ -886,10 +887,36 @@ impl Daemon {
                     .ok_or_else(|| invalid("missing setup"))?)?;
                 self.setup_push(setup, by)?
             }
+            // Which agent programs are here, and their versions.
+            "agents.status" => {
+                let d = self.clone();
+                tokio::task::spawn_blocking(move || d.agents_status())
+                    .await
+                    .map_err(|e| invalid(e.to_string()))?
+            }
+            // Update one agent program, or all of them, on this station. The
+            // caller names an agent; what is run comes from the catalogue or
+            // this station's own config. Owner only: it changes the station.
+            "agents.update" => {
+                let agent = match opt(&params, "agent") {
+                    Some(a) => Some(
+                        AgentKind::parse(a).ok_or_else(|| invalid(format!("unknown agent {a}")))?,
+                    ),
+                    None => None,
+                };
+                let restart = params
+                    .get("restart")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let (d, by) = (self.clone(), by.to_string());
+                tokio::task::spawn_blocking(move || d.agents_update(agent, restart, &by))
+                    .await
+                    .map_err(|e| invalid(e.to_string()))??
+            }
             "agents.command" => {
                 let agent = match opt(&params, "agent") {
                     Some(a) => Some(
-                        AgentKind::parse(a).ok_or_else(|| invalid("agent is claude or codex"))?,
+                        AgentKind::parse(a).ok_or_else(|| invalid(format!("unknown agent {a}")))?,
                     ),
                     None => None,
                 };

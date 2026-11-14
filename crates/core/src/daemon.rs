@@ -138,6 +138,13 @@ pub struct PaneMeta {
     /// Sub-agents the agent itself has running (its own, not spandeck helpers).
     #[serde(default)]
     pub subagents: Vec<SubAgent>,
+    /// The program the pane was asked to run instead of its agent's usual
+    /// one (tests and custom launchers), so a restart uses it again. Only
+    /// meaningful when `launcher_recorded`: older panes did not keep it.
+    #[serde(default)]
+    pub launcher: Option<String>,
+    #[serde(default)]
+    pub launcher_recorded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -279,6 +286,8 @@ pub struct Inner {
     pub vault: crate::vault::VaultState,
     /// Held while the deck document is read, changed and written back.
     pub(crate) deck_lock: Mutex<()>,
+    /// Agent programs: versions read, updates running, restarts owed.
+    pub(crate) agents: crate::agents::AgentsState,
 }
 
 #[derive(Clone)]
@@ -366,6 +375,7 @@ impl Daemon {
             web_addrs: Mutex::new(vec![]),
             vault: Default::default(),
             deck_lock: Mutex::new(()),
+            agents: Default::default(),
         }));
         let _ = std::fs::write(daemon.paths.pid_file(), std::process::id().to_string());
 
@@ -399,9 +409,17 @@ impl Daemon {
                     PaneMsg::Term(id, ev) => d.on_pane_event(&id, ev),
                     PaneMsg::Osc7501(id, state) => {
                         // Read when present; hooks stay the primary signal.
+                        // Antigravity's hooks cover the turn but not its
+                        // prompts, so there both are listened to.
                         if let Ok(p) = d.pane(&id) {
-                            if !p.meta.lock().unwrap().hooks_seen {
-                                d.set_state(&p, state, None);
+                            let (hooked, agent) = {
+                                let m = p.meta.lock().unwrap();
+                                (m.hooks_seen, m.agent)
+                            };
+                            if !hooked || agent == AgentKind::Antigravity {
+                                let reason = (state == AgentState::NeedsYou)
+                                    .then(|| "waiting for you".to_string());
+                                d.set_state(&p, state, reason);
                             }
                         }
                     }
@@ -424,6 +442,12 @@ impl Daemon {
     async fn tick(&self, n: u64) {
         self.detect_screens();
         self.update_keep_awake();
+        self.pump_agent_restarts();
+        // Agent versions for the fleet view: soon after start, then now and
+        // again. Asking for `agents.status` reads them at once.
+        if n % 1200 == 20 {
+            self.agents_refresh();
+        }
         if n.is_multiple_of(2) {
             let d = self.clone();
             let _ = tokio::task::spawn_blocking(move || d.archive.poll()).await;
@@ -563,6 +587,8 @@ impl Daemon {
                 .map(kind_from_command)
                 .unwrap_or(AgentKind::Shell)
         });
+        let mut new_session = None;
+        let mut agent_env = vec![];
         let (program, args) = match (adapter(agent), &opts.program) {
             (Some(a), _) => {
                 let cfg = self
@@ -571,17 +597,60 @@ impl Daemon {
                     .get(agent.as_str())
                     .cloned()
                     .unwrap_or_default();
+                let (wiring, env) = self.integration(agent, &id, &token, opts.project.as_deref());
+                agent_env = env;
                 let mut extra = cfg.args.clone();
-                extra.extend(self.integration_args(agent));
+                extra.extend(wiring);
                 extra.extend(opts.extra_args.iter().cloned());
                 extra.extend(opts.args.iter().cloned());
+                if opts.resume.is_none() {
+                    // An agent that cannot report its session id is started
+                    // under one chosen here, so it can be resumed later.
+                    new_session = a.session_prefix().map(|prefix| {
+                        format!(
+                            "{prefix}{}",
+                            ulid::Ulid::generate().to_string().to_lowercase()
+                        )
+                    });
+                }
                 let launch = a.launch(&LaunchOpts {
                     resume: opts.resume.clone(),
                     prompt: opts.prompt.clone(),
                     extra_args: extra,
                     program: opts.program.clone().or(cfg.program),
+                    session: new_session.clone(),
                 });
-                (launch.program, launch.args)
+                match self.find_program(&launch.program) {
+                    Some(path) => (path.display().to_string(), launch.args),
+                    // Not installed here: the pane installs it first, where
+                    // the user can watch, and then starts it.
+                    None => match self.agent_install_line(agent) {
+                        // Installing a program changes the station, and an
+                        // agent never gets to do that: only a pane the owner
+                        // asked for installs one.
+                        Some(_) if opts.parent_pane.is_some() => {
+                            return Err(invalid(format!(
+                                "{} is not installed on {} ({} was not found). A pane an agent asks for does not install software: the owner starts a {} pane once, which installs it",
+                                agent.display(),
+                                self.station,
+                                launch.program,
+                                agent.display()
+                            )))
+                        }
+                        Some(install) => {
+                            self.install_then_launch(agent, &launch.program, &install, launch.args)
+                        }
+                        None => {
+                            return Err(invalid(format!(
+                                "{} is not installed on {} ({} was not found), and spandeck knows no install command for it. Install it yourself, or set [agents.{}] program or install_cmd in config.toml",
+                                agent.display(),
+                                self.station,
+                                launch.program,
+                                agent.as_str()
+                            )))
+                        }
+                    },
+                }
             }
             (None, Some(p)) => (p.clone(), opts.args.clone()),
             (None, None) => {
@@ -618,6 +687,7 @@ impl Daemon {
             return Err(invalid(format!("{} is not a directory", cwd.display())));
         }
         let mut env = opts.env.clone();
+        env.extend(agent_env);
         let exe_dir = self
             .exe
             .parent()
@@ -719,7 +789,7 @@ impl Daemon {
             needs_reason: None,
             tool: None,
             tool_since_ms: 0,
-            session_id: opts.resume.clone(),
+            session_id: opts.resume.clone().or(new_session),
             transcript_path: None,
             title: String::new(),
             exit: None,
@@ -734,6 +804,8 @@ impl Daemon {
             turn: TurnStats::default(),
             controller: None,
             subagents: vec![],
+            launcher: opts.program.clone(),
+            launcher_recorded: true,
         };
         let entry = Arc::new(PaneEntry {
             id: id.clone(),
@@ -781,13 +853,20 @@ impl Daemon {
         Ok(pane)
     }
 
-    /// Arguments that wire an agent to this daemon at launch, so a pane
-    /// spandeck starts works with no global install.
-    fn integration_args(&self, agent: AgentKind) -> Vec<String> {
+    /// Arguments and environment that wire an agent to this daemon at
+    /// launch, so a pane spandeck starts works with no global install.
+    fn integration(
+        &self,
+        agent: AgentKind,
+        pane: &str,
+        token: &str,
+        project: Option<&str>,
+    ) -> (Vec<String>, Vec<(String, String)>) {
         let bin = self.exe.display().to_string();
         let setup = self.setup();
         // The fleet-wide agent setup: model defaults and shared MCP servers.
         let mut args = setup.launch_args(agent);
+        let mut env = vec![];
         match agent {
             AgentKind::Claude => {
                 let installed = install::status(agent, &self.home)
@@ -821,9 +900,31 @@ impl Daemon {
                 "-c".to_string(),
                 "mcp_servers.spandeck.env_vars=[\"SPANDECK_PANE\",\"SPANDECK_TOKEN\",\"SPANDECK_SOCKET\",\"SPANDECK_STATE_DIR\",\"SPANDECK_CONFIG_DIR\",\"SPANDECK_STATION\",\"SPANDECK_PROJECT\"]".to_string(),
             ]),
+            AgentKind::OpenCode => {
+                // OpenCode takes settings for one process from its
+                // environment, and only a private server reads them: its
+                // background service does not see this pane's environment.
+                args.push("--standalone".to_string());
+                env.push((
+                    "OPENCODE_CONFIG_CONTENT".to_string(),
+                    self.opencode_config(&setup, pane, token, project)
+                        .to_string(),
+                ));
+            }
+            AgentKind::Antigravity => {
+                // Antigravity has no per-launch setting for MCP servers or
+                // hooks. It loads plugins from its config folder, so spandeck
+                // keeps one there, in a folder of its own.
+                for problem in self.antigravity_plugin(&setup) {
+                    tracing::warn!(%problem, "antigravity plugin");
+                }
+                // Report state to the terminal (OSC 7501) without asking it
+                // first whether it understands.
+                env.push(("AGY_CLI_OSC7501".to_string(), "on".to_string()));
+            }
             _ => {}
         }
-        args
+        (args, env)
     }
 
     pub(crate) fn save_pane(&self, p: &PaneEntry) {
@@ -1472,6 +1573,10 @@ impl Daemon {
     /// The program a pane was launched with, when it was not the adapter's default
     /// (tests and custom launchers), so a resume uses the same one.
     fn launcher_program(&self, meta: &PaneMeta) -> Option<String> {
+        if meta.launcher_recorded {
+            return meta.launcher.clone();
+        }
+        // A pane from before the launcher was kept: work it out.
         let default = adapter(meta.agent)?.launch(&LaunchOpts::default()).program;
         (meta.spec.program != default).then(|| meta.spec.program.clone())
     }
@@ -1655,6 +1760,7 @@ impl Daemon {
             "macs": crate::manage::mac_addresses(),
             "service": crate::doctor::service_installed(&self.home),
             "codex_sandbox_blocked": crate::doctor::codex_sandbox_blocked(&self.home),
+            "agents": self.agents_brief(),
             "setup": {"updated_ms": self.setup().updated_ms},
             "deck": {"updated_ms": self.deck().updated_ms},
             "vault": self.vault_view(),

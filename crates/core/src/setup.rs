@@ -17,6 +17,18 @@ use crate::daemon::{invalid, Daemon, Result};
 use crate::paths::now_ms;
 
 const MARKER: &str = ".spandeck-managed";
+/// The skill every agent in a spandeck pane gets: how to use spandeck's tools.
+const SPANDECK_SKILL: &str = include_str!("../../../skills/spandeck/SKILL.md");
+
+fn write_if_changed(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    if std::fs::read_to_string(path).is_ok_and(|now| now == content) {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, content)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -55,7 +67,7 @@ pub struct AgentSetup {
     pub updated_by: String,
     pub mcp_servers: BTreeMap<String, McpServer>,
     pub skills: BTreeMap<String, Skill>,
-    /// Keyed by agent: "claude", "codex".
+    /// Keyed by agent: "claude", "codex", "antigravity".
     pub defaults: BTreeMap<String, AgentDefaults>,
 }
 
@@ -101,9 +113,9 @@ impl AgentSetup {
             }
         }
         for (agent, d) in &self.defaults {
-            if !matches!(agent.as_str(), "claude" | "codex") {
+            if !matches!(agent.as_str(), "claude" | "codex" | "antigravity") {
                 return Err(format!(
-                    "defaults are per agent (claude, codex), not {agent:?}"
+                    "defaults are per agent (claude, codex, antigravity), not {agent:?}"
                 ));
             }
             for v in [&d.model, &d.effort, &d.permission_mode]
@@ -152,6 +164,19 @@ impl AgentSetup {
                     ("--model", &d.model),
                     ("--effort", &d.effort),
                     ("--permission-mode", &d.permission_mode),
+                ] {
+                    if let Some(v) = v {
+                        args.push(flag.to_string());
+                        args.push(v.clone());
+                    }
+                }
+            }
+            // `agy --help` 1.5.9: --model, --effort, --mode.
+            AgentKind::Antigravity => {
+                for (flag, v) in [
+                    ("--model", &d.model),
+                    ("--effort", &d.effort),
+                    ("--mode", &d.permission_mode),
                 ] {
                     if let Some(v) = v {
                         args.push(flag.to_string());
@@ -216,11 +241,154 @@ impl Daemon {
 
     /// Where each agent looks for skills on this station.
     fn skill_dirs(&self) -> Vec<(AgentKind, PathBuf)> {
-        vec![
+        let mut dirs = vec![
             (AgentKind::Claude, self.home.join(".claude/skills")),
             // From Codex's documentation; not checked against a real Codex here.
             (AgentKind::Codex, self.home.join(".codex/skills")),
-        ]
+            // A folder of spandeck's own, named to OpenCode at launch.
+            (AgentKind::OpenCode, self.opencode_skills_dir()),
+        ];
+        // Only once an Antigravity pane has been started here.
+        let plugin = self.antigravity_plugin_dir();
+        if plugin.join(MARKER).exists() {
+            dirs.push((AgentKind::Antigravity, plugin.join("skills")));
+        }
+        dirs
+    }
+
+    fn opencode_skills_dir(&self) -> PathBuf {
+        self.paths.state_dir.join("agent-skills").join("opencode")
+    }
+
+    /// spandeck's plugin in Antigravity's own plugin folder. Antigravity
+    /// loads every plugin placed there (its plugins guide; `agy plugin list`
+    /// showed this one enabled with its skill, MCP server and hooks).
+    fn antigravity_plugin_dir(&self) -> PathBuf {
+        self.home.join(".gemini/config/plugins/spandeck")
+    }
+
+    /// The spandeck skill, in a folder of skills spandeck manages.
+    fn write_spandeck_skill(dir: &std::path::Path) -> std::io::Result<()> {
+        let skill = dir.join("spandeck");
+        write_if_changed(&skill.join("SKILL.md"), SPANDECK_SKILL)?;
+        write_if_changed(
+            &skill.join(MARKER),
+            "Installed by spandeck. It is rewritten when a pane starts.\n",
+        )
+    }
+
+    /// OpenCode's settings for one pane, in the form `OPENCODE_CONFIG_CONTENT`
+    /// takes: spandeck's MCP server speaking for this pane, the fleet's
+    /// shared servers, and where the skills are. (`opencode debug config
+    /// --standalone` on 2.3.0 accepts exactly these keys.)
+    pub(crate) fn opencode_config(
+        &self,
+        setup: &AgentSetup,
+        pane: &str,
+        token: &str,
+        project: Option<&str>,
+    ) -> Value {
+        let skills = self.opencode_skills_dir();
+        if let Err(e) = Self::write_spandeck_skill(&skills) {
+            tracing::warn!(error = %e, "could not write the spandeck skill for OpenCode");
+        }
+        let mut env = serde_json::Map::new();
+        for (k, v) in [
+            ("SPANDECK_PANE", pane.to_string()),
+            ("SPANDECK_TOKEN", token.to_string()),
+            ("SPANDECK_SOCKET", self.paths.socket().display().to_string()),
+            (
+                "SPANDECK_STATE_DIR",
+                self.paths.state_dir.display().to_string(),
+            ),
+            (
+                "SPANDECK_CONFIG_DIR",
+                self.paths.config_dir.display().to_string(),
+            ),
+            ("SPANDECK_STATION", self.station.clone()),
+        ] {
+            env.insert(k.into(), json!(v));
+        }
+        if let Some(project) = project {
+            env.insert("SPANDECK_PROJECT".into(), json!(project));
+        }
+        let mut servers = serde_json::Map::new();
+        for (name, s) in setup
+            .mcp_servers
+            .iter()
+            .filter(|(_, s)| applies(&s.agents, AgentKind::OpenCode))
+        {
+            let v = match (&s.command, &s.url) {
+                (Some(command), _) => {
+                    let mut argv = vec![command.clone()];
+                    argv.extend(s.args.iter().cloned());
+                    json!({"type": "local", "command": argv, "environment": s.env, "enabled": true})
+                }
+                (None, Some(url)) => json!({"type": "remote", "url": url, "enabled": true}),
+                _ => continue,
+            };
+            servers.insert(name.clone(), v);
+        }
+        servers.insert(
+            "spandeck".into(),
+            json!({"type": "local", "command": [self.exe.display().to_string(), "mcp"], "environment": env, "enabled": true}),
+        );
+        json!({"mcp": servers, "skills": {"paths": [skills.display().to_string()]}})
+    }
+
+    /// Write, or bring up to date, spandeck's Antigravity plugin: its MCP
+    /// server and the fleet's shared ones, the hooks that report the
+    /// conversation and the turn, and the skills. Returns what went wrong.
+    pub(crate) fn antigravity_plugin(&self, setup: &AgentSetup) -> Vec<String> {
+        let dir = self.antigravity_plugin_dir();
+        if dir.exists() && !dir.join(MARKER).exists() {
+            return vec![format!(
+                "{} exists and was not made by spandeck; left alone, so Antigravity panes have no spandeck tools",
+                dir.display()
+            )];
+        }
+        let bin = self.exe.display().to_string();
+        let mut servers = serde_json::Map::new();
+        for (name, s) in setup
+            .mcp_servers
+            .iter()
+            .filter(|(_, s)| applies(&s.agents, AgentKind::Antigravity))
+        {
+            let v = match (&s.command, &s.url) {
+                (Some(command), _) => json!({"command": command, "args": s.args, "env": s.env}),
+                (None, Some(url)) => json!({"url": url}),
+                _ => continue,
+            };
+            servers.insert(name.clone(), v);
+        }
+        servers.insert("spandeck".into(), json!({"command": bin, "args": ["mcp"]}));
+        let pretty = |v: &Value| serde_json::to_string_pretty(v).unwrap_or_default() + "\n";
+        let files = [
+            (
+                "plugin.json",
+                pretty(&json!({"name": "spandeck", "version": crate::daemon::VERSION})),
+            ),
+            ("mcp_config.json", pretty(&json!({"mcpServers": servers}))),
+            (
+                "hooks.json",
+                pretty(&spandeck_agents::antigravity::hooks_json(&bin)),
+            ),
+            (
+                MARKER,
+                "Made by spandeck and rewritten when an Antigravity pane starts. Remove the folder to remove it.\n".to_string(),
+            ),
+        ];
+        let mut problems = vec![];
+        for (name, content) in files {
+            if let Err(e) = write_if_changed(&dir.join(name), &content) {
+                problems.push(format!("could not write {}: {e}", dir.join(name).display()));
+            }
+        }
+        if let Err(e) = Self::write_spandeck_skill(&dir.join("skills")) {
+            problems.push(format!("could not write the spandeck skill: {e}"));
+        }
+        problems.extend(self.apply_skills(setup));
+        problems
     }
 
     /// Write the setup's skills where each agent finds them, and remove the
@@ -237,7 +405,8 @@ impl Daemon {
                         .skills
                         .get(&name)
                         .is_some_and(|s| applies(&s.agents, kind));
-                    if ours && !wanted {
+                    // "spandeck" is spandeck's own skill, not one from the setup.
+                    if ours && !wanted && name != "spandeck" {
                         let _ = std::fs::remove_file(e.path().join("SKILL.md"));
                         let _ = std::fs::remove_file(e.path().join(MARKER));
                         let _ = std::fs::remove_dir(e.path());
@@ -296,7 +465,13 @@ impl Daemon {
             f.write_all(&serde_json::to_vec_pretty(setup).map_err(|e| invalid(e.to_string()))?)?;
         }
         std::fs::rename(&tmp, self.setup_file())?;
-        let problems = self.apply_skills(setup);
+        let mut problems = self.apply_skills(setup);
+        // Antigravity reads the shared MCP servers from spandeck's plugin.
+        if self.antigravity_plugin_dir().join(MARKER).exists() {
+            problems.extend(self.antigravity_plugin(setup));
+            problems.sort();
+            problems.dedup();
+        }
         self.record(
             "setup.applied",
             None,
@@ -369,31 +544,18 @@ impl Daemon {
 
     pub fn setup_view(&self) -> Value {
         let setup = self.setup();
-        let version = |program: &str| -> Option<String> {
-            let out = std::process::Command::new(program)
-                .arg("--version")
-                .output()
-                .ok()?;
-            out.status.success().then(|| {
-                String::from_utf8_lossy(&out.stdout)
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string()
-            })
-        };
-        let agents: Vec<Value> = [AgentKind::Claude, AgentKind::Codex]
+        let agents: Vec<Value> = spandeck_agents::catalogue::CATALOGUE
             .iter()
-            .map(|k| {
-                let program = self.cfg.agents.get(k.as_str()).and_then(|a| a.program.clone()).unwrap_or_else(|| k.as_str().to_string());
+            .map(|entry| {
+                let k = entry.kind;
                 let panes: Vec<Value> = self
                     .list_panes()
                     .iter()
-                    .filter(|p| { let m = p.meta.lock().unwrap(); m.agent == *k && m.exit.is_none() })
+                    .filter(|p| { let m = p.meta.lock().unwrap(); m.agent == k && m.exit.is_none() })
                     .map(|p| { let m = p.meta.lock().unwrap(); json!({"id": m.id, "name": m.name, "state": m.state, "needs_reason": m.needs_reason}) })
                     .collect();
-                json!({"agent": k, "name": k.display(), "installed_version": version(&program), "running": panes})
+                let version = self.agent_probe(k, std::time::Duration::from_secs(60)).version;
+                json!({"agent": k, "name": k.display(), "installed_version": version, "running": panes})
             })
             .collect();
         json!({"station": self.station, "setup": setup, "agents": agents})

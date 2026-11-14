@@ -119,19 +119,22 @@ impl Daemon {
             },
         );
 
-        for kind in [AgentKind::Claude, AgentKind::Codex] {
+        for kind in spandeck_agents::catalogue::CATALOGUE.iter().map(|p| p.kind) {
             let program = self
-                .cfg
-                .agents
-                .get(kind.as_str())
-                .and_then(|a| a.program.clone())
+                .agent_program(kind)
                 .unwrap_or_else(|| kind.as_str().to_string());
-            let version = version_of(&program);
+            let probe = self.agent_probe(kind, std::time::Duration::from_secs(60));
             add(
                 &format!("{} installed", kind.display()),
-                version.is_some(),
+                probe.path.is_some(),
                 false,
-                version.unwrap_or_else(|| format!("`{program}` not found on PATH")),
+                match (&probe.path, &probe.version) {
+                    (Some(path), Some(v)) => format!("{v} at {}", path.display()),
+                    (Some(path), None) => format!("{} (version not read)", path.display()),
+                    (None, _) => {
+                        format!("`{program}` not found; a pane started for it installs it first")
+                    }
+                },
             );
             if let Ok(st) = install::status(kind, &self.home) {
                 let detail = match (st.installed, st.outdated, kind) {
