@@ -151,7 +151,11 @@ function closeLeaf(st, paneId) {
 
 function paneMenu(e, st, p, where) {
   const s = stateOf(p), agent = p.agent !== 'shell', alive = !p.exited;
-  const act = (m, extra) => () => rpc(st, m, { pane: p.id, ...extra });
+  const act = (m, extra) => () => rpc(st, m, { pane: p.id, ...extra }).then((r) => {
+    // A restarted pane is a new program behind the same name: show it.
+    if (m === 'pane.restart') for (const t of S.terms.values()) if (t.station === st && t.pane.id === p.id) { if (t.chan !== null) api.detach(t.chan); t.chan = null; t.attach(); }
+    return r;
+  });
   showMenu(e.clientX, e.clientY, [
     { title: `${p.name} · ${p.address}` },
     where !== 'zoom' && { label: 'Open full size', action: () => go(paneUrl(st, p.id)) },
@@ -174,6 +178,11 @@ function paneMenu(e, st, p, where) {
     { label: 'Copy address', action: () => navigator.clipboard?.writeText(p.address).then(() => toast('Copied ' + p.address)) },
     '-',
     alive && { label: 'Kill the process', danger: true, action: () => confirmBox('Kill ' + p.name + '?', 'The process ends now. An agent can be resumed later by its session.', 'Kill', act('pane.kill')) },
+    agent && { label: alive ? 'Restart and resume the conversation' : 'Start again and resume the conversation', action: () => alive
+      ? confirmBox('Restart ' + p.name + '?', 'The agent is stopped and started again in this pane. It goes back to its conversation; a turn that is running now is lost.', 'Restart', act('pane.restart'))
+      : act('pane.restart')() },
+    agent && { label: 'Restart with a new conversation', action: () => confirmBox('Start ' + p.name + ' afresh?', 'The agent is started again in this pane with an empty conversation. The old one stays in the archive.', 'Start afresh', act('pane.restart', { fresh: true })) },
+    !agent && { label: alive ? 'Restart the shell' : 'Start the shell again', action: () => alive ? confirmBox('Restart ' + p.name + '?', 'What is running in this shell is stopped.', 'Restart', act('pane.restart')) : act('pane.restart')() },
     { label: alive ? 'Kill and remove' : 'Remove from the list', danger: true, action: () => confirmBox('Remove ' + p.name + '?', 'The pane is closed and removed from this station.', 'Remove', act('pane.close')) },
   ]);
 }

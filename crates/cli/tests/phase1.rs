@@ -233,6 +233,49 @@ fn a_station_updates_to_a_release_only_if_the_download_matches_its_checksum() {
     assert!(s.log("station.rolled_back").is_empty());
 }
 
+/// Asked for after a Claude pane ended: restart an agent in its pane and go
+/// back to its conversation, or start it afresh.
+#[test]
+fn a_pane_is_restarted_in_place_and_the_agent_resumes_its_conversation() {
+    let s = Station::start("alpha");
+    let pane = s.fake(json!({"steps": [{"exit": 3}]}), json!({"name": "dev"}));
+    wait_for("the agent to end", 10, || {
+        (!s.pane(&pane)["exited"].is_null() && s.pane(&pane)["exited"] != json!(false))
+            .then_some(())
+    });
+    let session = s.pane(&pane)["session_id"].as_str().unwrap().to_string();
+
+    // Resume: the same pane, a new program, the same conversation.
+    let again = s.call("pane.restart", json!({"pane": pane}));
+    assert_eq!(
+        (again["id"].clone(), again["name"].clone()),
+        (json!(pane), json!("dev"))
+    );
+    s.wait_text(&pane, &format!("[fake] RESUMED {session}"));
+    assert_eq!(s.pane(&pane)["exited"], json!(false));
+    assert_eq!(s.log("pane.restarted")[0]["data"]["resumed"], json!(true));
+
+    // Afresh: a live agent is stopped and started with a new conversation.
+    s.call("pane.restart", json!({"pane": pane, "fresh": true}));
+    let fresh = wait_for("a new session", 10, || {
+        s.pane(&pane)["session_id"]
+            .as_str()
+            .filter(|id| *id != session)
+            .map(String::from)
+    });
+    assert_ne!(fresh, session);
+    assert!(!s.text(&pane).contains("RESUMED"), "{}", s.text(&pane));
+    assert_eq!(
+        s.call("pane.list", json!({}))
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["name"] == json!("dev"))
+            .count(),
+        1
+    );
+}
+
 /// 0.2: a restart keeps every terminal.
 #[test]
 fn a_restart_keeps_every_terminal() {

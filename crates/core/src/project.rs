@@ -389,7 +389,7 @@ impl Daemon {
             let resume = previous
                 .as_ref()
                 .filter(|m| m.agent == agent && agent.is_agent())
-                .and_then(|m| m.session_id.clone());
+                .and_then(|m| self.resumable(m));
             let cwd = match &slot.cwd {
                 Some(sub) => path.join(sub),
                 None => path.clone(),

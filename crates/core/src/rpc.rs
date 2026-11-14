@@ -322,6 +322,10 @@ impl Daemon {
                 self.kill(s(&params, "pane")?, by)?;
                 json!({"ok": true})
             }
+            "pane.restart" => {
+                let pane = self.restart_pane(s(&params, "pane")?, flag(&params, "fresh"), by)?;
+                pane.view(&self.station)
+            }
             "pane.close" => {
                 self.close(s(&params, "pane")?, by)?;
                 json!({"ok": true})

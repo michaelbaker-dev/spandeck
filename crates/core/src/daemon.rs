@@ -933,6 +933,73 @@ impl Daemon {
         Ok(())
     }
 
+    /// The session to resume for a pane that ran before, if there is a
+    /// conversation to go back to. Claude Code saves nothing until the first
+    /// message, and refuses to resume a session it never saved, so a session
+    /// that was opened and never used starts afresh.
+    pub(crate) fn resumable(&self, meta: &PaneMeta) -> Option<String> {
+        let id = meta.session_id.clone()?;
+        if meta.agent == AgentKind::Claude {
+            let saved = meta
+                .transcript_path
+                .as_deref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .is_some_and(|m| m.len() > 0);
+            if !saved {
+                return None;
+            }
+        }
+        Some(id)
+    }
+
+    /// Start a pane's program again in the same pane: same name, folder,
+    /// project and role. An agent goes back to its conversation unless
+    /// `fresh` is set or there is none to go back to.
+    pub fn restart_pane(&self, id: &str, fresh: bool, by: &str) -> Result<Arc<PaneEntry>> {
+        let old = self.pane(id)?;
+        let meta = old.meta();
+        let resume = if fresh { None } else { self.resumable(&meta) };
+        if meta.exit.is_none() {
+            let _ = old.term.signal(Signal::SIGHUP);
+            let _ = old.term.signal(Signal::SIGKILL);
+            // The old program's exit must be seen before the pane is reused,
+            // or it would be taken for the new one's.
+            let start = std::time::Instant::now();
+            while old.meta().exit.is_none() && start.elapsed() < Duration::from_secs(3) {
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        }
+        self.cancel_pane_approvals(&old.id);
+        self.panes.write().unwrap().remove(&old.id);
+        let p = self.spawn_pane(SpawnOpts {
+            id: Some(old.id.clone()),
+            name: Some(meta.name.clone()),
+            agent: Some(meta.agent),
+            program: self.launcher_program(&meta),
+            cwd: Some(PathBuf::from(&meta.cwd)),
+            cols: Some(meta.spec.cols),
+            rows: Some(meta.spec.rows),
+            project: meta.project.clone(),
+            role: meta.role.clone(),
+            task: meta.task.clone(),
+            parent_pane: meta.parent_pane.clone(),
+            resume: resume.clone(),
+            slot: meta.slot.clone(),
+            ..Default::default()
+        })?;
+        self.write_instructions(&p.meta());
+        self.record(
+            "pane.restarted",
+            Some(&p.id),
+            meta.project.as_deref(),
+            meta.task.as_deref(),
+            Some(by),
+            json!({"resumed": resume.is_some(), "session_id": resume}),
+        );
+        self.emit("pane.updated", Some(&p.id), None, json!({}));
+        Ok(p)
+    }
+
     /// A folder as the user typed it: `~` and `~/x` are under the home folder,
     /// and a path with no leading `/` is too.
     pub fn expand_path(&self, path: &std::path::Path) -> PathBuf {
@@ -1312,7 +1379,7 @@ impl Daemon {
                 role: meta.role.clone(),
                 task: meta.task.clone(),
                 parent_pane: meta.parent_pane.clone(),
-                resume: meta.session_id.clone(),
+                resume: self.resumable(&meta),
                 slot: meta.slot.clone(),
                 ..Default::default()
             };
