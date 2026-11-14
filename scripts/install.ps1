@@ -46,11 +46,17 @@ try {
     $published = (Invoke-WebRequest -UseBasicParsing -Uri "$url.sha256").Content
     if ($published -is [byte[]]) { $published = [Text.Encoding]::ASCII.GetString($published) }
     $want = ($published.Trim() -split '\s+')[0].ToLower()
-    $got = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
+    # .NET directly, not Get-FileHash or Expand-Archive: those two are script
+    # modules, and where scripts are restricted (seen on a CI machine)
+    # PowerShell cannot load them and says the command does not exist.
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($zip)
+    try { $got = ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLower() } finally { $stream.Dispose(); $sha.Dispose() }
     if ($want.Length -ne 64 -or $want -ne $got) {
         throw 'The download does not match its published checksum. Nothing was installed.'
     }
-    Expand-Archive -Path $zip -DestinationPath $tmp -Force
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $tmp)
 
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
     foreach ($exe in 'spandeck.exe', 'sd.exe', 'spandeckd.exe', 'spandeck-pane-host.exe') {
