@@ -152,16 +152,20 @@ pub(crate) fn normalize_claude_dialect(agent: AgentKind, p: &Value) -> Option<Ag
             None,
             None,
         ),
+        // A sub-agent starting or stopping says nothing about the main agent's
+        // turn. Claude Code also runs helpers of its own a few seconds after a
+        // turn ends, and their events used to flip a finished pane back to
+        // "working", where it stayed until the next prompt.
         "SubagentStart" => (
             EventKind::SubagentStart,
-            Some(AgentState::Working),
+            None,
             None,
             s(p, "agent_type"),
             None,
         ),
         "SubagentStop" => (
             EventKind::SubagentStop,
-            Some(AgentState::Working),
+            None,
             None,
             s(p, "agent_type"),
             None,
@@ -389,5 +393,20 @@ mod notification_tests {
         assert_eq!(state("idle_prompt"), None);
         assert_eq!(state("permission_prompt"), Some(AgentState::NeedsYou));
         assert_eq!(state("elicitation_dialog"), Some(AgentState::NeedsYou));
+    }
+
+    // A bug the owner reported: a pane showed "working · 10m" while Claude sat
+    // at its prompt. The log showed "done", then "working" six seconds later
+    // with no prompt and no tool call in between.
+    #[test]
+    fn a_sub_agent_event_does_not_restart_a_finished_turn() {
+        for name in ["SubagentStart", "SubagentStop"] {
+            let ev = normalize_claude_dialect(
+                AgentKind::Claude,
+                &json!({"hook_event_name": name, "session_id": "s", "agent_type": "helper"}),
+            )
+            .unwrap();
+            assert_eq!(ev.state, None, "{name}");
+        }
     }
 }

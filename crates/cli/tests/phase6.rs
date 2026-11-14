@@ -941,9 +941,11 @@ fn the_deck_shows_who_works_for_whom_and_who_is_talking() {
         labels.contains("message") && labels.contains("→ lead · question"),
         "{labels}"
     );
-    assert_eq!(
-        page.js("document.querySelectorAll('.watch-map .links .link').length"),
-        json!(2)
+    // Waited for, not read once: the map is redrawn as events arrive, and a
+    // read between two draws found no lines on a busy machine.
+    page.wait(
+        "two lines",
+        "document.querySelectorAll('.watch-map .links .link').length === 2",
     );
     let feed = page.js("document.querySelector('.watch-feed').innerText");
     assert!(
