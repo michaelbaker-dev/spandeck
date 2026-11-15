@@ -4,6 +4,7 @@
 //! Raw history stays on this station. Search results come only from the
 //! scrubbed copy.
 
+pub mod conversation;
 pub mod normalize;
 pub mod scrub;
 pub mod usage;
@@ -31,6 +32,13 @@ pub struct Archive {
     found: Mutex<Vec<(String, String)>>,
     /// Token usage of the conversations asked about since the daemon started.
     usage: Mutex<std::collections::HashMap<String, usage::Tracked>>,
+    /// One copy of a file's new lines at a time: the every-second poll and
+    /// a conversation that is being watched both ask for them.
+    poll_lock: Mutex<()>,
+    /// Per session, the last line that holds something the agent said.
+    last_reply: Mutex<std::collections::HashMap<String, u64>>,
+    /// Where each conversation's items are (conversation.rs). Memory only.
+    convs: conversation::Cache,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +118,9 @@ impl Archive {
             conn: Mutex::new(conn),
             found: Mutex::new(vec![]),
             usage: Mutex::new(Default::default()),
+            poll_lock: Mutex::new(()),
+            last_reply: Mutex::new(Default::default()),
+            convs: Default::default(),
         })
     }
 
@@ -164,40 +175,69 @@ impl Archive {
         .unwrap_or_default()
     }
 
+    /// One followed session, as the archive has it.
+    pub fn session(&self, id: &str) -> Option<SessionInfo> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id,agent,path,project,pane,lines FROM sessions WHERE id=?1",
+            [id],
+            |r| {
+                Ok(SessionInfo {
+                    id: r.get(0)?,
+                    agent: r.get(1)?,
+                    path: r.get(2)?,
+                    project: r.get(3)?,
+                    pane: r.get(4)?,
+                    lines: r.get::<_, i64>(5)? as u64,
+                })
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
     /// Copy any new complete lines from every followed file. Returns lines added.
     pub fn poll(&self) -> u64 {
-        let targets: Vec<(String, String, String, i64, i64, Option<String>)> = {
+        let ids: Vec<String> = {
             let conn = self.conn.lock().unwrap();
-            let Ok(mut stmt) = conn.prepare(
-                "SELECT id,agent,path,offset,lines,commit_sha FROM sessions WHERE active=1",
-            ) else {
+            let Ok(mut stmt) = conn.prepare("SELECT id FROM sessions WHERE active=1") else {
                 return 0;
             };
-            stmt.query_map([], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
-            })
-            .map(|rows| rows.filter_map(Result::ok).collect())
-            .unwrap_or_default()
+            stmt.query_map([], |r| r.get(0))
+                .map(|rows| rows.filter_map(Result::ok).collect())
+                .unwrap_or_default()
         };
-        let mut added = 0;
-        for (id, agent, path, offset, lines, commit) in targets {
-            added += self.poll_one(
-                &id,
-                &agent,
-                &path,
-                offset as u64,
-                lines as u64,
-                commit.as_deref(),
-            );
-        }
-        added
+        ids.iter().map(|id| self.poll_session(id)).sum()
+    }
+
+    /// Copy any new complete lines of one followed file, now. Where the file
+    /// was read to is looked up inside the lock, so two callers never copy
+    /// the same line twice.
+    pub fn poll_session(&self, id: &str) -> u64 {
+        let _one_at_a_time = self.poll_lock.lock().unwrap();
+        let row: Option<(String, String, i64, i64, Option<String>)> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT agent,path,offset,lines,commit_sha FROM sessions WHERE id=?1 AND active=1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        };
+        let Some((agent, path, offset, lines, commit)) = row else {
+            return 0;
+        };
+        self.poll_one(
+            id,
+            &agent,
+            &path,
+            offset as u64,
+            lines as u64,
+            commit.as_deref(),
+        )
     }
 
     fn poll_one(
@@ -233,6 +273,7 @@ impl Archive {
         let mut conn = self.conn.lock().unwrap();
         let Ok(tx) = conn.transaction() else { return 0 };
         let mut line_no = lines;
+        let mut replied = None;
         for raw in complete.split(|b| *b == b'\n') {
             if raw.is_empty() {
                 continue;
@@ -249,6 +290,9 @@ impl Archive {
                     if found.len() < 200 && !found.iter().any(|(_, v)| *v == value) {
                         found.push((id.to_string(), value));
                     }
+                }
+                if e.role == "assistant" && e.kind == "reply" {
+                    replied = Some(line_no);
                 }
                 let mut text = scrub(&e.text);
                 if text.len() > INDEX_CAP {
@@ -280,7 +324,89 @@ impl Archive {
             params![id, (offset + complete.len() as u64) as i64, line_no as i64],
         );
         let _ = tx.commit();
+        drop(conn);
+        if let Some(line) = replied {
+            self.last_reply.lock().unwrap().insert(id.to_string(), line);
+        }
         added
+    }
+
+    /// The last line of a session on which its agent said something to the
+    /// reader (a reply, not a tool call): what "unread" is measured from.
+    /// 0 when it has said nothing.
+    pub fn last_reply_line(&self, session: &str) -> u64 {
+        if let Some(line) = self.last_reply.lock().unwrap().get(session) {
+            return *line;
+        }
+        let line: i64 = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT line FROM entries WHERE session=?1 AND role='assistant' AND kind='reply'
+                 ORDER BY line DESC LIMIT 1",
+                [session],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+        };
+        *self
+            .last_reply
+            .lock()
+            .unwrap()
+            .entry(session.to_string())
+            .or_insert(line as u64)
+    }
+
+    /// Raw lines after `after`, oldest first: at most `max_lines`, and no
+    /// more once `max_bytes` have been read. Station-local use only.
+    pub(crate) fn raw_after(
+        &self,
+        session: &str,
+        after: u64,
+        max_lines: u32,
+        max_bytes: usize,
+    ) -> Vec<(u64, String)> {
+        let conn = self.conn.lock().unwrap();
+        let Ok(mut stmt) = conn.prepare_cached(
+            "SELECT line, raw FROM raw WHERE session=?1 AND line>?2 ORDER BY line LIMIT ?3",
+        ) else {
+            return vec![];
+        };
+        let Ok(mut rows) = stmt.query(params![session, after as i64, max_lines]) else {
+            return vec![];
+        };
+        let mut out = vec![];
+        let mut bytes = 0;
+        while let Ok(Some(r)) = rows.next() {
+            let (Ok(line), Ok(raw)) = (r.get::<_, i64>(0), r.get::<_, String>(1)) else {
+                break;
+            };
+            bytes += raw.len();
+            out.push((line as u64, raw));
+            if bytes >= max_bytes {
+                break;
+            }
+        }
+        out
+    }
+
+    /// The raw lines with these numbers. Station-local use only.
+    pub(crate) fn raw_at(&self, session: &str, lines: &[u64]) -> Vec<(u64, String)> {
+        let conn = self.conn.lock().unwrap();
+        let Ok(mut stmt) = conn.prepare_cached("SELECT raw FROM raw WHERE session=?1 AND line=?2")
+        else {
+            return vec![];
+        };
+        lines
+            .iter()
+            .filter_map(|line| {
+                stmt.query_row(params![session, *line as i64], |r| r.get(0))
+                    .ok()
+                    .map(|raw| (*line, raw))
+            })
+            .collect()
     }
 
     /// Key-shaped values found since the last call, as (session, value).

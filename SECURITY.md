@@ -47,10 +47,28 @@ days, not hours.
 - **History.** Session transcripts are copied to the station that ran them and stay
   there. Other agents and stations see a copy with secrets scrubbed by pattern, which is
   best-effort.
+- **A pane's conversation.** A signed-in Control Deck can ask a station for an agent
+  pane's conversation as text (`docs/conversation-api.md`): what was said, each tool
+  call and its output. This is the transcript as written, not the scrubbed copy, so it
+  is yours alone: an agent's token is refused, even for its own pane, and it is not
+  among the calls a station makes for itself. When the deck is served by another
+  station, that station passes your request on and the answer back, as it does a
+  pane's terminal, and keeps none of it. (A station of your fleet can pass on a request
+  as you for any call; see Known limits.) Text in it is data: the station drops terminal control sequences and returns
+  text, never markup.
 - **API keys.** With AgentVault connected, agents use keys through the vault and never
   hold them. See `docs/vault.md`, including what that does not protect against.
 
 ## Known limits
+
+- A pane's conversation holds whatever its terminal showed, including a secret an agent
+  printed or a file it read. Any signed-in browser can read it, and it crosses your
+  tailnet to that browser unencrypted by spandeck (Tailscale encrypts between devices),
+  as the terminal already does. The scrubbing that protects history from other agents
+  does not apply to what you read yourself.
+- The conversation is built from Claude Code's and Codex's own session files, which
+  their vendors call internal. After an agent update it may show less than happened; it
+  says how many records it did not understand, and the terminal is always complete.
 
 - Approving a station or a browser gives it control of every station. Check the code
   it shows matches the one you are asked to approve.

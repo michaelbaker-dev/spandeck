@@ -741,6 +741,18 @@ enum Chan {
         control: bool,
         task: tokio::task::JoinHandle<()>,
     },
+    /// A conversation being watched: items go down, nothing comes up.
+    Watch { task: tokio::task::JoinHandle<()> },
+}
+
+impl Chan {
+    fn close(self) {
+        match self {
+            Chan::Local { task, .. } | Chan::Remote { task, .. } | Chan::Watch { task } => {
+                task.abort()
+            }
+        }
+    }
 }
 
 fn frame(kind: u8, chan: u32, payload: &[u8]) -> Message {
@@ -935,16 +947,58 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                     }
                 }
             }
-            "pane.detach" => {
+            "pane.detach" | "pane.conversation.unwatch" => {
                 if let Some(c) = chan_of(&params).and_then(|c| chans.remove(&c)) {
-                    match c {
-                        Chan::Local { task, .. } | Chan::Remote { task, .. } => task.abort(),
-                    }
+                    c.close();
                 }
                 Ok(json!({"ok": true}))
             }
+            // The conversation view's live stream: the first page as the
+            // reply, then every change on this channel, the pane's file
+            // looked at five times a second for as long as someone watches.
+            // The owner's clients only, as attaching is; a pane on another
+            // station is watched there and passed through, and nothing of
+            // it is kept here.
+            "pane.conversation.watch" => {
+                if !who.is_owner() {
+                    Err(
+                        json!({"code": "denied", "message": "a conversation is for the user's clients"}),
+                    )
+                } else {
+                    let chan = next_chan;
+                    next_chan += 1;
+                    let station = params
+                        .get("station")
+                        .and_then(|s| s.as_str())
+                        .filter(|s| *s != web.daemon.station)
+                        .map(String::from);
+                    let watched = match station {
+                        None => watch_local(&web.daemon, &params, chan, out_tx.clone())
+                            .await
+                            .map_err(|e| error_json(&e)),
+                        Some(station) => {
+                            watch_remote(
+                                &web.daemon,
+                                &station,
+                                &params,
+                                &who.client,
+                                chan,
+                                out_tx.clone(),
+                            )
+                            .await
+                        }
+                    };
+                    watched.map(|(result, task)| {
+                        chans.insert(chan, Chan::Watch { task });
+                        result
+                    })
+                }
+            }
             "pane.input" | "pane.resize" if chan_of(&params).is_some() => {
                 match chan_of(&params).and_then(|c| chans.get(&c)) {
+                    Some(Chan::Watch { .. }) => Err(
+                        json!({"code": "denied", "message": "a watched conversation takes no typing"}),
+                    ),
                     Some(Chan::Local { pane, control, .. }) => {
                         if !control {
                             Err(
@@ -1043,9 +1097,7 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     }
 
     for (_, c) in chans {
-        match c {
-            Chan::Local { task, .. } | Chan::Remote { task, .. } => task.abort(),
-        }
+        c.close();
     }
     if let Some(t) = events_task {
         t.abort();
@@ -1163,18 +1215,24 @@ fn resized_for(ev: &Value, pane: &str, chan: u32) -> Option<Value> {
     Some(json!({"chan": chan, "resized": {"cols": cols, "rows": rows, "controller": controller}}))
 }
 
-/// Gateway: attach to a pane on another station and relay its stream, so the
-/// browser keeps a single connection to the station it opened. `client` is
-/// the browser tab the attach is for.
-async fn attach_remote(
+type PeerSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// A connection to another station of the fleet for one browser tab, signed
+/// with the fleet key: how a deck served here attaches to a pane there, or
+/// watches its conversation. The station there takes it as the owner's own
+/// request passed on, and as a client of its own (`gateway_client`).
+async fn peer_socket(
     daemon: &Daemon,
     station: &str,
-    pane: &str,
-    control: bool,
     client: &str,
-    chan: u32,
-    out: mpsc::Sender<Message>,
-) -> Result<RemoteAttach, String> {
+) -> Result<
+    (
+        futures_util::stream::SplitSink<PeerSocket, tungstenite::Message>,
+        futures_util::stream::SplitStream<PeerSocket>,
+    ),
+    String,
+> {
     use tungstenite::client::IntoClientRequest;
     let peer = daemon
         .fleet
@@ -1199,14 +1257,44 @@ async fn attach_remote(
     .await
     .map_err(|_| format!("{station} did not answer"))?
     .map_err(|e| format!("{station} unreachable: {e}"))?;
-    let (mut peer_sink, mut peer_stream) = ws.split();
-    let send = |v: Value| tungstenite::Message::Text(v.to_string().into());
+    let (mut peer_sink, peer_stream) = ws.split();
     peer_sink
-        .send(send(
-            json!({"auth": {"client": gateway_client(&daemon.station, client)}}),
+        .send(tungstenite::Message::Text(
+            json!({"auth": {"client": gateway_client(&daemon.station, client)}})
+                .to_string()
+                .into(),
         ))
         .await
         .map_err(|e| e.to_string())?;
+    Ok((peer_sink, peer_stream))
+}
+
+/// Why another station refused this one's connection.
+fn refused_by(daemon: &Daemon, station: &str) -> String {
+    // When the clocks are too far apart, that is why.
+    match daemon.perf.clock_of(station).filter(|c| c.refused()) {
+        Some(c) => format!(
+            "{station} refused this station: its clock and this station's differ by {}",
+            spandeck_core::perf::clock_words(c.diff_ms)
+        ),
+        None => format!("{station} refused this station"),
+    }
+}
+
+/// Gateway: attach to a pane on another station and relay its stream, so the
+/// browser keeps a single connection to the station it opened. `client` is
+/// the browser tab the attach is for.
+async fn attach_remote(
+    daemon: &Daemon,
+    station: &str,
+    pane: &str,
+    control: bool,
+    client: &str,
+    chan: u32,
+    out: mpsc::Sender<Message>,
+) -> Result<RemoteAttach, String> {
+    let (mut peer_sink, mut peer_stream) = peer_socket(daemon, station, client).await?;
+    let send = |v: Value| tungstenite::Message::Text(v.to_string().into());
     // The station's events come down this connection too, for one thing:
     // who resized the pane and to what.
     peer_sink
@@ -1227,14 +1315,7 @@ async fn attach_remote(
             Ok(Some(Ok(tungstenite::Message::Text(t)))) => {
                 let v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
                 if v.get("auth").is_some_and(|a| a["ok"] == json!(false)) {
-                    // When the clocks are too far apart, that is why.
-                    return Err(match daemon.perf.clock_of(station).filter(|c| c.refused()) {
-                        Some(c) => format!(
-                            "{station} refused this station: its clock and this station's differ by {}",
-                            spandeck_core::perf::clock_words(c.diff_ms)
-                        ),
-                        None => format!("{station} refused this station"),
-                    });
+                    return Err(refused_by(daemon, station));
                 }
                 if let Some(c) = v["auth"]["client"].as_str() {
                     me = json!(c.chars().take(128).collect::<String>());
@@ -1290,6 +1371,195 @@ async fn attach_remote(
         }
     });
     Ok((result, tx, peer_chan, task))
+}
+
+// ------------------------------------------------------- conversation watch
+
+type Watched = (Value, tokio::task::JoinHandle<()>);
+
+/// How often a watched pane's session file is looked at. The archive's own
+/// look is once a second; nobody waits that long for a reply they are
+/// watching for.
+const WATCH_EVERY: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// `pane.conversation`, off the async runtime: it reads a file and the
+/// databases.
+async fn conversation_of(
+    daemon: &Daemon,
+    pane: &str,
+    params: Value,
+) -> Result<Value, spandeck_core::Error> {
+    let (d, pane) = (daemon.clone(), pane.to_string());
+    tokio::task::spawn_blocking(move || d.conversation(&pane, &params))
+        .await
+        .map_err(|e| spandeck_core::Error::Invalid(e.to_string()))?
+}
+
+/// What of an answer, beside its items, is worth telling a watcher when it
+/// changes: everything but the station's clock.
+fn steady(answer: &Value) -> Value {
+    let mut live = answer["live"].clone();
+    if let Some(live) = live.as_object_mut() {
+        live.remove("now_ms");
+    }
+    json!([
+        answer["available"],
+        answer["reason"],
+        answer["session"],
+        answer["title"],
+        answer["not_understood"],
+        live
+    ])
+}
+
+/// Watch a pane's conversation on this station. The reply is what
+/// `pane.conversation` gives for the same parameters, so a client that
+/// comes back with its cursor is caught up in the reply; after it, every
+/// change is a `{"chan", "conversation": {…}}` message of that same shape,
+/// asked for `after` the cursor of the one before.
+async fn watch_local(
+    daemon: &Daemon,
+    params: &Value,
+    chan: u32,
+    out: mpsc::Sender<Message>,
+) -> Result<Watched, spandeck_core::Error> {
+    let pane = daemon
+        .pane(params.get("pane").and_then(|p| p.as_str()).unwrap_or(""))?
+        .id
+        .clone();
+    let mut first = conversation_of(daemon, &pane, params.clone()).await?;
+    first["chan"] = json!(chan);
+    let mut was = steady(&first);
+    let mut session = first["session"].as_str().unwrap_or("").to_string();
+    let mut cursor = first["cursor"].as_u64().unwrap_or(0);
+    let d = daemon.clone();
+    let task = tokio::spawn(async move {
+        let text = |v: Value| Message::Text(v.to_string().into());
+        let mut tick = tokio::time::interval(WATCH_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            // An empty session name is never the pane's: when the pane gets
+            // a session, the answer starts again from its newest items.
+            let ask = json!({"pane": pane, "session": session, "after": cursor, "limit": 200});
+            let next = match conversation_of(&d, &pane, ask).await {
+                Ok(next) => next,
+                Err(e) => {
+                    // The pane was closed.
+                    let _ = out
+                        .send(text(
+                            json!({"chan": chan, "conversation_end": {"message": e.to_string()}}),
+                        ))
+                        .await;
+                    return;
+                }
+            };
+            let now = steady(&next);
+            let news = |key: &str| next[key].as_array().is_some_and(|a| !a.is_empty());
+            let changed =
+                news("items") || news("updated") || next["reset"] == json!(true) || now != was;
+            was = now;
+            session = next["session"].as_str().unwrap_or("").to_string();
+            cursor = next["cursor"].as_u64().unwrap_or(0);
+            if changed
+                && out
+                    .send(text(json!({"chan": chan, "conversation": next})))
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+        }
+    });
+    Ok((first, task))
+}
+
+/// Gateway: watch a pane's conversation on another station and pass each
+/// message through, so the browser keeps one connection to the station it
+/// opened. What passes is the owner's own history on its way to the owner's
+/// browser: nothing of it is kept, logged or read here.
+async fn watch_remote(
+    daemon: &Daemon,
+    station: &str,
+    params: &Value,
+    client: &str,
+    chan: u32,
+    out: mpsc::Sender<Message>,
+) -> Result<Watched, Value> {
+    let unreachable = |message: String| json!({"code": "unreachable", "message": message});
+    let (mut peer_sink, mut peer_stream) = peer_socket(daemon, station, client)
+        .await
+        .map_err(unreachable)?;
+    let mut ask = params.clone();
+    if let Some(ask) = ask.as_object_mut() {
+        ask.remove("station");
+    }
+    peer_sink
+        .send(tungstenite::Message::Text(
+            json!({"id": 1, "method": "pane.conversation.watch", "params": ask})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .map_err(|e| unreachable(e.to_string()))?;
+    let mut result = loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(10), peer_stream.next()).await {
+            Ok(Some(Ok(tungstenite::Message::Text(t)))) => {
+                let v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
+                if v.get("auth").is_some_and(|a| a["ok"] == json!(false)) {
+                    return Err(unreachable(refused_by(daemon, station)));
+                }
+                if v.get("id") == Some(&json!(1)) {
+                    if let Some(e) = v.get("error") {
+                        // Another station's words: bounded, and passed as text.
+                        let short = |v: &Value, max: usize| -> String {
+                            v.as_str().unwrap_or("").chars().take(max).collect()
+                        };
+                        return Err(json!({
+                            "code": short(&e["code"], 32),
+                            "message": format!("{station}: {}", short(&e["message"], 300)),
+                        }));
+                    }
+                    break v["result"].clone();
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+            _ => return Err(unreachable(format!("{station} did not answer"))),
+        }
+    };
+    result["chan"] = json!(chan);
+    let task = tokio::spawn(async move {
+        // Held so the connection stays open for as long as it is watched.
+        let _peer_sink = peer_sink;
+        loop {
+            match peer_stream.next().await {
+                Some(Ok(tungstenite::Message::Text(t))) => {
+                    let Ok(mut v) = serde_json::from_str::<Value>(&t) else {
+                        continue;
+                    };
+                    if v.get("chan").is_some() {
+                        v["chan"] = json!(chan);
+                        if out.send(Message::Text(v.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Some(Ok(_)) => {}
+                _ => {
+                    let _ = out
+                        .send(Message::Text(
+                            json!({"chan": chan, "unreachable": true})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await;
+                    break;
+                }
+            }
+        }
+    });
+    Ok((result, task))
 }
 
 /// A short name for exactly this set of Control Deck files. A page that was

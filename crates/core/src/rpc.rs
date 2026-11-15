@@ -113,6 +113,13 @@ const NOT_FORWARDED: &[&str] = &[
     "fleet.uninstall",
 ];
 
+/// The owner's calls that only look, or only say what has been looked at,
+/// and so do not mean the owner is at a keyboard. A phone that shows a
+/// conversation asks for it again and again; that must not hold back the
+/// push that tells the same phone another pane needs it. They are not on
+/// the read-only list: a conversation is the owner's history, unscrubbed.
+const OWNER_LOOKS: &[&str] = &["pane.conversation", "pane.conversation.detail", "pane.read"];
+
 const READ_METHODS: &[&str] = &[
     "station.info",
     "station.doctor",
@@ -230,7 +237,10 @@ impl Daemon {
                 )))
             }
         }
-        if caller.authority == Authority::Owner && !READ_METHODS.contains(&method) {
+        if caller.authority == Authority::Owner
+            && !READ_METHODS.contains(&method)
+            && !OWNER_LOOKS.contains(&method)
+        {
             self.touch_presence(&caller.client);
         }
         if caller.authority == Authority::Owner && SYNCED_CHANGES.contains(&method) {
@@ -340,6 +350,24 @@ impl Daemon {
                     pane.term.lines()
                 };
                 json!({"pane": pane.id, "lines": lines, "info": pane.term.info()})
+            }
+            // The conversation view (conversation.rs): a pane's session as
+            // items, one item in full, and how far the owner has read. The
+            // owner's only: on no agent's list, no station's, and not the
+            // read-only one. Another station passes on the owner's request
+            // with `rpc.forward` and keeps nothing. They read files and the
+            // databases, so they run off the async runtime.
+            "pane.conversation" | "pane.conversation.detail" | "pane.read" => {
+                let pane = self.pane(s(&params, "pane")?)?.id.clone();
+                let d = self.clone();
+                let method = method.to_string();
+                tokio::task::spawn_blocking(move || match method.as_str() {
+                    "pane.conversation" => d.conversation(&pane, &params),
+                    "pane.conversation.detail" => d.conversation_detail(&pane, &params),
+                    _ => d.conversation_read(&pane, params.get("upto").and_then(|v| v.as_u64())),
+                })
+                .await
+                .map_err(|e| invalid(e.to_string()))??
             }
             "pane.send_text" => {
                 let id = self.target_pane(caller, &params)?;
