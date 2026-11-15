@@ -2146,14 +2146,20 @@ function ctxFor(lay) {
     // its terminal here is let go like any terminal that leaves the screen,
     // and comes back from the station's copy of the screen when it is shown.
     shown: () => leaves(tree()).filter(n => !n.hidden),
+    // A menu or a button holds the leaf it was drawn for. A refresh in
+    // between rebuilds the tree, and that leaf is then no part of it: "Show
+    // only this" hid every pane, this one too, and Hide did nothing. So the
+    // leaf is looked up again, by what it names, when the owner acts.
+    live: (n) => { const ref = refOf(n); return leaves(tree()).find(x => refOf(x) === ref) || null; },
     hide: (n, on) => {
+      if (!(n = ctx.live(n))) return;
       if (on && !ctx.shown().some(x => x !== n)) return toast('This is the only pane showing. Show another one first.');
       setHidden(n, on);
       saveLayout(lay);
       render();
       if (!on) focusLeafSoon(ctx, n);
     },
-    only: (n) => { for (const x of leaves(tree())) setHidden(x, x !== n); saveLayout(lay); render(); focusLeafSoon(ctx, n); },
+    only: (n) => { if (!(n = ctx.live(n))) return; for (const x of leaves(tree())) setHidden(x, x !== n); saveLayout(lay); render(); focusLeafSoon(ctx, n); },
   };
   return ctx;
 }

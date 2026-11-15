@@ -1197,9 +1197,22 @@ fn a_hidden_pane_gives_its_room_to_the_others_and_comes_back_as_it_was() {
         "[...document.querySelectorAll('.workspace .pane')].find(p => p.paneTerm.pane.name === 'two')?.querySelector('.strip')",
     );
     page.choose("Show only this");
-    page.wait(
+    wait_for_or(
         "one pane and two chips",
-        &format!("JSON.stringify({chips}) === '[\"one\",\"three\"]' && JSON.stringify({seen}.map(p => p[0])) === '[\"two\"]' && !document.querySelector('.strip-hide')"),
+        20,
+        || {
+            format!(
+                "DIAG chips={} seen={} striphide={} deck={}",
+                page.js(chips),
+                page.js(&format!("JSON.stringify({seen})")),
+                page.js("document.querySelectorAll('.strip-hide').length"),
+                s.call("deck.get", json!({}))["layouts"]
+            )
+        },
+        || {
+            let v = page.js(&format!("JSON.stringify({chips}) === '[\"one\",\"three\"]' && JSON.stringify({seen}.map(p => p[0])) === '[\"two\"]' && !document.querySelector('.strip-hide')"));
+            (v == json!(true)).then_some(())
+        },
     );
     page.right_click("document.querySelector('.workspace .pane .strip')");
     assert_eq!(
