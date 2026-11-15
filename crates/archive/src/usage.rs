@@ -534,6 +534,49 @@ pub fn opencode_session(db: &Path, session: &str) -> Option<OpenCodeSession> {
     .flatten()
 }
 
+/// OpenCode's most recently used conversation whose folder `in_folder`
+/// accepts and that `taken` does not claim: its id and when it was last
+/// used. Not a conversation OpenCode started itself (a child), not an
+/// archived one, and not one nothing was ever said in. `None` as for
+/// `opencode_session`. Columns seen on OpenCode 2.3.0 (15 Nov 2026).
+pub fn opencode_last(
+    db: &Path,
+    in_folder: &dyn Fn(&str) -> bool,
+    taken: &dyn Fn(&str) -> bool,
+) -> Option<(String, u64)> {
+    if !db.exists() {
+        return None;
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(200));
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, directory, time_updated FROM session_v2
+             WHERE parent_id IS NULL AND time_archived IS NULL
+               AND tokens_input + tokens_output > 0
+             ORDER BY time_updated DESC",
+        )
+        .ok()?;
+    let mut rows = stmt.query([]).ok()?;
+    while let Ok(Some(r)) = rows.next() {
+        let (Ok(id), Ok(dir), Ok(at)) = (
+            r.get::<_, String>(0),
+            r.get::<_, String>(1),
+            r.get::<_, i64>(2),
+        ) else {
+            continue;
+        };
+        if in_folder(&dir) && !taken(&id) {
+            return Some((id, at.max(0) as u64));
+        }
+    }
+    None
+}
+
 /// A followed conversation.
 #[derive(Debug, Clone)]
 pub(crate) struct Tracked {
@@ -1040,6 +1083,42 @@ mod tests {
         assert_eq!(opencode_session(&db, "ses_none"), None);
         assert_eq!(
             opencode_session(&dir.path().join("absent.db"), "ses_1"),
+            None
+        );
+    }
+
+    /// The owner's request (15 Nov 2026): a new pane continues the last
+    /// conversation in its folder, or starts a new one when there is none.
+    /// OpenCode's schema is not ours: this pins the columns that are read.
+    #[test]
+    fn opencode_last_is_the_conversation_last_used_in_a_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("opencode.db");
+        let oc = rusqlite::Connection::open(&db).unwrap();
+        oc.execute_batch(
+            r#"CREATE TABLE session_v2 (id text PRIMARY KEY, parent_id text, directory text NOT NULL,
+                 tokens_input integer DEFAULT 0 NOT NULL, tokens_output integer DEFAULT 0 NOT NULL,
+                 time_updated integer NOT NULL, time_archived integer);
+               INSERT INTO session_v2 VALUES('ses_old', NULL, '/w/repo', 5, 5, 100, NULL);
+               INSERT INTO session_v2 VALUES('ses_recent', NULL, '/w/repo', 5, 5, 200, NULL);
+               INSERT INTO session_v2 VALUES('ses_child', 'ses_recent', '/w/repo', 5, 5, 300, NULL);
+               INSERT INTO session_v2 VALUES('ses_archived', NULL, '/w/repo', 5, 5, 400, 450);
+               INSERT INTO session_v2 VALUES('ses_unused', NULL, '/w/repo', 0, 0, 500, NULL);
+               INSERT INTO session_v2 VALUES('ses_elsewhere', NULL, '/w/other', 5, 5, 600, NULL);"#,
+        )
+        .unwrap();
+        let here = |d: &str| d == "/w/repo";
+        assert_eq!(
+            opencode_last(&db, &here, &|_| false),
+            Some(("ses_recent".to_string(), 200))
+        );
+        assert_eq!(
+            opencode_last(&db, &here, &|id| id == "ses_recent"),
+            Some(("ses_old".to_string(), 100))
+        );
+        assert_eq!(opencode_last(&db, &|_| false, &|_| false), None);
+        assert_eq!(
+            opencode_last(&dir.path().join("absent.db"), &here, &|_| false),
             None
         );
     }

@@ -7,8 +7,9 @@
 //! the screen. `catalogue` says how each program is installed and updated.
 //!
 //! This crate is pure: no daemon state, no I/O beyond config-file edits in
-//! `install`. The daemon feeds it vendor payloads and gets normalized events
-//! and vendor-shaped replies back.
+//! `install` and reading the agents' saved conversations in `sessions`. The
+//! daemon feeds it vendor payloads and gets normalized events and
+//! vendor-shaped replies back.
 
 pub mod antigravity;
 pub mod catalogue;
@@ -18,6 +19,7 @@ pub mod detect;
 pub mod event;
 pub mod install;
 pub mod opencode;
+pub mod sessions;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

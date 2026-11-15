@@ -71,6 +71,15 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - A machine that is not in the fleet and stops answering leaves the list (before, it stayed as "unreachable" until the daemon restarted). Stations of the fleet that are off stay listed, as before.
 - Both dialogs name the station and its counts, open on Cancel, and act only on the red button. `fleet.forget` ("Forget this station") stays: it only takes an unreachable station off the list.
 
+## A new pane can continue the last conversation (15 Nov 2026, the owner's request)
+
+"We should have a resume session checkbox when creating a new pane, this way if it's there it would load, if it's not then it just start a new one."
+
+- **`pane.spawn` takes `resume_last`** (the New pane dialog's tick, off until ticked and then remembered in that browser; `spandeck pane new --resume-last`). The agent goes back to the conversation it last used in the pane's folder; with none, a new one starts and the pane says so (`resumed` in the pane and in `pane.created`). A caller's own `resume` id wins. A shell ignores it.
+- **The agent's own saved conversations are read, not spandeck's records**, so one started outside spandeck counts. Claude Code: the newest session file in its directory for the folder that holds a message (not an empty file, not a sub-agent's). Codex: the first line of its session files, the 200 most recently started only. OpenCode: its database. Antigravity: none can be found, so a new one always starts. Only read, never changed.
+- **Two live panes are never put in one conversation.** One a live pane on the station is in is passed over for the next most recent, or a new one.
+- **`pane.last_session`** says what would be continued and when it was last used, before the pane is started. It reads only, and is for whoever may start a pane: on no agent's list, no station's and not the read-only one.
+
 ## AgentVault (14 Nov 2026)
 
 - spandeck and AgentVault stay separate programs. spandeck works without a vault.

@@ -219,6 +219,10 @@ enum PaneCmd {
         project: Option<String>,
         #[arg(long)]
         cwd: Option<PathBuf>,
+        /// Continue the last conversation the agent saved in the folder; a
+        /// new one starts when there is none.
+        #[arg(long)]
+        resume_last: bool,
         /// Program and arguments instead of an agent.
         #[arg(last = true)]
         command: Vec<String>,
@@ -565,6 +569,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 name,
                 project,
                 cwd,
+                resume_last,
                 command,
             } => {
                 let cwd = cwd.or_else(|| std::env::current_dir().ok());
@@ -572,7 +577,11 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     Some((p, rest)) => (Some(p.clone()), rest.to_vec()),
                     None => (None, vec![]),
                 };
-                let v = c.call("pane.spawn", json!({"agent": agent, "name": name, "project": project, "cwd": cwd, "program": program, "args": args}))?;
+                let v = c.call("pane.spawn", json!({"agent": agent, "name": name, "project": project, "cwd": cwd, "program": program, "args": args, "resume_last": resume_last}))?;
+                // The id stays alone on standard output, for scripts.
+                if resume_last && v["resumed"] != json!(true) && v["agent"] != json!("shell") {
+                    eprintln!("spandeck: no saved conversation to continue in this folder; a new one was started");
+                }
                 show(j, &v, |v| v["id"].as_str().unwrap_or("").to_string());
             }
             PaneCmd::List => {

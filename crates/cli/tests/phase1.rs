@@ -458,3 +458,90 @@ fn a_panes_usage_follows_its_session_file_is_priced_and_survives_a_restart() {
         json!(1350)
     );
 }
+
+/// The owner's request (15 Nov 2026): "we should have a resume session
+/// checkbox when creating a new pane, this way if it's there it would load,
+/// if it's not then it just start a new one." And two panes are never put
+/// in one conversation.
+#[test]
+fn a_new_pane_continues_the_last_conversation_in_its_folder_or_starts_a_new_one() {
+    let claude = tempfile::tempdir().unwrap();
+    let s = Station::start_with(
+        "alpha",
+        "",
+        &[("CLAUDE_CONFIG_DIR", claude.path().to_str().unwrap())],
+    );
+    let work = s.root.join("home").join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let start = || {
+        let pane = s.call(
+            "pane.spawn",
+            json!({"agent": "fake", "cwd": work, "resume_last": true}),
+        );
+        (
+            pane["id"].as_str().unwrap().to_string(),
+            pane["resumed"].clone(),
+        )
+    };
+    let last = || s.call("pane.last_session", json!({"agent": "fake", "cwd": work}));
+
+    // Nothing saved for the folder: said so, and a new conversation starts.
+    assert_eq!(last()["found"], json!(false));
+    let (new, resumed) = start();
+    assert_eq!(resumed, json!(false));
+    s.wait_text(&new, "[fake] session ");
+    assert_eq!(s.log("pane.created")[0]["data"]["resumed"], json!(false));
+
+    // Two conversations saved by the agent itself, outside spandeck.
+    let real = std::fs::canonicalize(&work).unwrap();
+    let real = real.to_string_lossy();
+    let dir = claude.path().join("projects").join(
+        spandeck_agents::sessions::claude_folder_name(real.trim_start_matches(r"\\?\")).unwrap(),
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    for (id, age) in [("older", 7200), ("recent", 60)] {
+        let file = dir.join(format!("{id}.jsonl"));
+        std::fs::write(&file, "{\"type\":\"user\",\"message\":{}}\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(age))
+            .unwrap();
+    }
+    let found = last();
+    assert_eq!(
+        (&found["session_id"], &found["newer_in_use"]),
+        (&json!("recent"), &json!(false))
+    );
+    let (first, resumed) = start();
+    assert_eq!(resumed, json!(true));
+    s.wait_text(&first, "[fake] RESUMED recent");
+    let created = s.log("pane.created");
+    assert_eq!(
+        created
+            .iter()
+            .filter(|e| e["data"]["resumed"] == json!(true))
+            .count(),
+        1,
+        "{created:?}"
+    );
+
+    // A live pane is in the most recent one: the next, then a new one.
+    let found = last();
+    assert_eq!(
+        (&found["session_id"], &found["newer_in_use"]),
+        (&json!("older"), &json!(true))
+    );
+    let (second, _) = start();
+    s.wait_text(&second, "[fake] RESUMED older");
+    let (third, resumed) = start();
+    assert_eq!(resumed, json!(false));
+    s.wait_text(&third, "[fake] session ");
+    // A shell has no conversation to go back to.
+    let sh = s.call(
+        "pane.spawn",
+        json!({"agent": "shell", "cwd": work, "resume_last": true}),
+    );
+    assert_eq!(sh["resumed"], json!(false));
+}

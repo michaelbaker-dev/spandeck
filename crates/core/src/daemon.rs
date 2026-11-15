@@ -147,6 +147,20 @@ pub struct PaneMeta {
     pub launcher: Option<String>,
     #[serde(default)]
     pub launcher_recorded: bool,
+    /// The program was started into a conversation saved before (a restart,
+    /// a recovery, or a new pane asked to continue the last one), not a new
+    /// one.
+    #[serde(default)]
+    pub resumed: bool,
+}
+
+/// What `Daemon::last_session` found.
+#[derive(Debug, Clone, Default)]
+pub struct LastSession {
+    /// The conversation a new pane would continue.
+    pub session: Option<spandeck_agents::sessions::SavedSession>,
+    /// A more recent one was passed over: a live pane here is in it.
+    pub newer_in_use: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -183,7 +197,7 @@ impl PaneEntry {
             "parent_pane": m.parent_pane, "hooks_seen": m.hooks_seen, "muted": m.muted,
             "watch": m.watch, "slot": m.slot, "last_message": m.last_message,
             "cols": info.cols, "rows": info.rows, "controller": m.controller,
-            "subagents": m.subagents,
+            "subagents": m.subagents, "resumed": m.resumed,
             "last_output_ms": self.term.last_output_ms(), "pid": self.term.pid(),
             "program": m.spec.program,
             "icon": spandeck_agents::icon(m.agent, &m.spec.program),
@@ -209,6 +223,9 @@ pub struct SpawnOpts {
     pub task: Option<String>,
     pub parent_pane: Option<String>,
     pub resume: Option<String>,
+    /// Continue the last conversation this agent saved for the folder, or
+    /// start a new one when there is none. `resume` wins; a shell ignores it.
+    pub resume_last: bool,
     pub prompt: Option<String>,
     pub slot: Option<String>,
     pub extra_args: Vec<String>,
@@ -290,6 +307,9 @@ pub struct Inner {
     pub vault: crate::vault::VaultState,
     /// Held while the deck document is read, changed and written back.
     pub(crate) deck_lock: Mutex<()>,
+    /// Held while a pane that continues the last conversation is started, so
+    /// two of them asked for at once do not both choose the same one.
+    pub(crate) resume_lock: Mutex<()>,
     /// Agent programs: versions read, updates running, restarts owed.
     pub(crate) agents: crate::agents::AgentsState,
     pub(crate) prices: crate::prices::PricesState,
@@ -388,6 +408,7 @@ impl Daemon {
             web_addrs: Mutex::new(vec![]),
             vault: Default::default(),
             deck_lock: Mutex::new(()),
+            resume_lock: Mutex::new(()),
             agents: Default::default(),
             prices: Default::default(),
             adding: Default::default(),
@@ -617,6 +638,9 @@ impl Daemon {
                 .map(kind_from_command)
                 .unwrap_or(AgentKind::Shell)
         });
+        let cwd = opts.cwd.clone().unwrap_or_else(|| self.home.clone());
+        let _one_at_a_time = opts.resume_last.then(|| self.resume_lock.lock().unwrap());
+        let mut resume = opts.resume.clone();
         let mut new_session = None;
         let mut agent_env = vec![];
         let (program, args) = match (adapter(agent), &opts.program) {
@@ -633,7 +657,10 @@ impl Daemon {
                 extra.extend(wiring);
                 extra.extend(opts.extra_args.iter().cloned());
                 extra.extend(opts.args.iter().cloned());
-                if opts.resume.is_none() {
+                if resume.is_none() && opts.resume_last {
+                    resume = self.last_session(agent, &cwd).session.map(|s| s.id);
+                }
+                if resume.is_none() {
                     // An agent that cannot report its session id is started
                     // under one chosen here, so it can be resumed later.
                     new_session = a.session_prefix().map(|prefix| {
@@ -644,7 +671,7 @@ impl Daemon {
                     });
                 }
                 let launch = a.launch(&LaunchOpts {
-                    resume: opts.resume.clone(),
+                    resume: resume.clone(),
                     prompt: opts.prompt.clone(),
                     extra_args: extra,
                     program: opts.program.clone().or(cfg.program),
@@ -733,7 +760,6 @@ impl Daemon {
             (program, args)
         };
 
-        let cwd = opts.cwd.clone().unwrap_or_else(|| self.home.clone());
         if !cwd.is_dir() {
             return Err(invalid(format!("{} is not a directory", cwd.display())));
         }
@@ -839,7 +865,7 @@ impl Daemon {
             needs_reason: None,
             tool: None,
             tool_since_ms: 0,
-            session_id: opts.resume.clone().or(new_session),
+            session_id: resume.clone().or(new_session),
             transcript_path: None,
             title: String::new(),
             exit: None,
@@ -856,6 +882,7 @@ impl Daemon {
             subagents: vec![],
             launcher: opts.program.clone(),
             launcher_recorded: true,
+            resumed: resume.is_some(),
         };
         let entry = Arc::new(PaneEntry {
             id: id.clone(),
@@ -874,7 +901,7 @@ impl Daemon {
             m.project.as_deref(),
             m.task.as_deref(),
             None,
-            json!({"name": m.name, "agent": m.agent, "resumed": opts.resume.is_some()}),
+            json!({"name": m.name, "agent": m.agent, "resumed": resume.is_some(), "resume_last": opts.resume_last}),
         );
         Ok(entry)
     }
@@ -1163,6 +1190,52 @@ impl Daemon {
             }
         }
         Some(id)
+    }
+
+    /// The last conversation `agent` saved for a folder, from the agent's own
+    /// files, for a new pane that is to continue it. Never one a live pane
+    /// on this station is in: the next most recent instead, or none.
+    pub fn last_session(&self, agent: AgentKind, cwd: &std::path::Path) -> LastSession {
+        use spandeck_agents::sessions::{self, SavedSession};
+        let live: Vec<String> = self
+            .list_panes()
+            .iter()
+            .filter_map(|p| {
+                let m = p.meta.lock().unwrap();
+                m.exit.is_none().then(|| m.session_id.clone()).flatten()
+            })
+            .collect();
+        let passed = std::cell::Cell::new(false);
+        let taken = |id: &str| {
+            let held = live.iter().any(|l| l == id);
+            passed.set(passed.get() || held);
+            held
+        };
+        let folder = sessions::Folder::of(cwd);
+        let session = match agent {
+            // The test agent keeps Claude Code's layout.
+            AgentKind::Claude | AgentKind::Fake => {
+                sessions::claude_last(&sessions::claude_projects_dir(&self.home), &folder, &taken)
+            }
+            AgentKind::Codex => {
+                sessions::codex_last(&sessions::codex_sessions_dir(&self.home), &folder, &taken)
+            }
+            AgentKind::OpenCode => spandeck_archive::usage::opencode_last(
+                &spandeck_archive::usage::opencode_db(&self.home),
+                &|dir| folder.is(dir),
+                &taken,
+            )
+            .map(|(id, last_used_ms)| SavedSession {
+                id,
+                path: None,
+                last_used_ms,
+            }),
+            AgentKind::Antigravity | AgentKind::Shell => None,
+        };
+        LastSession {
+            session,
+            newer_in_use: passed.get(),
+        }
     }
 
     /// Start a pane's program again in the same pane: same name, folder,

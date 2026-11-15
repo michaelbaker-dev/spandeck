@@ -251,6 +251,36 @@ impl Daemon {
                 self.write_instructions(&pane.meta());
                 self.pane_view(&pane)
             }
+            // What a new pane asked to continue the last conversation
+            // (`pane.spawn` with `resume_last`) would go back to. Reads only;
+            // for whoever may start a pane, so on no other caller's list.
+            "pane.last_session" => {
+                let agent = AgentKind::parse(s(&params, "agent")?)
+                    .ok_or_else(|| invalid("unknown agent"))?;
+                let cwd = opt(&params, "cwd")
+                    .filter(|c| !c.trim().is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        opt(&params, "project")
+                            .and_then(|project| self.project_path(project))
+                            .map(PathBuf::from)
+                    })
+                    .map(|c| self.expand_path(&c))
+                    .unwrap_or_else(|| self.home.clone());
+                let d = self.clone();
+                let last = tokio::task::spawn_blocking(move || d.last_session(agent, &cwd))
+                    .await
+                    .map_err(|e| invalid(e.to_string()))?;
+                json!({
+                    "found": last.session.is_some(),
+                    "session_id": last.session.as_ref().map(|s| &s.id),
+                    "last_used_ms": last.session.as_ref().map(|s| s.last_used_ms),
+                    "newer_in_use": last.newer_in_use,
+                    // False for an agent whose saved conversations spandeck
+                    // has no way to find.
+                    "can_find": !matches!(agent, AgentKind::Antigravity | AgentKind::Shell),
+                })
+            }
             "pane.list" => json!(self.pane_views()),
             "pane.get" => {
                 let pane = self.pane(&self.target_pane(caller, &params)?)?;

@@ -242,16 +242,69 @@ function newPaneDialog(st, project, then) {
     agent.addEventListener('change', suggest);
     proj.addEventListener('change', suggest);
     suggest();
+    // An agent can go back to the last conversation it saved in the folder.
+    // The station is asked whether there is one, so the dialog can say so
+    // before the pane is started. The tick is remembered in this browser.
+    let keep = false;
+    try { keep = localStorage.getItem(RESUME_LAST_KEY) === '1'; } catch (e) { /* no storage: not ticked */ }
+    const last = h('input', { type: 'checkbox', checked: keep, style: { width: 'auto' } });
+    last.addEventListener('change', () => { try { localStorage.setItem(RESUME_LAST_KEY, last.checked ? '1' : '0'); } catch (e) { /* not kept, then */ } });
+    const lastNote = h('small', { class: 'muted', style: { display: 'block', margin: '2px 0 0 24px' } });
+    const lastRow = h('div', { style: { marginBottom: '10px' } }, h('label', { class: 'row' }, last, 'Continue the last conversation in this folder'), lastNote);
+    let canContinue = true, asked = 0, askTimer = null;
+    const ask = async () => {
+      const n = ++asked;
+      const isAgent = agent.value !== 'shell';
+      lastRow.style.display = isAgent && canContinue ? '' : 'none';
+      if (!isAgent || !canContinue) return;
+      lastNote.textContent = '';
+      let r;
+      try { r = await api.on(st, 'pane.last_session', { agent: agent.value, project: proj.value || undefined, cwd: cwd.value.trim() || undefined }); }
+      catch (e) {
+        // A station from before this could be asked cannot continue one either.
+        if (n === asked && (e.code === 'not_found' || /method pane\.last_session/.test(e.message || ''))) { canContinue = false; lastRow.style.display = 'none'; }
+        return;
+      }
+      if (n !== asked) return;
+      lastNote.textContent = lastSessionNote(r, AGENT_CHOICES.find(([v]) => v === agent.value)[1]);
+    };
+    agent.addEventListener('change', ask);
+    proj.addEventListener('change', ask);
+    cwd.addEventListener('input', () => { clearTimeout(askTimer); askTimer = setTimeout(ask, 350); });
+    ask();
     const submit = async () => {
-      const params = { agent: agent.value, name: name.value.trim() || undefined, project: proj.value || undefined, cwd: cwd.value || undefined };
+      clearTimeout(askTimer);
+      const resumeLast = agent.value !== 'shell' && canContinue && last.checked;
+      const params = { agent: agent.value, name: name.value.trim() || undefined, project: proj.value || undefined, cwd: cwd.value || undefined, resume_last: resumeLast || undefined };
       const pane = await rpc(st, 'pane.spawn', params);
       close();
+      if (resumeLast && !pane.resumed) toast('No saved conversation to continue here: a new one was started');
       then ? then(pane.id) : go(paneUrl(st, pane.id));
     };
     return h('form', { onsubmit: (e) => { e.preventDefault(); submit(); } },
-      field('Run', agent), field('Name', name, 'A name is used once in a project.'), field('Project', proj), field('Folder', cwd),
+      field('Run', agent), field('Name', name, 'A name is used once in a project.'), field('Project', proj), field('Folder', cwd), lastRow,
       h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel'), h('button', { class: 'primary', type: 'submit' }, 'Start')));
   });
+}
+
+const RESUME_LAST_KEY = 'spandeck.newPane.resumeLast';
+
+// "2 hours ago", for a time that may be days back.
+function longAgo(ms) {
+  const mins = Math.floor(Math.max(0, Date.now() - ms) / 60000);
+  const say = (n, unit) => `${n} ${unit}${n === 1 ? '' : 's'} ago`;
+  if (mins < 1) return 'just now';
+  if (mins < 60) return say(mins, 'minute');
+  if (mins < 1440) return say(Math.floor(mins / 60), 'hour');
+  return say(Math.floor(mins / 1440), 'day');
+}
+
+// What `pane.last_session` answered, in a line beside the tick.
+function lastSessionNote(r, agentName) {
+  if (!r) return '';
+  if (r.can_find === false) return `spandeck cannot find ${agentName}'s saved conversations; a new one will start`;
+  if (r.found) return `Last used ${longAgo(r.last_used_ms)}` + (r.newer_in_use ? '. A more recent one is open in another pane' : '');
+  return r.newer_in_use ? 'The last one is open in another pane; a new one will start' : 'None saved here yet; a new one will start';
 }
 
 function newProjectDialog(st) {
