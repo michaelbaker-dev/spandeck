@@ -253,6 +253,12 @@ impl Daemon {
             }
             "presence.touch" => {
                 self.touch_presence(&caller.client);
+                // The owner at a deck served here is at a keyboard for every
+                // station, not only this one. One passed on is not passed on
+                // again.
+                if !caller.client.starts_with("via:") {
+                    self.presence_relay();
+                }
                 json!({"at_keyboard": true})
             }
             "log.query" => json!(self.db.log_query(

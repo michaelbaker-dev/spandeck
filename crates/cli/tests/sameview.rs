@@ -34,7 +34,8 @@ fn event(events: &Arc<Mutex<Vec<Value>>>, kind: &str, holds: &str) -> Option<Val
 #[test]
 fn a_deck_opened_on_either_station_shows_the_same() {
     use common::browser::Page;
-    let (a, b) = Station::pair();
+    // Alpha forgets after a second that the owner was at a keyboard.
+    let (a, b) = Station::pair_with("at_keyboard_secs = 1\n");
 
     // ---- Fault 1: the inbox was the serving station's only. A notice and
     // a message kept at bravo are in the inbox of a deck served by alpha,
@@ -117,6 +118,18 @@ fn a_deck_opened_on_either_station_shows_the_same() {
         &format!("(p => p.length ? p : null)({shown})"),
     );
     assert_eq!(on_bravo, on_alpha);
+
+    // ---- Fault 2: the owner at a deck counted as "at a keyboard" for the
+    // station serving it only, so the others pushed to the phone meanwhile.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let at_keyboard = || a.call("station.info", json!({}))["at_keyboard"].clone();
+    assert_eq!(at_keyboard(), json!(false), "nobody has been at alpha");
+    page.js("(document.body.dispatchEvent(new MouseEvent('mousedown', {bubbles: true})), true)");
+    wait_for(
+        "the owner at bravo's deck to count at alpha too",
+        10,
+        || (at_keyboard() == json!(true)).then_some(()),
+    );
 }
 
 #[test]

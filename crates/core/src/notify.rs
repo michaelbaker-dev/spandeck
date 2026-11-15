@@ -150,6 +150,25 @@ impl Daemon {
         self.notify_relay(json!({"read": true}));
     }
 
+    /// The owner is at a Control Deck served by this station: say so to the
+    /// other stations, so that none of them pushes to the phone meanwhile.
+    /// It is the owner's own `presence.touch`, passed on as a deck's calls to
+    /// another station are, so a station of any version takes it.
+    pub(crate) fn presence_relay(&self) {
+        let d = self.clone();
+        tokio::spawn(async move {
+            let online = d.fleet.peers().into_iter().filter(|p| p.state == "online");
+            let calls = online.map(|p| {
+                let d = d.clone();
+                async move {
+                    let touch = json!({"method": "presence.touch", "params": {}});
+                    d.fleet.call(&p.station, "rpc.forward", touch).await
+                }
+            });
+            let _ = crate::fleet::futures_join_all(calls).await;
+        });
+    }
+
     /// Decide, for each new notification, whether it is pushed or held back.
     pub(crate) async fn pump_notifications(&self) {
         let pending: Vec<(String, String, String, String, Option<String>)> = self
