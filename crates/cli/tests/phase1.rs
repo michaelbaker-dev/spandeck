@@ -238,6 +238,11 @@ fn a_station_updates_to_a_release_only_if_the_download_matches_its_checksum() {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "releases/".into());
     assert!(exe.contains("releases/"), "{exe}");
+    // It still names the program it was started from: that is the path
+    // agents are given and the one the next update replaces. (A station
+    // updated twice kept an old program to start from at login: found on the
+    // 0.4.0 roll-out.)
+    assert_eq!(after["dirs"]["program"], before["dirs"]["program"]);
     assert!(s.log("station.rolled_back").is_empty());
 }
 

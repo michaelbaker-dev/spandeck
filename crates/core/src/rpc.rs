@@ -1334,6 +1334,10 @@ impl Daemon {
                     .arg("--handoff")
                     .arg(&file)
                     .env("SPANDECK_PREVIOUS_EXE", &previous)
+                    // The new image runs from wherever it was unpacked. It is
+                    // told the program this station starts from, so that path
+                    // stays the one agents are given and updates replace.
+                    .env("SPANDECK_BIN", &d.exe)
                     .env(
                         "SPANDECK_INSTALL_TO",
                         install_to.clone().unwrap_or_default(),

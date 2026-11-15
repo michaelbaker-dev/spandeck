@@ -37,6 +37,32 @@ impl Paths {
         }
     }
 
+    /// The program this station is started from at login, for a daemon whose
+    /// own image is a release unpacked under the state directory. A daemon
+    /// started by an update from 0.4.0 or earlier is not told that path, so it
+    /// is worked out: the place the installer puts the program. Only for the
+    /// station that has the login service and the usual state directory; a
+    /// trial or a test under another directory keeps the image it runs.
+    pub fn started_from(&self, running: &Path) -> PathBuf {
+        if !running.starts_with(&self.state_dir) {
+            return running.to_path_buf();
+        }
+        let home = home_dir();
+        let usual = sys::default_dirs(&home).0 == self.state_dir
+            && std::env::var_os("SPANDECK_STATE_DIR").is_none();
+        let installed = if sys::WINDOWS {
+            self.state_dir
+                .parent()
+                .map(|local| local.join("Programs").join("spandeck").join("spandeck.exe"))
+        } else {
+            Some(home.join(".local/bin/spandeck"))
+        };
+        match installed {
+            Some(p) if usual && p.is_file() && crate::doctor::service_installed(&home) => p,
+            _ => running.to_path_buf(),
+        }
+    }
+
     pub fn socket(&self) -> PathBuf {
         if let Some(p) = std::env::var_os("SPANDECK_SOCKET") {
             return PathBuf::from(p);

@@ -1325,12 +1325,34 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
                 // An update that proved healthy also replaces the binary this
                 // station is started from.
                 if let Some(to) = &install_to {
-                    let installed = std::env::current_exe().and_then(|me| {
+                    // An update started by 0.4.0 or earlier names its own
+                    // unpacked image here, not the program started at login.
+                    let to = &daemon.paths.started_from(to);
+                    let put = |from: &std::path::Path, to: &std::path::Path| {
                         let tmp = to.with_extension("new");
-                        std::fs::copy(&me, &tmp)?;
+                        std::fs::copy(from, &tmp)?;
                         // Windows: `to` may be running (a `sd` command, a
-                        // hook); it is moved aside, not written over.
+                        // hook, the pane host); it is moved aside, not
+                        // written over.
                         sys::replace_file(&tmp, to)
+                    };
+                    let installed = std::env::current_exe().and_then(|me| {
+                        put(&me, to)?;
+                        // The programs released beside it replace the ones
+                        // installed beside it. A link to `spandeck` follows it.
+                        for name in ["sd", "spandeckd", "spandeck-pane-host"] {
+                            let name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+                            let (from, beside) = (me.with_file_name(&name), to.with_file_name(&name));
+                            let own_file = std::fs::symlink_metadata(&beside)
+                                .map(|m| m.is_file())
+                                .unwrap_or(false);
+                            if from.is_file() && own_file {
+                                if let Err(e) = put(&from, &beside) {
+                                    tracing::warn!(error = %e, to = %beside.display(), "could not replace an installed program");
+                                }
+                            }
+                        }
+                        Ok(())
                     });
                     if let Err(e) = installed {
                         tracing::warn!(error = %e, to = %to.display(), "the new version runs, but could not replace the installed binary");

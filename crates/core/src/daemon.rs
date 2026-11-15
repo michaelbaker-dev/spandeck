@@ -381,7 +381,11 @@ impl Daemon {
         let exe = opts
             .exe
             .or_else(|| std::env::var_os("SPANDECK_BIN").map(PathBuf::from))
-            .or_else(|| std::env::current_exe().ok())
+            .or_else(|| {
+                std::env::current_exe()
+                    .ok()
+                    .map(|me| paths.started_from(&me))
+            })
             .unwrap_or_else(|| PathBuf::from("spandeck"));
         let home = crate::paths::home_dir();
         let station = cfg.station.clone();
