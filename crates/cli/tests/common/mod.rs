@@ -626,17 +626,28 @@ impl Station {
     /// busy machine).
     pub fn wait_frozen(&self) {
         use std::io::{Read, Write};
+        // Frozen means: no byte comes back in half a second. A connection
+        // that is not taken, or a request that cannot be written, is the
+        // same thing (macOS does not take a connection for a stopped
+        // process the way Linux does).
         wait_for("the frozen station to stop answering", 20, || {
-            let mut s = std::net::TcpStream::connect(("127.0.0.1", self.port)).ok()?;
-            s.set_read_timeout(Some(std::time::Duration::from_millis(500)))
-                .ok()?;
+            let half = std::time::Duration::from_millis(500);
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], self.port));
+            let Ok(mut s) = std::net::TcpStream::connect_timeout(&addr, half) else {
+                return Some(());
+            };
+            let _ = s.set_read_timeout(Some(half));
+            let _ = s.set_write_timeout(Some(half));
             let body = r#"{"method":"station.hello","params":{}}"#;
-            write!(
+            if write!(
                 s,
                 "POST /api/peer/rpc HTTP/1.1\r\nhost: station\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             )
-            .ok()?;
+            .is_err()
+            {
+                return Some(());
+            }
             match s.read(&mut [0u8; 16]) {
                 Ok(n) if n > 0 => None,
                 _ => Some(()),
