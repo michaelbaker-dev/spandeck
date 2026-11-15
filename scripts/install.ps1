@@ -1,6 +1,6 @@
 # Install the latest spandeck release on Windows (x64). The Windows form of install.sh.
 #   irm https://raw.githubusercontent.com/michaelbaker-dev/spandeck/main/scripts/install.ps1 | iex
-# Options (environment): SPANDECK_VERSION=v0.4.1   SPANDECK_BIN_DIR=<folder>
+# Options (environment): SPANDECK_VERSION=v0.4.2   SPANDECK_BIN_DIR=<folder>
 #   SPANDECK_RELEASES=<address of a copy of the release page>
 #   SPANDECK_NO_SERVICE=1   do not set spandeck to start when you log on
 #   SPANDECK_NO_PATH=1      do not add the folder to your PATH
