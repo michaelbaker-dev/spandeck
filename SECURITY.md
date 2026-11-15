@@ -146,6 +146,13 @@ days, not hours.
   touched; where they do not agree it does nothing. What a pane that is not started
   again left running is never ended, only named to you. A program's name in that notice
   is text from the machine: bounded, and shown as text.
+- On Windows the station can be stopped, and the program that keeps it running told to
+  make way for a newer copy, through named objects of your Windows user, with no token
+  (`spandeck service --stop`; 15 Nov 2026). That is what a signal is on macOS and Linux: any
+  program running as you can do it, an agent in a pane included, as any could already end
+  the process. Another account on the machine cannot. The program that keeps the station
+  running starts only the `spandeck.exe` beside it, and follows a process only if the
+  station's own pid file or the station itself, asked with the token, names it.
 - Requests to join or sign in that were waiting are handed to the daemon that takes over
   at an upgrade, in the same private file as the terminals. They hold the hash of what
   the asker collects with, never the key or a token, and one already approved is not

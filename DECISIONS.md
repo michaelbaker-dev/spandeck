@@ -577,7 +577,8 @@ not been tried on a real machine is said where it applies.
     and scrollback goes back as far as those 8 MB. This changes a recommended default
     ("processes do not survive a daemon crash") for Windows only; on Unix it stands. So that
     panes nobody can reach are not kept for ever, a host with no daemon ends its panes and
-    itself after ten minutes (the log-on task restarts a failed daemon within one or two).
+    itself after ten minutes (the supervisor starts a failed daemon again after a second; see
+    Start at login).
     Stopping the station on purpose ends the panes and the host at once.
   - **The host is not upgraded while it holds a pane**: it cannot be without ending them.
     Its protocol is versioned and only grows; a daemon speaks every host protocol back to 1
@@ -596,21 +597,82 @@ not been tried on a real machine is said where it applies.
   but can be renamed, so an update moves `spandeck.exe` to `spandeck.exe.old` and puts the new
   one in its place; the old file is removed at the next start. `state\bin\running` and
   `previous` are hard links as on Unix (same volume), else copies. The same goes for the
-  pane host's file while it runs.
+  pane host's file while it runs, and for `spandeckd.exe`, which runs for as long as the
+  station does. A program still running from `.old` at the next update keeps that name, and
+  the file moved aside then is `.old2` (up to `.old9`); each is removed at the first
+  replacement after nothing runs from it (15 Nov 2026: before, the second update while an
+  old copy ran could not replace the file).
 - **Start at login: a per-user Scheduled Task** ("spandeckd", at log on, restart on failure,
   no time limit, runs on battery), not a Windows Service: a service runs in session 0 without
   the user's profile, PATH or the agents' logins. The task runs `spandeckd.exe`, a windowless
-  program that starts `spandeck.exe daemon` with no console window and waits for it, so no
-  window opens at log on and the task's restart-on-failure sees the daemon's exit code.
+  program that starts `spandeck.exe daemon` with no console window, so no window opens at
+  log on.
   **Unlike Linux with linger, the daemon runs only while the owner is logged in** (a locked
   screen is fine; logged out is not). The owner accepted this (14 Nov 2026: the machine logs
   on by itself).
-  **Not yet checked on the real machine (asked for on 15 Nov 2026):** whether the task
-  restarts a daemon that crashes after an upgrade in place. On Windows the upgraded daemon is
-  a new process, which `spandeckd.exe` did not start and does not wait for, and the one it did
-  start has ended; as the code reads, the task then sees its program end and nothing watches
-  the daemon that is running. If the check on rtx6000 shows that, `spandeckd.exe` is to follow
-  the station's pid file instead of its own child. Nothing was changed without the check.
+- **`spandeckd.exe` supervises the station, not the process it started** (15 Nov 2026, after
+  a fault measured on rtx6000). Until then it waited for the one daemon it had started and
+  passed on its exit code for the task's restart-on-failure. An upgraded daemon is a new
+  process on Windows, so after the first upgrade the wrapper's child had ended with success,
+  the wrapper with it, and nothing watched the daemon that was running. Measured: the
+  station's daemon, upgraded many times, was ended with `taskkill /F`; nothing started it in
+  150 seconds; `schtasks /run /tn spandeckd` brought it back, with its three panes under the
+  same pane host. So a Windows station that crashed after its first upgrade stayed down until
+  the next log on, its agents running where no Stop and no hook reached them. The rule now:
+  - **It follows whichever daemon is current.** That is the process the station's pid file
+    names, believed only if that process was started before the file was written (Windows
+    gives a pid out again; only the daemon that wrote the file, or the one it was written
+    for, can be older than it); failing that, the pid the station gives when asked on its
+    pipe, which only a daemon of that state folder answers. A daemon that hands over (an
+    upgrade, a restart in place, going back to the previous binary) writes the next one's pid
+    in the pid file before it ends, so there is no moment when the file names nobody while
+    the new daemon waits for the old one (`SPANDECK_WAIT_PID`).
+  - **When that daemon ends:** another is already named: follow it, start nothing. It ended
+    with success and the clean-stop mark is set (`restore.stopped_clean`): it was stopped on
+    purpose; the supervisor ends too and nothing is started until the next log on or
+    `schtasks /Run /TN spandeckd`. It ended with success, no mark, nobody named: a hand-over
+    from a daemon older than this rule, so the next one is waited for, 30 seconds; if none
+    comes and the station's database says it was not stopped, one is started. Anything else
+    (a crash, a kill): a daemon is started after 1 second, then 2, 4, 8 and so on up to 5
+    minutes between tries, and from 1 again once a daemon has stayed up 10 minutes. Each such
+    start is an unclean one to the daemon, whose own guard still holds agents back at the
+    third in 10 minutes (After a restart); panes in the pane host are not affected.
+  - **Stopping on purpose is `spandeck service --stop`** (new with this): a daemon with no
+    console can be sent no signal, and one that is merely ended is now started again. The
+    daemon listens for a request named for its state folder and stops as it does for SIGTERM
+    on Unix: panes and pane host ended, the mark written. On macOS and Linux the command
+    prints the login service's own stop command. `station.leave` with stop, and the uninstall
+    that uses it, stop the same way. Any program of the same Windows user can make the
+    request, as any can end the process; no agent is given an RPC for it.
+  - **One supervisor per station.** Being it is holding a named object that goes when the
+    process does; a second copy (a second log on, the task run by hand) finds it held, ends
+    with success and starts nothing. A copy started with nothing running adopts a daemon that
+    is running instead of starting a second.
+  - **It is replaced at an update without a log on.** The update moves the running
+    `spandeckd.exe` aside and installs the new one (as above); the new daemon, once healthy,
+    starts the new one, told to take over: the old one leaves and the new one follows the
+    daemon. This is done for a station that has a supervisor, or that is the one started at
+    log on (the usual state folder, the task's script present): so a station installed before
+    this gets its supervisor at the update that brings this, with nothing to do by hand.
+    The supervisor so started is not the task's own process: Task Scheduler shows the task as
+    ready, not running, and running it then starts a copy that ends at once.
+  - It writes what it did, and why, to `spandeckd-supervisor.log` in the state folder.
+  - **Not covered:** a daemon that hangs without ending; a supervisor that is itself ended
+    (the daemon runs on, and is supervised again at the next update, log on or run of the
+    task); a stop whose mark the database did not take in the two seconds the daemon gives
+    it, which is then taken for a lost hand-over and started again after 30 seconds.
+  - **Tried on rtx6000** with stations under folders of their own and `spandeckd.exe` run
+    directly: a daemon ended after two upgrades comes back with its panes, twice; a stop on
+    purpose after an upgrade is not undone; an upgrade, and one that goes back, start
+    nothing; a second supervisor ends; an update from a local release (`station.update`)
+    replaces the file of a supervisor that is running, for the second time, and the daemon it
+    brings starts the new one, which takes over and then restarts an ended daemon. **Not
+    tried:** any of it under the Task Scheduler in the owner's desktop session (the tests ran
+    in an SSH session, where the objects named for every session and for one are the same),
+    and the update of a station that has the old wrapper, which is taken to be "the usual
+    state folder and the task's script" and not something a test station can be. macOS and
+    Linux are unchanged: systemd and launchd restart the daemon and follow it through an
+    upgrade, since it stays one process.
 - **Keep-awake** is `SetThreadExecutionState`, held by `spandeck keep-awake` (the same shape
   as `caffeinate` and `systemd-inhibit`: a helper that holds the machine awake while it runs).
   The helper ends when the daemon does. It does not stop a laptop sleeping when its lid shuts.

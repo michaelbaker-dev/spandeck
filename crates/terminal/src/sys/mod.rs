@@ -12,7 +12,10 @@
 //!   processes     `replace_process`, `UPGRADE_KEEPS_PID`, `spawn_detached`,
 //!                 `end_leftover_child`, `close_inherited`,
 //!                 `wait_for_exit`, `shutdown_signal`, `no_window`, `ignore_interrupt`,
-//!                 `interrupted`
+//!                 `interrupted`, `request_stop`
+//!   supervising   `supervise`, `Supervisor`, `Watched`, `supervised`,
+//!                 `process_started`, `record_successor_in` (Windows; no-ops
+//!                 on Unix, where the login service does it)
 //!   the machine   `hostname`, `load_average`, `random_bytes`, `keep_awake_cmd`,
 //!                 `hold_awake`
 //!   shells        `default_shell`, `shell_line`
