@@ -68,6 +68,26 @@ const PEER_METHODS: &[&str] = &[
     "project.link.record",
     "project.link.findings",
     "notify.relay",
+    "sync.pull",
+    "prefs.push",
+];
+
+/// The owner's changes to a document every station keeps a copy of. Before
+/// one is taken, a station that has not looked at the fleet lately looks,
+/// and takes a newer copy if there is one (sync.rs).
+const SYNCED_CHANGES: &[&str] = &[
+    "deck.layout.save",
+    "deck.layout.remove",
+    "deck.pin",
+    "deck.unpin",
+    "look.theme.save",
+    "look.theme.remove",
+    "look.set",
+    "look.font.add",
+    "look.font.remove",
+    "project.layout.remove",
+    "setup.set",
+    "prefs.set",
 ];
 
 /// Methods that act from the station the owner is using and are never
@@ -113,6 +133,7 @@ const READ_METHODS: &[&str] = &[
     "agents.status",
     "deck.get",
     "look.get",
+    "prefs.get",
     "vault.status",
     "trust.status",
 ];
@@ -201,6 +222,9 @@ impl Daemon {
         }
         if caller.authority == Authority::Owner && !READ_METHODS.contains(&method) {
             self.touch_presence(&caller.client);
+        }
+        if caller.authority == Authority::Owner && SYNCED_CHANGES.contains(&method) {
+            self.sync_catch_up().await;
         }
         let by = caller.who.as_str();
         Ok(match method {
@@ -1012,6 +1036,35 @@ impl Daemon {
             }
             "look.font.remove" => self.look_font_remove(s(&params, "id")?, by)?,
             "look.font.fetch" => self.look_font_fetch(s(&params, "id")?)?,
+            // ------------------------------------------- owner preferences
+            // Small choices that follow the owner to every station. The
+            // owner's alone; a station has only the call that offers its copy.
+            "prefs.get" => json!(self.prefs()),
+            "prefs.set" => self.prefs_set(
+                s(&params, "key")?,
+                params.get("value").cloned().unwrap_or(Value::Null),
+                by,
+            )?,
+            "prefs.push" => {
+                if caller.authority != Authority::Peer {
+                    return Err(Error::Denied(
+                        "prefs.push is for another station; use prefs.set".into(),
+                    ));
+                }
+                let prefs: crate::prefs::Prefs = p(params
+                    .get("prefs")
+                    .ok_or_else(|| invalid("missing prefs"))?)?;
+                self.prefs_push(prefs, by)?
+            }
+            // A station asking for this station's copy of a synced document,
+            // because it saw that this one is newer. A station's signed call
+            // only: the agent setup can hold credentials for MCP servers.
+            "sync.pull" => {
+                if caller.authority != Authority::Peer {
+                    return Err(Error::Denied("sync.pull is for another station".into()));
+                }
+                self.sync_copy(s(&params, "doc")?)?
+            }
             "setup.push" => {
                 let setup: crate::setup::AgentSetup = p(params
                     .get("setup")

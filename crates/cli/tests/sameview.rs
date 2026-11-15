@@ -124,5 +124,120 @@ fn every_station_of_a_fleet_shows_the_same() {
         .try_call("notify.relay", json!({"title": "x"}))
         .unwrap_err();
     assert_eq!(refused.code, "denied", "{}", refused.message);
-    drop(c);
+
+    // ---- Fault 3: a station that had just come back changed its stale
+    // copy of a synced document, stamped it the newest, and every station
+    // then took it: what was changed while it was away was gone.
+    let (mut a, mut c) = (a, c);
+    let layouts = |s: &Station| -> Vec<String> {
+        let deck = s.call("deck.get", json!({}));
+        let names = deck["layouts"].as_array().unwrap().iter();
+        names
+            .map(|l| l["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let themes = |s: &Station| -> Vec<String> {
+        let look = s.call("look.get", json!({}));
+        let names = look["themes"].as_array().unwrap().iter();
+        names
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let model = |s: &Station| {
+        s.call("setup.get", json!({}))["setup"]["defaults"]["claude"]["model"].clone()
+    };
+    let own_look = |s: &Station, key: &str| !s.call("look.get", json!({}))["panes"][key].is_null();
+    // An agent's pane is still there after its station was off; a shell's is not.
+    let scratch = c.fake(json!({"steps": []}), json!({}));
+    wait_for("the agent's session", 10, || {
+        c.pane(&scratch)["session_id"].as_str().map(String::from)
+    });
+    let scratch_look = format!("charlie/{scratch}");
+    a.call("deck.layout.save", json!({"layout": {"name": "one"}}));
+    a.call(
+        "look.set",
+        json!({"level": "pane", "key": scratch_look, "choice": {"set": {"font.size": 15}}}),
+    );
+    wait_for("charlie to have the layout and the pane's look", 10, || {
+        (layouts(&c) == ["one"] && own_look(&c, &scratch_look)).then_some(())
+    });
+    // Charlie is off while the owner works at alpha.
+    c.kill9();
+    a.call("deck.layout.save", json!({"layout": {"name": "two"}}));
+    a.call("look.theme.save", json!({"theme": {"name": "Later"}}));
+    a.call(
+        "setup.set",
+        json!({"setup": {"defaults": {"claude": {"model": "opus"}}}}),
+    );
+    // It is back, and at once: a pane is closed there, which changes its
+    // copy of the looks without the owner asking (3b), and the owner pins
+    // something and saves a theme there (3a).
+    c.launch();
+    c.call("pane.close", json!({"pane": scratch}));
+    assert!(
+        !own_look(&c, &scratch_look),
+        "the closed pane's look is gone there"
+    );
+    c.call(
+        "deck.pin",
+        json!({"pin": {"kind": "layout", "name": "one"}}),
+    );
+    c.call("look.theme.save", json!({"theme": {"name": "Mine"}}));
+    for s in [&a, &b, &c] {
+        wait_for_or(
+            "every station to hold what was changed at alpha and at charlie",
+            20,
+            || format!("{}: {:?} {:?} {}", s.name, layouts(s), themes(s), model(s)),
+            || {
+                let pins = s.call("deck.get", json!({}))["pins"]
+                    .as_array()
+                    .unwrap()
+                    .len();
+                (layouts(s) == ["one", "two"]
+                    && pins == 1
+                    && themes(s) == ["Later", "Mine"]
+                    && model(s) == json!("opus"))
+                .then_some(())
+            },
+        );
+    }
+    // 3d: an editor that opened the setup before it was changed elsewhere
+    // is told its save was not kept, never "Saved".
+    let stale = b
+        .try_call(
+            "setup.set",
+            json!({"setup": {"updated_ms": 1, "defaults": {"claude": {"model": "haiku"}}}}),
+        )
+        .unwrap_err();
+    assert!(stale.message.starts_with("not saved"), "{}", stale.message);
+    assert_eq!(model(&a), json!("opus"));
+
+    // What is left of the fault: the same document changed at two stations
+    // that could not reach each other. The later change wins whole, and the
+    // owner is told which station's change went, at every station.
+    drop(b);
+    c.kill9();
+    a.call("deck.layout.save", json!({"layout": {"name": "at-alpha"}}));
+    a.kill9();
+    c.launch();
+    c.call(
+        "deck.layout.save",
+        json!({"layout": {"name": "at-charlie"}}),
+    );
+    a.launch();
+    for s in [&a, &c] {
+        wait_for("the later change to be the one both hold", 20, || {
+            (layouts(s) == ["one", "two", "at-charlie"]).then_some(())
+        });
+    }
+    let said = wait_for("alpha to say that its change was not kept", 10, || {
+        let notes = a.call("notify.list", json!({}));
+        let lost = notes.as_array().unwrap().iter();
+        lost.map(|n| n["title"].as_str().unwrap().to_string())
+            .find(|t| t.contains("was not kept"))
+    });
+    assert_eq!(
+        said,
+        "A change to the global layouts and pins made at alpha was not kept"
+    );
 }

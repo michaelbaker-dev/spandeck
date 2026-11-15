@@ -787,8 +787,11 @@ async function setupPanel() {
     const draw = () => body.replaceChildren(content());
     const save = async () => {
       const out = await rpc(api.station, 'setup.set', { setup, fleet: true });
-      const bad = out.stations.filter(x => !x.ok);
-      toast(bad.length ? `Saved. Not yet on: ${bad.map(x => x.station).join(', ')} (they catch up when they are back)` : `Saved on ${out.stations.length} station${out.stations.length === 1 ? '' : 's'}`);
+      // A station that kept its own, newer setup did not take this one, and
+      // its copy replaces it everywhere: that is not "Saved".
+      const kept = out.stations.filter(x => x.kept), bad = out.stations.filter(x => !x.ok && !x.kept);
+      if (kept.length) toast(`Not saved: ${kept.map(x => x.station).join(', ')} had a newer agent setup, which is the one in use now. Open Agent setup again and make your change there.`, 'error');
+      else toast(bad.length ? `Saved. Not yet on: ${bad.map(x => x.station).join(', ')} (they catch up when they are back)` : `Saved on ${out.stations.length} station${out.stations.length === 1 ? '' : 's'}`);
       const problems = out.stations.flatMap(x => x.problems || []);
       if (problems.length) toast(problems.join(' · '), 'error');
       close();

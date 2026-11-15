@@ -309,6 +309,10 @@ pub struct Inner {
     pub(crate) deck_lock: Mutex<()>,
     /// The same for the look document.
     pub(crate) look_lock: Mutex<()>,
+    /// The same for the owner's preferences.
+    pub(crate) prefs_lock: Mutex<()>,
+    /// Stamps seen in the fleet, and when this station last looked at it.
+    pub(crate) sync: crate::sync::SyncState,
     /// Held while a pane that continues the last conversation is started, so
     /// two of them asked for at once do not both choose the same one.
     pub(crate) resume_lock: Mutex<()>,
@@ -415,6 +419,8 @@ impl Daemon {
             vault: Default::default(),
             deck_lock: Mutex::new(()),
             look_lock: Mutex::new(()),
+            prefs_lock: Mutex::new(()),
+            sync: Default::default(),
             resume_lock: Mutex::new(()),
             agents: Default::default(),
             prices: Default::default(),
@@ -2068,6 +2074,8 @@ impl Daemon {
             // Said only by a station that keeps the look document: one that
             // does not say it is never sent a copy.
             "look": {"updated_ms": self.look().updated_ms, "format": crate::look::FORMAT},
+            // The same for the owner's preferences.
+            "prefs": {"updated_ms": self.prefs().updated_ms, "format": crate::prefs::FORMAT},
             "vault": self.vault_view(),
         })
     }

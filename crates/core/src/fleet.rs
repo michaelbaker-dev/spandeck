@@ -340,6 +340,17 @@ impl Daemon {
     /// it runs spandeck. Only those holding the same fleet key are trusted;
     /// the rest are listed as not linked until the owner joins them.
     pub(crate) async fn discover_peers(&self) {
+        self.look_at_fleet(false).await;
+    }
+
+    /// One look at a time. `only_if_stale`: a caller that only needs the
+    /// fleet to have been looked at lately, and waited for a look that was
+    /// under way, does not look again.
+    pub(crate) async fn look_at_fleet(&self, only_if_stale: bool) {
+        let _one = self.sync.looking.lock().await;
+        if only_if_stale && !self.sync_look_is_stale() {
+            return;
+        }
         self.discover_once().await;
         // A station that was away when the fleet's key was replaced, and is
         // back: handed the key, it is in the fleet at the next look.
@@ -347,9 +358,14 @@ impl Daemon {
             tokio::time::sleep(Duration::from_millis(300)).await;
             self.discover_once().await;
         }
+        // A newer copy of a synced document is taken before this station's
+        // is offered: see sync.rs.
+        self.sync_pull().await;
         self.setup_sync().await;
         self.deck_sync().await;
         self.look_sync().await;
+        self.prefs_sync().await;
+        self.sync_looked();
         // A station that was away when a request arrived here hears of it.
         self.trust_relay_send(false).await;
     }

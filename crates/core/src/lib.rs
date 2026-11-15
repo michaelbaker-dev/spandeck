@@ -21,6 +21,8 @@
 //!   deck      fleet-wide deck document: global layouts and pins
 //!   look      fleet-wide look document: themes, and what the deck, a layout or a pane uses
 //!   fonts     font files the owner uploaded: checked, kept by content id, fetched between stations
+//!   prefs     fleet-wide owner preferences: small choices that follow the owner
+//!   sync      what the synced documents share: stamps, catching up, taking a newer copy
 //!   vault     AgentVault: station token, key use through the vault's proxy
 //!   usage     what each pane's agent has used, and the station's totals
 //!   prices    the public list of model prices and context windows, fetched daily
@@ -46,6 +48,7 @@ pub mod messages;
 pub mod notify;
 pub mod orders;
 pub mod paths;
+pub mod prefs;
 pub mod prices;
 pub mod project;
 pub mod recipes;
@@ -54,6 +57,7 @@ pub mod remove;
 pub mod rpc;
 pub mod server;
 pub mod setup;
+pub mod sync;
 pub mod tasks;
 pub mod trust;
 pub mod usage;

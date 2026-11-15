@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::daemon::{invalid, write_private, Daemon, Error, Result};
-use crate::paths::now_ms;
 use crate::project::{valid_name, Layout};
 
 const MAX_LAYOUTS: usize = 48;
@@ -73,6 +72,10 @@ pub struct Deck {
     /// Global layouts. A leaf with no station means the station being viewed.
     pub layouts: Vec<Layout>,
     pub pins: Vec<Pin>,
+    /// Which stations' changes this copy holds (sync.rs). A station from
+    /// before this passes it over and writes the document without it.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub changes: crate::sync::Changes,
 }
 
 impl Deck {
@@ -82,6 +85,9 @@ impl Deck {
         }
         if self.pins.len() > MAX_PINS {
             return Err(format!("at most {MAX_PINS} things can be pinned"));
+        }
+        if !crate::sync::changes_ok(&self.changes) {
+            return Err("the record of changes is not one".into());
         }
         self.layouts.iter().try_for_each(Layout::validate)?;
         self.pins.iter().try_for_each(Pin::validate)
@@ -126,8 +132,10 @@ impl Daemon {
                 return Ok(deck);
             };
             deck.validate().map_err(invalid)?;
-            // Always later than the copy it replaces, whatever the clock says.
-            deck.updated_ms = now_ms().max(deck.updated_ms + 1);
+            // Later than the copy it replaces and than any seen in the fleet.
+            let base = deck.updated_ms;
+            deck.updated_ms = self.sync_stamp("deck", base);
+            self.sync_mark(&mut deck.changes, base, deck.updated_ms);
             self.deck_write(&deck)?;
             self.record("deck.changed", None, None, None, Some(by), what);
             deck
@@ -157,9 +165,11 @@ impl Daemon {
             if peer.state != "online" || (only_if_older_than > 0 && theirs >= only_if_older_than) {
                 continue;
             }
-            let _ = self
+            let r = self
                 .fleet
                 .call(&peer.station, "deck.push", json!({"deck": deck}))
+                .await;
+            self.sync_sent("deck", deck.updated_ms, &peer.station, r)
                 .await;
         }
     }
@@ -228,14 +238,16 @@ impl Daemon {
     /// Another station offering its copy. Kept only if it is newer.
     pub fn deck_push(&self, deck: Deck, from: &str) -> Result<Value> {
         deck.validate().map_err(invalid)?;
+        self.sync_saw("deck", deck.updated_ms);
         {
             let _held = self.deck_lock.lock().unwrap();
-            let mine = self.deck().updated_ms;
-            if deck.updated_ms <= mine {
+            let mine = self.deck();
+            if deck.updated_ms <= mine.updated_ms {
                 return Ok(
-                    json!({"station": self.station, "ok": true, "kept": "this station's copy is as new or newer", "updated_ms": mine}),
+                    json!({"station": self.station, "ok": true, "kept": "this station's copy is as new or newer", "updated_ms": mine.updated_ms}),
                 );
             }
+            self.sync_replaced("deck", &mine.changes, &deck.changes);
             self.deck_write(&deck)?;
         }
         self.record(

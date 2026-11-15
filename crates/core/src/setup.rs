@@ -14,7 +14,6 @@ use serde_json::{json, Value};
 use spandeck_agents::{AgentKind, AgentState};
 
 use crate::daemon::{invalid, Daemon, Result};
-use crate::paths::now_ms;
 
 const MARKER: &str = ".spandeck-managed";
 /// The skill every agent in a spandeck pane gets: how to use spandeck's tools.
@@ -69,6 +68,9 @@ pub struct AgentSetup {
     pub skills: BTreeMap<String, Skill>,
     /// Keyed by agent: "claude", "codex", "antigravity".
     pub defaults: BTreeMap<String, AgentDefaults>,
+    /// Which stations' changes this copy holds (sync.rs).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub changes: crate::sync::Changes,
 }
 
 fn name_ok(name: &str) -> bool {
@@ -86,6 +88,9 @@ fn applies(agents: &[String], kind: AgentKind) -> bool {
 
 impl AgentSetup {
     pub fn validate(&self) -> std::result::Result<(), String> {
+        if !crate::sync::changes_ok(&self.changes) {
+            return Err("the record of changes is not one".into());
+        }
         for (name, server) in &self.mcp_servers {
             if !name_ok(name) {
                 return Err(format!(
@@ -479,8 +484,24 @@ impl Daemon {
     }
 
     /// Edit the setup here and push it to every station.
+    ///
+    /// What arrives is the whole setup as an editor changed it, with the
+    /// stamp of the copy the editor opened. If the setup here has been
+    /// changed since (at this station or another), saving would undo that
+    /// change, so it is refused and the owner opens the setup again. A
+    /// caller that sends no stamp (0) replaces whatever is here, as before.
     pub async fn setup_set(&self, mut setup: AgentSetup, by: &str, fleet: bool) -> Result<Value> {
-        setup.updated_ms = now_ms();
+        let mine = self.setup();
+        if setup.updated_ms != 0 && setup.updated_ms < mine.updated_ms {
+            return Err(invalid(format!(
+                "not saved: the agent setup was changed ({}) after you opened it. Open it again and make your change there.",
+                mine.updated_by
+            )));
+        }
+        setup.updated_ms = self.sync_stamp("setup", mine.updated_ms);
+        // The record is this station's, not the editor's.
+        setup.changes = mine.changes.clone();
+        self.sync_mark(&mut setup.changes, mine.updated_ms, setup.updated_ms);
         setup.updated_by = format!("{by} at {}", self.station);
         let mut results = vec![self.setup_apply(&setup, by)?];
         if fleet {
@@ -494,24 +515,46 @@ impl Daemon {
                     .fleet
                     .call(&peer.station, "setup.push", json!({"setup": setup}))
                     .await;
-                results.push(match r {
-                    Ok(v) => v,
+                results.push(match &r {
+                    // It kept its own copy: this setup is not on it. Said as
+                    // not saved, never as saved.
+                    Ok(v) if v.get("kept").is_some() => json!({
+                        "station": peer.station, "ok": false, "kept": true,
+                        "why": if v["updated_ms"].as_u64() > Some(setup.updated_ms) {
+                            "it has a newer setup, which replaces this one"
+                        } else {
+                            "it kept the setup it has"
+                        },
+                    }),
+                    Ok(v) => v.clone(),
                     Err(e) => json!({"station": peer.station, "ok": false, "why": e}),
                 });
+                self.sync_sent("setup", setup.updated_ms, &peer.station, r)
+                    .await;
             }
         }
-        Ok(json!({"setup": setup, "stations": results}))
+        // If a station's newer copy replaced it, say what is here now.
+        Ok(json!({"setup": self.setup(), "stations": results}))
     }
 
     /// Another station offering its copy. Accepted only if it is newer.
     pub fn setup_push(&self, setup: AgentSetup, from: &str) -> Result<Value> {
+        self.sync_saw("setup", setup.updated_ms);
         let mine = self.setup();
         if setup.updated_ms <= mine.updated_ms {
             return Ok(
                 json!({"station": self.station, "ok": true, "kept": "this station's copy is as new or newer", "updated_ms": mine.updated_ms}),
             );
         }
-        self.setup_apply(&setup, from)
+        self.sync_replaced("setup", &mine.changes, &setup.changes);
+        let out = self.setup_apply(&setup, from)?;
+        self.emit(
+            "setup.updated",
+            None,
+            None,
+            json!({"updated_ms": setup.updated_ms}),
+        );
+        Ok(out)
     }
 
     /// Called after discovery: bring peers with an older setup up to date.
@@ -527,9 +570,11 @@ impl Daemon {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             if peer.state == "online" && theirs < mine.updated_ms {
-                let _ = self
+                let r = self
                     .fleet
                     .call(&peer.station, "setup.push", json!({"setup": mine}))
+                    .await;
+                self.sync_sent("setup", mine.updated_ms, &peer.station, r)
                     .await;
             }
         }
