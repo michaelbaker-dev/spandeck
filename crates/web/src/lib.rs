@@ -609,7 +609,24 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     let mut next_chan: u32 = 1;
     let mut events_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    while let Some(Ok(msg)) = stream.next().await {
+    // A browser signed in from another device, or another station relaying
+    // its user, was let in on the strength of the fleet key. When a station
+    // is removed the key is replaced, and such a connection ends: what it
+    // was let in with no longer counts. The token this station made for
+    // its own Control Deck, and a pane's token, do not rest on the key.
+    let rests_on_key = who.is_owner() && who.who != "you";
+    let mut rekeyed = web.daemon.trust.rekeyed();
+    let mut key_replaced = false;
+
+    loop {
+        let msg = tokio::select! {
+            m = stream.next() => m,
+            _ = rekeyed.changed(), if rests_on_key => {
+                key_replaced = true;
+                break;
+            }
+        };
+        let Some(Ok(msg)) = msg else { break };
         let text = match msg {
             Message::Text(t) => t,
             Message::Close(_) => break,
@@ -798,6 +815,13 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     }
     if let Some(t) = events_task {
         t.abort();
+    }
+    if key_replaced {
+        // The reply to the call that replaced the key is still on its way
+        // out: let it go before the connection is closed.
+        drop(out_tx);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), writer).await;
+        return;
     }
     writer.abort();
 }

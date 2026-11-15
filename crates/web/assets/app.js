@@ -978,7 +978,113 @@ function stationMenu(e, s) {
     s.state === 'unreachable' && { label: 'Start spandeck there (over SSH)', action: () => rpc(api.station, 'fleet.start', { station: s.station }).then((r) => toast(`${s.station} is ${r.state}`)) },
     s.state === 'unreachable' && { label: 'Forget this station', danger: true, action: () => confirmBox(`Forget ${s.station}?`, 'It is removed from this list. If it comes back it is listed again.', 'Forget', () => rpc(api.station, 'fleet.forget', { station: s.station })) },
     up && { label: 'Stop every agent here', danger: true, action: () => rpc(api.station, 'stop.all', { scope: s.station === api.station ? 'station' : s.station }) },
+    up && { label: 'Close all panes here…', danger: true, action: () => closeAllDialog(s) },
+    // A station that is not in the fleet has nothing to be removed from,
+    // and neither has the only station of a fleet of one.
+    s.state !== 'not_linked' && S.fleet.stations.some(x => x.station !== s.station && x.state !== 'not_linked')
+      && { label: 'Remove this station from the fleet…', danger: true, action: () => removeStationDialog(s) },
   ]);
+}
+
+// ---- close every pane on a station; remove a station from the fleet ----
+// Both end work that cannot be brought back, so each says what it will do
+// with the station's name and its counts, and does nothing until the red
+// button is pressed. The button the dialog opens on is Cancel.
+const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + 's')}`;
+function paneCounts(st) {
+  const all = panesOf(st), live = all.filter(p => !p.exited);
+  return { all: all.length, live: live.length, ended: all.length - live.length,
+    agents: live.filter(p => p.agent !== 'shell').length, shells: live.filter(p => p.agent === 'shell').length,
+    working: live.filter(p => p.state === 'working' || p.state === 'needs_you').length };
+}
+function paneCountLine(st) {
+  const c = paneCounts(st);
+  if (!c.all) return `No pane is on ${st}.`;
+  return `${st} has ${plural(c.live, 'running pane')} (${plural(c.agents, 'agent')}, ${plural(c.shells, 'shell')})`
+    + `${c.ended ? ` and ${c.ended} ended on its list` : ''}. ${c.working === 0 ? 'None is' : c.working === 1 ? '1 is' : c.working + ' are'} working right now.`;
+}
+const RESUME_NOTE = 'A conversation can be resumed later only where the agent saved one. A turn that is running now is lost, and so is whatever a shell was doing.';
+
+function closeAllDialog(s) {
+  const st = s.station, c = paneCounts(st);
+  dialog(`Close all panes on ${st}?`, (close) => h('div', { class: 'consequences' },
+    h('p', {}, h('b', {}, paneCountLine(st))),
+    h('ul', {},
+      h('li', {}, 'Every pane is ended, with everything it started, and taken off the list.'),
+      h('li', {}, RESUME_NOTE),
+      h('li', {}, 'Projects, layouts, history and the archive are left alone.')),
+    h('div', { class: 'row end' },
+      h('button', { onclick: close }, 'Cancel'),
+      h('button', { class: 'primary danger', disabled: !c.all, onclick: () => { close(); rpc(st, 'station.close_all', {}).then((r) => toast(`Closed ${plural(r.closed, 'pane')} on ${st}`)); } },
+        c.all ? `Close ${plural(c.all, 'pane')} on ${st}` : 'Nothing to close'))));
+}
+
+function removeStationDialog(s) {
+  const st = s.station, me = !!s.self, away = s.state === 'unreachable';
+  const others = S.fleet.stations.filter(x => x.station !== st && x.state !== 'not_linked');
+  const staying = others.filter(x => !x.self).map(x => x.station);
+  const absent = others.filter(x => x.state !== 'online').map(x => x.station);
+  const canReach = others.some(x => x.state === 'online');
+  const dirs = s.dirs;
+  const stop = h('input', { type: 'checkbox', disabled: away });
+  const vault = away
+    ? `If ${st} holds a vault token, it keeps it. Revoke spandeck:${st} on the vault's Tokens page.`
+    : s.vault?.has_token ? `${st} keeps its vault token, and the token keeps working there. To end it, revoke spandeck:${st} on the vault's Tokens page.` : null;
+  const steps = [
+    away
+      ? h('li', {}, h('b', {}, `${st} cannot be reached, so nothing is done on it.`), ` Its panes keep running until someone stops spandeck there.`)
+      : h('li', {}, h('b', {}, `Every pane on ${st} is closed.`), ` ${paneCountLine(st)} ${RESUME_NOTE}`),
+    me && !canReach
+      ? h('li', {}, h('b', {}, `${st} leaves the fleet by itself.`), ` It throws away its copy of the fleet key and stops trusting the other stations. No other station can be reached to be told: they still list ${st} until you remove it at one of them as well.`)
+      : h('li', {}, h('b', {}, `${st} is taken out of the fleet for good.`),
+        away ? ` The stations that stay get a new fleet key. ${st} keeps the old one, which no station accepts any more: it cannot act on the fleet, and cannot rejoin without a new approval.`
+          : ` It stops trusting the other stations, and they stop trusting it: the stations that stay get a new fleet key, so the key ${st} held works nowhere.`,
+        h('ul', {},
+          h('li', {}, 'Browsers signed in from other devices (a phone, a laptop) must sign in again. This one stays signed in.'),
+          absent.length ? h('li', { class: 'warn-text' }, `Not reachable right now: ${absent.join(', ')}. Each keeps the old key until it is seen again and is handed the new one then (for 30 days; after that it rejoins on your approval). Until then it shows as not in this fleet, and ${st} could still act on it.`) : null,
+          !staying.length ? h('li', {}, `${st} is the only other station: afterwards ${api.station} is a fleet of one.`) : null)),
+    h('li', {}, h('b', {}, `${st} is forgotten.`), ` It goes from this list on every station, with pinned panes and layouts that point at it, its panes in global layouts, and project links to its projects. Project files in your folders are not changed.`),
+    vault ? h('li', {}, vault) : null,
+    h('li', {}, me ? `This Control Deck then shows ${st} alone. The other stations appear as "not in this fleet".`
+      : away ? `If spandeck is still running on ${st}, it appears here again as "not in this fleet", like any machine of yours that never joined.`
+        : `spandeck keeps running on ${st} as a fleet of one (unless you tick the box below), and ${st} appears here as "not in this fleet". To put it back, join it again and approve the request.`),
+  ];
+  const d = dialog(me ? `Remove this station (${st}) from the fleet?` : `Remove ${st} from the fleet?`, (close) => h('div', { class: 'consequences' },
+    h('p', {}, me ? `You are using ${st}'s own Control Deck. In this order:` : 'In this order:'),
+    h('ol', {}, steps),
+    h('label', { class: 'check' + (away ? ' muted' : '') }, stop, h('span', {},
+      `Also stop spandeck on ${st} and stop it starting at login`,
+      h('small', {}, away ? `Not possible while ${st} cannot be reached.`
+        : `The program and its data stay on ${st}'s disk${dirs ? `: ${dirs.program}, ${dirs.state} and ${dirs.config}` : ''}. ${me ? 'This page stops working when it does.' : ''}`))),
+    h('div', { class: 'row end' },
+      h('button', { onclick: close }, 'Cancel'),
+      h('button', { class: 'primary danger', onclick: () => { close(); removeStation(st, stop.checked); } }, `Remove ${st}`))), { wide: true });
+  // The dialog opens on Cancel: not on the tick box, and not on the red button.
+  d.body.querySelector('.row.end button').focus();
+}
+
+function removeStation(st, stop) {
+  toast(`Removing ${st}…`);
+  rpc(api.station, 'fleet.remove', { station: st, stop }).then((r) => {
+    // The fleet's key is new: this browser's sign-in is replaced with it.
+    if (r.token) { try { localStorage.setItem('spandeck.token', r.token); } catch (e) { /* signs in again */ } }
+    const there = r.there || {};
+    const said = [
+      r.reached ? `${plural(there.closed || 0, 'pane')} closed on ${st}. It left the fleet and trusts no other station.`
+        : `${st} could not be reached (${r.problem || 'no answer'}). Its panes keep running until someone stops spandeck there. It cannot act on the fleet, and cannot rejoin without a new approval.`,
+      r.self && (r.not_told || []).length ? `No other station could be told: ${r.not_told.join(', ')}. Remove ${st} at one of them as well.` : null,
+      !r.self || r.through ? (r.alone ? `${r.self ? r.through : api.station} is now a fleet of one, with a new key.` : `The fleet has a new key. Took it: ${[r.self ? r.through : api.station, ...(r.rekeyed || [])].join(', ')}.`) : null,
+      (r.waiting || []).length ? `Still on the old key: ${r.waiting.join(', ')}. Each is handed the new key when it is next seen. Until then ${st} could still act on it.` : null,
+      there.stopping ? `spandeck is stopping on ${st} and will not start at login. Still on its disk: ${there.dirs?.program}, ${there.dirs?.state}, ${there.dirs?.config}.` : null,
+      there.service?.problems?.length ? `Stopping it at login did not go cleanly: ${there.service.problems.join('; ')}` : null,
+      r.reached ? (there.vault_token ? `${st} still holds its vault token. Revoke spandeck:${st} on the vault's Tokens page.` : null)
+        : `If ${st} holds a vault token, revoke spandeck:${st} on the vault's Tokens page.`,
+      'Browsers signed in from other devices must sign in again.',
+    ].filter(Boolean);
+    dialog(`${st} was removed from the fleet`, (close) => h('div', { class: 'consequences' },
+      h('ul', {}, said.map(line => h('li', {}, line))),
+      h('div', { class: 'row end' }, h('button', { class: 'primary', onclick: close }, 'Done'))));
+  }).catch(() => {});
 }
 
 function stationTile(s) {
@@ -2192,7 +2298,9 @@ function phoneList() {
         up ? h('button', { onclick: () => newPaneDialog(st) }, 'New') : null,
         s.state === 'unreachable' ? h('button', { onclick: () => rpc(api.station, 'fleet.wake', { station: st }).then((r) => toast(`Sent ${r.sent} wake packets. Give it a minute.`)) }, 'Wake') : null,
         s.state === 'unreachable' ? h('button', { onclick: () => rpc(api.station, 'fleet.start', { station: st }).then((r) => toast(`${st} is ${r.state}`)) }, 'Start') : null,
-        up ? h('button', { class: 'danger', onclick: () => confirmBox(`Stop every agent on ${st}?`, 'Running turns are interrupted. Processes stay.', 'Stop', () => rpc(api.station, 'stop.all', { scope: s.self ? 'station' : st })) }, 'Stop') : null),
+        up ? h('button', { class: 'danger', onclick: () => confirmBox(`Stop every agent on ${st}?`, 'Running turns are interrupted. Processes stay.', 'Stop', () => rpc(api.station, 'stop.all', { scope: s.self ? 'station' : st })) }, 'Stop') : null,
+        // Everything else a station offers, with closing its panes and removing it.
+        h('button', { class: 'station-more', 'aria-label': `More for ${st}`, title: `More for ${st}`, onclick: (e) => stationMenu(e, s) }, '⋯')),
       projects.map(pr => {
         const mine = panesOf(st).filter(p => p.project === pr.name && !p.exited).sort(byState);
         return h('div', { class: 'phone-project' },

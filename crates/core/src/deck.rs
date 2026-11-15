@@ -114,7 +114,7 @@ impl Daemon {
     /// The owner's change path, and the only one that writes what was not
     /// already another station's copy. `change` returns what to put in the
     /// ship's log, or nothing when the document is already as asked.
-    fn deck_change(
+    pub(crate) fn deck_change(
         &self,
         by: &str,
         change: impl FnOnce(&mut Deck) -> Result<Option<Value>>,

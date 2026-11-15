@@ -158,14 +158,39 @@ impl Pty {
         Ok(())
     }
 
-    /// Signal the pane's whole process group.
+    /// Signal the pane's whole process group. Kill reaches further: every
+    /// process in the pane's session, so a job that a shell put in a group
+    /// of its own (`sleep 300 &`) ends with the pane.
     pub fn signal(&self, sig: Signal) -> io::Result<()> {
+        let kill = matches!(sig, Signal::Kill);
         let sig = match sig {
             Signal::Hangup => nix::sys::signal::Signal::SIGHUP,
             Signal::Terminate => nix::sys::signal::Signal::SIGTERM,
             Signal::Kill => nix::sys::signal::Signal::SIGKILL,
         };
-        killpg(Pid::from_raw(self.pid), sig).map_err(io::Error::from)
+        let sent = killpg(Pid::from_raw(self.pid), sig).map_err(io::Error::from);
+        if kill {
+            for pid in self.in_this_session() {
+                let _ = nix::sys::signal::kill(Pid::from_raw(pid), sig);
+            }
+        }
+        sent
+    }
+
+    /// Every process in the pane's session. The pane's program started the
+    /// session (`setsid` in `spawn`), so the session's id is its pid, and it
+    /// stays that after the program itself has ended. The terminal cannot be
+    /// asked instead: a session whose first program ended has none.
+    fn in_this_session(&self) -> Vec<i32> {
+        let Ok(out) = Command::new("ps").args(["-axo", "pid="]).output() else {
+            return vec![];
+        };
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<i32>().ok())
+            // SAFETY: getsid only reads; a pid that is gone gives -1.
+            .filter(|pid| *pid > 1 && unsafe { libc::getsid(*pid) } == self.pid)
+            .collect()
     }
 
     /// Non-blocking: has the child exited?

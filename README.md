@@ -107,6 +107,8 @@ From the Control Deck, right-click a station (or use the commands on any station
 | Update to the latest release | Update to the latest release | `spandeck update [--station NAME]` |
 | Wake a sleeping machine | Wake it | `spandeck wake NAME` |
 | Start spandeck where it is not running | Start spandeck there | `spandeck start NAME` |
+| End every pane on a station | Close all panes here… | `spandeck pane close --all [--station NAME]` |
+| Take a station out of the fleet | Remove this station from the fleet… | `spandeck fleet --remove NAME [--stop]` |
 
 - **Update** downloads the release on that station, checks it against its published
   SHA-256, and swaps it in. If the new version does not start properly, the station
@@ -120,6 +122,29 @@ From the Control Deck, right-click a station (or use the commands on any station
   if there is one, else `~/.local/bin/spandeck daemon`.
 - A station that is off stays in the list as unreachable. One that does not start at
   login is marked; fix that with `spandeck service --install`.
+- **Close all panes** ends every agent and shell on that station, with everything they
+  started, and takes them off the list. A conversation can be resumed later only where
+  the agent saved one. Projects, layouts, history and the archive are left alone.
+- **Remove this station from the fleet** closes its panes, then takes it out for good.
+  Every station shares one fleet key, so the stations that stay get a new one and the
+  key the removed machine held stops working. What that costs you:
+  - Browsers signed in from other devices (a phone, a laptop) must sign in again. The
+    one you remove from stays signed in.
+  - A station that is off or unreachable at that moment keeps the old key until it is
+    seen again, and is handed the new one then (for 30 days; after that, join it again
+    and approve). Until then it shows as "not in this fleet", and the removed machine
+    could still act on it.
+  - A station that cannot be reached is removed from the fleet's side only: its panes
+    keep running until someone stops spandeck there, and it cannot rejoin without a new
+    approval.
+  - Its AgentVault token stays on that machine and keeps working. Revoke
+    `spandeck:<station>` on the vault's Tokens page.
+  - With "Also stop spandeck there" (`--stop`), spandeck is stopped on that machine and
+    no longer starts at login. The program and its state and config folders stay on
+    its disk; the dialog says where.
+  - Removing the station you are using is done through another station; if none can be
+    reached it leaves by itself, and you remove it at one of the others afterwards.
+  To put a station back: `spandeck fleet --join`, and approve.
 
 ## Agent programs
 
@@ -279,6 +304,10 @@ is working. To keep it awake whenever spandeckd runs, add `stay_awake = true` to
   the same machine, and with stand-ins for Tailscale and the release page. It has not
   yet installed spandeck on a second physical machine, used a real password login, or
   met Tailscale SSH or macOS Remote Login.
+- **Removing a station**: tested with three daemons on one machine. "Also stop spandeck
+  there" has not been run against a real login service on any system (systemd, launchd
+  or the Windows Scheduled Task), and ending a pane's whole session has not been tried
+  on a Mac.
 - **Phone**: tested in a phone-sized desktop browser, not on a real phone. Dictation
   with the 🎤 button has not been tried on any device.
 

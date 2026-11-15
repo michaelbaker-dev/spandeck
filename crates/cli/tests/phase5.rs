@@ -1309,3 +1309,293 @@ exec env -i PATH={remote_bin}:/usr/bin:/bin HOME={c}/home SPANDECK_STATE_DIR={c}
         }
     }
 }
+
+fn fleet_of(s: &Station) -> String {
+    s.call("trust.status", json!({}))["fleet"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Whether a process is running. One that was killed and not yet collected
+/// by its new parent (a zombie) is not.
+fn pid_alive(pid: &str) -> bool {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    !stat.is_empty() && !stat.starts_with('Z')
+}
+
+/// The owner's request of 15 Nov 2026, "I should be able to delete a machine
+/// and it should kill all the sessions that are running, or delete all
+/// sessions on a machine". Done when: closing every pane ends agents, shells
+/// and what they started, and an agent cannot ask for it; a removed station
+/// has no pane left, is refused by the others and refuses them; the stations
+/// that stay have a new key and still work with each other; nothing that
+/// pointed at the removed station is left in the deck.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "runs a Unix shell (/bin/sh) and checks a process by its pid"
+)]
+fn a_removed_station_loses_its_panes_and_the_rest_of_the_fleet_gets_a_new_key() {
+    let (a, b, mut c) = Station::three();
+    let old_fleet = fleet_of(&a);
+    let old_key = std::fs::read_to_string(a.root.join("state/fleet.key")).unwrap();
+
+    // charlie runs an agent and a shell, and the shell started a job of its own.
+    let agent = c.fake(
+        json!({"steps": [{"prompt": "go"}, {"work": 60000}]}),
+        json!({}),
+    );
+    c.wait_state(&agent, "working");
+    let shell = c.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "sh", "cwd": c.root.join("home")}),
+    );
+    let shell = shell["id"].as_str().unwrap().to_string();
+    c.call(
+        "pane.send_text",
+        json!({"pane": shell, "text": "sleep 300 & echo job-is-$!-"}),
+    );
+    let kid = wait_for("the shell's job to start", 10, || {
+        let text = c.text(&shell);
+        let at = text.rfind("job-is-")? + 7;
+        let pid: String = text[at..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        (!pid.is_empty() && text[at + pid.len()..].starts_with('-')).then_some(pid)
+    });
+    assert!(pid_alive(&kid));
+
+    // An agent has no way to close a station's panes or to change the fleet.
+    for (method, params) in [
+        ("station.close_all", json!({})),
+        ("station.leave", json!({})),
+        ("fleet.remove", json!({"station": "alpha"})),
+        (
+            "fleet.rekey",
+            json!({"key": "00".repeat(32), "removed": "alpha"}),
+        ),
+    ] {
+        let err = c.call_as_pane(&agent, method, params).unwrap_err();
+        assert_eq!(err.code, "denied", "{method}");
+    }
+    // Nor does the owner hand a station a key: only a station of the fleet does.
+    let err = a
+        .try_call(
+            "fleet.rekey",
+            json!({"key": "00".repeat(32), "removed": "bravo"}),
+        )
+        .unwrap_err();
+    assert_eq!(err.code, "denied");
+
+    // From alpha's Control Deck: close every pane on charlie.
+    let closed = a.call(
+        "peer.call",
+        json!({"station": "charlie", "method": "station.close_all", "params": {}}),
+    );
+    assert_eq!(
+        (closed["closed"].clone(), closed["working"].clone()),
+        (json!(2), json!(1)),
+        "{closed}"
+    );
+    assert_eq!(c.call("pane.list", json!({})), json!([]));
+    wait_for_or(
+        "the shell's own job to end with its pane",
+        10,
+        || {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "pid,ppid,pgid,sess,tty,stat,args", "-p", &kid])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        },
+        || (!pid_alive(&kid)).then_some(()),
+    );
+    let said = c.log("station.closed_all");
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert_eq!(said[0]["data"]["panes"], json!(2));
+    assert!(said[0]["actor"].as_str().unwrap().contains("via alpha"));
+
+    // charlie gets a new pane, and the owner pins it: both must go.
+    let later = c.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "later", "cwd": c.root.join("home")}),
+    );
+    let pin = json!({"kind": "pane", "station": "charlie", "id": later["id"]});
+    let kept = json!({"kind": "pane", "station": "bravo", "id": "p-kept"});
+    a.call("deck.pin", json!({"pin": pin}));
+    a.call("deck.pin", json!({"pin": kept}));
+
+    let out = a.call("fleet.remove", json!({"station": "charlie"}));
+    assert_eq!(
+        (
+            out["reached"].clone(),
+            out["rekeyed"].clone(),
+            out["waiting"].clone()
+        ),
+        (json!(true), json!(["bravo"]), json!([])),
+        "{out}"
+    );
+    assert_eq!(out["there"]["closed"], json!(1), "{out}");
+    assert_eq!(c.call("pane.list", json!({})), json!([]));
+
+    // The stations that stay share a new key; charlie has one of its own.
+    let new_fleet = fleet_of(&a);
+    assert_ne!(new_fleet, old_fleet);
+    assert_eq!(fleet_of(&b), new_fleet);
+    assert!(![old_fleet.clone(), new_fleet.clone()].contains(&fleet_of(&c)));
+    for (s, other) in [(&a, "bravo"), (&b, "alpha")] {
+        wait_for("the stations that stay to see each other", 15, || {
+            (s.sees(other).as_deref() == Some("online")).then_some(())
+        });
+        let panes = s.call(
+            "peer.call",
+            json!({"station": other, "method": "pane.list", "params": {}}),
+        );
+        assert!(panes.is_array(), "{panes}");
+        // To them charlie is a machine that is not in the fleet.
+        assert_eq!(s.sees("charlie").as_deref(), Some("not_linked"));
+        let err = s
+            .try_call(
+                "peer.call",
+                json!({"station": "charlie", "method": "pane.list", "params": {}}),
+            )
+            .unwrap_err();
+        assert!(err.message.contains("not in this fleet"), "{}", err.message);
+    }
+    // And charlie can do nothing to them.
+    for other in ["alpha", "bravo"] {
+        assert_eq!(c.sees(other).as_deref(), Some("not_linked"));
+        let err = c
+            .try_call(
+                "peer.call",
+                json!({"station": other, "method": "pane.list", "params": {}}),
+            )
+            .unwrap_err();
+        assert!(err.message.contains("not in this fleet"), "{}", err.message);
+    }
+    // The pin that pointed at charlie is gone on every station that stays.
+    for s in [&a, &b] {
+        wait_for("the deck to forget charlie", 15, || {
+            (s.call("deck.get", json!({}))["pins"] == json!([kept])).then_some(())
+        });
+    }
+    // Each station's log says what happened and who asked; no key is shown.
+    assert_eq!(
+        a.log("fleet.removed")[0]["data"]["station"],
+        json!("charlie")
+    );
+    assert_eq!(
+        b.log("fleet.rekeyed")[0]["data"]["removed"],
+        json!("charlie")
+    );
+    assert!(c.log("station.left")[0]["actor"]
+        .as_str()
+        .unwrap()
+        .contains("via alpha"));
+    let new_key = std::fs::read_to_string(a.root.join("state/fleet.key")).unwrap();
+    assert_ne!(new_key.trim(), old_key.trim());
+    for s in [&a, &b, &c] {
+        let said = s.call("log.query", json!({"limit": 500})).to_string();
+        assert!(!said.contains(new_key.trim()) && !said.contains(old_key.trim()));
+    }
+
+    // "Also stop spandeck there": the daemon ends by itself.
+    let left = c.call("station.leave", json!({"stop": true}));
+    assert_eq!(left["stopping"], json!(true), "{left}");
+    wait_for("charlie's daemon to stop", 15, || {
+        c.child.as_mut().unwrap().try_wait().ok().flatten()
+    });
+    c.child = None;
+}
+
+/// Guarantee (Trust), for a station that cannot be told it was removed: it
+/// keeps the old key, so the fleet must stop accepting that key. Done when:
+/// the removed station's signed call is refused and it sees the others as
+/// not linked, its panes are still running, and a station that was away at
+/// that moment is handed the new key when it is back, without a new approval.
+#[test]
+#[cfg_attr(windows, ignore = "freezes a daemon with a signal")]
+fn an_unreachable_station_is_removed_from_the_fleets_side() {
+    let (a, b, c) = Station::three();
+    let pane = c.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "stays", "cwd": c.root.join("home")}),
+    );
+    // charlie is the one to remove; bravo is merely away.
+    b.signal(SIGSTOP);
+    c.signal(SIGSTOP);
+    wait_for("alpha to lose sight of both", 20, || {
+        (a.sees("bravo").as_deref() == Some("unreachable")
+            && a.sees("charlie").as_deref() == Some("unreachable"))
+        .then_some(())
+    });
+    let old_fleet = fleet_of(&a);
+    let out = a.call("fleet.remove", json!({"station": "charlie", "stop": true}));
+    assert_eq!(
+        (
+            out["reached"].clone(),
+            out["rekeyed"].clone(),
+            out["waiting"].clone()
+        ),
+        (json!(false), json!([]), json!(["bravo"])),
+        "{out}"
+    );
+    assert_ne!(fleet_of(&a), old_fleet);
+    // Forgotten at once: it is not kept as a station that is merely off.
+    assert_eq!(
+        a.call("fleet.view", json!({}))["stations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    b.signal(SIGCONT);
+    c.signal(SIGCONT);
+    // charlie still holds the key the fleet used to accept, and signs with it.
+    assert_eq!(fleet_of(&c), old_fleet);
+    let err = c
+        .try_call(
+            "peer.call",
+            json!({"station": "alpha", "method": "pane.list", "params": {}}),
+        )
+        .unwrap_err();
+    assert!(err.message.contains("not in this fleet"), "{}", err.message);
+    assert_eq!(c.sees("alpha").as_deref(), Some("not_linked"));
+    // Nothing was done on charlie: its pane runs on.
+    assert_eq!(c.pane(pane["id"].as_str().unwrap())["exited"], json!(false));
+
+    // bravo was only away. alpha hands it the new key when it sees it again.
+    wait_for("bravo to be handed the new key", 20, || {
+        (a.sees("bravo").as_deref() == Some("online")).then_some(())
+    });
+    assert_eq!(fleet_of(&b), fleet_of(&a));
+    assert_eq!(
+        b.log("fleet.rekeyed")[0]["data"]["removed"],
+        json!("charlie")
+    );
+    wait_for("bravo to see alpha in the fleet", 15, || {
+        (b.sees("alpha").as_deref() == Some("online")).then_some(())
+    });
+    assert!(a
+        .call(
+            "peer.call",
+            json!({"station": "bravo", "method": "pane.list", "params": {}}),
+        )
+        .is_array());
+    // And then charlie is outside for bravo too.
+    assert_eq!(b.sees("charlie").as_deref(), Some("not_linked"));
+    let err = c
+        .try_call(
+            "peer.call",
+            json!({"station": "bravo", "method": "pane.list", "params": {}}),
+        )
+        .unwrap_err();
+    assert!(err.message.contains("not in this fleet"), "{}", err.message);
+}

@@ -45,6 +45,11 @@ days, not hours.
   Deck (or `spandeck trust --revoke`); stations that are off at the time learn of it only
   from a later sign-out. Joining another fleet replaces the key and signs every browser
   out.
+- Every station of a fleet holds the same key. Removing a station therefore gives the
+  stations that stay a new key, which also signs every browser out. A station that is
+  off at that moment keeps the old key until it is seen again, and until then the
+  removed machine could still act on it. Removal does not undo what a machine did while
+  it was trusted.
 - Signed station calls are accepted for two minutes, so stations' clocks must roughly
   agree, and a captured call could be replayed within that time by someone who can
   already read your Tailscale traffic.

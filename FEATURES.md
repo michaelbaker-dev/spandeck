@@ -151,6 +151,7 @@ One-line version: **tmux-style daemon + herdr-style agent awareness + project wo
 - [ ] **P1** Peer-to-peer (no central server); any machine can be a client of any other.
 - [ ] **P1** Fallback transport when Tailscale isn't available: SSH tunnel (like herdr's saved SSH machines).
 - [ ] **P1** mTLS / device-key auth on every API call; Tailscale ACL tags respected.
+- [x] **P1** Close every pane on a machine in one step, and remove a machine from the fleet: its panes are closed, the fleet gets a new key so the removed machine can no longer act on the others, and it is forgotten everywhere (15 Nov 2026; see DECISIONS.md, "Closing every pane, and removing a station").
 - [ ] **P2** Move or clone a project between machines (sync dirs via git; re-create panes).
 - [ ] **?** Optional self-hosted relay for phones on cellular without Tailscale.
 

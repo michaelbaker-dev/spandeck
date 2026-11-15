@@ -103,6 +103,49 @@ impl Station {
         Station::two(Some("5a".repeat(32)), extra_a)
     }
 
+    /// Three stations in one fleet: alpha, bravo and charlie.
+    pub fn three() -> (Station, Station, Station) {
+        let ports = [free_port(), free_port(), free_port()];
+        let key = "5a".repeat(32);
+        let start = |i: usize, name: &str| {
+            let others: Vec<String> = (0..3)
+                .filter(|j| *j != i)
+                .map(|j| format!("\"127.0.0.1:{}\"", ports[j]))
+                .collect();
+            Station::start_keyed(
+                name,
+                ports[i],
+                &format!("peers = [{}]\n", others.join(", ")),
+                Some(&key),
+            )
+        };
+        let (a, b, c) = (start(0, "alpha"), start(1, "bravo"), start(2, "charlie"));
+        for s in [&a, &b, &c] {
+            wait_for("the three stations to find each other", 20, || {
+                let v = s.call("fleet.refresh", json!({}));
+                (v["stations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|x| x["state"] == json!("online"))
+                    .count()
+                    == 3)
+                    .then_some(())
+            });
+        }
+        (a, b, c)
+    }
+
+    /// How this station sees another one, after looking again.
+    pub fn sees(&self, other: &str) -> Option<String> {
+        self.call("fleet.refresh", json!({}))["stations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["station"] == json!(other))
+            .and_then(|x| x["state"].as_str().map(String::from))
+    }
+
     fn two(shared_key: Option<String>, extra_a: &str) -> (Station, Station) {
         let (pa, pb) = (free_port(), free_port());
         let key = shared_key.as_deref();

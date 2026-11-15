@@ -133,6 +133,9 @@ button.toggle { padding: 2px 10px; } button.toggle.on { background: #1f4a7a; col
 .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: grid; place-items: start center; padding-top: 8vh; overflow: auto; }
 .dialog { width: min(520px, 94vw); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.6); margin-bottom: 8vh; }
 .dialog.wide { width: min(900px, 96vw); }
+.dialog.wide:has(.consequences) { width: min(680px, 96vw); }
+.consequences ol, .consequences ul { margin: 6px 0; padding-left: 22px; } .consequences li { margin: 5px 0; overflow-wrap: anywhere; }
+.consequences .check { display: flex; gap: 8px; align-items: flex-start; margin-top: 12px; } .consequences .check input { width: auto; flex: none; margin: 3px 0 0; } .consequences .check small { display: block; color: var(--muted); overflow-wrap: anywhere; }
 .dialog-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px 0; } .dialog-head h2 { margin: 0; }
 .dialog-body { padding: 12px 16px 16px; }
 .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; } .field > span { color: var(--muted); font-size: 12px; } .field small { color: var(--muted); }

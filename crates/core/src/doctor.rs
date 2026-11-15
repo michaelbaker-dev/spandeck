@@ -219,6 +219,52 @@ pub fn service_installed(home: &std::path::Path) -> bool {
         .exists()
 }
 
+/// How to undo `spandeck service --install` on this kind of machine.
+pub struct ServiceRemoval {
+    /// The definition `service --install` wrote. Deleted after `before`.
+    pub file: std::path::PathBuf,
+    /// Shell lines that turn the login service off while its file exists.
+    pub before: Vec<String>,
+    /// Shell lines for after the file is gone.
+    pub after: Vec<String>,
+    /// A line that may end the daemon itself, so it is run last, detached.
+    pub last: Vec<String>,
+}
+
+/// Stop spandeckd starting at login: the reverse of `service_definition`.
+/// Nothing here stops the daemon that is running, except `last` on macOS,
+/// where taking the job out of launchd ends it. On Linux and Windows the
+/// daemon then ends by itself with success, which neither restarts.
+pub fn service_removal(home: &std::path::Path) -> ServiceRemoval {
+    let (file, _, _) = service_definition(std::path::Path::new("spandeck"), home);
+    let line = |s: &str| vec![s.to_string()];
+    let (before, after, last) = if spandeck_terminal::sys::WINDOWS {
+        (
+            line(&format!("schtasks.exe /Delete /TN {WINDOWS_TASK} /F")),
+            vec![],
+            vec![],
+        )
+    } else if cfg!(target_os = "macos") {
+        (
+            vec![],
+            vec![],
+            line("launchctl bootout gui/$(id -u)/dev.spandeck.spandeckd"),
+        )
+    } else {
+        (
+            line("systemctl --user disable spandeckd"),
+            line("systemctl --user daemon-reload"),
+            vec![],
+        )
+    };
+    ServiceRemoval {
+        file,
+        before,
+        after,
+        last,
+    }
+}
+
 /// The name of the Scheduled Task that starts spandeckd at log on (Windows).
 pub const WINDOWS_TASK: &str = "spandeckd";
 

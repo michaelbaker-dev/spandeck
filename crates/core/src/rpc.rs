@@ -61,6 +61,7 @@ const PEER_METHODS: &[&str] = &[
     "rpc.forward",
     "fleet.view",
     "trust.revoked",
+    "fleet.rekey",
     "project.link.record",
     "project.link.findings",
 ];
@@ -1000,6 +1001,22 @@ impl Daemon {
             "fleet.wake" => self.fleet_wake(s(&params, "station")?, by)?,
             "fleet.start" => self.fleet_start(s(&params, "station")?, by).await?,
             "fleet.forget" => self.forget_station(s(&params, "station")?)?,
+
+            // ------------------------------- close every pane; remove a station
+            // The owner's alone: on no agent's list, and a station cannot
+            // ask for either by itself. `rpc.forward` carries the owner's
+            // request to the station it is about.
+            "station.close_all" => self.close_all(by),
+            // What a station does when it is removed: panes closed, a key
+            // of its own. `fleet.remove` is what the owner asks for.
+            "station.leave" => self.station_leave(flag(&params, "stop"), by)?,
+            "fleet.remove" => {
+                self.fleet_remove(s(&params, "station")?, flag(&params, "stop"), caller)
+                    .await?
+            }
+            // A station of this fleet handing over the key that replaces
+            // the one both hold. A peer's signed call only.
+            "fleet.rekey" => self.fleet_rekeyed(caller, &params)?,
 
             // ------------------------------------------------ add a machine
             // The owner's alone, and only at the station they are using:

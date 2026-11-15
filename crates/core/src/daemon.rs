@@ -295,6 +295,9 @@ pub struct Inner {
     pub(crate) prices: crate::prices::PricesState,
     /// A machine being added to the fleet from the Control Deck.
     pub(crate) adding: crate::add::AddState,
+    /// Told when the owner asked for this station to be stopped (when it
+    /// was removed from the fleet with "also stop spandeck there").
+    pub quit: tokio::sync::Notify,
 }
 
 #[derive(Clone)]
@@ -388,6 +391,7 @@ impl Daemon {
             agents: Default::default(),
             prices: Default::default(),
             adding: Default::default(),
+            quit: tokio::sync::Notify::new(),
         }));
         daemon.prices_load();
         let _ = std::fs::write(daemon.paths.pid_file(), std::process::id().to_string());
@@ -1371,6 +1375,18 @@ impl Daemon {
         if p.meta.lock().unwrap().exit.is_none() {
             let _ = p.term.signal(Signal::Hangup);
             let _ = p.term.signal(Signal::Kill);
+            // Keep the pane until its program has been collected. Let go of
+            // at once, its reader stops first, and the ended program stays
+            // in the process table for as long as the daemon runs.
+            let held = p.clone();
+            std::thread::spawn(move || {
+                for _ in 0..150 {
+                    if held.term.exit_info().is_some() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            });
         }
         p.term.forget();
         self.panes.write().unwrap().remove(&p.id);
@@ -1954,6 +1970,13 @@ impl Daemon {
             "web": self.web_addrs.lock().unwrap().clone(),
             "load": load_average(),
             "macs": crate::manage::mac_addresses(),
+            // Where spandeck is on this machine: said before the owner
+            // removes a station, since those stay on its disk.
+            "dirs": {
+                "program": self.exe.display().to_string(),
+                "state": self.paths.state_dir.display().to_string(),
+                "config": self.paths.config_dir.display().to_string(),
+            },
             "service": crate::doctor::service_installed(&self.home),
             "codex_sandbox_blocked": crate::doctor::codex_sandbox_blocked(&self.home),
             "agents": self.agents_brief(),

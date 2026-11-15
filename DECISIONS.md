@@ -50,6 +50,27 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - Without the key or a token, a device under the owner's login can only ask a station its name and ask to be let in.
 - There is no switch that turns this off, in tests or otherwise.
 
+## Closing every pane, and removing a station (15 Nov 2026, the owner's request)
+
+"I should be able to delete a machine and it should kill all the sessions that are running, or delete all sessions on a machine."
+
+- **Close all panes on a station** (`station.close_all`; the station's menu; `spandeck pane close --all [--station NAME]`). Every pane is ended and taken off the list, as "Kill and remove" does for one. Projects, layouts, history and the archive are not touched. The owner's alone: on no agent's list and no station's; it reaches another station only as the owner's forwarded request, like `station.restart`. The ship's log says who and how many.
+- **Ending a pane ends its whole session, not only its process group** (Unix; a change to Kill for every pane). A shell puts a job (`sleep 300 &`) in a group of its own, and that job used to outlive "Kill and remove". Kill now also reaches every process in the session the pane's program started. A program that started a session of its own (`setsid`, a daemon) is still not reached. On Windows the job object already ended the tree.
+- **A station is removed by replacing the fleet key, because there is no other honest way.** Every station of a fleet holds the same key, and that key signs station calls and makes browser tokens. A list of removed stations would not stop a machine that still holds a key the others accept. So `fleet.remove` (the station's menu; `spandeck fleet --remove NAME [--stop]`) does this, in order:
+  1. The station being removed, if it answers (`station.leave`): closes every pane, takes a new key of its own (a fleet of one), and forgets the other stations, its links to their projects and the browsers signed in to it.
+  2. The station the owner is using makes a new fleet key and hands it to every other station that answers (`fleet.rekey`, a station's signed call only, never the owner's or an agent's), then takes it itself.
+  3. The removed station is forgotten: the list of known stations, pinned panes and layouts that point at it, its panes in global layouts (a layout left empty goes), project links to its projects, stops and messages waiting for it. Project files in the owner's folders are not changed.
+- **What follows, and is said in the dialog before anything is done:**
+  - Every browser signed in from another device signs in again, and connections made under the old key are closed at once. The browser that asked for the removal gets its new token in the reply and stays signed in. The token of a station's own Control Deck (`spandeck cc`) does not rest on the key and is unaffected.
+  - **A station that was away at that moment keeps the old key.** Until it has the new one it shows as not in the fleet, and the removed station, if it kept the old key, could still act on it. Each station that changed keeps the old key in a private file (`fleet.retired`) for one purpose, never to accept anything: when a station it knew is seen again at the address it had, still showing the old fleet, it is handed the new key in a call signed with the old one. No approval is needed for that, since it is a station the owner already approved. After 30 days it is no longer offered, and that station rejoins with `fleet --join` and an approval.
+  - **A station that cannot be reached is removed from the fleet's side.** Nothing is done on it: its panes keep running until someone stops spandeck there. It keeps a key nobody accepts, so it cannot act on the fleet, and it cannot rejoin without a new approval. If spandeck is still running there it is listed again as "not in this fleet", like any machine under the owner's login that never joined.
+  - **The vault token is that station's own.** A removed station keeps it and it keeps working there; the owner is told to revoke `spandeck:<station>` at the vault. spandeck does not revoke it: only the vault ends a token.
+  - **"Also stop spandeck there and stop it starting at login"** is a tick box, off by default, not offered for a station that cannot be reached. It removes the login service (`systemctl --user disable` and the unit file on Linux; the launchd agent on macOS; the Scheduled Task on Windows) and the daemon then ends by itself. The programs, the state folder and the config folder stay on that machine's disk, and the dialog names them.
+  - **Removing the last other station** leaves the station in use as a fleet of one with a new key. **Removing the station in use** is done through another station that answers, which does steps 2 and 3 for the rest; with none in reach the station leaves by itself (it throws its key away), says which stations were not told, and the owner removes it at one of them as well, which is what replaces their key. The only station of a fleet of one cannot be removed from it.
+- **What this does not do.** It does not undo what a station did while it was trusted: a machine that was already hostile could have left something behind on the others. Removal is for a machine that is retired, sold, lost or no longer wanted.
+- A machine that is not in the fleet and stops answering leaves the list (before, it stayed as "unreachable" until the daemon restarted). Stations of the fleet that are off stay listed, as before.
+- Both dialogs name the station and its counts, open on Cancel, and act only on the red button. `fleet.forget` ("Forget this station") stays: it only takes an unreachable station off the list.
+
 ## AgentVault (14 Nov 2026)
 
 - spandeck and AgentVault stay separate programs. spandeck works without a vault.
@@ -125,6 +146,7 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 ### Trust
 - The user at the Control Deck has full authority on every station.
 - An agent has only what its task grants. Permissions are separate: discover, read history, execute commands, administer a station. Agents never get administer.
+- A station removed from the fleet can no longer act on the stations that took the new key: its signed calls are refused and browser tokens made with the old key are not accepted.
 
 ### Sharing and archive
 - Captured events and posted findings: on by default. Transcripts via recall: own always; same project scrubbed; cross-project opt-in.

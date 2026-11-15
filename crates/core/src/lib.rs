@@ -46,6 +46,7 @@ pub mod prices;
 pub mod project;
 pub mod recipes;
 pub mod relay;
+pub mod remove;
 pub mod rpc;
 pub mod server;
 pub mod setup;

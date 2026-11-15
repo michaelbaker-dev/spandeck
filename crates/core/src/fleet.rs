@@ -84,6 +84,10 @@ impl FleetState {
         self.peers.lock().unwrap().remove(station);
     }
 
+    pub(crate) fn forget_all(&self) {
+        self.peers.lock().unwrap().clear();
+    }
+
     pub fn peers(&self) -> Vec<Peer> {
         self.peers.lock().unwrap().values().cloned().collect()
     }
@@ -201,7 +205,20 @@ impl FleetState {
         method: &str,
         params: Value,
     ) -> std::result::Result<Value, String> {
-        self.post(addr, method, params, true).await
+        self.post(addr, method, params, Some(self.trust.key()))
+            .await
+    }
+
+    /// A call signed with a key this fleet no longer uses: the only way to
+    /// reach a station that was away when the key was replaced.
+    pub(crate) async fn call_with_key(
+        &self,
+        addr: &str,
+        method: &str,
+        params: Value,
+        key: &[u8],
+    ) -> std::result::Result<Value, String> {
+        self.post(addr, method, params, Some(key.to_vec())).await
     }
 
     /// A call any device under the owner's login may make without the fleet
@@ -212,7 +229,7 @@ impl FleetState {
         method: &str,
         params: Value,
     ) -> std::result::Result<Value, String> {
-        self.post(addr, method, params, false).await
+        self.post(addr, method, params, None).await
     }
 
     async fn post(
@@ -220,7 +237,7 @@ impl FleetState {
         addr: &str,
         method: &str,
         params: Value,
-        signed: bool,
+        key: Option<Vec<u8>>,
     ) -> std::result::Result<Value, String> {
         let body =
             json!({"method": method, "params": params, "from": self.station, "protocol": PROTOCOL})
@@ -231,9 +248,12 @@ impl FleetState {
             .post(format!("http://{addr}/api/peer/rpc"))
             .header("x-spandeck-station", &self.station)
             .header("content-type", "application/json");
-        if signed {
+        if let Some(key) = key {
             // The signature covers the exact bytes sent.
-            req = req.header("x-spandeck-sig", self.trust.sign("rpc", &body));
+            req = req.header(
+                "x-spandeck-sig",
+                crate::trust::sign_with(&key, "rpc", &body),
+            );
         }
         let resp = req
             .body(body)
@@ -320,6 +340,18 @@ impl Daemon {
     /// it runs spandeck. Only those holding the same fleet key are trusted;
     /// the rest are listed as not linked until the owner joins them.
     pub(crate) async fn discover_peers(&self) {
+        self.discover_once().await;
+        // A station that was away when the fleet's key was replaced, and is
+        // back: handed the key, it is in the fleet at the next look.
+        if self.rekey_stragglers().await {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            self.discover_once().await;
+        }
+        self.setup_sync().await;
+        self.deck_sync().await;
+    }
+
+    async fn discover_once(&self) {
         let mut candidates: Vec<String> = self.cfg.peers.clone();
         if self.cfg.discovery {
             let fleet = &self.fleet;
@@ -446,6 +478,14 @@ impl Daemon {
                     },
                 );
             }
+            // A machine that is not in this fleet and no longer answers is
+            // not one of its stations that is off: it leaves the list. (A
+            // station removed from the fleet and then stopped would otherwise
+            // stay, shown as unreachable, with offers to wake it.) A station
+            // of this fleet that is away is listed again from `known` above.
+            let before = peers.len();
+            peers.retain(|_, p| seen_addrs.contains(&p.addr) || p.state != "not_linked");
+            changed |= peers.len() != before;
             for p in peers.values_mut() {
                 if !seen_addrs.contains(&p.addr) && p.state != "unreachable" {
                     p.state = "unreachable".into();
@@ -463,8 +503,6 @@ impl Daemon {
         if changed {
             self.emit("fleet.updated", None, None, json!({}));
         }
-        self.setup_sync().await;
-        self.deck_sync().await;
     }
 
     pub fn fleet_view(&self) -> Value {

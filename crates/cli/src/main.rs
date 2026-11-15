@@ -140,6 +140,15 @@ enum Cmd {
         /// Ask this station to let this one into its fleet. Approve it there.
         #[arg(long, value_name = "STATION")]
         join: Option<String>,
+        /// Remove a station from the fleet: its panes are closed, and the
+        /// fleet gets a new key so that station can no longer act on the
+        /// others. Browsers signed in from other devices sign in again.
+        #[arg(long, value_name = "STATION", conflicts_with = "join")]
+        remove: Option<String>,
+        /// With --remove: also stop spandeck there and stop it starting at
+        /// login. The programs and its data stay on that machine's disk.
+        #[arg(long, requires = "remove")]
+        stop: bool,
     },
     /// Approve a station or browser that asked to be let in, by the code it shows.
     Approve { code: String },
@@ -241,9 +250,18 @@ enum PaneCmd {
     Kill {
         pane: String,
     },
-    /// Forget a pane.
+    /// Forget a pane (a running one is killed first). With --all: every
+    /// pane on this station, or on the one named with --station.
     Close {
-        pane: String,
+        #[arg(required_unless_present = "all")]
+        pane: Option<String>,
+        /// End and remove every pane on the station. Projects, layouts,
+        /// history and the archive are not touched.
+        #[arg(long, conflicts_with = "pane")]
+        all: bool,
+        /// With --all: another station in the fleet, by name.
+        #[arg(long, requires = "all")]
+        station: Option<String>,
     },
 }
 
@@ -597,8 +615,22 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             PaneCmd::Kill { pane } => {
                 c.call("pane.kill", json!({"pane": pane}))?;
             }
-            PaneCmd::Close { pane } => {
+            PaneCmd::Close {
+                pane: Some(pane), ..
+            } => {
                 c.call("pane.close", json!({"pane": pane}))?;
+            }
+            PaneCmd::Close { station, .. } => {
+                let v = on_station(&mut c, station.as_deref(), "station.close_all", json!({}))?;
+                show(j, &v, |v| {
+                    format!(
+                        "closed {} pane(s) on {} ({} running, {} of them working right then)",
+                        v["closed"],
+                        v["station"].as_str().unwrap_or(""),
+                        v["running"],
+                        v["working"]
+                    )
+                });
             }
         },
         Cmd::Project { cmd } => match cmd {
@@ -936,13 +968,23 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             });
         }
         Cmd::Fleet {
+            remove: Some(station),
+            stop,
+            ..
+        } => {
+            c.set_timeout(Some(Duration::from_secs(60)));
+            let v = c.call("fleet.remove", json!({"station": station, "stop": stop}))?;
+            show(j, &v, removed_summary);
+        }
+        Cmd::Fleet {
             join: Some(station),
+            ..
         } => {
             c.call("fleet.refresh", json!({}))?;
             let v = c.call("fleet.join", json!({"station": station}))?;
             show(j, &v, |v| v["next"].as_str().unwrap_or("").to_string());
         }
-        Cmd::Fleet { join: None } => {
+        Cmd::Fleet { join: None, .. } => {
             let v = c.call("fleet.refresh", json!({}))?;
             show(j, &v, |v| {
                 v["stations"]
@@ -1294,13 +1336,87 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
         }
         tracing::info!(station = %daemon.station, version = spandeck_core::VERSION, socket = %daemon.paths.socket().display(), "spandeckd ready");
 
-        sys::shutdown_signal().await?;
+        // A signal, or the owner removing this station with "also stop it".
+        tokio::select! {
+            r = sys::shutdown_signal() => r?,
+            _ = daemon.quit.notified() => {}
+        }
         // Asked to stop, not replaced: the panes end with the station.
         daemon.stop_pane_host();
         tracing::info!("spandeckd stopping");
         let _ = std::fs::remove_file(daemon.paths.socket());
         Ok(0)
     })
+}
+
+/// What `fleet.remove` did, in the owner's words.
+fn removed_summary(v: &Value) -> String {
+    let st = v["station"].as_str().unwrap_or("");
+    let names = |k: &str| -> Vec<&str> {
+        v[k].as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.as_str())
+            .collect()
+    };
+    let mut out = vec![];
+    if v["reached"] == json!(true) {
+        let there = &v["there"];
+        out.push(format!(
+            "{st} left the fleet: {} pane(s) closed there, and it no longer trusts the other stations.",
+            there["closed"].as_u64().unwrap_or(0)
+        ));
+        if there["stopping"] == json!(true) {
+            out.push(format!(
+                "spandeck is stopping on {st} and will not start at login. Its program ({}) and data ({}, {}) stay on that machine.",
+                there["dirs"]["program"].as_str().unwrap_or("?"),
+                there["dirs"]["state"].as_str().unwrap_or("?"),
+                there["dirs"]["config"].as_str().unwrap_or("?")
+            ));
+        }
+        if there["vault_token"] == json!(true) {
+            out.push(format!(
+                "{st} still holds its vault token. Revoke spandeck:{st} on the vault's Tokens page."
+            ));
+        }
+    } else {
+        out.push(format!(
+            "{st} could not be reached ({}). It was removed from the fleet's side: its panes keep running until someone stops spandeck there, and it cannot act on the fleet or rejoin without a new approval. If it holds a vault token, revoke spandeck:{st} on the vault's Tokens page.",
+            v["problem"].as_str().unwrap_or("no answer")
+        ));
+    }
+    // The station that handed out the new key: this one, or, when this one
+    // is the station removed, the one that did it in its place.
+    let through = v["through"].as_str();
+    if v["self"] == json!(true) && through.is_none() {
+        let not_told = names("not_told");
+        if !not_told.is_empty() {
+            out.push(format!(
+                "No other station could be told ({}). They still list this one, and still accept the old key, which this station has thrown away. Remove {st} at one of them as well.",
+                not_told.join(", ")
+            ));
+        }
+    } else {
+        let (rekeyed, waiting) = (names("rekeyed"), names("waiting"));
+        let first = through.unwrap_or("this station");
+        out.push(if v["alone"] == json!(true) {
+            format!("What stays is a fleet of one ({first}), with a new key.")
+        } else {
+            format!(
+                "The fleet has a new key. Took it: {first}{}{}.",
+                if rekeyed.is_empty() { "" } else { ", " },
+                rekeyed.join(", ")
+            )
+        });
+        if !waiting.is_empty() {
+            out.push(format!(
+                "Away, and still on the old key: {}. Each is handed the new key when it is next seen (for 30 days); until then it shows as not linked, and the removed station could still act on it.",
+                waiting.join(", ")
+            ));
+        }
+    }
+    out.push("Browsers signed in from other devices must sign in again.".to_string());
+    out.join("\n")
 }
 
 /// Call a method here, or on another station in the fleet through this one.

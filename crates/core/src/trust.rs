@@ -60,13 +60,41 @@ pub struct TrustState {
     file: PathBuf,
     requests: Mutex<BTreeMap<String, Request>>,
     outgoing: Mutex<Option<Outgoing>>,
+    /// Goes up each time the key is replaced because a station left the
+    /// fleet. A connection that was let in with the old key ends then.
+    epoch: tokio::sync::watch::Sender<u64>,
+    /// Held while the list of retired keys is read, changed and written.
+    retired_lock: Mutex<()>,
 }
 
-fn hex(bytes: &[u8]) -> String {
+/// A station that was away when the fleet's key was replaced.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Straggler {
+    pub station: String,
+    /// Where it was last seen. The new key is sent to this address only.
+    pub addr: String,
+}
+
+/// A key the fleet stopped using when a station was removed. Nothing is
+/// accepted under it. It is kept only to hand the new key to the stations
+/// that were away at that moment, which still hold it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Retired {
+    pub key: String,
+    pub removed: String,
+    pub since_ms: u64,
+    pub stations: Vec<Straggler>,
+}
+
+/// How long a station that was away is still handed the new key when it
+/// comes back. After that it rejoins on the owner's approval.
+pub const RETIRED_KEPT_MS: u64 = 30 * 24 * 3600 * 1000;
+
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn unhex(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn unhex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) || !s.is_ascii() {
         return None;
     }
@@ -113,30 +141,80 @@ impl TrustState {
             file,
             requests: Mutex::new(BTreeMap::new()),
             outgoing: Mutex::new(None),
+            epoch: tokio::sync::watch::Sender::new(0),
+            retired_lock: Mutex::new(()),
         })
     }
 
-    fn key(&self) -> Vec<u8> {
+    pub(crate) fn key(&self) -> Vec<u8> {
         self.key.read().unwrap().clone()
     }
 
     /// A public name for the fleet: stations with the same key show the same
     /// id, and the id says nothing about the key.
     pub fn fleet_id(&self) -> String {
-        hex(&mac(&self.key(), &[b"fleet-id"]).finalize().into_bytes()[..8])
+        fleet_id_of(&self.key())
     }
 
     /// Sign one call to another station: `<time>.<nonce>.<mac>`.
     pub fn sign(&self, purpose: &str, body: &[u8]) -> String {
-        let ts = now_ms().to_string();
-        let nonce = &random_token()[..16];
-        let tag = mac(
-            &self.key(),
-            &[purpose.as_bytes(), ts.as_bytes(), nonce.as_bytes(), body],
+        sign_with(&self.key(), purpose, body)
+    }
+
+    /// Stop using this station's key and use `key` from now on: saved first,
+    /// so a restart never brings the old one back. Every signature, device
+    /// token and open connection that rested on the old key ends here.
+    pub(crate) fn replace_key(&self, key: Vec<u8>) -> std::io::Result<()> {
+        write_private(&self.file, &hex(&key))?;
+        *self.key.write().unwrap() = key;
+        // Requests that were waiting were made to the old fleet.
+        self.requests.lock().unwrap().clear();
+        *self.outgoing.lock().unwrap() = None;
+        self.epoch.send_modify(|n| *n += 1);
+        Ok(())
+    }
+
+    /// Changes when the key is replaced: see `replace_key`.
+    pub fn rekeyed(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.epoch.subscribe()
+    }
+
+    fn retired_file(&self) -> PathBuf {
+        self.file.with_file_name("fleet.retired")
+    }
+
+    /// Keys this fleet stopped using, with the stations still to be told.
+    pub(crate) fn retired(&self) -> Vec<Retired> {
+        std::fs::read(self.retired_file())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    /// Read the list, change it and write it back, one caller at a time.
+    pub(crate) fn retired_change(
+        &self,
+        change: impl FnOnce(&mut Vec<Retired>),
+    ) -> std::io::Result<()> {
+        let _held = self.retired_lock.lock().unwrap();
+        let mut list = self.retired();
+        change(&mut list);
+        self.set_retired(list)
+    }
+
+    fn set_retired(&self, mut list: Vec<Retired>) -> std::io::Result<()> {
+        let now = now_ms();
+        list.retain(|r| !r.stations.is_empty() && now.saturating_sub(r.since_ms) < RETIRED_KEPT_MS);
+        if list.is_empty() {
+            return match std::fs::remove_file(self.retired_file()) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            };
+        }
+        write_private(
+            &self.retired_file(),
+            &serde_json::to_string(&list).unwrap_or_default(),
         )
-        .finalize()
-        .into_bytes();
-        format!("{ts}.{nonce}.{}", hex(&tag))
     }
 
     /// Whether `sig` was made with this fleet's key for exactly this call.
@@ -182,6 +260,24 @@ impl TrustState {
     }
 }
 
+/// The public name of the fleet that holds `key`.
+pub(crate) fn fleet_id_of(key: &[u8]) -> String {
+    hex(&mac(key, &[b"fleet-id"]).finalize().into_bytes()[..8])
+}
+
+/// Sign one call with a given key: `<time>.<nonce>.<mac>`.
+pub(crate) fn sign_with(key: &[u8], purpose: &str, body: &[u8]) -> String {
+    let ts = now_ms().to_string();
+    let nonce = &random_token()[..16];
+    let tag = mac(
+        key,
+        &[purpose.as_bytes(), ts.as_bytes(), nonce.as_bytes(), body],
+    )
+    .finalize()
+    .into_bytes();
+    format!("{ts}.{nonce}.{}", hex(&tag))
+}
+
 fn short_code() -> String {
     // Letters that are hard to confuse when read off another screen.
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -212,6 +308,45 @@ impl Daemon {
     pub fn device_for_token(&self, token: &str) -> Option<String> {
         let id = self.trust.device_of(token)?;
         (!self.revoked_devices().contains(&id)).then_some(id)
+    }
+
+    /// A new token for the browser that made this call, when it is one the
+    /// owner signed in on another device. Given once, in the reply to the
+    /// call that replaced the fleet's key, so the owner is not signed out of
+    /// the Control Deck they are using.
+    pub(crate) fn device_token_again(&self, who: &str) -> Option<(String, String)> {
+        let id = who.strip_prefix("you (device ")?.strip_suffix(')')?;
+        (!self.revoked_devices().iter().any(|r| r == id))
+            .then(|| (id.to_string(), self.trust.device_token(id)))
+    }
+
+    /// Every browser signed in from another device was signed in under the
+    /// old key. Their tokens no longer work, so they are not listed.
+    pub(crate) fn devices_forget(&self, keep: Option<&str>) {
+        let kept: Vec<Value> = self
+            .known_devices()
+            .into_iter()
+            .filter(|d| keep.is_some() && d["id"].as_str() == keep)
+            .collect();
+        self.db
+            .kv_set("trust.devices", &Value::Array(kept).to_string());
+    }
+
+    /// This station's record of the browser that made a call, if it is one
+    /// signed in here from another device.
+    pub(crate) fn device_entry(&self, who: &str) -> Option<Value> {
+        let (id, _) = self.device_token_again(who)?;
+        self.known_devices()
+            .into_iter()
+            .find(|d| d["id"].as_str() == Some(id.as_str()))
+    }
+
+    pub(crate) fn devices_keep(&self, entry: Value) {
+        let mut devices = self.known_devices();
+        devices.retain(|d| d["id"] != entry["id"]);
+        devices.push(entry);
+        self.db
+            .kv_set("trust.devices", &Value::Array(devices).to_string());
     }
 
     fn revoked_devices(&self) -> Vec<String> {
@@ -579,6 +714,8 @@ mod tests {
             file: PathBuf::new(),
             requests: Mutex::new(BTreeMap::new()),
             outgoing: Mutex::new(None),
+            epoch: tokio::sync::watch::Sender::new(0),
+            retired_lock: Mutex::new(()),
         }
     }
 
