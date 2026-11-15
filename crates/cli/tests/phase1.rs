@@ -134,9 +134,23 @@ fn after_a_daemon_crash_agents_resume_and_shells_do_not() {
         || format!("screen:\n{}\npane: {}", s.text(&agent), s.pane(&agent)),
         || s.pane(&agent)["session_id"].as_str().map(String::from),
     );
+    // Guarantee (Stop, pause): a paused agent takes no new work. The crash
+    // must not lift that, nor drop what the owner set on the pane. It did:
+    // the pane came back not paused and was nudged about its mail.
+    s.call("pane.pause", json!({"pane": agent, "paused": true}));
+    s.call(
+        "pane.set",
+        json!({"pane": agent, "muted": true, "watch": true}),
+    );
     s.kill9();
     s.launch();
     s.wait_text(&agent, &format!("[fake] RESUMED {session}"));
+    let back = s.pane(&agent);
+    assert_eq!(
+        (&back["paused"], &back["muted"], &back["watch"]),
+        (&json!(true), &json!(true), &json!(true)),
+        "still paused, muted and watched after the crash"
+    );
     assert!(
         s.try_call("pane.get", json!({"pane": shell})).is_err(),
         "a plain shell is not brought back"

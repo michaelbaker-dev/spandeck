@@ -1294,6 +1294,7 @@ impl Daemon {
             slot: meta.slot.clone(),
             ..Default::default()
         })?;
+        self.keep_owner_marks(&p, &meta);
         self.write_instructions(&p.meta());
         self.record(
             "pane.restarted",
@@ -1828,6 +1829,7 @@ impl Daemon {
             };
             match self.spawn_pane(opts) {
                 Ok(p) => {
+                    self.keep_owner_marks(&p, &meta);
                     self.record(
                         "pane.resumed",
                         Some(&p.id),
@@ -1848,6 +1850,23 @@ impl Daemon {
                 }
             }
         }
+    }
+
+    /// A pane started again under its old id keeps what the owner set on
+    /// it: paused, muted, watched. A paused pane that came back taking work
+    /// would break the Pause guarantee, and did after a daemon crash
+    /// (found on 15 Nov 2026).
+    fn keep_owner_marks(&self, p: &Arc<PaneEntry>, old: &PaneMeta) {
+        if !(old.paused || old.muted || old.watch) {
+            return;
+        }
+        {
+            let mut m = p.meta.lock().unwrap();
+            m.paused = old.paused;
+            m.muted = old.muted;
+            m.watch = old.watch;
+        }
+        self.save_pane(p);
     }
 
     /// The program a pane was launched with, when it was not the adapter's default
