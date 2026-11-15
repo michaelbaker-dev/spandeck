@@ -1345,6 +1345,9 @@ pub struct Waiting {
 #[derive(Default)]
 pub(crate) struct Cache {
     convs: Mutex<HashMap<String, Arc<Mutex<Conv>>>>,
+    /// Per session: how many of its lines were looked at for a title, and
+    /// the last title found (`session_title`).
+    titles: Mutex<HashMap<String, (u64, Option<String>)>>,
 }
 
 impl crate::Archive {
@@ -1539,6 +1542,52 @@ impl crate::Archive {
     /// The session's title, when its file has one.
     pub fn conversation_title(&self, session: &str) -> Option<String> {
         self.conv(session)?.lock().unwrap().title.clone()
+    }
+
+    /// The session's title without building its index, for a list of every
+    /// pane's session (the index is kept for eight sessions only, and a
+    /// list would push out the ones being read). Only lines written since
+    /// the last look are read, and of those only the ones that could hold a
+    /// title.
+    pub fn session_title(&self, session: &str) -> Option<String> {
+        let info = self.session(session)?;
+        let dialect = Dialect::of(&info.agent)?;
+        let (seen, mut title) = self
+            .convs
+            .titles
+            .lock()
+            .unwrap()
+            .get(session)
+            .cloned()
+            .unwrap_or_default();
+        if info.lines <= seen {
+            return title;
+        }
+        let rows: Vec<(u64, String)> = {
+            let conn = self.conn.lock().unwrap();
+            conn.prepare_cached(
+                "SELECT line, raw FROM raw WHERE session=?1 AND line>?2
+                 AND instr(raw, '-title\"')>0 ORDER BY line",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map(rusqlite::params![session, seen as i64], |r| {
+                    Ok((r.get::<_, i64>(0)? as u64, r.get::<_, String>(1)?))
+                })?
+                .collect()
+            })
+            .unwrap_or_default()
+        };
+        for (line, raw) in rows {
+            if let Some(t) = parse_line(dialect, line, &raw).title {
+                title = Some(t);
+            }
+        }
+        self.convs
+            .titles
+            .lock()
+            .unwrap()
+            .insert(session.to_string(), (info.lines, title.clone()));
+        title
     }
 }
 

@@ -255,6 +255,23 @@ impl Daemon {
         }
     }
 
+    /// Where a pushed notice leads: the pane's place in this station's
+    /// Control Deck, at the station's own tailnet address, which is where a
+    /// phone reaches it. None for a notice about no pane, and on a station
+    /// with no tailnet address, from which a link would lead nowhere.
+    async fn click_url(&self, url: Option<&str>) -> Option<String> {
+        let path = url.filter(|u| u.starts_with("/#/"))?;
+        let d = self.clone();
+        let me = tokio::task::spawn_blocking(move || d.fleet.tailnet_self())
+            .await
+            .ok()??;
+        let ip = me
+            .ips
+            .iter()
+            .find(|i| i.parse::<std::net::Ipv4Addr>().is_ok())?;
+        Some(format!("http://{ip}:{}{path}", self.cfg.web_port))
+    }
+
     async fn push(&self, kind: &str, title: &str, body: &str, url: Option<&str>) {
         let client = &self.fleet.http;
         let title = format!("{} · {}", title, self.station);
@@ -266,6 +283,11 @@ impl Daemon {
                 .body(body.to_string());
             if matches!(kind, "needs_you" | "approval" | "error") {
                 req = req.header("Priority", "high");
+            }
+            // Touching the notice opens the pane in the Control Deck, which
+            // on a phone shows an agent's pane as its conversation.
+            if let Some(click) = self.click_url(url).await {
+                req = req.header("Click", click);
             }
             if let Err(e) = req.send().await {
                 tracing::warn!(error = %e, "ntfy push failed");

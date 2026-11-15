@@ -118,7 +118,12 @@ const NOT_FORWARDED: &[&str] = &[
 /// conversation asks for it again and again; that must not hold back the
 /// push that tells the same phone another pane needs it. They are not on
 /// the read-only list: a conversation is the owner's history, unscrubbed.
-const OWNER_LOOKS: &[&str] = &["pane.conversation", "pane.conversation.detail", "pane.read"];
+const OWNER_LOOKS: &[&str] = &[
+    "pane.conversation",
+    "pane.conversation.detail",
+    "pane.read",
+    "pane.titles",
+];
 
 const READ_METHODS: &[&str] = &[
     "station.info",
@@ -368,6 +373,14 @@ impl Daemon {
                 })
                 .await
                 .map_err(|e| invalid(e.to_string()))??
+            }
+            // The session titles of this station's panes, for the list of
+            // sessions on a phone. The owner's only, as the conversation is.
+            "pane.titles" => {
+                let d = self.clone();
+                tokio::task::spawn_blocking(move || d.conversation_titles())
+                    .await
+                    .map_err(|e| invalid(e.to_string()))?
             }
             "pane.send_text" => {
                 let id = self.target_pane(caller, &params)?;

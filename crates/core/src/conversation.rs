@@ -131,6 +131,26 @@ impl Daemon {
         Ok(json!({"pane": p.id, "session": session, "read_line": line, "unread": unread}))
     }
 
+    /// `pane.titles`: the title of each pane's session, for the panes whose
+    /// session file has one (Claude Code writes one). A title is made from
+    /// what was said, so this is the owner's, like the conversation itself:
+    /// it is not put in `pane.list`, which agents read.
+    pub fn conversation_titles(&self) -> Value {
+        let mut titles = serde_json::Map::new();
+        for p in self.list_panes() {
+            let meta = p.meta();
+            // The file's new lines are copied first, as for a conversation.
+            let title = meta.session_id.as_deref().and_then(|s| {
+                self.archive.poll_session(s);
+                self.archive.session_title(s)
+            });
+            if let Some(title) = title {
+                titles.insert(meta.id.clone(), json!(title));
+            }
+        }
+        json!({ "titles": titles })
+    }
+
     /// A closed pane's read mark is of no more use.
     pub(crate) fn conversation_forget(&self, pane: &str) {
         self.read_marks.lock().unwrap().remove(pane);

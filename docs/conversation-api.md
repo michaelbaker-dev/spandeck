@@ -1,7 +1,8 @@
 # The conversation API
 
 The station side of the conversation view (mobile plan, phase M1; `DECISIONS.md`, "The
-conversation view"). This is the contract for whoever builds the view. The code is
+conversation view"). This is the contract the view is built on (`crates/web/assets/chat.js`,
+phase M2). The code is
 `crates/archive/src/conversation.rs` (session file to items), `crates/core/src/conversation.rs`
 (the calls) and `watch_local` / `watch_remote` in `crates/web/src/lib.rs` (the live stream).
 
@@ -293,6 +294,24 @@ the archive's part, on a 51 MB session).
   (the newest item is on screen and the page is visible) and calls `pane.read`.
 - None of these three calls counts as the owner being at a keyboard, so a phone that shows a
   conversation is still sent the push for another pane.
+
+## Titles for a list: `pane.titles`
+
+```
+{}   →   {"titles": {"p_01jx": "Heron counts for the marsh survey"}}
+```
+
+- The title of each of this station's panes' sessions, for the panes whose session file has
+  one (Claude Code writes one; Codex does not). A pane that is not there has none: show its
+  name. It is the `title` a conversation answer gives, for every pane at once.
+- A title is made from what was said, so this is **the owner's only**, like the other calls
+  here, and it is not in `pane.list`, which agents read. For another station:
+  `peer.call {station, method: "pane.titles"}`.
+- Cheap enough for a list that asks every few seconds: the station copies each file's new
+  lines, reads only the lines written since it last looked, and does not build a session's
+  index (which is kept for eight sessions only).
+- It does not count as the owner being at a keyboard.
+- A station from before this answers `not_found`: its panes go by their names.
 
 ## Errors
 
