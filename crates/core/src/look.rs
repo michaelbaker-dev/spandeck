@@ -410,36 +410,41 @@ impl Daemon {
         // A pane can be closed from a thread that is not the runtime's.
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             let (d, pushed) = (self.clone(), look.clone());
-            rt.spawn(async move { d.look_send(&pushed, 0).await });
+            rt.spawn(async move { d.look_send(&pushed).await });
         }
         Ok(look)
     }
 
-    /// Offer a copy to every online peer that keeps this document, or (when
-    /// `only_if_older_than` is set) to those whose copy is older than that.
-    /// A station that does not say it keeps one is from before themes and is
-    /// not asked.
-    async fn look_send(&self, look: &Look, only_if_older_than: u64) {
-        for peer in self.fleet.peers() {
-            let Some(theirs) = peer.info.pointer("/look/updated_ms") else {
-                continue;
-            };
-            let theirs = theirs.as_u64().unwrap_or(0);
-            // A station that reads only an older format would refuse this copy.
-            let reads = peer.info.pointer("/look/format").and_then(|f| f.as_u64());
-            if peer.state != "online"
-                || reads < Some(look.format as u64)
-                || (only_if_older_than > 0 && theirs >= only_if_older_than)
-            {
-                continue;
-            }
-            let r = self
-                .fleet
-                .call(&peer.station, "look.push", json!({"look": look}))
-                .await;
-            self.sync_sent("look", look.updated_ms, &peer.station, r)
-                .await;
+    /// Offer a copy to every online station that keeps this document, each
+    /// in a call of its own and all at the same time: one that is slow to
+    /// answer holds up none of the others.
+    async fn look_send(&self, look: &Look) {
+        let peers = self.fleet.peers();
+        crate::fleet::futures_join_all(peers.iter().map(|p| self.look_offer(p, look, false))).await;
+    }
+
+    /// Offer a copy to one online station. `if_older` (its round, at every
+    /// look): only when it last said its copy was older. A station that
+    /// does not say it keeps one is from before themes and is not asked.
+    pub(crate) async fn look_offer(&self, peer: &crate::fleet::Peer, look: &Look, if_older: bool) {
+        let Some(theirs) = peer.info.pointer("/look/updated_ms") else {
+            return;
+        };
+        let theirs = theirs.as_u64().unwrap_or(0);
+        // A station that reads only an older format would refuse this copy.
+        let reads = peer.info.pointer("/look/format").and_then(|f| f.as_u64());
+        if peer.state != "online"
+            || reads < Some(look.format as u64)
+            || (if_older && theirs >= look.updated_ms)
+        {
+            return;
         }
+        let r = self
+            .fleet
+            .call(&peer.station, "look.push", json!({"look": look}))
+            .await;
+        self.sync_sent("look", look.updated_ms, &peer.station, r)
+            .await;
     }
 
     /// Save a theme: a new one (no id) or a change to one already saved.
@@ -652,19 +657,10 @@ impl Daemon {
         if !look.fonts.is_empty() {
             if let Ok(rt) = tokio::runtime::Handle::try_current() {
                 let (d, from) = (self.clone(), from.to_string());
-                rt.spawn(async move { d.look_fonts_sync(Some(&from)).await });
+                rt.spawn(async move { d.look_fonts_sync(Some(&from), None).await });
             }
         }
         Ok(json!({"station": self.station, "ok": true, "updated_ms": look.updated_ms}))
-    }
-
-    /// Called after discovery: bring peers with an older copy up to date.
-    pub(crate) async fn look_sync(&self) {
-        let mine = self.look();
-        if mine.updated_ms > 0 {
-            self.look_send(&mine, mine.updated_ms).await;
-        }
-        self.look_fonts_sync(None).await;
     }
 }
 

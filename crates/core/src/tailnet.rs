@@ -537,39 +537,41 @@ impl Daemon {
         })
     }
 
-    /// Ask the stations that answer for theirs: when one is first seen, and
-    /// then once a minute. What each says is kept for when it is off.
-    pub(crate) async fn tailnet_ask(&self) {
+    /// Ask a station that answers for its own (in its round): when it is
+    /// first seen, and then once a minute. What it says is kept for when
+    /// it is off.
+    pub(crate) async fn tailnet_ask(&self, peer: &Peer) {
         let now = now_ms();
-        let asked: Vec<Peer> = {
-            let mut last = self.tailnet.asked.lock().unwrap();
-            let due: Vec<Peer> = self
-                .fleet
-                .peers()
-                .into_iter()
-                .filter(|p| p.state == "online" && p.info.get("perf").is_some())
-                .filter(|p| {
-                    last.get(&p.station)
-                        .is_none_or(|at| now.saturating_sub(*at) >= 60_000)
-                })
-                .collect();
-            last.retain(|s, _| self.fleet.peer(s).is_some_and(|p| p.state == "online"));
-            for p in &due {
-                last.insert(p.station.clone(), now);
-            }
-            due
-        };
-        if asked.is_empty() {
+        if peer.state != "online" || peer.info.get("perf").is_none() {
             return;
         }
-        let calls = asked.iter().map(|p| async move {
-            let said = self
-                .fleet
-                .call(&p.station, "tailnet.report", json!({}))
-                .await;
-            (p.station.clone(), said.ok())
-        });
-        let answers = crate::fleet::futures_join_all(calls).await;
+        {
+            let mut last = self.tailnet.asked.lock().unwrap();
+            last.retain(|s, _| self.fleet.peer(s).is_some_and(|p| p.state == "online"));
+            if last
+                .get(&peer.station)
+                .is_some_and(|at| now.saturating_sub(*at) < 60_000)
+            {
+                return;
+            }
+            last.insert(peer.station.clone(), now);
+        }
+        let said = self
+            .fleet
+            .call(&peer.station, "tailnet.report", json!({}))
+            .await;
+        let answers = [(peer.station.clone(), said.ok())];
+        // What is kept is read, changed and written by one round at a time.
+        let mut last = self.tailnet.asked.lock().unwrap();
+        // A station that has not read its own key yet (it has just
+        // started) is asked again at its next round, not in a minute.
+        if answers[0]
+            .1
+            .as_ref()
+            .is_none_or(|s| s["read"] != json!(true))
+        {
+            last.remove(&peer.station);
+        }
         let mut reports = self.tailnet_reports();
         let before = serde_json::to_string(&reports).unwrap_or_default();
         for (station, said) in answers {

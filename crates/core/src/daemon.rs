@@ -389,6 +389,10 @@ pub struct Inner {
     pub(crate) restore: crate::restore::RestoreState,
     /// The owner has been told that this station cannot write its database.
     pub(crate) db_told: std::sync::atomic::AtomicBool,
+    /// The schedule of rounds with the other stations (rounds.rs).
+    pub rounds: Arc<crate::rounds::Rounds>,
+    /// When each waiting message for another station may next be tried.
+    pub(crate) relay_retries: crate::relay::Retries,
 }
 
 #[derive(Clone)]
@@ -483,6 +487,8 @@ impl Daemon {
             tailnet: Default::default(),
             restore: Default::default(),
             db_told: Default::default(),
+            rounds: crate::rounds::Rounds::new(crate::fleet::ROUND_DEADLINE),
+            relay_retries: Default::default(),
             trust,
             stops: crate::stops::StopsState::new(db.clone(), &cfg.station),
             paths,
@@ -578,29 +584,33 @@ impl Daemon {
                 }
             }
         });
-        let d = self.clone();
-        tokio::spawn(async move {
-            let mut n: u64 = 0;
-            let period = Duration::from_millis(500);
-            let mut tick = tokio::time::interval(period);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut last: Option<std::time::Instant> = None;
-            loop {
-                tick.tick().await;
-                n += 1;
-                // For the Performance page: how much later than half a
-                // second after the last one this began, and how long it took.
-                let began = std::time::Instant::now();
-                if let Some(last) = last {
-                    d.perf
-                        .tick_late
-                        .record(began.duration_since(last).saturating_sub(period));
+        if self.flag_on(crate::loops::SWITCH, true) {
+            self.spawn_loops();
+        } else {
+            // The switch `split_tick` off: everything periodic in one loop,
+            // each thing awaited in turn, as before.
+            let d = self.clone();
+            tokio::spawn(async move {
+                let mut n: u64 = 0;
+                let period = Duration::from_millis(500);
+                let mut tick = tokio::time::interval(period);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut last: Option<std::time::Instant> = None;
+                loop {
+                    tick.tick().await;
+                    n += 1;
+                    let began = std::time::Instant::now();
+                    if let Some(last) = last {
+                        d.perf
+                            .tick_late
+                            .record(began.duration_since(last).saturating_sub(period));
+                    }
+                    last = Some(began);
+                    d.tick(n).await;
+                    d.perf.tick_work.record(began.elapsed());
                 }
-                last = Some(began);
-                d.tick(n).await;
-                d.perf.tick_work.record(began.elapsed());
-            }
-        });
+            });
+        }
         // Stops that wait for a station: a task of their own, so a slow
         // tick cannot hold one up. Every two seconds, and at once when the
         // list of stations changes (a station that was away is back).
@@ -623,6 +633,109 @@ impl Daemon {
         });
     }
 
+    /// Each kind of periodic work in a loop of its own (loops.rs). The
+    /// loops marked local wait for no other machine: a station that is
+    /// slow or away cannot make them late. Whatever is for another station
+    /// is done in that station's own round, which the `fleet` loop only
+    /// starts and never waits for (rounds.rs).
+    fn spawn_loops(&self) {
+        use crate::loops::{spawn, Loop};
+        let ms = Duration::from_millis;
+        let local = |name, every: u64| Loop {
+            name,
+            every: ms(every),
+            first: Duration::ZERO,
+            local: true,
+        };
+        let remote = |name, every: u64, first: u64| Loop {
+            name,
+            every: ms(every),
+            first: ms(first),
+            local: false,
+        };
+        let d = self.clone();
+        spawn(&self.perf, local("screens", 500), move |_| {
+            d.detect_screens();
+            d.update_keep_awake();
+            d.pump_agent_restarts();
+            Box::pin(async {})
+        });
+        let d = self.clone();
+        spawn(&self.perf, local("archive", 1000), move |_| {
+            let d = d.clone();
+            Box::pin(async move {
+                let a = d.clone();
+                let changed = tokio::task::spawn_blocking(move || {
+                    a.archive.poll();
+                    a.archive.poll_usage(now_ms())
+                })
+                .await;
+                d.usage_changed(&changed.unwrap_or_default());
+            })
+        });
+        let d = self.clone();
+        spawn(&self.perf, local("mail", 1000), move |_| {
+            d.pump_mail();
+            d.db_health();
+            Box::pin(async {})
+        });
+        let d = self.clone();
+        spawn(&self.perf, local("recipes", 500), move |_| {
+            let d = d.clone();
+            Box::pin(async move { d.pump_recipes().await })
+        });
+        // Every ten seconds: when this daemon was last running, for the
+        // next start. Now and again: the price list (looked at every
+        // minute, fetched when a day old), agent versions and ended panes
+        // (every ten minutes); each of those works on a thread of its own.
+        let d = self.clone();
+        spawn(&self.perf, local("upkeep", 10_000), move |n| {
+            d.restore_alive();
+            if n % 6 == 1 {
+                d.prices_refresh();
+            }
+            if n % 60 == 2 {
+                d.agents_refresh();
+            }
+            if n % 60 == 3 {
+                d.prune_ended();
+            }
+            Box::pin(async {})
+        });
+        // From here on, work that waits for another machine. Each loop can
+        // only make itself late.
+        let d = self.clone();
+        spawn(&self.perf, remote("relay", 500, 500), move |n| {
+            let d = d.clone();
+            Box::pin(async move { d.pump_relay(n).await })
+        });
+        let d = self.clone();
+        spawn(&self.perf, remote("notifications", 2000, 2000), move |_| {
+            let d = d.clone();
+            Box::pin(async move { d.pump_notifications().await })
+        });
+        let d = self.clone();
+        spawn(&self.perf, remote("fleet", 10_000, 500), move |_| {
+            let d = d.clone();
+            Box::pin(async move { d.look_begin().await })
+        });
+        // The vault: the whole chain once the fleet has been looked at
+        // (the vault may be at another station), then the address, the
+        // lock and the token every ten seconds.
+        let d = self.clone();
+        spawn(&self.perf, remote("vault", 10_000, 600), move |n| {
+            let d = d.clone();
+            Box::pin(async move {
+                if n == 1 {
+                    d.rounds.settle(true, crate::fleet::LOOK_WAIT).await;
+                }
+                d.vault_check(n == 1).await;
+                d.vault_report_archive().await;
+            })
+        });
+    }
+
+    /// The switch `split_tick` off: one loop for everything.
     async fn tick(&self, n: u64) {
         self.detect_screens();
         self.update_keep_awake();

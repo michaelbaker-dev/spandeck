@@ -231,7 +231,11 @@ fn a_lost_acknowledgment_does_not_start_the_task_twice() {
         assert_eq!(alpha.queued(), 1, "so the message stays queued");
         turmoil::repair_oneway("bravo", "alpha");
         tokio::time::sleep(Duration::from_secs(40)).await;
-        assert_eq!(alpha.pump(&SimLink, 60_000).await, 1);
+        // The wall clock was meanwhile set back (given here as 1, before
+        // the failed try): the next try is counted on a clock that only
+        // goes forward, so it is still made. (A message once waited 223 s
+        // after a clock was corrected: audit, section 10.)
+        assert_eq!(alpha.pump(&SimLink, 1).await, 1);
         Ok(())
     });
     sim.run().unwrap();

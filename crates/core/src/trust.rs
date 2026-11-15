@@ -764,6 +764,20 @@ impl Daemon {
         }
     }
 
+    /// The same with one station, in its round.
+    pub(crate) async fn trust_sync_with(&self, peer: &crate::fleet::Peer) {
+        if peer.state != "online" || peer.info["trust_relay"] != json!(true) {
+            return;
+        }
+        let said = self
+            .fleet
+            .call_addr(&peer.addr, "trust.sync", self.trust_doc())
+            .await;
+        if let Ok(theirs) = said {
+            self.trust_merge(&theirs);
+        }
+    }
+
     fn trust_sync_soon(&self) {
         // Not from a test of this file alone, which has no runtime.
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
@@ -955,11 +969,8 @@ impl Daemon {
     /// owner can answer at whichever one they are using. The whole list is
     /// sent each time: a request that was answered is no longer in it. A
     /// station that is away, or too old to know the call, is skipped.
-    pub(crate) async fn trust_relay_send(&self, even_if_none: bool) {
+    pub(crate) async fn trust_relay_send(&self) {
         let requests = self.trust_waiting();
-        if requests.is_empty() && !even_if_none {
-            return;
-        }
         let params = json!({"requests": requests});
         let mates: Vec<String> = self
             .fleet
@@ -974,9 +985,23 @@ impl Daemon {
         crate::fleet::futures_join_all(calls).await;
     }
 
+    /// In a station's round, while a request waits here: a station that
+    /// was away when it arrived hears of it.
+    pub(crate) async fn trust_relay_to(&self, peer: &crate::fleet::Peer) {
+        let requests = self.trust_waiting();
+        if requests.is_empty() || peer.state != "online" || peer.info["trust_relay"] != json!(true)
+        {
+            return;
+        }
+        let _ = self
+            .fleet
+            .call_addr(&peer.addr, "trust.relay", json!({"requests": requests}))
+            .await;
+    }
+
     fn trust_relay_soon(&self) {
         let d = self.clone();
-        tokio::spawn(async move { d.trust_relay_send(true).await });
+        tokio::spawn(async move { d.trust_relay_send().await });
     }
 
     /// Another station of this fleet says which requests wait there. They

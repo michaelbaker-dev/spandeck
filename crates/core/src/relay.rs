@@ -10,9 +10,10 @@
 //! The store knows nothing about the network. `Transport` is the swappable
 //! station link: HTTP in production, simulated TCP under Turmoil in tests.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -97,17 +98,51 @@ pub fn split_address(addr: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// When each waiting message may next be tried: "not before", counted on
+/// a clock that only goes forward, and kept in memory. The wall clock was
+/// used before, and a message waited 223 s after a clock was corrected
+/// (audit, section 10). After a restart nothing is held here, so every
+/// waiting message is tried at once.
+#[derive(Clone)]
+pub struct Retries {
+    began: tokio::time::Instant,
+    not_before_ms: Arc<Mutex<HashMap<String, u64>>>,
+}
+
+impl Default for Retries {
+    fn default() -> Retries {
+        Retries {
+            began: tokio::time::Instant::now(),
+            not_before_ms: Default::default(),
+        }
+    }
+}
+
+/// How long after a failed try the next one is: half a second, doubling
+/// to 30 s.
+pub fn retry_after_ms(attempts: u32) -> u64 {
+    (500u64 << attempts.min(6)).min(30_000)
+}
+
 #[derive(Clone)]
 pub struct MessageStore {
     db: Arc<Db>,
     pub station: String,
+    retries: Retries,
 }
 
 impl MessageStore {
     pub fn new(db: Arc<Db>, station: &str) -> MessageStore {
+        MessageStore::with_retries(db, station, Retries::default())
+    }
+
+    /// A store that shares its retry times with every other store made
+    /// with the same `retries` (the daemon makes one per use).
+    pub fn with_retries(db: Arc<Db>, station: &str, retries: Retries) -> MessageStore {
         MessageStore {
             db,
             station: station.to_string(),
+            retries,
         }
     }
 
@@ -222,22 +257,34 @@ impl MessageStore {
         }
     }
 
-    /// Try the head of each destination's queue once. Returns messages delivered.
+    /// Try the head of each destination's queue once, unless it failed too
+    /// lately. Returns messages delivered. `now` is the wall clock, for the
+    /// time a message is marked delivered; when to try again is counted on
+    /// the forward-only clock (`Retries`).
     pub async fn pump(&self, transport: &dyn Transport, now: u64) -> usize {
-        let heads: Vec<(String, String)> = self
+        let heads: Vec<(String, String, u32)> = self
             .db
             .read(|c| {
                 let mut stmt = c.prepare(
-                    "SELECT o.msg, o.dest FROM outbox o
-                     WHERE o.state='pending' AND o.ord = (SELECT MIN(ord) FROM outbox WHERE dest=o.dest AND state='pending')
-                       AND o.next_try <= ?1",
+                    "SELECT o.msg, o.dest, o.attempts FROM outbox o
+                     WHERE o.state='pending' AND o.ord = (SELECT MIN(ord) FROM outbox WHERE dest=o.dest AND state='pending')",
                 )?;
-                let rows = stmt.query_map([now as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
                 rows.collect()
             })
             .unwrap_or_default();
+        let clock = self.retries.began.elapsed().as_millis() as u64;
+        let heads: Vec<(String, String, u32)> = {
+            let mut wait = self.retries.not_before_ms.lock().unwrap();
+            // Only a message still at the head of a queue has a time kept.
+            wait.retain(|msg, _| heads.iter().any(|(m, _, _)| m == msg));
+            heads
+                .into_iter()
+                .filter(|(msg, _, _)| wait.get(msg).is_none_or(|at| *at <= clock))
+                .collect()
+        };
         let mut delivered = 0;
-        for (msg, dest) in heads {
+        for (msg, dest, attempts) in heads {
             let Some(env) = self.get(&msg) else {
                 let _ = self
                     .db
@@ -269,12 +316,15 @@ impl MessageStore {
                 // Unreachable, or they could not store it: keep it at the head.
                 _ => {
                     let _ = self.db.with(|c| {
-                        c.execute(
-                            "UPDATE outbox SET attempts=attempts+1,
-                               next_try=?2 + MIN(30000, 500 * (1 << MIN(attempts, 6))) WHERE msg=?1",
-                            params![msg, now as i64],
-                        )
+                        c.execute("UPDATE outbox SET attempts=attempts+1 WHERE msg=?1", [&msg])
                     });
+                    let again =
+                        self.retries.began.elapsed().as_millis() as u64 + retry_after_ms(attempts);
+                    self.retries
+                        .not_before_ms
+                        .lock()
+                        .unwrap()
+                        .insert(msg.clone(), again);
                 }
             }
         }

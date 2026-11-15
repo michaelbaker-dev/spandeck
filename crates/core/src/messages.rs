@@ -22,7 +22,7 @@ fn not_linked(own: &str, other: &str) -> Error {
 
 impl Daemon {
     pub fn mail(&self) -> MessageStore {
-        MessageStore::new(self.db.clone(), &self.station)
+        MessageStore::with_retries(self.db.clone(), &self.station, self.relay_retries.clone())
     }
 
     /// Every name a pane answers to on this station.

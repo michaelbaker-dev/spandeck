@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -329,6 +329,21 @@ struct Link {
     last_fail: Option<(u64, &'static str)>,
     last_ok_ms: u64,
     clock: Vec<ClockSample>,
+    /// This station's rounds with it (rounds.rs): how long each took, and
+    /// those in which it did not answer.
+    round: Hist,
+    round_silent: Count,
+}
+
+/// One kind of periodic work (loops.rs).
+pub struct LoopStat {
+    every_ms: u64,
+    local: bool,
+    /// How much later than its time a run began, and how long it took.
+    pub late: Hist,
+    pub work: Hist,
+    /// Times its work panicked and it was started again.
+    pub panics: Count,
 }
 
 #[derive(Default)]
@@ -338,10 +353,14 @@ pub struct Perf {
     /// waited behind the ones before it on its connection.
     waited: Hist,
     slow: Mutex<Vec<Slow>>,
-    /// The periodic work (every half second): how late it began, and how
-    /// long it took.
+    /// The periodic work that waits for no other machine (screens, mail
+    /// wake-ups, the archive, recipes, upkeep): how late a run began, and
+    /// how long it took. With the switch `split_tick` off, all of the
+    /// periodic work, as before.
     pub tick_late: Hist,
     pub tick_work: Hist,
+    /// Each kind of periodic work by itself.
+    loops: Mutex<BTreeMap<&'static str, Arc<LoopStat>>>,
     /// One look at the fleet.
     pub look: Hist,
     /// A client that fell behind a pane's output and was repainted.
@@ -408,6 +427,36 @@ impl Perf {
             },
             station: station.map(clean),
         });
+    }
+
+    /// The counters of one kind of periodic work, made when first asked for.
+    pub fn loop_stat(&self, name: &'static str, every: Duration, local: bool) -> Arc<LoopStat> {
+        let mut loops = self.loops.lock().unwrap();
+        loops
+            .entry(name)
+            .or_insert_with(|| {
+                Arc::new(LoopStat {
+                    every_ms: every.as_millis() as u64,
+                    local,
+                    late: Hist::default(),
+                    work: Hist::default(),
+                    panics: Count::default(),
+                })
+            })
+            .clone()
+    }
+
+    /// A round with the station at `addr` ended: how long it took, and
+    /// whether the station answered. Only for a station on the list.
+    pub fn link_round(&self, addr: &str, took: Duration, answered: bool) {
+        let mut links = self.links.lock().unwrap();
+        let Some(link) = links.get_mut(addr) else {
+            return;
+        };
+        link.round.record(took);
+        if !answered {
+            link.round_silent.add();
+        }
     }
 
     /// After a look: the stations listed, and when each last changed state.
@@ -503,6 +552,10 @@ impl Perf {
                         "last": l.last_fail.map(|(at, code)| json!({"at_ms": at, "why": code})),
                     },
                     "last_ok_ms": (l.last_ok_ms > 0).then_some(l.last_ok_ms),
+                    "round": {
+                        "took": l.round.summary_at(now, FIVE_MIN).json(),
+                        "silent": {"last_5m": l.round_silent.recent_at(now, FIVE_MIN), "since_start": l.round_silent.total()},
+                    },
                     "clock": clock.map(|c| json!({"diff_ms": c.diff_ms, "bound_ms": c.bound_ms, "age_secs": c.age_secs, "refused": c.refused()})),
                 })
             })
@@ -532,9 +585,24 @@ impl Perf {
         let mut late = self.tick_late.summary_at(now, FIVE_MIN).json();
         late["worst_1m_ms"] =
             json!((self.tick_late.summary_at(now, ONE_MIN).max_us as f64 / 10.0).round() / 100.0);
+        let loops: serde_json::Map<String, Value> = self
+            .loops
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(name, l)| {
+                let v = json!({
+                    "every_ms": l.every_ms, "local": l.local,
+                    "late": l.late.summary_at(now, FIVE_MIN).json(),
+                    "work": l.work.summary_at(now, FIVE_MIN).json(),
+                    "panics": l.panics.json(),
+                });
+                (name.to_string(), v)
+            })
+            .collect();
         json!({
             "requests": {"handled": handled, "waited": {"deck": self.waited.summary_at(now, FIVE_MIN).json()}, "slowest": slowest},
-            "periodic": {"late": late, "work": self.tick_work.summary_at(now, FIVE_MIN).json()},
+            "periodic": {"late": late, "work": self.tick_work.summary_at(now, FIVE_MIN).json(), "loops": loops},
             "look": self.look.summary_at(now, FIVE_MIN).json(),
             "terminal": {"resyncs": self.resyncs.json()},
             "messages": {
@@ -717,6 +785,7 @@ impl Daemon {
             .count());
         // Which way each link goes, as this station's Tailscale client has it.
         let tailnet = self.tailnet.get();
+        let rounds = self.rounds.view();
         if let Some(links) = v["links"].as_array_mut() {
             for link in links {
                 let station = link["station"].as_str().unwrap_or_default().to_string();
@@ -724,6 +793,12 @@ impl Daemon {
                     .fleet
                     .peer(&station)
                     .and_then(|p| self.tailnet_device_of(&p, tailnet.as_ref()));
+                // Its place in this station's schedule of rounds.
+                if let Some(at) = link["addr"].as_str().and_then(|a| rounds.get(a)) {
+                    for (k, v) in at.as_object().into_iter().flatten() {
+                        link["round"][k] = v.clone();
+                    }
+                }
                 link["path"] = json!(device.as_ref().and_then(|d| d.path.clone()));
                 link["relay"] = json!(device.as_ref().and_then(|d| d.relay.clone()));
             }
