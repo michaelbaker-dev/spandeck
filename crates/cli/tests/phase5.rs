@@ -1364,7 +1364,8 @@ fn a_removed_station_loses_its_panes_and_the_rest_of_the_fleet_gets_a_new_key() 
     });
     c.call(
         "pane.send_text",
-        json!({"pane": shell, "text": "sleep 300 & echo job-is-$!-"}),
+        // `$!` then a space: the Mac's /bin/sh reads `!-` as a history event.
+        json!({"pane": shell, "text": "sleep 300 & k=$! ; echo job-is-$k-"}),
     );
     let kid = wait_for("the shell's job to start", 10, || {
         let text = c.text(&shell);
