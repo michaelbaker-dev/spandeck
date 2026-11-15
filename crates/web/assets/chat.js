@@ -18,7 +18,7 @@
 // - Times are the station's: an elapsed time is worked out from the clock the
 //   station sent with its answer, plus the time since that answer arrived.
 
-import { h, showMenu, toast, dialog, copyText, dot, stateOf, STATE_LABEL, fmtTokens } from './ui.js';
+import { h, showMenu, toast, dialog, copyText, dot, stateOf, STATE_LABEL, fmtTokens, heldWords, RELEASE_SAYS } from './ui.js';
 import { renderMarkdown } from './md.js';
 
 let env = null;
@@ -620,6 +620,11 @@ class Conv {
       h('div', { class: 'wait-keys', role: 'group', 'aria-label': 'Keys for the terminal' },
         WAIT_KEYS.map(([label, bytes]) => h('button', { type: 'button', class: 'key', 'aria-label': KEY_SAYS[label] || label, onclick: () => this.key1(bytes) }, label)),
         h('button', { type: 'button', class: 'primary', onclick: () => setFace(this.st, p, 'terminal') }, 'Open terminal')))));
+    // Held: stopped and staying stopped, or waiting for you after a restart.
+    if (L.held && !exited) cards.push(this.node(cache, used, 'held', JSON.stringify(L.held), () => h('div', { class: 'chat-card wait' },
+      h('b', {}, heldWords(L.held)),
+      h('div', { class: 'muted small' }, 'It takes no mail from other agents until you release it. Sending it a message releases it too.'),
+      h('button', { type: 'button', class: 'primary', title: RELEASE_SAYS, onclick: () => env.rpc(this.st, 'pane.release', { pane: p.id }).catch(() => {}) }, 'Release'))));
     if (exited) cards.push(this.node(cache, used, 'ended', '', () => quiet('This pane has ended. Its conversation is still here to read.')));
     sync(this.cards, cards);
     for (const key of [...cache.keys()]) if (!used.has(key)) cache.delete(key);
@@ -777,7 +782,7 @@ class Conv {
     } catch (e) { /* said by rpc; what was written stays */ } finally { this.sending = false; }
   }
 
-  stopTurn() { env.rpc(this.st, 'pane.stop', { pane: this.p.id }).then(() => toast('Stop sent')).catch(() => {}); }
+  stopTurn() { env.rpc(this.st, 'pane.stop', { pane: this.p.id }).then(() => toast('Stopped. It takes no mail until you release it or send it a message.')).catch(() => {}); }
 
   // A photo or a file: the station writes it and types its path for the agent.
   async upload(file) {

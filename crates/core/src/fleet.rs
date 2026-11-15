@@ -767,6 +767,12 @@ impl Daemon {
     /// from before says how long ago the stop was issued when it sent it
     /// (`age_ms`), and this station counts back from now; older still, only
     /// its own clock's time (`issued_ms`), used as it is. See stops.rs.
+    ///
+    /// `marks`: the stop's place in each pane's input, taken when the stop
+    /// was read (`Daemon::stop_marks`). Each pane is stopped on a thread of
+    /// its own, since a program that is not reading takes two seconds to
+    /// be found out; such a pane is listed under `not_reading`, never under
+    /// `stopped`. Waits, so it is called off the request threads.
     pub fn apply_stop(
         &self,
         stop_id: &str,
@@ -774,11 +780,12 @@ impl Daemon {
         age_ms: Option<u64>,
         cutoff_ms: Option<u64>,
         by: &str,
+        mut marks: crate::holds::StopMarks,
     ) -> Value {
         let cutoff_ms = cutoff_ms.filter(|_| self.flag_on(stops::CAP, true));
         let aim = stops::aim(now_ms(), issued_ms, age_ms, cutoff_ms);
         let (result, first) = self.stops.applier.apply(stop_id, || {
-            let mut stopped = vec![];
+            let mut hit = vec![];
             for p in self.list_panes() {
                 let work = {
                     let m = p.meta.lock().unwrap();
@@ -792,11 +799,39 @@ impl Daemon {
                         busy_since_ms: m.busy_since_ms,
                     }
                 };
-                if stops::hit(&work, &aim) && self.stop(&p.id, by).is_ok() {
-                    stopped.push(p.id.clone());
+                if stops::hit(&work, &aim) {
+                    let mark = marks.remove(&p.id).unwrap_or_else(|| p.term.mark_stop());
+                    hit.push((p.id.clone(), mark));
                 }
             }
-            json!({"stopped": stopped, "station": self.station, "applied_ms": now_ms()})
+            // The panes this stop is not for are held up no longer.
+            marks.clear();
+            let runtime = tokio::runtime::Handle::try_current().ok();
+            let results: Vec<(String, Option<bool>)> = std::thread::scope(|scope| {
+                let jobs: Vec<_> = hit
+                    .into_iter()
+                    .map(|(id, mark)| {
+                        let runtime = runtime.clone();
+                        scope.spawn(move || {
+                            let _in = runtime.as_ref().map(|r| r.enter());
+                            let done = self.stop_at(&id, by, mark, false);
+                            (id, done.ok().map(|s| s.delivered))
+                        })
+                    })
+                    .collect();
+                jobs.into_iter().filter_map(|j| j.join().ok()).collect()
+            });
+            let ids = |want: bool| -> Vec<&String> {
+                results
+                    .iter()
+                    .filter(|(_, delivered)| *delivered == Some(want))
+                    .map(|(id, _)| id)
+                    .collect()
+            };
+            json!({
+                "stopped": ids(true), "not_reading": ids(false),
+                "station": self.station, "applied_ms": now_ms(),
+            })
         });
         if first {
             self.record(
@@ -809,10 +844,32 @@ impl Daemon {
                     "id": stop_id, "issued_ms": aim.ms(),
                     "aimed_by": if matches!(aim, stops::Aim::Cutoff(_)) { "cutoff" } else { "age" },
                     "stopped": result["stopped"].as_array().map_or(0, |s| s.len()),
+                    "not_reading": result["not_reading"].as_array().map_or(0, |s| s.len()),
                 }),
             );
         }
         result
+    }
+
+    /// `apply_stop` for a stop that arrives in a request: each pane's place
+    /// for it is taken now, as the request is read, and the stopping (which
+    /// waits for a program that is not reading) runs off the request
+    /// threads.
+    pub async fn apply_stop_off_thread(
+        &self,
+        stop_id: &str,
+        issued_ms: u64,
+        age_ms: Option<u64>,
+        cutoff_ms: Option<u64>,
+        by: &str,
+    ) -> Result<Value> {
+        let marks = self.stop_marks();
+        let (d, id, by) = (self.clone(), stop_id.to_string(), by.to_string());
+        tokio::task::spawn_blocking(move || {
+            d.apply_stop(&id, issued_ms, age_ms, cutoff_ms, &by, marks)
+        })
+        .await
+        .map_err(|e| invalid(e.to_string()))
     }
 
     /// Stop-all for this station, one other station, or the whole fleet.
@@ -823,7 +880,15 @@ impl Daemon {
     /// at the same time and each station within its own five seconds. The
     /// database is given one second; a row it has not taken by then is held
     /// in memory, said to be not saved, and written by the stops task.
-    pub async fn stop_all(&self, scope: &str, by: &str) -> Result<Value> {
+    ///
+    /// `marks`: the stop's place in the input of this station's panes,
+    /// taken when the request was read.
+    pub async fn stop_all(
+        &self,
+        scope: &str,
+        by: &str,
+        marks: crate::holds::StopMarks,
+    ) -> Result<Value> {
         let issued = now_ms();
         // The fleet is its members: a machine that has not joined cannot
         // be sent a stop (it does not take this fleet's calls), and a row
@@ -867,7 +932,7 @@ impl Daemon {
         let local = here.first().map(|(id, _)| {
             let (d, id, by) = (self.clone(), id.to_string(), by.to_string());
             tokio::task::spawn_blocking(move || {
-                let result = d.apply_stop(&id, issued, None, None, &by);
+                let result = d.apply_stop(&id, issued, None, None, &by, marks);
                 d.stops.book.mark(&id, "confirmed", result, now_ms());
             })
         });

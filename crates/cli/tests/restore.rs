@@ -244,7 +244,8 @@ fn after_a_crash_nothing_is_left_wrong() {
     assert!(title.starts_with("alpha restarted at "), "{title}");
     assert!(
         body.starts_with(
-            "6 sessions were started again, 1 shell ended, 1 task failed. They wait for you."
+            "6 sessions were started again, 1 shell ended, 1 task failed. They wait for you, \
+             and take no mail from other agents until you release them:"
         ),
         "{body}"
     );

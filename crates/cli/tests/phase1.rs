@@ -649,7 +649,10 @@ fn a_paste_into_a_program_that_is_not_reading_does_not_stop_the_station() {
     s.call("pane.paste", json!({"pane": pane, "text": lines}));
     // The station still answers, and the pane can still be ended.
     assert_eq!(s.call("station.info", json!({}))["station"], json!("alpha"));
-    s.call("pane.stop", json!({"pane": pane}));
+    // Stop answers too, and never claims a program it could not reach
+    // (DECISIONS.md, "A stopped agent stays stopped").
+    let e = s.try_call("pane.stop", json!({"pane": pane})).unwrap_err();
+    assert_eq!(e.code, "not_reading", "{}", e.message);
     s.call("pane.kill", json!({"pane": pane}));
     wait_for("the pane to end", 10, || {
         (s.pane(&pane)["exited"] == json!(true)).then_some(())

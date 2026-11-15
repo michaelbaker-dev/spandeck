@@ -13,7 +13,7 @@
 
 import { Api } from './api.js';
 import { PaneTerm } from './term.js';
-import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText } from './ui.js';
+import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText, heldWords } from './ui.js';
 import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
 import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners } from './look.js';
 import { lookEditor } from './lookedit.js';
@@ -369,6 +369,7 @@ function paneMenu(e, st, p, where, term) {
     '-',
     agent && alive && { label: 'Stop this turn', action: act('pane.stop'), disabled: !(s === 'working' || s === 'needs_you') },
     agent && alive && { label: p.paused ? 'Unpause (deliver work again)' : 'Pause (no new work)', action: act('pane.pause', { paused: !p.paused }) },
+    agent && alive && p.held && { label: 'Release (take mail again)', hint: heldWords(p.held), action: act('pane.release') },
     agent && { label: p.watch ? 'Stop notifying when it finishes' : 'Notify me when it finishes', action: act('pane.set', { watch: !p.watch }) },
     { label: p.muted ? 'Unmute notifications' : 'Mute notifications', action: act('pane.set', { muted: !p.muted }) },
     '-',
@@ -698,9 +699,18 @@ async function inboxPanel() {
     msgs.length ? h('div', { class: 'list' }, msgs.map(m => h('div', { class: 'note' + (m.read ? '' : ' unread') },
       h('div', {}, h('b', {}, m.from), h('span', { class: 'muted' }, ` · ${m.station} · ${m.kind} · ${ago(m.ts)} ago`)), h('div', { class: 'pre' }, m.body)))) : h('p', { class: 'muted' }, 'No messages.'),
     h('h3', {}, 'Notifications'),
-    S.notes.length ? h('div', { class: 'list' }, S.notes.map(n => h('button', { class: 'list-row note' + (n.read ? '' : ' unread'), onclick: () => { readNote(n).then(() => refreshSoon(0)); if (n.url) { close(); location.hash = n.url.replace(/^\/#/, '#'); } } },
+    S.notes.length ? h('div', { class: 'list' }, S.notes.map(n => [h('button', { class: 'list-row note' + (n.read ? '' : ' unread'), onclick: () => { readNote(n).then(() => refreshSoon(0)); if (n.url) { close(); location.hash = n.url.replace(/^\/#/, '#'); } } },
       h('span', { class: 'dot ' + (n.kind === 'approval' ? 'needs_you' : n.kind) }), h('b', {}, n.title), h('span', { class: 'muted' }, n.body), h('span', { class: 'grow' }),
-      h('span', { class: 'muted' }, n.at.map(a => a.station).join(', '), ' · ', n.pushed === 2 ? 'held (you were here) · ' : n.pushed === 1 ? 'pushed · ' : '', ago(n.ts))))) : h('p', { class: 'muted' }, 'No notifications.')), { wide: true });
+      h('span', { class: 'muted' }, n.at.map(a => a.station).join(', '), ' · ', n.pushed === 2 ? 'held (you were here) · ' : n.pushed === 1 ? 'pushed · ' : '', ago(n.ts))),
+      // The recovery notice carries the one action that lets the restarted sessions take mail again.
+      ...(n.kind === 'station.recovered' ? n.at.map(a => a.station).filter(st => (S.fleet.stations.find(s => s.station === st)?.caps || []).includes('holds'))
+        .map(st => h('button', { class: 'mini', onclick: () => releaseAll(st) }, `Release all on ${st}`)) : [])]).flat()) : h('p', { class: 'muted' }, 'No notifications.')), { wide: true });
+}
+
+// "Release all on this station": every held agent there takes mail again.
+// Pause is not changed by it, and the answer says how many stay paused.
+function releaseAll(st) {
+  return rpc(st, 'pane.release', { all: true }).then((r) => toast(`Released ${plural(r.released, 'pane')} on ${st}` + (r.still_paused ? ` (${r.still_paused} still paused)` : '')));
 }
 
 function stopAllMenu(e) {
@@ -1291,7 +1301,7 @@ function stopRows() {
   // if that station's daemon ends first, the stop is not delivered.
   const unsaved = (s) => s.saved === false && s.status !== 'confirmed';
   return h('div', { class: 'stops' }, h('b', {}, 'Stop requests'), recent.map(s => h('span', { class: 'stop ' + s.status, title: `issued ${ago(Date.now() - age(s))} ago${s.from ? ' at ' + s.from : ''}${unsaved(s) ? `. ${s.from} has not been able to write this stop to its database yet; it keeps trying. If spandeck on ${s.from} restarts before it is written, the stop is not delivered to ${s.station}.` : ''}` },
-    `${s.station}: ${s.label}`, s.status === 'confirmed' ? ` (${s.result?.stopped?.length ?? 0} stopped)` : unsaved(s) ? ` — waiting for ${s.station} · not yet saved on ${s.from}` : s.status === 'unreachable' ?` — will be delivered when it is back${s.from && !online(s.from) ? `, once ${s.from} is on too` : ''}` : '')),
+    `${s.station}: ${s.label}`, s.status === 'confirmed' ? ` (${s.result?.stopped?.length ?? 0} stopped${s.result?.not_reading?.length ? `, ${s.result.not_reading.length} not reading input and not stopped: use Kill` : ''})` : unsaved(s) ? ` — waiting for ${s.station} · not yet saved on ${s.from}` : s.status === 'unreachable' ?` — will be delivered when it is back${s.from && !online(s.from) ? `, once ${s.from} is on too` : ''}` : '')),
     away.length ? h('span', { class: 'muted small' }, `Stops issued at ${away.join(', ')} are not shown: not reachable.`) : null);
 }
 
@@ -1405,6 +1415,7 @@ function stationMenu(e, s) {
     s.state === 'unreachable' && !awayWhy(s) && { label: 'Start spandeck there (over SSH)', action: () => rpc(api.station, 'fleet.start', { station: s.station }).then((r) => toast(`${s.station} is ${r.state}`)) },
     s.state === 'unreachable' && { label: 'Forget this station', danger: true, action: () => confirmBox(`Forget ${s.station}?`, 'It is taken off the list on every station of the fleet (the others follow within seconds, one that is off when it is back). If it comes back it is listed again.', 'Forget', () => rpc(api.station, 'fleet.forget', { station: s.station })) },
     up && { label: 'Stop every agent here', danger: true, action: () => rpc(api.station, 'stop.all', { scope: s.station === api.station ? 'station' : s.station }) },
+    up && (s.caps || []).includes('holds') && { label: 'Release all on this station', hint: 'held agents take mail again', action: () => releaseAll(s.station) },
     up && { label: 'Close all panes here…', danger: true, action: () => closeAllDialog(s) },
     // A station that is not in the fleet has nothing to be removed from,
     // and neither has the only station of a fleet of one.
@@ -1820,6 +1831,7 @@ function sidebar() {
     dot(p), paneMark(p), h('span', { class: 'side-name' }, p.name),
     where ? h('span', { class: 'muted side-where' }, where) : null,
     p.paused ? h('span', { class: 'chip warn' }, 'paused') : null,
+    p.held && !p.exited ? h('span', { class: 'chip warn', title: heldWords(p.held) }, 'held') : null,
     ctx && ctx.leafOf(st, p)?.hidden ? h('span', { class: 'chip', title: `Hidden in ${ctx.lay.name}` }, 'hidden')
       : can && ctx.arrange && ctx.has(st, p) ? h('span', { class: 'chip' }, 'in layout') : null);
   };

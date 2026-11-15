@@ -271,6 +271,19 @@ enum PaneCmd {
         #[arg(long, requires = "all")]
         station: Option<String>,
     },
+    /// Let a held agent take mail again: one that was stopped, or one
+    /// that was started again after spandeck restarted. With --all: every
+    /// pane on this station, or on the one named with --station. A paused
+    /// pane stays paused.
+    Release {
+        #[arg(required_unless_present = "all")]
+        pane: Option<String>,
+        #[arg(long, conflicts_with = "pane")]
+        all: bool,
+        /// Another station in the fleet, by name.
+        #[arg(long)]
+        station: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -632,6 +645,52 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 pane: Some(pane), ..
             } => {
                 c.call("pane.close", json!({"pane": pane}))?;
+            }
+            PaneCmd::Release {
+                pane: Some(pane),
+                station,
+                ..
+            } => {
+                let v = on_station(
+                    &mut c,
+                    station.as_deref(),
+                    "pane.release",
+                    json!({"pane": pane}),
+                )?;
+                show(j, &v, |v| {
+                    format!(
+                        "{}{}",
+                        if v["released"] == json!(true) {
+                            "released: it takes mail again"
+                        } else {
+                            "it was not held"
+                        },
+                        if v["still_paused"] == json!(true) {
+                            "; it is still paused (spandeck pane unpause)"
+                        } else {
+                            ""
+                        }
+                    )
+                });
+            }
+            PaneCmd::Release { station, .. } => {
+                let v = on_station(
+                    &mut c,
+                    station.as_deref(),
+                    "pane.release",
+                    json!({"all": true}),
+                )?;
+                show(j, &v, |v| {
+                    format!(
+                        "released {} pane(s) on {}{}",
+                        v["released"],
+                        v["station"].as_str().unwrap_or(""),
+                        match v["still_paused"].as_u64().unwrap_or(0) {
+                            0 => String::new(),
+                            n => format!("; {n} of them still paused"),
+                        }
+                    )
+                });
             }
             PaneCmd::Close { station, .. } => {
                 let v = on_station(&mut c, station.as_deref(), "station.close_all", json!({}))?;

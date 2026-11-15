@@ -26,6 +26,10 @@ jobs:
       # for 12 to 35 seconds.
       - name: Nothing waits for the database (locked 12 s, at an upgrade, 30 s)
         run: cargo test -p spandeck --test dblock -- --ignored
+      # A stopped or restarted agent stays put: each waits whole seconds to
+      # see that no mail arrives, one kills two stations, one drives browsers.
+      - name: Holds (a stopped agent stays stopped, not reading, after a restart, the deck)
+        run: cargo test -p spandeck --test holds -- --ignored
   build:
     strategy:
       fail-fast: false

@@ -99,6 +99,9 @@ pub struct Recovery {
     pub leftovers_more: usize,
     /// Programs ended because their pane was started again.
     pub leftovers_ended: usize,
+    /// Sessions started again that take no mail until the owner releases
+    /// them (holds.rs). None when that hold is switched off here.
+    pub mail_held: usize,
 }
 
 impl Recovery {
@@ -254,7 +257,15 @@ pub fn notice_text(
         ));
     }
     let mut body = format!("{}.", parts.join(", "));
-    if found.resumed + found.held > 0 {
+    if found.mail_held > 0 {
+        // The words name no button: an older Control Deck has none, and
+        // typing into a pane releases it from any deck.
+        body.push_str(
+            " They wait for you, and take no mail from other agents until you release them: \
+             type into one, or release them all (Release all on this station, or \
+             `spandeck pane release --all`).",
+        );
+    } else if found.resumed + found.held > 0 {
         body.push_str(" They wait for you.");
     }
     if found.held + found.closed() > 0 {
@@ -803,6 +814,8 @@ impl Daemon {
             json!({"resume": {"continued_ms": now_ms(), "continued_by": by}}),
             by,
         )?;
+        // The owner sends this into the pane: it is released, as by typing.
+        self.release_by_typing(&pane.id, by);
         self.send_text(&pane.id, &line, true)?;
         self.record(
             "task.continued",
@@ -901,7 +914,7 @@ impl Daemon {
                 "panes": found.panes + found.kept, "kept": found.kept,
                 "resumed": found.resumed, "closed": found.closed(),
                 "held_back": found.held, "tasks_failed": found.tasks_failed,
-                "approvals_expired": found.approvals_expired,
+                "approvals_expired": found.approvals_expired, "mail_held": found.mail_held,
                 "leftovers": found.leftovers, "leftovers_ended": found.leftovers_ended,
                 "unclean_starts": start.starts,
             }),
@@ -1010,6 +1023,21 @@ mod tests {
         assert_eq!(
             body,
             "4 sessions were started again, 1 shell ended, 1 task failed. They wait for you. \
+             One that was not started can be brought back from its pane."
+        );
+        // With the sessions held for the owner (the default): the notice
+        // says so and how they are released, in words an older Control
+        // Deck with no Release button can show too.
+        let held = Recovery {
+            mail_held: 4,
+            ..found.clone()
+        };
+        let (_, body) = notice_text("spark2", &start(t0), &held, &first);
+        assert_eq!(
+            body,
+            "4 sessions were started again, 1 shell ended, 1 task failed. They wait for you, \
+             and take no mail from other agents until you release them: type into one, or \
+             release them all (Release all on this station, or `spandeck pane release --all`). \
              One that was not started can be brought back from its pane."
         );
         first.id = "n-1".into();

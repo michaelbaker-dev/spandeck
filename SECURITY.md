@@ -42,6 +42,15 @@ days, not hours.
   and search history; they never get a call that administers a station. Text from agents,
   other stations and session history is shown as text and labelled as quoted, never run
   as markup.
+- **A stopped agent stays stopped, and only you release it.** An agent you stopped, and
+  one spandeck started again after a restart, gets no messages from other agents until
+  you release it: by typing into its pane, with Release, or with
+  `spandeck pane release`. `pane.release` is yours alone: an agent's token is refused,
+  for its own pane too, and it is not among the calls a station makes for itself (a
+  station of your fleet can pass on a request as you; see Known limits). So an agent
+  cannot wake itself or another agent that you stopped. What a browser's terminal
+  sends by itself (focus, the mouse, its answers to the program) does not count as you
+  typing. A message for a held agent is stored and waits; it is not dropped.
 - **Rules.** A standing order is shown as enforced only where the agent's hooks can
   really block it. Elsewhere it is guidance the agent may ignore.
 - **History.** Session transcripts are copied to the station that ran them and stay

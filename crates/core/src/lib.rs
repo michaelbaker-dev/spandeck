@@ -31,6 +31,7 @@
 //!   tailnet   Tailscale key expiry: read from the local client, shown, warned of
 //!   http      the one outgoing HTTPS client builder, and what it trusts
 //!   restore   after a restart: what is put right and listed, the one notice, `[flags]`
+//!   holds     a stopped or restarted agent stays put: the marks, what they gate, release
 
 pub mod add;
 pub mod agents;
@@ -43,6 +44,7 @@ pub mod doctor;
 pub mod fleet;
 pub mod fonts;
 pub mod git;
+pub mod holds;
 pub mod hooks;
 pub mod http;
 pub mod links;

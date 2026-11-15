@@ -14,7 +14,7 @@
 // symbols font) is the same case: the terminal measured its cells with the
 // font that stood in for it, so it measures again and then does as above.
 
-import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge } from './ui.js';
+import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge, heldWords, RELEASE_SAYS } from './ui.js';
 import { paneIcon, iconName, hideIcon } from './icons.js';
 import { keyTyped, paneWrote } from './perf.js';
 import { BASE, termOptions, applyPaneFrame, SIZING } from './look.js';
@@ -167,6 +167,7 @@ export class PaneTerm {
         onResized: (r) => {
           if (Number.isInteger(r.cols) && Number.isInteger(r.rows) && r.cols >= 2 && r.cols <= 500 && r.rows >= 1 && r.rows <= 300) this.resizedBy(String(r.controller || ''), r.cols, r.rows);
         },
+        onDiscarded: (n) => { if (n > 0) toast(`Not sent: the pane was stopped before ${n === 1 ? 'what you typed' : n + ' things you typed'} reached its program.`, 'error'); },
       };
       const res = await this.api.attach(this.station, this.pane.id, this.mode, handlers);
       if (this.disposed) { this.api.detach(res.chan); return; }
@@ -389,6 +390,8 @@ export class PaneTerm {
       // The model and how full its context is. The first things a narrow strip drops.
       ...usageGauge(p.usage, this.opts.onUsage ? () => this.opts.onUsage(this) : null),
       p.paused ? h('span', { class: 'chip warn' }, 'paused') : null,
+      p.held && !p.exited ? h('span', { class: 'strip-reason', title: heldWords(p.held) }, heldWords(p.held)) : null,
+      p.held && !p.exited ? h('button', { class: 'mini', title: RELEASE_SAYS, onclick: () => rpc('pane.release') }, 'Release') : null,
       p.task ? h('span', { class: 'chip', title: 'Working on task ' + p.task }, 'task') : null,
       this.mode === 'watch' ? h('span', { class: 'chip' }, 'watching') : null,
       this._lostControl ? h('button', { class: 'mini', title: 'Another client set this pane\'s size', onclick: () => this.takeControl() }, 'Take control') : null,

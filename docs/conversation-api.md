@@ -88,6 +88,7 @@ answer is as fresh as the file whoever asks.
     "tool": "Bash", "tool_since_ms": 1794736805000,
     "subagents": [{"kind": "Explore", "since_ms": 1794736851000}],
     "paused": false, "exited": false, "resumed": false, "hooks_seen": true,
+    "held": null,
     "approvals": [],
     "unread": true, "read_line": 9,
     "now_ms": 1794736806200
@@ -184,6 +185,7 @@ kind as a quiet line with its name, never as an error.
 | `tool`, `tool_since_ms` | The tool running now, from the agent's hooks, or `null`. For "Working · Bash · 42 s". The command is the `summary` of the last `tool` item with `status: "running"`. |
 | `subagents` | `[{kind, since_ms}]`: the agent's own sub-agents running now. |
 | `paused`, `exited`, `resumed`, `hooks_seen` | As in the pane list. `resumed`: the program was started into a saved conversation. |
+| `held` | `null`, or why the agent takes no mail until the owner releases it: `{stopped, restored, mail}`. `stopped` is `null` or `{at_ms, by, reached}`: the owner (or a "stop every agent") stopped it; `reached: false` means the program was not reading and the stop did not reach it ("use Kill"). `restored` is `null` or `{at_ms, why}`: the station started it again after a restart (`why`: `crash`, `stop`, `upgrade`). `mail` is how many messages wait. Show it with a Release button: `pane.release {pane}` (the owner's only; `{all: true}` for every pane on the station), answered `{ok, pane, released, still_paused, saved}`. Sending the pane anything (`pane.send_text`, `pane.paste`, `pane.input`) releases it too. `paused` is apart: Release never changes it. The same `held` is in `pane.list` and `pane.get`. A station from before this has no `held`. |
 | `approvals` | Requests held for the owner for this pane, oldest first. Each: `{kind: "approval", id: "approval:<approval id>", approval, what, summary, tool, ts_ms, item}`. `approval` is the id `approval.answer {id, allow, reason?}` takes, as today. `what` is the kind of request (`permission`, `route`). `item` is the `id` of the `tool` item the request is about, or `null`: draw the card anyway. It is set only when the station is sure which call it is: the call with the id the hook gave, else the newest running call of that tool with the same command or file. It can name an item on a line after this answer's `cursor`, which the next answer brings. They are not in `items`: they are not in the session file. |
 | `unread`, `read_line` | Whether the agent has said something after the read mark, and the mark. Below. |
 | `now_ms` | The station's clock. |
@@ -316,7 +318,9 @@ the archive's part, on a 51 MB session).
 ## Errors
 
 The usual shape, `{"error": {"code", "message"}}`: `denied` (an agent, or a read-only caller),
-`not_found` (no such pane, no such item, or a station from before this), `invalid` (bad
+`not_found` (no such pane, no such item, or a station from before this), `not_reading`
+(`pane.stop` could not reach the program: it is not reading input, was not stopped, and Kill is
+what is left; show the message), `invalid` (bad
 parameters; `after` and `before` together; `detail` or `read` on a pane with no conversation;
 an item of another session), `unreachable` (the pane's station, through the gateway).
 

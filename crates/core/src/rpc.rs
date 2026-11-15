@@ -420,13 +420,22 @@ impl Daemon {
                     .await
                     .map_err(|e| invalid(e.to_string()))?
             }
+            // What is sent into a pane goes as one item of its input, in
+            // the order it arrives, from whichever connection or station
+            // (terminal/input.rs). When it is the owner who sends it, the
+            // pane is released first if it was held (holds.rs): decided
+            // here, at the pane's station, so it works from any deck.
             "pane.send_text" => {
                 let id = self.target_pane(caller, &params)?;
                 let enter = params
                     .get("enter")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                self.send_text(&id, s(&params, "text")?, enter)?;
+                let text = s(&params, "text")?;
+                if caller.is_owner() {
+                    self.release_by_typing(&id, by);
+                }
+                self.send_text_from(&id, text, enter, Some(&caller.client))?;
                 if caller.is_owner() {
                     self.note_input(&id, &caller.who, &caller.client);
                 }
@@ -437,13 +446,22 @@ impl Daemon {
                 if !caller.is_owner() {
                     return Err(Error::Denied("pasting into a pane is for the user".into()));
                 }
-                self.paste(&id, s(&params, "text")?, flag(&params, "enter"))?;
+                let text = s(&params, "text")?;
+                self.release_by_typing(&id, by);
+                self.paste_from(&id, text, flag(&params, "enter"), Some(&caller.client))?;
                 self.note_input(&id, &caller.who, &caller.client);
                 json!({"ok": true})
             }
             "pane.input" => {
                 let pane = self.pane(s(&params, "pane")?)?;
-                pane.term.write(s(&params, "data")?.as_bytes())?;
+                let data = s(&params, "data")?.as_bytes();
+                // What a terminal says by itself (focus, the mouse, its
+                // answers to the program) is not the owner typing: looking
+                // at a pane never releases it.
+                if caller.is_owner() && crate::holds::is_typing(data) {
+                    self.release_by_typing(&pane.id, by);
+                }
+                self.type_keys(&pane.id, data, Some(&caller.client))?;
                 self.note_input(&pane.id, &caller.who, &caller.client);
                 json!({"ok": true})
             }
@@ -498,8 +516,45 @@ impl Daemon {
                 json!({"ok": true, "saved": saved})
             }
             "pane.stop" => {
-                self.stop(s(&params, "pane")?, by)?;
-                json!({"ok": true})
+                // The stop's place in the pane's input is where it is read:
+                // here, before anything is waited for. What this connection
+                // sends next is kept, and written after the interrupt key.
+                let pane = self.pane(s(&params, "pane")?)?;
+                let mark = pane.term.mark_stop();
+                let (d, id, who) = (self.clone(), pane.id.clone(), by.to_string());
+                let done = tokio::task::spawn_blocking(move || d.stop_at(&id, &who, mark, true))
+                    .await
+                    .map_err(|e| invalid(e.to_string()))??;
+                if !done.delivered {
+                    // Never an "ok" for a program the stop did not reach.
+                    return Err(Error::NotReading(crate::holds::NOT_READING.into()));
+                }
+                json!({"ok": true, "stopped": true, "discarded": done.discarded, "saved": done.saved})
+            }
+            // The owner's alone: on no agent's list, no station's and not
+            // the read-only one. It reaches another station only as the
+            // owner's forwarded request. Pause is never changed by it.
+            "pane.release" => {
+                let d = self.clone();
+                let who = by.to_string();
+                let all = flag(&params, "all");
+                let pane = match all {
+                    true => None,
+                    false => Some(self.pane(s(&params, "pane")?)?.id.clone()),
+                };
+                tokio::task::spawn_blocking(move || match pane {
+                    None => Ok(d.release_all(&who)),
+                    Some(id) => {
+                        let released = d.release(&id, &who, "release")?;
+                        let paused = d.pane(&id)?.meta.lock().unwrap().paused;
+                        Ok::<_, Error>(json!({
+                            "ok": true, "pane": id, "released": released,
+                            "still_paused": paused, "saved": d.pane_saved(&id),
+                        }))
+                    }
+                })
+                .await
+                .map_err(|e| invalid(e.to_string()))??
             }
             "pane.kill" => {
                 self.kill(s(&params, "pane")?, by)?;
@@ -923,19 +978,24 @@ impl Daemon {
                 self.fleet_view()
             }
             "stop.all" => {
-                self.stop_all(opt(&params, "scope").unwrap_or("station"), by)
+                // Each pane's place for this stop is taken as it is read.
+                let marks = self.stop_marks();
+                self.stop_all(opt(&params, "scope").unwrap_or("station"), by, marks)
                     .await?
             }
-            "stop.apply" => self.apply_stop(
-                s(&params, "id")?,
-                params
-                    .get("issued_ms")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| invalid("missing issued_ms"))?,
-                params.get("age_ms").and_then(|v| v.as_u64()),
-                params.get("cutoff_ms").and_then(|v| v.as_u64()),
-                opt(&params, "by").unwrap_or("another station"),
-            ),
+            "stop.apply" => {
+                self.apply_stop_off_thread(
+                    s(&params, "id")?,
+                    params
+                        .get("issued_ms")
+                        .and_then(|v| v.as_u64())
+                        .ok_or_else(|| invalid("missing issued_ms"))?,
+                    params.get("age_ms").and_then(|v| v.as_u64()),
+                    params.get("cutoff_ms").and_then(|v| v.as_u64()),
+                    opt(&params, "by").unwrap_or("another station"),
+                )
+                .await?
+            }
             "stop.list" => json!(self.stops(50)),
             "rpc.forward" => {
                 // The user's request, made at a Control Deck on another station.

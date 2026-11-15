@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::hosted::{self, HostClient};
+use crate::input::{Input, Interrupt, Item, Kind, Mark};
 use crate::pty::{ExitInfo, Pty, PtyReader, Signal, SpawnSpec};
 use crate::screen::{Screen, ScreenEvent, ScreenInfo};
 
@@ -86,59 +87,6 @@ impl Source {
 }
 
 type Writer = Box<dyn Write + Send>;
-
-/// How much input may wait for a program that is not reading before more is
-/// refused.
-const INPUT_WAITING_MAX: usize = 8 << 20;
-
-/// What is typed or pasted into a pane, on its way to the program. A program
-/// that is not reading (`sleep 600`, one stopped in a debugger) lets the
-/// terminal fill up, and a write then waits for as long as that lasts. That
-/// wait used to be taken by whoever sent the input, holding the pane's lock:
-/// a 20 KB paste into such a pane stopped the whole station answering, Kill
-/// included (found on 15 Nov 2026). So input is handed to a thread of the
-/// pane's own, in order, and the sender never waits.
-struct Input {
-    tx: Mutex<std::sync::mpsc::Sender<Vec<u8>>>,
-    waiting: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-impl Input {
-    fn start(mut writer: Writer) -> io::Result<Input> {
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        let waiting = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let left = waiting.clone();
-        thread::Builder::new()
-            .name("pane-input".into())
-            .spawn(move || {
-                // Ends when the pane is dropped, or its terminal is gone.
-                while let Ok(bytes) = rx.recv() {
-                    let done = writer.write_all(&bytes);
-                    left.fetch_sub(bytes.len(), Ordering::SeqCst);
-                    if done.is_err() {
-                        break;
-                    }
-                }
-            })?;
-        Ok(Input {
-            tx: Mutex::new(tx),
-            waiting,
-        })
-    }
-
-    fn send(&self, bytes: &[u8]) -> io::Result<()> {
-        if self.waiting.load(Ordering::SeqCst) + bytes.len() > INPUT_WAITING_MAX {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "the program in this pane is not reading what is sent to it; nothing more was sent",
-            ));
-        }
-        self.waiting.fetch_add(bytes.len(), Ordering::SeqCst);
-        self.tx.lock().unwrap().send(bytes.to_vec()).map_err(|_| {
-            io::Error::new(io::ErrorKind::BrokenPipe, "this pane's terminal is closed")
-        })
-    }
-}
 
 pub struct Pane {
     pty: Terminal,
@@ -400,10 +348,45 @@ impl Pane {
         }
     }
 
-    /// Send input to the program. It is queued and this returns at once; see
-    /// `Input`. Refused when too much is already waiting.
+    /// Send keys to the program as they are. They are queued and this
+    /// returns at once; see `input`. Refused when too much already waits.
     pub fn write(&self, bytes: &[u8]) -> io::Result<()> {
-        self.input.send(bytes)
+        self.input.send(Item::keys(bytes)).map(|_| ())
+    }
+
+    /// Send one item (keys, a paste, a line of text) to the program, in
+    /// the order it arrives. Never waits. Its number in the pane's input.
+    pub fn send(&self, item: Item) -> io::Result<u64> {
+        self.input.send(item)
+    }
+
+    /// Send an item only if `ok` says so, asked with the pane's input
+    /// locked: together with `withdraw`, how the nudge that wakes an agent
+    /// cannot pass a Pause set at the same moment. `Ok(None)`: not sent.
+    pub fn send_if(&self, item: Item, ok: impl FnOnce() -> bool) -> io::Result<Option<u64>> {
+        self.input.send_if(item, ok)
+    }
+
+    /// Take back every item of `kind` not yet started. How many.
+    pub fn withdraw(&self, kind: Kind) -> usize {
+        self.input.withdraw(kind)
+    }
+
+    /// A stop's place in this pane's input, taken the moment the stop is
+    /// read. Never waits. What is sent after it is kept, and waits until
+    /// the stop has run (`interrupt`) or the mark is dropped.
+    pub fn mark_stop(&self) -> Mark {
+        self.input.mark()
+    }
+
+    /// Run a stop at its mark: throw away what was sent before it and not
+    /// started, close and cut what was being written, then write `keys`.
+    /// Waits up to two seconds for the terminal to take them, so it is
+    /// called off any thread that must not wait. `delivered: false`: the
+    /// program is not reading, and was not stopped.
+    pub fn interrupt(&self, mark: Mark, keys: &[u8]) -> Interrupt {
+        self.input
+            .interrupt(mark, keys, crate::input::INTERRUPT_WAIT)
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {

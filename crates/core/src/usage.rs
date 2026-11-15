@@ -126,6 +126,16 @@ impl Daemon {
         // Whether the agent has said something the owner has not read, as
         // this station keeps it: the same answer from every station's deck.
         v["unread"] = json!(self.conversation_unread(&meta));
+        // Stopped and staying stopped, or waiting for the owner after a
+        // restart (holds.rs); null when neither.
+        v["held"] = self.held_view(&meta);
+        // A deck from before holds shows only this: said where the pane
+        // has no reason of its own to show.
+        if meta.needs_reason.is_none() && meta.exit.is_none() {
+            if let Some(words) = self.held_words(&meta) {
+                v["needs_reason"] = json!(words);
+            }
+        }
         v
     }
 

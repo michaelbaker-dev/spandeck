@@ -349,14 +349,16 @@ impl Daemon {
                     decision.context = Some(parts.join("\n\n"));
                 }
             }
+            // Mail by a hook: none for a pane that is paused, stopped or
+            // waiting for the owner after a restart. `mail_notice` looks at
+            // the marks as they are now (holds.rs).
             EventKind::PromptSubmit | EventKind::ToolEnd => {
-                if !meta.paused {
-                    decision.context = self.mail_notice(&meta.id);
-                }
+                decision.context = self.mail_notice(&meta.id);
             }
             EventKind::TurnEnd => {
                 // Pause: no new work is delivered; the current turn finishes.
-                if !meta.paused && stuck.is_none() {
+                // And a stopped turn is not continued with mail.
+                if stuck.is_none() {
                     decision.continue_with = self.mail_notice(&meta.id);
                 }
             }

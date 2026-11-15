@@ -100,6 +100,8 @@ export class Api {
           if (c && msg.unreachable) c.onUnreachable && c.onUnreachable();
           // A pane on another station was resized there: who did it, and to what.
           if (c && msg.resized) c.onResized && c.onResized(msg.resized);
+          // A stop threw away what this client had sent and the program had not been given.
+          if (c && msg.input_discarded) c.onDiscarded && c.onDiscarded(Number(msg.input_discarded) || 0);
           // A watched conversation (chat.js): what is new, or that it ended.
           if (c && msg.conversation) c.onConversation && c.onConversation(msg.conversation);
           if (c && msg.conversation_end) c.onEnd && c.onEnd(msg.conversation_end);

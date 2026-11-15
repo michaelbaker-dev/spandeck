@@ -280,12 +280,16 @@ impl Daemon {
     }
 
     /// Hook delivery: a short notice for an agent that is in the middle of a
-    /// turn. Returns nothing for a paused pane (no new work is delivered).
-    /// A notice that is ignored is repeated after `nudge_secs`.
+    /// turn. Returns nothing for a pane that is paused, stopped and not yet
+    /// released, or started again after a restart and not yet released (no
+    /// new work is delivered; holds.rs): the mail stays unread and is not
+    /// marked as announced. A notice that is ignored is repeated after
+    /// `nudge_secs`.
     pub(crate) fn mail_notice(&self, pane_id: &str) -> Option<String> {
-        // Read the pause flag now, not from an earlier copy: a pause that lands
-        // while a hook is being handled must still hold the mail back.
-        if self.pane(pane_id).ok()?.meta.lock().unwrap().paused {
+        // Read the marks now, not from an earlier copy: a pause or a stop
+        // that lands while a hook is being handled must still hold the mail
+        // back.
+        if self.no_mail(&self.pane(pane_id).ok()?.meta.lock().unwrap()) {
             return None;
         }
         let names = self.pane_names(pane_id);
@@ -323,15 +327,20 @@ impl Daemon {
     pub(crate) fn pump_mail(&self) {
         let mail = self.mail();
         let now = now_ms();
+        let in_force = self.holds_in_force();
         for p in self.list_panes() {
-            let (idle, id) = {
-                let m = p.meta.lock().unwrap();
-                let idle = m.exit.is_none()
-                    && !m.paused
+            // An idle agent that nothing holds: not paused, not stopped,
+            // not waiting for the owner after a restart.
+            let wakeable = |m: &crate::daemon::PaneMeta| {
+                m.exit.is_none()
+                    && !in_force.no_mail(m)
                     && m.agent.is_agent()
                     && matches!(m.state, AgentState::Idle | AgentState::Done)
-                    && now.saturating_sub(m.state_since_ms) > 1200;
-                (idle, m.id.clone())
+                    && now.saturating_sub(m.state_since_ms) > 1200
+            };
+            let (idle, id) = {
+                let m = p.meta.lock().unwrap();
+                (wakeable(&m), m.id.clone())
             };
             if !idle {
                 continue;
@@ -343,6 +352,24 @@ impl Daemon {
             let Some((_, sender, _)) = waiting.first().cloned() else {
                 continue;
             };
+            let nudge = format!("You have mail from {sender}. Check your spandeck inbox.");
+            // The marks are looked at once more with the pane's input
+            // locked, and whatever sets one takes back a nudge not yet
+            // typed: this look and the typing cannot pass a Pause or a Stop
+            // (terminal/input.rs). A nudge that is not sent announces
+            // nothing: the mail stays as it was.
+            let sent = p.term.send_if(
+                spandeck_terminal::Item {
+                    kind: spandeck_terminal::InputKind::Nudge,
+                    bytes: nudge.into_bytes(),
+                    enter_after: Some(std::time::Duration::from_millis(30)),
+                    from: None,
+                },
+                || wakeable(&p.meta.lock().unwrap()),
+            );
+            if !matches!(sent, Ok(Some(_))) {
+                continue;
+            }
             self.note_woken(
                 &waiting.iter().map(|w| w.0.clone()).collect::<Vec<_>>(),
                 now,
@@ -351,17 +378,14 @@ impl Daemon {
                 &waiting.iter().map(|w| w.0.clone()).collect::<Vec<_>>(),
                 now,
             );
-            let nudge = format!("You have mail from {sender}. Check your spandeck inbox.");
-            if self.send_text(&id, &nudge, true).is_ok() {
-                self.record(
-                    "msg.nudged",
-                    Some(&id),
-                    None,
-                    None,
-                    None,
-                    json!({"count": waiting.len()}),
-                );
-            }
+            self.record(
+                "msg.nudged",
+                Some(&id),
+                None,
+                None,
+                None,
+                json!({"count": waiting.len()}),
+            );
         }
     }
 

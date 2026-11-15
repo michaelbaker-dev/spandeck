@@ -899,7 +899,13 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                         .filter(|s| *s != web.daemon.station)
                         .map(String::from);
                     match station {
-                        None => match attach_local(&web.daemon, &pane, chan, out_tx.clone()) {
+                        None => match attach_local(
+                            &web.daemon,
+                            &pane,
+                            &who.client,
+                            chan,
+                            out_tx.clone(),
+                        ) {
                             Ok((result, task)) => {
                                 web.daemon.note_attach(
                                     result["pane"].as_str().unwrap_or(&pane),
@@ -1115,10 +1121,29 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
 
 type AttachResult = (Value, tokio::task::JoinHandle<()>);
 
+/// A stop threw away something this client had sent to the pane and that
+/// had not reached its program: said on the client's channel for the pane,
+/// as how many things, never what they were.
+fn discarded_for(
+    ev: &spandeck_core::BusEvent,
+    pane: &str,
+    client: &str,
+    chan: u32,
+) -> Option<Value> {
+    if ev.kind != "pane.input_discarded" || ev.pane.as_deref() != Some(pane) {
+        return None;
+    }
+    let n = ev.data["clients"][client].as_u64().filter(|n| *n > 0)?;
+    Some(json!({"chan": chan, "input_discarded": n, "why": "stopped"}))
+}
+
 /// Attach to a pane on this station: a snapshot now, then the live stream.
+/// `client`: who attaches, told on this channel when a stop throws away
+/// what it had sent.
 fn attach_local(
     daemon: &Daemon,
     pane: &str,
+    client: &str,
     chan: u32,
     out: mpsc::Sender<Message>,
 ) -> Result<AttachResult, spandeck_core::Error> {
@@ -1131,9 +1156,24 @@ fn attach_local(
         "exited": entry.meta().exit,
     });
     let d = daemon.clone();
+    let mut bus = daemon.bus.subscribe();
+    let client = client.to_string();
     let task = tokio::spawn(async move {
         loop {
-            match rx.recv().await {
+            let ev = tokio::select! {
+                ev = rx.recv() => ev,
+                said = bus.recv() => {
+                    // Only one kind of event is looked for; one missed
+                    // because this client fell behind is not made up for.
+                    if let Some(msg) = said.ok().and_then(|ev| discarded_for(&ev, &pane_id, &client, chan)) {
+                        if out.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            return;
+                        }
+                    }
+                    continue;
+                }
+            };
+            match ev {
                 Ok(PaneEvent::Output(bytes)) => {
                     if out.send(frame(FRAME_OUTPUT, chan, &bytes)).await.is_err() {
                         return;

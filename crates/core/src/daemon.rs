@@ -12,7 +12,8 @@ use serde_json::{json, Value};
 use spandeck_agents::{adapter, install, kind_from_command, AgentKind, AgentState, LaunchOpts};
 use spandeck_archive::Archive;
 use spandeck_terminal::{
-    sys, ExitInfo, Pane, PaneEvent, PaneHandoff, ScreenInfo, Signal, SpawnSpec,
+    sys, ExitInfo, InputKind, Item, Mark, Pane, PaneEvent, PaneHandoff, ScreenInfo, Signal,
+    SpawnSpec,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -33,6 +34,9 @@ pub enum Error {
     Invalid(String),
     #[error("not found: {0}")]
     NotFound(String),
+    /// A stop that could not reach its program: it is not reading input.
+    #[error("{0}")]
+    NotReading(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -47,6 +51,7 @@ impl Error {
             Error::NoPane(_) | Error::NotFound(_) => "not_found",
             Error::Denied(_) => "denied",
             Error::Invalid(_) => "invalid",
+            Error::NotReading(_) => "not_reading",
             _ => "internal",
         }
     }
@@ -174,6 +179,27 @@ pub struct PaneMeta {
     /// ten minutes. Its record stays open, so a later start tries again.
     #[serde(default)]
     pub held_back: bool,
+    /// Stopped, and staying stopped: no mail reaches it in any form until
+    /// the owner releases it (holds.rs). Apart from `paused`, and from
+    /// `held_restored`: clearing one never clears another.
+    #[serde(default)]
+    pub held_stopped: Option<crate::holds::HeldStopped>,
+    /// Started again after the station restarted, and waiting for the
+    /// owner before it takes mail (holds.rs).
+    #[serde(default)]
+    pub held_restored: Option<crate::holds::HeldRestored>,
+}
+
+/// What came of stopping one pane.
+#[derive(Debug, Clone, Copy)]
+pub struct Stopped {
+    /// The terminal took the interrupt key. False: the program is not
+    /// reading; it was not stopped, and is never said to be.
+    pub delivered: bool,
+    /// Things sent to the pane before the stop that were thrown away.
+    pub discarded: usize,
+    /// The pane's record, with its mark, is written.
+    pub saved: bool,
 }
 
 /// What `Daemon::last_session` found.
@@ -1043,6 +1069,8 @@ impl Daemon {
             ended_by: None,
             ended_ms: 0,
             held_back: false,
+            held_stopped: None,
+            held_restored: None,
         };
         let entry = Arc::new(PaneEntry {
             id: id.clone(),
@@ -1343,13 +1371,28 @@ impl Daemon {
     }
 
     pub fn send_text(&self, id: &str, text: &str, enter: bool) -> Result<()> {
+        self.send_text_from(id, text, enter, None)
+    }
+
+    /// Send a line of text to a pane as one item of its input, its Enter
+    /// included: nothing else sent to the pane can land between the two,
+    /// and nobody waits for the pause before the Enter. `from`: the client
+    /// that sent it, told if a stop throws it away.
+    pub fn send_text_from(
+        &self,
+        id: &str,
+        text: &str,
+        enter: bool,
+        from: Option<&str>,
+    ) -> Result<()> {
         let p = self.pane(id)?;
-        p.term.write(text.as_bytes())?;
-        if enter {
+        p.term.send(Item {
+            kind: InputKind::Text,
+            bytes: text.as_bytes().to_vec(),
             // Agents with paste detection need the Enter as its own write.
-            std::thread::sleep(Duration::from_millis(30));
-            p.term.write(b"\r")?;
-        }
+            enter_after: enter.then_some(Duration::from_millis(30)),
+            from: from.map(String::from),
+        })?;
         Ok(())
     }
 
@@ -1503,28 +1546,48 @@ impl Daemon {
     /// line, since each line break would send a half-finished message, and a
     /// shell gets it as typed.
     pub fn paste(&self, id: &str, text: &str, enter: bool) -> Result<()> {
+        self.paste_from(id, text, enter, None)
+    }
+
+    /// `paste`, as one item of the pane's input (its Enter included), from
+    /// a client that is told if a stop throws it away. A stop that lands
+    /// while a marked paste is being written closes it first.
+    pub fn paste_from(&self, id: &str, text: &str, enter: bool, from: Option<&str>) -> Result<()> {
         let p = self.pane(id)?;
         let text = text.replace("\r\n", "\n");
         // A paste cannot carry the marker that ends a paste.
         let text = text.replace("\x1b[201~", "").replace("\x1b[200~", "");
-        if p.term.bracketed_paste() {
-            p.term
-                .write(format!("\x1b[200~{}\x1b[201~", text.replace('\n', "\r")).as_bytes())?;
+        let bracketed = p.term.bracketed_paste();
+        let bytes = if bracketed {
+            format!("\x1b[200~{}\x1b[201~", text.replace('\n', "\r")).into_bytes()
         } else if p.meta().agent.is_agent() {
-            let one_line = text
-                .split('\n')
+            text.split('\n')
                 .map(str::trim)
                 .filter(|l| !l.is_empty())
                 .collect::<Vec<_>>()
-                .join(" ");
-            p.term.write(one_line.as_bytes())?;
+                .join(" ")
+                .into_bytes()
         } else {
-            p.term.write(text.replace('\n', "\r").as_bytes())?;
-        }
-        if enter {
-            std::thread::sleep(Duration::from_millis(60));
-            p.term.write(b"\r")?;
-        }
+            text.replace('\n', "\r").into_bytes()
+        };
+        p.term.send(Item {
+            kind: InputKind::Paste { bracketed },
+            bytes,
+            enter_after: enter.then_some(Duration::from_millis(60)),
+            from: from.map(String::from),
+        })?;
+        Ok(())
+    }
+
+    /// Keys as they were typed, as one item of the pane's input.
+    pub fn type_keys(&self, id: &str, data: &[u8], from: Option<&str>) -> Result<()> {
+        let p = self.pane(id)?;
+        p.term.send(Item {
+            kind: InputKind::Keys,
+            bytes: data.to_vec(),
+            enter_after: None,
+            from: from.map(String::from),
+        })?;
         Ok(())
     }
 
@@ -1553,6 +1616,11 @@ impl Daemon {
             m.paused = paused;
             m.clone()
         };
+        if paused {
+            // A nudge on its way and not yet typed is taken back: the mail
+            // pump's look and its typing cannot pass a Pause (input.rs).
+            p.term.withdraw(InputKind::Nudge);
+        }
         self.save_pane(&p);
         self.record(
             if paused {
@@ -1570,29 +1638,70 @@ impl Daemon {
     }
 
     /// Stop: the agent's current turn is interrupted; the process stays.
-    pub fn stop(&self, id: &str, by: &str) -> Result<()> {
+    /// The stop's place in the pane's input is now. Waits up to two
+    /// seconds for the terminal to take the key: not for a thread that
+    /// must not wait.
+    pub fn stop(&self, id: &str, by: &str) -> Result<Stopped> {
+        let mark = self.pane(id)?.term.mark_stop();
+        self.stop_at(id, by, mark, true)
+    }
+
+    /// Stop a pane at the place its stop was read (`Pane::mark_stop`).
+    ///
+    /// What was sent to the pane before that and not started is thrown
+    /// away whole and its senders are told; a paste being written is closed
+    /// and cut; then the agent's interrupt keys are written; what was typed
+    /// after the stop was read is kept. An agent's pane is marked stopped
+    /// first, so that from this moment no mail reaches it until the owner
+    /// releases it (holds.rs). A program that is not reading cannot be
+    /// given the key: `delivered` is false, the pane says so, and nothing
+    /// reports it as stopped. `ack`: wait (a second at most) for the
+    /// pane's record to be written, for an answer that says `saved`.
+    pub fn stop_at(&self, id: &str, by: &str, mark: Mark, ack: bool) -> Result<Stopped> {
         let p = self.pane(id)?;
         let meta = p.meta();
         if meta.exit.is_some() {
-            return Ok(());
+            return Ok(Stopped {
+                delivered: true,
+                discarded: 0,
+                saved: true,
+            });
         }
+        let held = self.hold_stopped(&p, by);
         let keys: &[u8] = adapter(meta.agent)
             .map(|a| a.interrupt_keys())
             .unwrap_or(b"\x03");
-        p.term.write(keys)?;
-        self.cancel_pane_approvals(&p.id);
+        let done = p.term.interrupt(mark, keys);
+        self.tell_discarded(&p.id, &done.discarded);
+        if held && !done.delivered {
+            if let Some(h) = p.meta.lock().unwrap().held_stopped.as_mut() {
+                h.reached = false;
+            }
+            self.save_pane(&p);
+        }
+        if done.delivered {
+            self.cancel_pane_approvals(&p.id);
+        }
         self.record(
-            "pane.stopped",
+            if done.delivered {
+                "pane.stopped"
+            } else {
+                "pane.stop_not_reading"
+            },
             Some(&p.id),
             meta.project.as_deref(),
             meta.task.as_deref(),
             Some(by),
-            json!({}),
+            json!({"discarded": done.discarded.len(), "held": held}),
         );
+        if held {
+            self.emit("pane.updated", Some(&p.id), None, json!({}));
+        }
+        let saved = !held || !ack || self.pane_saved(&p.id);
         // An interrupt while the model is thinking fires no hook at all. Confirm
         // from the screen: once the agent no longer shows itself as busy, the
-        // turn is over.
-        if let Some(a) = adapter(meta.agent) {
+        // turn is over. Only for a key the terminal took.
+        if let Some(a) = adapter(meta.agent).filter(|_| done.delivered) {
             let d = self.clone();
             let id = p.id.clone();
             tokio::spawn(async move {
@@ -1611,7 +1720,11 @@ impl Daemon {
                 }
             });
         }
-        Ok(())
+        Ok(Stopped {
+            delivered: done.delivered,
+            discarded: done.discarded.len(),
+            saved,
+        })
     }
 
     /// Kill: the process ends.
@@ -2073,7 +2186,15 @@ impl Daemon {
             match self.spawn_pane(opts) {
                 Ok(p) => {
                     found.resumed += 1;
-                    self.keep_owner_marks(&p, &meta);
+                    let why = match (start.handoff, start.clean) {
+                        (true, _) => "upgrade",
+                        (false, true) => "stop",
+                        (false, false) => "crash",
+                    };
+                    self.keep_marks(&p, &meta, Some(why));
+                    if p.meta.lock().unwrap().held_restored.is_some() {
+                        found.mail_held += 1;
+                    }
                     self.record(
                         "pane.resumed",
                         Some(&p.id),
@@ -2099,7 +2220,27 @@ impl Daemon {
     /// would break the Pause guarantee, and did after a daemon crash
     /// (found on 15 Nov 2026).
     fn keep_owner_marks(&self, p: &Arc<PaneEntry>, old: &PaneMeta) {
-        if !(old.paused || old.muted || old.watch) {
+        self.keep_marks(p, old, None);
+    }
+
+    /// `keep_owner_marks`, and for a pane the station itself started again
+    /// after a restart, the mark that makes it wait for the owner before
+    /// it takes mail (`restored`; holds.rs). The marks are apart: each is
+    /// carried as it was, and none stands for another.
+    fn keep_marks(&self, p: &Arc<PaneEntry>, old: &PaneMeta, restored: Option<&str>) {
+        let restored = restored
+            .filter(|_| old.agent.is_agent() && self.holds_in_force().restored)
+            .map(|why| crate::holds::HeldRestored {
+                at_ms: now_ms(),
+                why: why.to_string(),
+            })
+            .or_else(|| old.held_restored.clone());
+        if !(old.paused
+            || old.muted
+            || old.watch
+            || old.held_stopped.is_some()
+            || restored.is_some())
+        {
             return;
         }
         {
@@ -2107,6 +2248,8 @@ impl Daemon {
             m.paused = old.paused;
             m.muted = old.muted;
             m.watch = old.watch;
+            m.held_stopped = old.held_stopped.clone();
+            m.held_restored = restored;
         }
         self.save_pane(p);
     }
@@ -2313,6 +2456,11 @@ impl Daemon {
     /// ability only towards a station that announces it.
     pub fn caps(&self) -> Vec<&'static str> {
         let mut caps = vec!["task_continue", "station_flags"];
+        // Holds, and `pane.release`: offered by a deck only for a station
+        // that says so.
+        if self.flag_on("holds", true) {
+            caps.push(crate::holds::CAP);
+        }
         if self.flag_on(crate::stops::CAP, true) {
             caps.push(crate::stops::CAP);
         }

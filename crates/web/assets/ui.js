@@ -122,6 +122,21 @@ export function ago(ms) {
 
 export const STATE_LABEL = { idle: 'idle', working: 'working', needs_you: 'needs you', done: 'done', error: 'error' };
 export function stateOf(p) { return p.exited ? 'exited' : p.state; }
+// A pane that is held (`held` in its view): stopped and staying stopped, or
+// started again after a restart and waiting for the owner. It takes no mail
+// until it is released. What the station says is put on the page as text.
+export function heldWords(held) {
+  if (!held) return '';
+  const at = (ms) => new Date(Number(ms) || 0).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const parts = [];
+  const s = held.stopped, r = held.restored;
+  if (s && s.reached === false) parts.push('this program is not reading input: Stop could not reach it; use Kill');
+  else if (s) parts.push(`stopped by ${String(s.by || 'you').slice(0, 60)} at ${at(s.at_ms)}`);
+  if (r) parts.push('started again after a restart');
+  parts.push(held.mail > 0 ? `mail is waiting (${Number(held.mail)})` : 'takes no mail until released');
+  return parts.join(' · ');
+}
+export const RELEASE_SAYS = 'Release: this agent takes mail again. Typing into the pane does the same. A paused pane stays paused.';
 export function stateRank(p) {
   return { needs_you: 0, error: 1, working: 2, done: 3, idle: 4, exited: 5 }[stateOf(p)] ?? 6;
 }
