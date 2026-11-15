@@ -943,6 +943,37 @@ function vaultPrompt(stations, url) {
     } }, 'Not now'));
   render();
 }
+// ---- one version for the fleet ----
+// The Control Deck is the serving station's own copy of it, so a station on
+// an older spandeck serves an older deck, and what the fleet keeps the same
+// is only kept so by stations that know how. When the stations do not all
+// run the same version the deck says so, in a bar that blocks nothing, with
+// the update each station already offers in its menu.
+const versionOf = (v) => String(v || '').split(/[.+-]/).slice(0, 3).map(n => parseInt(n, 10) || 0);
+const olderThan = (a, b) => { const x = versionOf(a), y = versionOf(b); for (let i = 0; i < 3; i += 1) if (x[i] !== y[i]) return x[i] < y[i]; return false; };
+let versionBox = null, versionKey = '', versionLater = '';
+function versionBar() {
+  const all = S.fleet.stations.filter(s => s.state !== 'not_linked' && s.version && s.version !== '?');
+  const newest = all.reduce((n, s) => olderThan(n, s.version) ? s.version : n, '0');
+  const behind = all.filter(s => olderThan(s.version, newest));
+  const key = behind.map(s => `${s.station}=${s.version}/${s.state}`).join(' ') + '>' + newest + '@' + api.station;
+  if (!behind.length || key === versionLater) { versionBox = null; versionKey = ''; return null; }
+  if (key === versionKey) return versionBox;
+  const me = behind.find(s => s.self), can = behind.filter(s => s.state === 'online'), names = (list) => list.map(s => `${s.station} (${s.version})`).join(', ');
+  const on = all.filter(s => s.version === newest).map(s => s.station).join(', ');
+  const update = () => Promise.all(can.map(s => api.on(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`)).catch(e => toast(`${s.station}: ${e.message}`, 'error')))).then(() => refreshSoon(1500));
+  versionKey = key;
+  versionBox = h('div', { class: 'vault-prompt version-bar', role: 'region', 'aria-label': 'Stations on different versions' },
+    h('div', { class: 'grow' },
+      h('b', {}, me ? `This deck is served by ${api.station}, which runs an older spandeck (${me.version})` : `${behind.length === 1 ? 'A station runs' : 'Some stations run'} an older spandeck`),
+      h('div', { class: 'muted' }, `${on} ${on.includes(',') ? 'run' : 'runs'} ${newest}. Older: ${names(behind)}. `,
+        me ? `What you see here can differ from the deck ${on.includes(',') ? 'those stations serve' : on + ' serves'}, and newer things may be missing. ` : 'A deck served by an older station can look different, and what the fleet keeps the same may not be kept there. ',
+        behind.some(s => s.state !== 'online') ? 'A station that is off or cannot be controlled from here is updated at that machine.' : '')),
+    can.length ? h('button', { class: 'primary', onclick: () => confirmBox(`Update ${can.map(s => s.station).join(', ')}?`, `The latest release is downloaded on ${can.length === 1 ? 'that station' : 'each of them'} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', update, false) }, can.length === 1 ? `Update ${can[0].station}` : `Update ${can.length} stations`) : null,
+    h('button', { onclick: () => { versionLater = key; render(); } }, 'Not now'));
+  return versionBox;
+}
+
 // The bar goes once none of its stations needs it: connected from elsewhere, say.
 function vaultPromptSync() {
   if (!vaultPromptBox) return;
@@ -2798,7 +2829,7 @@ function render() {
   if (!layCtx) arranging = null;
   // A view that is already on the page stays attached: replacing it would
   // take the keyboard away from whatever is being typed into.
-  const kids = vaultPromptBox ? [vaultPromptBox, main] : [main];
+  const kids = [versionBar(), vaultPromptBox, main].filter(Boolean);
   if (root.children.length === kids.length + 1 && kids.every((k, i) => root.children[i + 1] === k)) root.replaceChild(topbar(), root.children[0]);
   else root.replaceChildren(topbar(), ...kids);
   const side = document.querySelector('.sidebar');
