@@ -656,6 +656,20 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
            el.dispatchEvent(touch('touchend', null));
            return false; }})()"
         );
+    // The last failure showed the view at the earliest lines straight after a
+    // drag, and back at the end a quarter of a second later. Note everything
+    // that could move it, so the next failure names what did.
+    page.js(
+        "(() => { const t = document.querySelector('.phone-pane .pane').paneTerm; const log = window.__moved = []; const at = performance.now();
+           const note = (what) => { if (log.length < 60) log.push(Math.round(performance.now() - at) + ' ' + what); };
+           for (const name of ['write', 'reset', 'clear', 'resize', 'scrollToBottom', 'scrollToLine', 'refresh']) {
+             const real = t.term[name].bind(t.term);
+             t.term[name] = (...a) => { note(name + (name === 'write' ? ' ' + (a[0] ? a[0].length : 0) : ' ' + JSON.stringify(a.slice(0, 2))) + (name === 'write' ? '' : ' <- ' + (new Error().stack || '').split('\\n').slice(2, 5).map(x => x.trim().replace(/^at /, '').replace(/https?:[^ )]*\\//, '')).join(' < '))); return real(...a); };
+           }
+           let last = -1; t.term.onScroll((y) => { if (y > last && last >= 0) note('moved towards the end: ' + last + ' -> ' + y); last = y; });
+           window.__paneEl = document.querySelector('.phone-pane .pane');
+           return true; })()",
+    );
     let start = std::time::Instant::now();
     loop {
         let v = page.js(&dragged);
@@ -663,6 +677,8 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
             break;
         }
         if start.elapsed() > Duration::from_secs(20) {
+            let moved = page.js("JSON.stringify({samePane: window.__paneEl === document.querySelector('.phone-pane .pane'), moved: window.__moved})");
+            eprintln!("what moved the view: {moved}");
             let seen = page.js(
                 "(() => { const v = document.querySelector('.phone-pane .xterm-viewport'); const r = document.querySelector('.phone-pane .xterm-rows'); const s = document.querySelector('.phone-pane .xterm-screen'); return JSON.stringify({scrollTop: v && v.scrollTop, scrollHeight: v && v.scrollHeight, clientHeight: v && v.clientHeight, rowCount: r && r.children.length, rowHeight: r && r.firstElementChild && r.firstElementChild.getBoundingClientRect().height, screen: s && [s.clientWidth, s.clientHeight], hidden: document.hidden, lastRows: r && r.innerText.split('\\n').filter(x => x.trim()).slice(-3)}); })()",
             );
@@ -671,6 +687,10 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
             );
         }
         std::thread::sleep(Duration::from_millis(250));
+    }
+
+    if std::env::var_os("SPANDECK_TEST_SHOW_MOVES").is_some() {
+        eprintln!("moves: {}", page.js("JSON.stringify(window.__moved)"));
     }
 
     // Found from a real phone's drag reports: Claude Code runs full-screen and
