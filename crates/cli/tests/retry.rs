@@ -718,13 +718,27 @@ impl Proxy {
                         let Some(answer) = http_message(&mut from_station) else {
                             return;
                         };
-                        if spawn
-                            && lose
-                                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                                    n.checked_sub(1)
-                                })
-                                .is_ok()
-                        {
+                        // One fewer answer to lose, if any are left. (Written out: the
+                        // one-call form has a different name in each compiler
+                        // the stations build with.)
+                        let lost = spawn && {
+                            let mut left = lose.load(Ordering::SeqCst);
+                            loop {
+                                if left == 0 {
+                                    break false;
+                                }
+                                match lose.compare_exchange(
+                                    left,
+                                    left - 1,
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                ) {
+                                    Ok(_) => break true,
+                                    Err(now) => left = now,
+                                }
+                            }
+                        };
+                        if lost {
                             return;
                         }
                         if to_client.write_all(&answer).is_err() {
