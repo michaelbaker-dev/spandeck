@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -86,6 +86,7 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
         .route("/api/device/request", post(device_request))
         .route("/api/device/collect", post(device_collect))
         .route("/api/ws", get(ws_upgrade))
+        .route("/api/font/{id}", get(font))
         .fallback(get(asset))
         .layer(DefaultBodyLimit::max(100 << 20))
         .with_state(web.clone());
@@ -440,6 +441,56 @@ async fn peer_rpc(
     }
 }
 
+/// A font the owner uploaded, by its id, for the owner's browsers. The id is
+/// looked up in the look document; the bytes are a file a browser asked to be
+/// kept, so they go out as a font and as nothing a browser might guess.
+async fn font(
+    State(web): State<Web>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    if let Err(e) = origin_ok(&web, &headers) {
+        return refuse(e);
+    }
+    match caller(&web, &addr, &headers, None).await {
+        Ok(who) if who.is_owner() => {}
+        Ok(_) => return refuse((StatusCode::FORBIDDEN, "fonts are for the user's clients")),
+        Err(e) => return refuse(e),
+    }
+    let (mime, bytes) = match web.daemon.look_font_file(&id) {
+        Ok(found) => found,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": error_json(&e)})),
+            )
+                .into_response()
+        }
+    };
+    let mut resp = Response::new(Body::from(bytes));
+    let h = resp.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    h.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    // The id is the file's own hash: what it names never changes.
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=31536000, immutable"),
+    );
+    h.insert(
+        "content-security-policy",
+        HeaderValue::from_static("default-src 'none'; sandbox"),
+    );
+    h.insert(
+        "cross-origin-resource-policy",
+        HeaderValue::from_static("same-origin"),
+    );
+    resp
+}
+
 async fn asset(uri: Uri) -> Response<Body> {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
@@ -481,9 +532,16 @@ async fn asset(uri: Uri) -> Response<Body> {
                 HeaderValue::from_str(mime.as_ref())
                     .unwrap_or(HeaderValue::from_static("application/octet-stream")),
             );
+            // The bundled symbols font is large and is asked for under a
+            // name that has its version in it: a browser keeps it. Nothing
+            // else is kept.
             h.insert(
                 header::CACHE_CONTROL,
-                HeaderValue::from_static("no-store, must-revalidate"),
+                HeaderValue::from_static(if path.ends_with(".woff2") {
+                    "public, max-age=31536000, immutable"
+                } else {
+                    "no-store, must-revalidate"
+                }),
             );
             h.insert(
                 "x-content-type-options",

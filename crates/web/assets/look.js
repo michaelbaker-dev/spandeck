@@ -12,6 +12,13 @@
 // checks it first), and it reaches the page in two ways only: as the value of
 // a custom property set with style.setProperty, and as an option of the
 // terminal. No style sheet or markup is ever built from it.
+//
+// Fonts: a theme names fonts. A name is a font installed on the device, or
+// one the owner uploaded (the document lists those, and the station serves
+// each file by its id). An uploaded font becomes a FontFace object made from
+// the file's bytes; its name is never written into a style sheet. Behind
+// every terminal font comes the bundled symbols font (app.css), which the
+// browser fetches only when a prompt icon or a powerline sign is on screen.
 
 const TERM_COLOURS = ['background', 'foreground', 'cursor', 'cursorAccent', 'selection',
   'black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white',
@@ -36,7 +43,7 @@ Object.assign(KEYS, {
 for (const c of DECK_COLOURS) KEYS['deck.' + c] = { kind: 'colour', group: 'deck', label: DECK_LABELS[c] };
 Object.assign(KEYS, {
   'deck.focusWidth': { kind: 'number', min: 0, max: 4, step: 1, group: 'deck', label: 'Outline width (0 is none)' },
-  'font.family': { kind: 'fonts', group: 'font', label: 'Font', hint: 'Names of fonts installed on the device showing the deck, first choice first, separated by commas.' },
+  'font.family': { kind: 'fonts', group: 'font', label: 'Font', hint: 'Names of fonts, first choice first, separated by commas: fonts you uploaded, or fonts installed on the device showing the deck.' },
   'font.size': { kind: 'number', min: 6, max: 40, step: 1, group: 'font', label: 'Size' },
   'font.lineHeight': { kind: 'number', min: 1, max: 2, step: 0.05, group: 'font', label: 'Line height' },
   'font.letterSpacing': { kind: 'number', min: -2, max: 8, step: 0.5, group: 'font', label: 'Letter spacing' },
@@ -156,7 +163,7 @@ export const isBuiltin = (id) => BUILTIN.some(t => t.id === id);
 
 // ---- the document, and what applies where ----
 
-const EMPTY = { themes: [], deck: { theme: null, set: {} }, layouts: {}, panes: {} };
+const EMPTY = { themes: [], deck: { theme: null, set: {} }, layouts: {}, panes: {}, fonts: [] };
 export const lookState = {
   doc: EMPTY,
   // While the editor is open: { level, key, choice } shown in place of what
@@ -171,7 +178,12 @@ export function setDoc(raw) {
     themes.push({ id: t.id, name: t.name.slice(0, 48), settings: cleanSettings(t.settings) });
   }
   const level = (m) => Object.fromEntries(Object.entries(m && typeof m === 'object' ? m : {}).map(([k, c]) => [k, cleanChoice(c)]));
-  lookState.doc = { updated_ms: raw?.updated_ms || 0, themes, deck: cleanChoice(raw?.deck), layouts: level(raw?.layouts), panes: level(raw?.panes) };
+  const fonts = [];
+  for (const f of Array.isArray(raw?.fonts) ? raw.fonts : []) {
+    if (!f || typeof f.id !== 'string' || !FONT_ID.test(f.id) || !isFontName(f.name) || !FACES[f.face] || fonts.some(o => o.id === f.id)) continue;
+    fonts.push({ id: f.id, name: f.name, face: f.face, format: String(f.format || '').replace(/[^a-z0-9]/g, '').slice(0, 5), size: Number(f.size) || 0 });
+  }
+  lookState.doc = { updated_ms: raw?.updated_ms || 0, themes, deck: cleanChoice(raw?.deck), layouts: level(raw?.layouts), panes: level(raw?.panes), fonts };
 }
 
 export const allThemes = () => [...BUILTIN, ...lookState.doc.themes];
@@ -249,6 +261,99 @@ export function applyPaneFrame(el, look, page) {
   el.style.setProperty('--lig', look['font.ligatures'] ? 'normal' : 'none');
 }
 
+// ---- fonts ----
+
+// The bundled symbols font (app.css), last in every terminal's list.
+const SYMBOLS = '"Spandeck Symbols"';
+const FONT_ID = /^[0-9a-f]{32}$/;
+// What each face of a family says of itself to the browser.
+export const FACES = {
+  regular: { label: 'Regular', desc: {} },
+  bold: { label: 'Bold', desc: { weight: '700' } },
+  italic: { label: 'Italic', desc: { style: 'italic' } },
+  'bold italic': { label: 'Bold italic', desc: { weight: '700', style: 'italic' } },
+  variable: { label: 'Every weight (a variable font)', desc: { weight: '1 1000' } },
+  'variable italic': { label: 'Every weight, italic (a variable font)', desc: { weight: '1 1000', style: 'italic' } },
+};
+// Names that mean a kind of font, not a font.
+const GENERIC = ['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui', 'ui-serif', 'ui-sans-serif', 'ui-monospace', 'ui-rounded', 'emoji', 'math', 'fangsong', '-apple-system', 'blinkmacsystemfont'];
+const lower = (name) => name.toLowerCase();
+export const sameFont = (a, b) => lower(a) === lower(b);
+export const uploadedAs = (name) => lookState.doc.fonts.filter(f => sameFont(f.name, name));
+
+// Told when a font has finished loading, so terminals measure their cells
+// again: a terminal measures once, with whatever font was there then.
+export const fontListeners = new Set();
+let told = null;
+const tellFonts = () => { clearTimeout(told); told = setTimeout(() => { for (const fn of fontListeners) fn(); }, 40); };
+// The symbols font, and any other the style sheet names, load when first needed.
+if (document.fonts?.addEventListener) document.fonts.addEventListener('loadingdone', (e) => { if (e.fontfaces?.length) tellFonts(); });
+
+// id -> { name, face (which), font (the FontFace), state: 'loading' | 'ok' | 'missing' | 'failed', at }
+const loaded = new Map();
+// Make a FontFace of every uploaded font, from its bytes. `get(id)` fetches
+// one file. A font the station does not hold yet is asked for again later.
+export async function loadFonts(get) {
+  if (typeof FontFace === 'undefined' || !document.fonts) return;
+  const want = lookState.doc.fonts;
+  let changed = false;
+  for (const [id, f] of loaded) {
+    if (want.some(w => w.id === id && w.name === f.name && w.face === f.face)) continue;
+    if (f.font) { document.fonts.delete(f.font); changed = true; }
+    loaded.delete(id);
+  }
+  await Promise.all(want.map(async (w) => {
+    const have = loaded.get(w.id);
+    if (have && (have.state === 'ok' || have.state === 'loading' || have.state === 'failed' || Date.now() - have.at < 10000)) return;
+    const entry = { name: w.name, face: w.face, state: 'loading', at: Date.now() };
+    loaded.set(w.id, entry);
+    let bytes;
+    try { bytes = await get(w.id); } catch (e) { entry.state = 'missing'; return; }
+    try {
+      // The name was checked (isFontName): it has no quote or comma in it.
+      // Chrome takes the name as it is written, and would keep quotes as
+      // part of it, so that no font list could ever name it. A browser that
+      // reads the name as a style sheet would refuse one that starts with a
+      // digit unless it is quoted; for that browser, the quoted form.
+      let font;
+      try { font = new FontFace(w.name, bytes, FACES[w.face].desc); await font.load(); } catch (e) {
+        if (e?.name !== 'SyntaxError') throw e;
+        font = new FontFace(`"${w.name}"`, bytes, FACES[w.face].desc);
+        await font.load();
+      }
+      if (loaded.get(w.id) !== entry) return;
+      document.fonts.add(font);
+      entry.font = font;
+      entry.state = 'ok';
+      changed = true;
+    } catch (e) { entry.state = 'failed'; }
+  }));
+  if (changed) tellFonts();
+}
+
+let probe = null;
+const widthOf = (font) => { probe ||= document.createElement('canvas').getContext('2d'); probe.font = `72px ${font}`; return probe.measureText('mmmmmmmmlli.WQ@0O').width; };
+// Whether text set in this font is drawn in it here: 'yes', 'no', or for an
+// uploaded font that is not ready 'loading', 'missing' (the station does not
+// hold the file yet) or 'failed' (this browser could not read the file).
+export function fontHere(name) {
+  if (GENERIC.includes(lower(name))) return 'yes';
+  const up = uploadedAs(name).map(f => loaded.get(f.id)?.state || 'loading');
+  if (up.includes('ok')) return 'yes';
+  if (up.length) return up.includes('loading') ? 'loading' : up.includes('missing') ? 'missing' : 'failed';
+  // An installed font changes the width of text that names it first.
+  const q = fontList([name]);
+  return ['monospace', 'serif'].some(g => widthOf(`${q}, ${g}`) !== widthOf(g)) ? 'yes' : 'no';
+}
+// A family name for a font file, from the file's name, and which face it is.
+export function fontFromFile(fileName) {
+  const base = String(fileName).replace(/\.[A-Za-z0-9]+$/, '');
+  const face = (/variable|\bVF\b|\[wght/i.test(base) ? 'variable' : /bold/i.test(base) ? 'bold' : '') + (/italic|oblique/i.test(base) ? ' italic' : '');
+  const name = base.replace(/\[[^\]]*\]/g, ' ').replace(/[-_ ]*(regular|bold|italic|oblique|variable|VF|webfont)\b/gi, ' ')
+    .replace(/[^A-Za-z0-9 ._-]+/g, ' ').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 64).trim();
+  return { name: name || 'My font', face: face.trim() || 'regular' };
+}
+
 // The terminal's options for a look. `smaller` is the phone-sized terminal.
 export function termOptions(look, smaller) {
   return {
@@ -257,7 +362,7 @@ export function termOptions(look, smaller) {
       selectionBackground: look['term.selection'],
       ...Object.fromEntries(TERM_COLOURS.slice(5).map(c => [c, look['term.' + c]])),
     },
-    fontFamily: fontList(look['font.family']),
+    fontFamily: fontList(look['font.family']) + ', ' + SYMBOLS,
     fontSize: Math.max(6, look['font.size'] - (smaller ? 2 : 0)),
     lineHeight: look['font.lineHeight'],
     letterSpacing: look['font.letterSpacing'],
@@ -333,18 +438,142 @@ export function warnings(look, level) {
 
 // ---- a theme as a file ----
 
+// Read here: spandeck's own format, an iTerm2 colour file (.itermcolors) and
+// a Windows Terminal colour scheme, alone or in a whole settings.json. The
+// last two say only the terminal's colours; the deck's are worked out from
+// them. Whatever the file is, its content is data: colours are read out of
+// it one by one and checked like any other, and its names are shown as text.
+
+const hex = (parts) => '#' + parts.map(c => Math.round(Math.min(255, Math.max(0, c))).toString(16).padStart(2, '0')).join('');
+// `t` of the way from colour a to colour b.
+const mix = (a, b, t) => { const [p, q] = [rgb(a), rgb(b)]; return hex(p.map((c, i) => c + (q[i] - c) * t)); };
+// Move a colour toward another until it stands out enough against a third.
+function readable(colour, against, least, toward) {
+  let c = colour;
+  for (let i = 0; i < 12 && contrast(c, against) < least; i += 1) c = mix(c, toward, 0.2);
+  return c;
+}
+// The deck's colours for a terminal palette: the page is the terminal's
+// background, bars and lines are steps from it toward the text, and the
+// state colours are the palette's own, whichever of each pair reads better.
+export function deckFromTerminal(t) {
+  const bg = t['term.background'], fg = t['term.foreground'];
+  const dark = contrast(bg, '#ffffff') >= contrast(bg, '#000000');
+  const far = dark ? '#ffffff' : '#000000';
+  const panel = mix(bg, fg, 0.05), panel2 = mix(bg, fg, 0.1);
+  const text = readable(fg, panel2, 7, far);
+  const accent = (a, b) => {
+    const best = [t['term.' + a], t['term.' + b]].sort((x, y) => contrast(y, panel) - contrast(x, panel))[0];
+    return readable(best, panel, 3, text);
+  };
+  const blue = accent('blue', 'brightBlue');
+  return {
+    'deck.scheme': dark ? 'dark' : 'light', 'deck.bg': bg, 'deck.panel': panel, 'deck.panel2': panel2, 'deck.line': mix(bg, fg, 0.2),
+    'deck.text': text, 'deck.muted': readable(mix(text, bg, 0.4), panel2, 4.5, text),
+    'deck.blue': blue, 'deck.green': accent('green', 'brightGreen'), 'deck.amber': accent('yellow', 'brightYellow'),
+    'deck.red': accent('red', 'brightRed'), 'deck.violet': accent('magenta', 'brightMagenta'), 'deck.focus': blue,
+  };
+}
+// A whole theme from terminal colours by our names. `c` may lack the cursor,
+// the selection and the bright colours; it must have the rest.
+function fromTerminal(c, name, from) {
+  const t = {};
+  for (const k of TERM_COLOURS) {
+    const v = typeof c[k] === 'string' ? c[k].trim().toLowerCase() : c[k];
+    if (v === undefined || v === null || v === '') continue;
+    if (!isColour(v)) return null;
+    t[k] = v.length === 9 && k !== 'selection' ? v.slice(0, 7) : v;
+  }
+  if (!t.background || !t.foreground || TERM_COLOURS.slice(5, 13).some(k => !t[k])) return null;
+  for (const k of TERM_COLOURS.slice(5, 13)) t['bright' + k[0].toUpperCase() + k.slice(1)] ||= t[k];
+  t.cursor ||= t.foreground;
+  t.cursorAccent ||= t.background;
+  t.selection ||= mix(t.background, t.foreground, 0.25);
+  const term = Object.fromEntries(TERM_COLOURS.map(k => ['term.' + k, t[k]]));
+  const settings = cleanSettings({ ...term, ...deckFromTerminal(term) });
+  return { name: cleanName(name) || 'Imported theme', settings, from };
+}
+// Shown as text wherever it appears; kept to one short line.
+const cleanName = (name) => String(typeof name === 'string' ? name : '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 48).trim();
+
+// iTerm2: a property list whose keys ("Ansi 0 Color", "Background Color")
+// each hold a dict of components from 0 to 1. Parsed as XML, which runs
+// nothing and fetches nothing, and only numbers are taken from it.
+const ITERM = { 'Background Color': 'background', 'Foreground Color': 'foreground', 'Cursor Color': 'cursor', 'Cursor Text Color': 'cursorAccent', 'Selection Color': 'selection' };
+function fromIterm(text, fileName) {
+  const not = { problem: 'That file is not an iTerm2 colour file.' };
+  let doc;
+  try { doc = new DOMParser().parseFromString(text, 'application/xml'); } catch (e) { return not; }
+  const top = doc.documentElement;
+  if (!top || top.nodeName !== 'plist' || doc.getElementsByTagName('parsererror').length) return not;
+  // A dict is keys and values in turn.
+  const pairs = (dict) => {
+    const out = new Map(), kids = dict ? [...dict.children] : [];
+    for (let i = 0; i + 1 < kids.length; i += 2) if (kids[i].nodeName === 'key') out.set(kids[i].textContent.trim(), kids[i + 1]);
+    return out;
+  };
+  const all = pairs([...top.children].find(c => c.nodeName === 'dict'));
+  const colour = (key) => {
+    const el = all.get(key) || all.get(key + ' (Dark)');
+    if (!el || el.nodeName !== 'dict') return undefined;
+    const parts = pairs(el);
+    const part = (n) => { const text = (parts.get(n + ' Component')?.textContent || '').trim(), v = Number(text); return text && Number.isFinite(v) ? v * 255 : NaN; };
+    const got = [part('Red'), part('Green'), part('Blue')];
+    return got.some(Number.isNaN) ? undefined : hex(got);
+  };
+  const c = {};
+  for (const [key, ours] of Object.entries(ITERM)) c[ours] = colour(key);
+  TERM_COLOURS.slice(5).forEach((ours, i) => { c[ours] = colour(`Ansi ${i} Color`); });
+  return fromTerminal(c, String(fileName || '').replace(/\.[A-Za-z0-9]+$/, ''), 'iTerm2') || { problem: 'That iTerm2 colour file does not have a background, a text colour and the eight colours.' };
+}
+
+// Windows Terminal: {"name", "background", "foreground", "cursorColor",
+// "selectionBackground", "black" … "brightWhite"}; it says purple for magenta.
+function fromWindowsTerminal(s) {
+  if (!s || typeof s !== 'object' || Array.isArray(s)) return null;
+  const c = { cursor: s.cursorColor, selection: s.selectionBackground, magenta: s.purple ?? s.magenta, brightMagenta: s.brightPurple ?? s.brightMagenta };
+  for (const k of TERM_COLOURS) if (!(k in c)) c[k] = s[k];
+  return fromTerminal(c, s.name, 'Windows Terminal');
+}
+// Windows Terminal's settings file has comments and commas JSON does not
+// allow, and a scheme copied out of one ends with the comma that followed it.
+function looseJson(text) {
+  try { return JSON.parse(text); } catch (e) { /* try it without them */ }
+  let out = '', i = 0, quoted = false;
+  while (i < text.length) {
+    const c = text[i], d = text[i + 1];
+    if (quoted) {
+      out += c;
+      if (c === '\\' && d !== undefined) { out += d; i += 1; } else if (c === '"') quoted = false;
+      i += 1;
+    } else if (c === '/' && d === '/') { while (i < text.length && text[i] !== '\n') i += 1; }
+    else if (c === '/' && d === '*') { const end = text.indexOf('*/', i + 2); i = end < 0 ? text.length : end + 2; }
+    else if (c === ',' && /^\s*([}\]]|$)/.test(text.slice(i + 1, i + 200).replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, ''))) i += 1;
+    else { quoted = c === '"'; out += c; i += 1; }
+  }
+  return JSON.parse(out);
+}
+
 // spandeck's own format: {"spandeck_theme": 1, "name": …, "settings": {…}}.
 export const exportTheme = (theme) => JSON.stringify({ spandeck_theme: 1, name: theme.name, settings: { ...BASE, ...theme.settings } }, null, 2) + '\n';
-// A theme from a file's text, or a sentence saying why it is not one.
-export function importTheme(text) {
+// A theme from a file's text: { name, settings, from } (`from` is the other
+// terminal it was read from; nothing for spandeck's own), or { choices: […] }
+// when the file holds several, or { problem } saying why it is not one.
+export function importTheme(text, fileName) {
+  text = String(text).replace(/^\ufeff/, '');
+  if (text.trimStart().startsWith('<')) return fromIterm(text, fileName);
+  const NOT = 'That file is not a theme spandeck can read. It reads its own theme files, iTerm2 colour files (.itermcolors) and Windows Terminal colour schemes or settings.';
   let raw;
-  try { raw = JSON.parse(text); } catch (e) { return { problem: 'That file is not JSON.' }; }
-  if (!raw || typeof raw !== 'object' || raw.spandeck_theme !== 1) return { problem: 'That file is not a spandeck theme. Themes from other terminals cannot be imported yet.' };
+  try { raw = looseJson(text); } catch (e) { return { problem: NOT }; }
+  if (!raw || typeof raw !== 'object') return { problem: NOT };
+  if (Array.isArray(raw.schemes)) {
+    const choices = raw.schemes.slice(0, 500).map(fromWindowsTerminal).filter(Boolean);
+    return choices.length > 1 ? { choices } : choices[0] || { problem: 'That Windows Terminal settings file has no colour schemes in it.' };
+  }
+  if (raw.spandeck_theme !== 1) return fromWindowsTerminal(raw) || { problem: NOT };
   const bad = [];
   const settings = cleanSettings(raw.settings, bad);
   if (bad.length) return { problem: `That theme has a value spandeck does not accept for: ${bad.slice(0, 6).join(', ')}${bad.length > 6 ? '…' : ''}. Nothing was imported.` };
   if (!Object.keys(settings).length) return { problem: 'That theme has no settings spandeck knows.' };
-  // Shown as text wherever it appears; kept to one short line.
-  const name = String(typeof raw.name === 'string' ? raw.name : '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 48) || 'Imported theme';
-  return { name, settings };
+  return { name: cleanName(raw.name) || 'Imported theme', settings };
 }

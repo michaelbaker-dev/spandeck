@@ -13,6 +13,11 @@
 //! station takes no copy in a format newer than it knows, and none in a
 //! format older than the copy it holds.
 //!
+//! Format 2 added the list of uploaded fonts (fonts.rs). A document is in
+//! format 1 until a font is uploaded, so a fleet with a station from before
+//! uploaded fonts keeps sharing its themes until then; from then on that
+//! station keeps the copy it has until it is updated.
+//!
 //! Everything in it arrives from a file the owner imported or from another
 //! station, so it is data and is checked here: a colour is `#` and hex
 //! digits, a number is within its range, a font is a short name, and a
@@ -30,7 +35,7 @@ use crate::paths::{new_id, now_ms};
 use crate::project::valid_name;
 
 /// The newest shape of the document this version reads and writes.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 const MAX_THEMES: usize = 64;
 const MAX_LAYOUTS: usize = 256;
@@ -118,7 +123,7 @@ fn is_colour(v: &str) -> bool {
 
 /// A font's name: letters, digits, space, `-`, `_` and `.`. No quote, comma,
 /// semicolon, bracket or slash, so a name cannot end the value it is put in.
-fn is_font_name(v: &str) -> bool {
+pub(crate) fn is_font_name(v: &str) -> bool {
     !v.is_empty()
         && v.len() <= MAX_FONT_NAME
         && v.trim() == v
@@ -263,6 +268,10 @@ pub struct Look {
     pub deck: Choice,
     pub layouts: BTreeMap<String, Choice>,
     pub panes: BTreeMap<String, Choice>,
+    /// Font files the owner uploaded (format 2). The files themselves are
+    /// kept beside the document, by id: see fonts.rs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fonts: Vec<crate::fonts::Font>,
 }
 
 impl Look {
@@ -304,6 +313,7 @@ impl Look {
             deck: self.deck.clean()?,
             layouts: level(self.layouts, is_layout_key, "layout")?,
             panes: level(self.panes, is_pane_key, "pane")?,
+            fonts: crate::fonts::clean_list(self.fonts)?,
         })
     }
 
@@ -349,7 +359,7 @@ impl Daemon {
     /// The owner's change path, as `deck_change` is for the deck document.
     /// `change` returns what to put in the ship's log, or nothing when the
     /// document is already as asked.
-    fn look_change(
+    pub(crate) fn look_change(
         &self,
         by: &str,
         change: impl FnOnce(&mut Look) -> Result<Option<Value>>,
@@ -374,7 +384,9 @@ impl Daemon {
             });
             drop(here);
             let mut look = look.clean().map_err(invalid)?;
-            look.format = FORMAT;
+            // Never back to an older format: a station holding this copy
+            // would then refuse the next one.
+            look.format = look.format.max(if look.fonts.is_empty() { 1 } else { 2 });
             look.updated_ms = now_ms().max(look.updated_ms + 1);
             self.look_write(&look)?;
             self.record("look.changed", None, None, None, Some(by), what);
@@ -404,7 +416,12 @@ impl Daemon {
                 continue;
             };
             let theirs = theirs.as_u64().unwrap_or(0);
-            if peer.state != "online" || (only_if_older_than > 0 && theirs >= only_if_older_than) {
+            // A station that reads only an older format would refuse this copy.
+            let reads = peer.info.pointer("/look/format").and_then(|f| f.as_u64());
+            if peer.state != "online"
+                || reads < Some(look.format as u64)
+                || (only_if_older_than > 0 && theirs >= only_if_older_than)
+            {
                 continue;
             }
             let _ = self
@@ -598,6 +615,13 @@ impl Daemon {
             None,
             json!({"updated_ms": look.updated_ms}),
         );
+        // It may name fonts this station does not hold: ask the sender.
+        if !look.fonts.is_empty() {
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                let (d, from) = (self.clone(), from.to_string());
+                rt.spawn(async move { d.look_fonts_sync(Some(&from)).await });
+            }
+        }
         Ok(json!({"station": self.station, "ok": true, "updated_ms": look.updated_ms}))
     }
 
@@ -607,6 +631,7 @@ impl Daemon {
         if mine.updated_ms > 0 {
             self.look_send(&mine, mine.updated_ms).await;
         }
+        self.look_fonts_sync(None).await;
     }
 }
 

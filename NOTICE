@@ -35,6 +35,65 @@ crates/web/assets/vendor/xterm.js, addon-fit.js and addon-unicode11.js
 (@xterm/addon-unicode11 0.8.0) are xterm.js, MIT licence; see
 crates/web/assets/vendor/XTERM-LICENSE.txt.
 
+Bundled fonts
+
+crates/web/assets/fonts/SymbolsNerdFontMono-Regular-3.5.1.woff2 is "Symbols
+Nerd Font Mono" from Nerd Fonts v3.5.1 (https://github.com/ryanoasis/nerd-fonts,
+the NerdFontsSymbolsOnly archive), unchanged except for being packed as WOFF2.
+The Control Deck draws prompt icons and powerline signs from it on a device
+that has no Nerd Font. Copyright (c) 2014 Ryan L McIntyre. MIT licence.
+
+crates/web/assets/fonts/SpandeckPowerline-3.5.1.woff2 is made from the same
+release (SymbolsNerdFont-Regular.ttf) by scripts/make-powerline-font.py: only
+the powerline separators, U+E0B0 to U+E0D7, each scaled in width and height to
+fit a terminal cell. Those glyphs are from Powerline Symbols and Powerline
+Extra Symbols, both MIT, listed below.
+
+The font is a collection of icon sets, each under its own licence. As listed
+in the release's own README:
+
+  Codicons                https://github.com/microsoft/vscode-codicons
+                          0.0.45. CC BY 4.0.
+  Devicons                https://github.com/devicons/devicon
+                          2.17.0. MIT.
+  extraglyphs             https://github.com/source-foundry/Hack
+                          MIT.
+  Font Awesome            https://github.com/FortAwesome/Font-Awesome
+                          6.5.1. CC BY 4.0.
+  Font Awesome Extension  https://github.com/AndreLZGava/font-awesome-extension
+                          0.0.3. MIT.
+  Font Logos              https://github.com/lukas-w/font-logos
+                          1.3.0. Listed by Nerd Fonts as "unlicensed".
+  MaterialDesign          https://github.com/Templarian/MaterialDesign-Font
+                          6 Oct 2022. Apache 2.0.
+  Octicons                https://github.com/primer/octicons
+                          18.3.0. MIT.
+  Seti and original       https://github.com/jesseweed/seti-ui
+                          0.8.1. MIT.
+  Pomicons                https://github.com/gabrielelana/pomicons
+                          1.001. SIL OFL 1.1, with a reserved font name.
+  Powerline Extra         https://github.com/ryanoasis/powerline-extra-symbols
+                          1.200. MIT.
+  Powerline Symbols       https://github.com/powerline/powerline
+                          1.000 (about 2013). MIT.
+  Power Symbols IEC       https://github.com/jloughry/Unicode
+                          February 2015. MIT.
+  Weather Icons           https://github.com/erikflowers/weather-icons
+                          2.0.10 (1.100). SIL OFL 1.1.
+
+Font Logos has no open licence that Nerd Fonts could name, and what it holds
+is the logos of Linux distributions and other projects (U+F300 to U+F381).
+Those logos are trademarks of their owners. spandeck ships them only as part
+of the unchanged font, draws one only where a program in a pane prints it, and
+is not affiliated with or endorsed by any of the projects.
+
+The glyphs of Pomicons are shipped under the font's own name ("Symbols Nerd
+Font Mono"), as Nerd Fonts released them; spandeck's name for the family in
+its style sheet ("Spandeck Symbols") is not a name of the font file.
+
+Fonts the owner uploads in the Appearance editor are the owner's files. They
+are kept on the owner's stations and are not part of spandeck.
+
 Colour palettes
 
 The Control Deck's built-in themes (crates/web/assets/look.js) include these

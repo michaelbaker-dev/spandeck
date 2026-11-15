@@ -55,6 +55,7 @@ const PEER_METHODS: &[&str] = &[
     "setup.push",
     "deck.push",
     "look.push",
+    "look.font.fetch",
     "station.info",
     "relay.accept",
     "stop.apply",
@@ -981,6 +982,21 @@ impl Daemon {
                     p(params.get("look").ok_or_else(|| invalid("missing look"))?)?;
                 self.look_push(look, by)?
             }
+            // Uploaded fonts. Adding and removing are the owner's; a station
+            // may only ask for the file of a font the document names.
+            "look.font.add" => {
+                let data = base64::engine::general_purpose::STANDARD
+                    .decode(s(&params, "data_b64")?)
+                    .map_err(|_| invalid("data_b64 is not base64"))?;
+                self.look_font_add(
+                    s(&params, "name")?,
+                    opt(&params, "face").unwrap_or("regular"),
+                    &data,
+                    by,
+                )?
+            }
+            "look.font.remove" => self.look_font_remove(s(&params, "id")?, by)?,
+            "look.font.fetch" => self.look_font_fetch(s(&params, "id")?)?,
             "setup.push" => {
                 let setup: crate::setup::AgentSetup = p(params
                     .get("setup")

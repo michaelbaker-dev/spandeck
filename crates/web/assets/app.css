@@ -38,6 +38,26 @@
   --needs-bg: color-mix(in srgb, var(--amber) 20%, var(--bg)); --err-bg: color-mix(in srgb, var(--red) 20%, var(--bg)); --done-bg: color-mix(in srgb, var(--green) 15%, var(--bg));
   --veil: color-mix(in srgb, var(--bg) 62%, transparent); --zone: color-mix(in srgb, var(--blue) 18%, transparent); --mic: var(--red); --mark: var(--text); --mark-white: var(--text); --ink: var(--bg);
 }
+/* Prompt icons and powerline signs, for a device with no Nerd Font: the
+   symbols of Nerd Fonts 3.5.1 (see NOTICE), last in every terminal's font
+   list (look.js). Only the private-use characters those icons live at and
+   the power signs are taken from them, so the browser fetches a file when one
+   of them is on screen and not before, and no letter, emoji or box-drawing
+   line is ever drawn from them.
+   The icons: every glyph in that file is one em wide, so at 60% each is as
+   wide as one cell of a monospace font.
+   The powerline separators (U+E0B0 to E0D7) have to be as tall as the row
+   and as wide as the cell, which no setting here can do to the glyphs of a
+   fallback font. They come from a second, small file: the same glyphs
+   already fitted to a cell (scripts/make-powerline-font.py). */
+@font-face {
+  font-family: "Spandeck Symbols"; src: url("fonts/SymbolsNerdFontMono-Regular-3.5.1.woff2") format("woff2"); font-display: swap; size-adjust: 60%;
+  unicode-range: U+23FB-23FE, U+2B58, U+E000-E00A, U+E0A0-E0A3, U+E200-E2A9, U+E300-E3E3, U+E5FA-E6BB, U+E700-E958, U+EA60-EC84, U+ED00-F385, U+F400-F533, U+F0001-F1AF0;
+}
+@font-face {
+  font-family: "Spandeck Symbols"; src: url("fonts/SpandeckPowerline-3.5.1.woff2") format("woff2"); font-display: swap;
+  unicode-range: U+E0B0-E0C8, U+E0CA, U+E0CC-E0D2, U+E0D4, U+E0D6-E0D7;
+}
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body { background: var(--bg); color: var(--text); font: calc(13px * var(--ui-scale))/1.45 var(--ui-font); overflow: hidden; }
@@ -99,7 +119,7 @@ input, select, textarea { width: 100%; } textarea { resize: vertical; }
 .tile-stats { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; } .tile-stats .needs { color: var(--amber); }
 .agent-line { display: flex; gap: 8px; align-items: center; min-width: 0; } .agent-line .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .needs-line { color: var(--amber); font-size: calc(12px * var(--ui-scale)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.thumb { margin: 0; height: 168px; overflow: hidden; font: 9px/12px ui-monospace, Menlo, Consolas, monospace; color: var(--thumb-text); background: var(--bg); border-radius: 6px; padding: 6px; white-space: pre; }
+.thumb { margin: 0; height: 168px; overflow: hidden; font: calc(9px * var(--ui-scale))/1.34 ui-monospace, Menlo, Consolas, monospace, "Spandeck Symbols"; color: var(--thumb-text); background: var(--bg); border-radius: 6px; padding: 6px; white-space: pre; }
 .stops { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 .stop { border-radius: 6px; padding: 1px 8px; border: 1px solid var(--line); }
 .stop.confirmed { color: var(--green); } .stop.requested { color: var(--blue); } .stop.unreachable { color: var(--red); border-style: dashed; }
@@ -185,7 +205,7 @@ button.toggle { padding: 2px 10px; } button.toggle.on { background: var(--toggle
 .approval { background: var(--panel2); border: 1px solid var(--amber); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
 .table { width: 100%; border-collapse: collapse; } .table th, .table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .table th { color: var(--muted); font-weight: 500; font-size: calc(12px * var(--ui-scale)); }
-.diff, .stat { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow: auto; max-height: 60vh; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; margin: 0 0 10px; }
+.diff, .stat { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow: auto; max-height: 60vh; font: calc(12px * var(--ui-scale))/1.45 ui-monospace, Menlo, Consolas, monospace; margin: 0 0 10px; }
 .diff .add { color: var(--green); } .diff .del { color: var(--red); } .diff .hunk { color: var(--violet); } .diff .file { color: var(--blue); font-weight: 600; }
 #toasts { position: fixed; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 8px; max-width: min(440px, 92vw); }
 .toast { background: var(--panel2); border: 1px solid var(--line); border-left: 3px solid var(--blue); border-radius: 8px; padding: 8px 12px; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
@@ -211,7 +231,7 @@ button.toggle { padding: 2px 10px; } button.toggle.on { background: var(--toggle
 /* Phone: talk to a pane */
 .composer { display: flex; flex-direction: column; gap: 8px; position: sticky; bottom: 0; background: var(--bg, #111); padding: 8px 0 calc(4px + env(safe-area-inset-bottom)); }
 .composer .keys { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
-.composer .key { min-width: 0; min-height: 44px; padding: 0; font: 500 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.composer .key { min-width: 0; min-height: 44px; padding: 0; font: 500 calc(13px * var(--ui-scale)) ui-monospace, SFMono-Regular, Menlo, monospace; }
 .composer-row { display: flex; gap: 8px; align-items: flex-end; }
 .composer-box { flex: 1; min-height: 48px; max-height: 40dvh; font-size: 16px; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: inherit; resize: vertical; }
 .composer-row button { min-height: 48px; min-width: 56px; }
@@ -355,7 +375,7 @@ button.agent-row:hover { border-color: var(--blue); }
 .add-row { cursor: pointer; justify-content: center; } .add-row.phone-station { border-style: dashed; }
 .add-dialog p { margin: 0 0 8px; } .add-dialog form { margin-top: 12px; } .add-dialog input { width: 100%; font-size: 16px; }
 .add-machine { gap: 8px; flex-wrap: wrap; min-height: 40px; }
-.add-log { margin: 8px 0 0; max-height: 220px; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: 11px/15px ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.add-log { margin: 8px 0 0; max-height: 220px; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: calc(11px * var(--ui-scale))/1.36 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
 .add-log:empty { display: none; }
 .add-steps { list-style: none; padding: 0; margin: 8px 0; display: flex; flex-direction: column; gap: 4px; }
 .add-steps li { display: flex; gap: 8px; align-items: center; color: var(--muted); } .add-steps li.now { color: var(--text); font-weight: 600; } .add-steps li.done { color: var(--green); }
@@ -390,6 +410,10 @@ button.agent-row:hover { border-color: var(--blue); }
 .look-row input.bad { border-color: var(--red); } .look-hint { grid-column: 1 / -1; } .look-reset { padding: 0 2px; }
 .look-sample { background: var(--term-bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 0 4px 8px; overflow: auto; min-height: 60px; max-height: 42dvh; }
 .look-sample .xterm-viewport { overflow: hidden !important; }
+.look-fonts .look-note { grid-column: 1 / -1; } .look-note:empty { display: none; }
+.look-uploaded { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; } .look-uploaded h4 { margin: 4px 0 0; font-size: calc(12px * var(--ui-scale)); font-weight: 600; }
+.look-font { display: flex; align-items: center; gap: 8px; min-height: 26px; } .look-font b { overflow-wrap: anywhere; } .look-font .grow { flex: 1; min-width: 0; }
+.look-adder { flex-wrap: wrap; } .look-adder[hidden], .look-picker[hidden] { display: none; } .look-adder input { flex: 1; min-width: 120px; } .look-picker { margin-bottom: 8px; } .look-picker select { flex: 1; min-width: 0; }
 .look-foot { flex: none; flex-wrap: wrap; margin-top: 0; } .look-foot [hidden] { display: none; }
 @media (max-width: 760px) {
   .backdrop.beside { padding: 8px 0 0; place-items: start center; } .backdrop.beside > .dialog { height: calc(100dvh - 16px); }

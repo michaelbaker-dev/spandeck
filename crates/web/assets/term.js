@@ -6,7 +6,10 @@
 //
 // How a terminal looks (colours, font, cursor) is a look (look.js). A font
 // change follows the sizing rule: the client in control fits the pane again
-// and tells the station; anyone else only scales what it shows.
+// and tells the station; anyone else only scales what it shows. A font that
+// finishes loading after the terminal was drawn (an uploaded font, the
+// symbols font) is the same case: the terminal measured its cells with the
+// font that stood in for it, so it measures again and then does as above.
 
 import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge } from './ui.js';
 import { paneIcon, iconName } from './icons.js';
@@ -20,6 +23,12 @@ export function newTerminal(options) {
   term.loadAddon(new Unicode11Addon.Unicode11Addon());
   term.unicode.activeVersion = '11';
   return term;
+}
+
+export function remeasureTerminal(term) {
+  const family = term.options.fontFamily;
+  term.options.fontFamily = 'monospace';
+  term.options.fontFamily = family;
 }
 
 export class PaneTerm {
@@ -243,6 +252,17 @@ export class PaneTerm {
     // Another window in control of the same pane does the same and arrives at
     // the same size, which `resizedBy` does not take for a loss of control.
     if (sizing && this.term.element) { clearTimeout(this._rt); this._rt = setTimeout(() => this.layout(), 60); }
+  }
+
+  // A font this terminal names has just finished loading. The terminal
+  // measures a cell when its font option changes and at no other time, and
+  // keeps the width of every character it has drawn; so the option is
+  // changed and put back, which makes it do both again. Then the sizing
+  // rule, exactly as for a font change.
+  remeasure() {
+    if (this.disposed || !this.term.element) return;
+    remeasureTerminal(this.term);
+    this.layout();
   }
 
   // Someone else resized the pane: they have control now, we letterbox.

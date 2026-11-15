@@ -871,7 +871,9 @@ fn a_dialog_keeps_the_keyboard_while_a_pane_is_open() {
 /// is on the station and on the page, and still after a reload; a pane given
 /// its own look shows it beside a pane that follows the deck; a pane's
 /// program can change none of it; a value that is more than a colour is
-/// refused by the station; and a closed pane's look is forgotten.
+/// refused by the station; and a closed pane's look is forgotten. Fonts (the
+/// same day's request): a file that is not a font is refused, and a pane's
+/// program can neither add a font nor take one away.
 #[test]
 #[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn a_saved_theme_is_used_again_and_a_panes_own_look_wins() {
@@ -983,6 +985,11 @@ fn a_saved_theme_is_used_again_and_a_panes_own_look_wins() {
         ("look.theme.save", json!({"theme": {"name": "Theirs"}})),
         ("look.theme.remove", json!({"id": mine["id"]})),
         ("look.push", json!({"look": {"updated_ms": u64::MAX}})),
+        (
+            "look.font.add",
+            json!({"name": "Theirs", "data_b64": "d09GMgAA"}),
+        ),
+        ("look.font.remove", json!({"id": "0".repeat(32)})),
     ] {
         assert_eq!(
             s.call_as_pane(&one, method, params).unwrap_err().code,
@@ -994,6 +1001,12 @@ fn a_saved_theme_is_used_again_and_a_panes_own_look_wins() {
     let bad = json!({"theme": {"name": "Bad", "settings": {"deck.bg": "#fff;}</style><script>alert(1)</script>"}}});
     assert_eq!(
         s.try_call("look.theme.save", bad).unwrap_err().code,
+        "invalid"
+    );
+    // "<svg onload=…>" under a font's name is not a font.
+    let not_a_font = json!({"name": "Mine", "data_b64": "PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+"});
+    assert_eq!(
+        s.try_call("look.font.add", not_a_font).unwrap_err().code,
         "invalid"
     );
     // A pane that is closed takes its look with it.

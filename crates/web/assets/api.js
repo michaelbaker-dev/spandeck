@@ -133,6 +133,15 @@ export class Api {
     });
   }
 
+  // A file this station serves to its user (an uploaded font), over HTTP so
+  // that the browser keeps it. The token goes in a header, as it never goes
+  // in a URL.
+  async file(path) {
+    const res = await fetch(path, { headers: { authorization: 'Bearer ' + (localStorage.getItem('spandeck.token') || '') } });
+    if (!res.ok) throw Object.assign(new Error(`${path}: ${res.status}`), { status: res.status });
+    return res.arrayBuffer();
+  }
+
   // Fire and forget (keystrokes).
   send(method, params) {
     if (this.connected) this.ws.send(JSON.stringify({ id: null, method, params }));

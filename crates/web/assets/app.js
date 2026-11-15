@@ -13,7 +13,7 @@ import { Api } from './api.js';
 import { PaneTerm } from './term.js';
 import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText } from './ui.js';
 import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
-import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage } from './look.js';
+import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners } from './look.js';
 import { lookEditor } from './lookedit.js';
 
 // The page opens in the look this browser last had, before anything is asked.
@@ -114,7 +114,12 @@ async function loadLook() {
   try { setDoc(await api.call('look.get')); } catch (e) { return; }
   // What is being tried in the editor is not what to open with next time.
   if (!lookState.preview) rememberPage(pageLook(null));
+  // The fonts the owner uploaded, from this station. Not waited for: a
+  // terminal shows in the next font of its list until one arrives.
+  loadFonts((id) => api.file('/api/font/' + id));
 }
+// A font arrived after terminals were drawn with another in its place.
+fontListeners.add(() => { for (const t of S.terms.values()) t.remeasure(); });
 
 // Show every look again: the page's (the deck's, or the layout's on screen)
 // and each terminal's. Called on every redraw and by the Appearance editor
@@ -2359,11 +2364,12 @@ function phonePaneView(st, id) {
   const sig = `${fitted}|${p.exited}|${canStop}|${brief}`;
   if (v.sig !== sig) {
     v.sig = sig;
-    v.head.replaceChildren(h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'),
-      p.exited ? '' : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: (e) => { e.currentTarget.blur(); fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
+    // replaceChildren would print a missing piece as the word "null".
+    v.head.replaceChildren(...[h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'),
+      p.exited ? null : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: (e) => { e.currentTarget.blur(); fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
       brief ? h('button', { class: 'phone-usage', title: usageTitle(p.usage), 'aria-label': `Usage: ${brief}`, onclick: (e) => { e.currentTarget.blur(); usageDialog(st, p); } }, brief, h('span', { class: 'muted' }, ' ›')) : null,
       h('span', { class: 'grow' }),
-      h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(st, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn'));
+      h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(st, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn')].filter(Boolean));
   }
   if (v.slot.firstChild !== t.el) v.slot.replaceChildren(t.el);
   const foot = p.exited ? (v.ended ||= h('p', { class: 'muted small' }, 'This pane has ended.')) : composer(st, p);

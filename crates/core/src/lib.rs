@@ -20,6 +20,7 @@
 //!   setup     fleet-wide agent setup: MCP servers, skills, model defaults
 //!   deck      fleet-wide deck document: global layouts and pins
 //!   look      fleet-wide look document: themes, and what the deck, a layout or a pane uses
+//!   fonts     font files the owner uploaded: checked, kept by content id, fetched between stations
 //!   vault     AgentVault: station token, key use through the vault's proxy
 //!   usage     what each pane's agent has used, and the station's totals
 //!   prices    the public list of model prices and context windows, fetched daily
@@ -33,6 +34,7 @@ pub mod db;
 pub mod deck;
 pub mod doctor;
 pub mod fleet;
+pub mod fonts;
 pub mod git;
 pub mod hooks;
 pub mod http;
