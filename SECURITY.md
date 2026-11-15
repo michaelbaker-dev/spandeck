@@ -159,6 +159,32 @@ days, not hours.
   an answer to an approval, and what those change is held in memory until it can be
   written: if the daemon ends first, a pause or the record of who approved is lost, and
   you were told it was not saved (15 Nov 2026).
+- A station keeps the answers to changes for two minutes, so that a command or an
+  agent's tool that asks again after losing its connection is given the first answer
+  and the change is made once (15 Nov 2026). They are rows of the station's own
+  database (`kv`, keys beginning `rid:` and `stoprid:`), readable only by your user:
+  the method, a SHA-256 of the parameters (never the parameters), the answer, the time.
+  What is in them is what the caller was already told: a pane's description, a
+  message's id, the messages an `inbox` call returned (which the database holds
+  anyway), a project's description. Who can be answered from a row: only the caller it
+  was made for (you, from any of your clients or through any station of your fleet; or
+  one agent's pane, told apart by its token, never by anything the request says), and
+  only for the same method with the same parameters. An id used for anything else is
+  refused. An agent cannot read or plant a row of yours or of another agent, and its
+  own hook is never answered from a row. A station of your fleet can ask as you, as it
+  always could (`rpc.forward`); it gets nothing from a row that it could not get by
+  asking. Never in a row: an answer that carries a token (`fleet.remove`,
+  `fleet.uninstall`), a call whose parameters are a password (`fleet.add`: not even
+  their hash), what the vault's proxy returned, the agent setup, what was typed or
+  pasted, a hook; and any answer with a field named like a secret is dropped before it
+  is written. The ids are 128 random bits made by the calling program. Rows are
+  bounded (1,024 for one caller, 8,192 for the station, 32 MB of answers; an agent that
+  fills its own cannot fill yours) and deleted after two minutes; a
+  station killed in between leaves them until it next runs. The same rows, when the
+  database had not taken them, travel to the next daemon at an upgrade in the private
+  file described above. Known limit: a second try is believed about how long ago its
+  first was made; a caller that lies about it can only cause its own change to be made
+  twice, which it could do by asking twice.
 - `remote_start = true` lets a station run a start command on your other machines over
   Tailscale SSH. It is off by default; what it may do there is governed by your
   Tailscale SSH rules, not by spandeck.

@@ -39,6 +39,18 @@ pub struct TailnetSelf {
     pub ips: Vec<String>,
 }
 
+/// What became of a call to another station that did not give a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sent {
+    /// No connection was made: the station was sent nothing.
+    No,
+    /// The request went out and no answer, or no readable one, came back:
+    /// it may have been carried out.
+    Maybe,
+    /// The station answered, with an error.
+    Answered,
+}
+
 /// Who is on the other end of a connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Remote {
@@ -304,6 +316,21 @@ impl FleetState {
         self.post(addr, method, params, None).await
     }
 
+    /// `call`, for a caller that must know whether a call that failed may
+    /// have arrived: the error says which it was.
+    pub async fn call_sent(
+        &self,
+        station: &str,
+        method: &str,
+        params: Value,
+    ) -> std::result::Result<Value, (Sent, String)> {
+        let peer = self
+            .peer(station)
+            .ok_or_else(|| (Sent::No, format!("station {station} is not in the fleet")))?;
+        self.post_sent(&peer.addr, method, params, Some(self.trust.key()))
+            .await
+    }
+
     async fn post(
         &self,
         addr: &str,
@@ -311,6 +338,18 @@ impl FleetState {
         params: Value,
         key: Option<Vec<u8>>,
     ) -> std::result::Result<Value, String> {
+        self.post_sent(addr, method, params, key)
+            .await
+            .map_err(|(_, why)| why)
+    }
+
+    async fn post_sent(
+        &self,
+        addr: &str,
+        method: &str,
+        params: Value,
+        key: Option<Vec<u8>>,
+    ) -> std::result::Result<Value, (Sent, String)> {
         let body =
             json!({"method": method, "params": params, "from": self.station, "protocol": PROTOCOL})
                 .to_string()
@@ -339,13 +378,18 @@ impl FleetState {
                 "no answer"
             };
             self.perf.link_call(addr, began.elapsed(), Some(why));
-            format!("unreachable: {e}")
+            // No connection was made: nothing was sent.
+            let sent = match e.is_connect() {
+                true => Sent::No,
+                false => Sent::Maybe,
+            };
+            (sent, format!("unreachable: {e}"))
         })?;
         let status = resp.status();
         let body: Value = resp.json().await.map_err(|e| {
             self.perf
                 .link_call(addr, began.elapsed(), Some("bad reply"));
-            format!("bad reply: {e}")
+            (Sent::Maybe, format!("bad reply: {e}"))
         })?;
         let refused = match body.pointer("/error/code").and_then(|c| c.as_str()) {
             Some("clock") => Some("clock"),
@@ -354,14 +398,16 @@ impl FleetState {
         };
         self.perf.link_call(addr, began.elapsed(), refused);
         if let Some(err) = body.get("error") {
-            return Err(err
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("error")
-                .to_string());
+            return Err((
+                Sent::Answered,
+                err.get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("error")
+                    .to_string(),
+            ));
         }
         if !status.is_success() {
-            return Err(format!("HTTP {status}"));
+            return Err((Sent::Answered, format!("HTTP {status}")));
         }
         Ok(body.get("result").cloned().unwrap_or(Value::Null))
     }
@@ -888,6 +934,7 @@ impl Daemon {
         scope: &str,
         by: &str,
         marks: crate::holds::StopMarks,
+        rid_key: Option<&str>,
     ) -> Result<Value> {
         let issued = now_ms();
         // The fleet is its members: a machine that has not joined cannot
@@ -922,6 +969,11 @@ impl Daemon {
         }
         let book = &self.stops.book;
         let ids = book.issue(&targets, scope, by, issued);
+        // Asked with a request id: a second try of the same request is
+        // given these stops, and issues none. Not waited for (rids.rs).
+        if let Some(key) = rid_key {
+            self.rids.stop_issued(key, &ids, issued);
+        }
         let (here, there): (Vec<_>, Vec<_>) = ids
             .iter()
             .zip(&targets)

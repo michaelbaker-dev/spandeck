@@ -24,6 +24,10 @@ struct Cli {
     /// Print raw JSON instead of a summary.
     #[arg(long, global = true)]
     json: bool,
+    /// Do not wait for spandeckd when it is not answering (an upgrade or
+    /// a restart is a moment; a command otherwise waits up to 5 seconds).
+    #[arg(long, global = true)]
+    no_wait: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -411,8 +415,16 @@ fn main() {
     std::process::exit(code);
 }
 
-fn connect(paths: &Paths) -> anyhow::Result<Client> {
-    Ok(Client::from_env(paths)?)
+/// The connection a command makes its calls on. While spandeckd is away
+/// (an upgrade, a restart) a call waits for it, five seconds at most, and
+/// says so after one; a change whose answer was lost is not made twice
+/// (core/client.rs). `--no-wait`: one try, as before.
+fn connect(paths: &Paths, no_wait: bool) -> anyhow::Result<Client> {
+    use spandeck_core::client::{CLI_NOTICE, CLI_WAIT};
+    if no_wait {
+        return Ok(Client::from_env(paths)?);
+    }
+    Ok(Client::from_env_retrying(paths, CLI_WAIT)?.notice(CLI_NOTICE, "waiting for spandeckd…"))
 }
 
 fn show(json_out: bool, v: &Value, summary: impl FnOnce(&Value) -> String) {
@@ -487,7 +499,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         _ => {}
     }
 
-    let mut c = connect(&paths)?;
+    let mut c = connect(&paths, cli.no_wait)?;
     c.set_timeout(Some(Duration::from_secs(3700)));
     match cli.cmd {
         Cmd::Status => {

@@ -559,6 +559,21 @@ impl Daemon {
         method: &str,
         params: Value,
     ) -> Result<Value> {
+        self.dispatch_timed_rid(kind, waited, caller, method, params, None)
+            .await
+    }
+
+    /// `dispatch_timed` for a request that came with an id beside its
+    /// token (rids.rs): a change is done once, a second try answered.
+    pub async fn dispatch_timed_rid(
+        &self,
+        kind: Kind,
+        waited: Option<Duration>,
+        caller: &Caller,
+        method: &str,
+        params: Value,
+        retry: Option<crate::rids::Retry>,
+    ) -> Result<Value> {
         let gateway = matches!(method, "peer.call" | "rpc.forward");
         let text = |key: &str| {
             gateway
@@ -567,7 +582,7 @@ impl Daemon {
         };
         let (inner, station) = (text("method"), text("station"));
         let began = Instant::now();
-        let out = self.dispatch(caller, method, params).await;
+        let out = self.dispatch_rid(caller, method, params, retry).await;
         self.perf.request(
             kind,
             method,

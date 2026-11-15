@@ -4,6 +4,12 @@
 //!   -> {"id":1,"token":"…","method":"pane.list","params":{}}
 //!   <- {"id":1,"result":[…]}            or  {"id":1,"error":{"code":"…","message":"…"}}
 //!
+//! A caller that may ask twice puts a request id beside its token, made
+//! once (`"rid":"<16 to 64 letters, digits, - or _>"`), and on a second try
+//! how long ago the first was written (`"again_ms":1200`): a change is
+//! then carried out once, and the second try is given the first one's
+//! answer, or told `outcome_unknown` (rids.rs).
+//!
 //! `events.subscribe` turns the connection into a stream of {"event":{…}}.
 //! The stream is not durable: a slow subscriber gets {"events_lost":n} and
 //! should re-read whatever state it shows.
@@ -111,8 +117,23 @@ async fn connection(daemon: Daemon, stream: Stream) -> std::io::Result<()> {
                 }
             }
         }
+        let retry = match crate::rids::Retry::parse(req.get("rid"), req.get("again_ms")) {
+            Ok(retry) => retry,
+            Err(why) => {
+                let out = json!({"id": id, "error": {"code": "invalid", "message": why}});
+                write.write_all(format!("{out}\n").as_bytes()).await?;
+                continue;
+            }
+        };
         let out = match daemon
-            .dispatch_timed(crate::perf::Kind::Local, None, &caller, &method, params)
+            .dispatch_timed_rid(
+                crate::perf::Kind::Local,
+                None,
+                &caller,
+                &method,
+                params,
+                retry,
+            )
             .await
         {
             Ok(result) => json!({"id": id, "result": result}),
