@@ -105,7 +105,20 @@ fn a_deck_opened_on_either_station_shows_the_same() {
     );
     assert_eq!(on_alpha, json!([scratch]));
 
-    // The same from the other side: the inbox, and the layout.
+    // ---- Fault 6: what the owner chose about the deck was kept by each
+    // browser for each station. A part of the list folded on alpha's deck
+    // is folded on bravo's.
+    let folded = page.wait(
+        "a part of the list to fold",
+        "(c => c ? (c.click(), document.querySelector('.caret').getAttribute('aria-label')) : null)(document.querySelector('.caret[aria-expanded=true]'))",
+    );
+    assert!(folded.as_str().unwrap().starts_with("Show "), "{folded}");
+    wait_for("the choice to be the fleet's", 10, || {
+        let at = |s: &Station| s.call("prefs.get", json!({}))["values"]["side.folded"].clone();
+        (at(&a).as_array().is_some_and(|f| f.len() == 1) && at(&a) == at(&b)).then_some(())
+    });
+
+    // The same from the other side: the inbox, the layout, the list.
     a.call("msg.send", json!({"to": "you", "body": "deploy is done"}));
     page.visit(&b);
     page.wait(
@@ -118,6 +131,11 @@ fn a_deck_opened_on_either_station_shows_the_same() {
         &format!("(p => p.length ? p : null)({shown})"),
     );
     assert_eq!(on_bravo, on_alpha);
+    assert_eq!(
+        page.js("document.querySelector('.caret').getAttribute('aria-label')"),
+        folded,
+        "folded on bravo's deck too"
+    );
 
     // ---- Fault 2: the owner at a deck counted as "at a keyboard" for the
     // station serving it only, so the others pushed to the phone meanwhile.

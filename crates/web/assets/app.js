@@ -102,6 +102,7 @@ async function refresh() {
   // Always from the station the deck was opened on: every station has the same copy.
   try { S.deck = await api.call('deck.get'); } catch (e) { /* keep */ }
   await loadLook();
+  await loadPrefs();
   S.loaded = true;
   update();
   vaultAtOpen();
@@ -190,7 +191,7 @@ api.onEvent((ev) => {
   // Raised here, or at another station of the fleet, which told this one.
   if (ev.kind === 'notify.new') { announced.add(`${ev.data.station}/${ev.data.id}`); notifyBrowser(ev.data); }
   if (ev.kind === 'connection.restored') { for (const t of S.terms.values()) t.attach(); }
-  if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events|vault|trust|deck|look)\./.test(ev.kind)) refreshSoon();
+  if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events|vault|trust|deck|look|prefs)\./.test(ev.kind)) refreshSoon();
 });
 
 const lastSaid = new Map(); // what was announced -> when, so one thing every station raised is said once
@@ -335,11 +336,10 @@ function newPaneDialog(st, project, then) {
     suggest();
     // An agent can go back to the last conversation it saved in the folder.
     // The station is asked whether there is one, so the dialog can say so
-    // before the pane is started. The tick is remembered in this browser.
-    let keep = false;
-    try { keep = localStorage.getItem(RESUME_LAST_KEY) === '1'; } catch (e) { /* no storage: not ticked */ }
-    const last = h('input', { type: 'checkbox', checked: keep, style: { width: 'auto' } });
-    last.addEventListener('change', () => { try { localStorage.setItem(RESUME_LAST_KEY, last.checked ? '1' : '0'); } catch (e) { /* not kept, then */ } });
+    // before the pane is started. The tick is one of the owner's
+    // preferences: remembered for every station and every browser.
+    const last = h('input', { type: 'checkbox', checked: pref('newPane.resumeLast', false) === true, style: { width: 'auto' } });
+    last.addEventListener('change', () => setPref('newPane.resumeLast', last.checked));
     const lastNote = h('small', { class: 'muted', style: { display: 'block', margin: '2px 0 0 24px' } });
     const lastRow = h('div', { style: { marginBottom: '10px' } }, h('label', { class: 'row' }, last, 'Continue the last conversation in this folder'), lastNote);
     let canContinue = true, asked = 0, askTimer = null;
@@ -378,7 +378,49 @@ function newPaneDialog(st, project, then) {
   });
 }
 
-const RESUME_LAST_KEY = 'spandeck.newPane.resumeLast';
+// ---- the owner's preferences ----
+// Small choices that follow the owner: the fleet keeps them in one document
+// (prefs.get, prefs.set), so they are the same on every station and in every
+// browser. Each station is its own web address, so what a browser keeps for
+// one it does not have for the next; the browser's copy is only what the
+// page opens with before the station has answered, and what is used on a
+// station from before preferences. What is the device's own is not here:
+// which pane a phone shows, drafts, fit-to-screen, the sign-in token.
+const PREF_LOCAL = { 'side.folded': 'spandeck.side.folded', 'newPane.resumeLast': 'spandeck.newPane.resumeLast' };
+function prefLocal(key) {
+  try {
+    const v = localStorage.getItem(PREF_LOCAL[key]);
+    if (v === null) return undefined;
+    return key === 'newPane.resumeLast' ? v === '1' : (JSON.parse(v) ?? undefined);
+  } catch (e) { return undefined; }
+}
+function prefKeep(key, value) {
+  try { localStorage.setItem(PREF_LOCAL[key], key === 'newPane.resumeLast' ? (value ? '1' : '0') : JSON.stringify(value)); } catch (e) { /* not kept, then */ }
+}
+const pref = (key, fallback) => S.prefs?.values?.[key] ?? prefLocal(key) ?? fallback;
+let prefSaving = 0;
+function setPref(key, value) {
+  prefKeep(key, value);
+  if (!S.prefs) return;
+  S.prefs.values = { ...S.prefs.values, [key]: value };
+  prefSaving += 1;
+  api.call('prefs.set', { key, value }).catch(() => {}).then(() => { prefSaving -= 1; });
+}
+async function loadPrefs() {
+  let doc;
+  try { doc = await api.call('prefs.get'); } catch (e) { S.prefs = null; return; }
+  if (prefSaving) return; // a change of this page's is on its way: not undone by an older answer
+  doc.values ||= {};
+  S.prefs = doc;
+  for (const key of Object.keys(PREF_LOCAL)) {
+    // What this browser chose before preferences followed the owner becomes
+    // the fleet's, once, if the fleet has none.
+    const mine = prefLocal(key);
+    if (doc.values[key] === undefined) { if (mine !== undefined) setPref(key, mine); } else prefKeep(key, doc.values[key]);
+  }
+  folded.clear();
+  for (const k of pref('side.folded', [])) folded.add(k);
+}
 
 // "2 hours ago", for a time that may be days back.
 function longAgo(ms) {
@@ -1450,11 +1492,12 @@ function paneTile(st, p) {
 // (each with its layouts, Watch and panes), then the global layouts. What is
 // selected in it is what the right-hand side shows.
 
-// Which groups are folded away is this browser's own business.
-const folded = new Set((() => { try { return JSON.parse(localStorage.getItem('spandeck.side.folded')) || []; } catch (e) { return []; } })());
+// Which groups are folded away is one of the owner's preferences: the same
+// on every station and in every browser.
+const folded = new Set(prefLocal('side.folded') || []);
 function fold(key) {
   if (!folded.delete(key)) folded.add(key);
-  try { localStorage.setItem('spandeck.side.folded', JSON.stringify([...folded])); } catch (e) { /* not kept, then */ }
+  setPref('side.folded', [...folded].slice(0, 256));
   render();
 }
 const caret = (key, what) => h('button', { class: 'caret', type: 'button', 'aria-expanded': String(!folded.has(key)), 'aria-label': `${folded.has(key) ? 'Show' : 'Hide'} ${what}`,
