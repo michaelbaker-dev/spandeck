@@ -603,6 +603,16 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
         "the phone view",
         "!!document.querySelector('main.phone .approval')",
     );
+    // A bug that happened (15 Nov 2026): the list is drawn again for every
+    // change, and each time it jumped back to the top while the owner was
+    // scrolling down it. Where it is scrolled to is kept.
+    page.js("document.getElementById('app').style.height = '220px'");
+    page.js("document.querySelector('main.phone').scrollTop = 90");
+    let top = "document.querySelector('main.phone').scrollTop";
+    assert_eq!(page.js(top), json!(90), "the list is long enough to scroll");
+    page.redraw(&s, &busy);
+    assert_eq!(page.js(top), json!(90), "still where it was scrolled to");
+    page.js("document.getElementById('app').style.height = '800px'");
     let text = page
         .js("document.querySelector('main.phone').innerText")
         .as_str()

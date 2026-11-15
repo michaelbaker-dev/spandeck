@@ -2985,6 +2985,7 @@ async function signIn() {
 
 // ------------------------------------------------------------------- render
 
+let drawnAt = null;
 function render() {
   if (!api.connected && api.authError) {
     if (S.signIn) return;
@@ -3005,8 +3006,17 @@ function render() {
   S.route = parseRoute();
   for (const t of S.terms.values()) t._used = false;
   const r = S.route;
-  // The list on the left is drawn again each time: keep where it was scrolled to.
+  // The page is drawn again for every change, every few seconds at least:
+  // whatever was scrolled stays where it was. (On a phone the list jumped
+  // back to the top while the owner was scrolling down to "Add a machine".)
+  // The list on the left keeps its place across views; the rest only while
+  // the same view is shown.
   const sideTop = document.querySelector('.sidebar')?.scrollTop || 0;
+  const sameView = drawnAt === location.hash;
+  drawnAt = location.hash;
+  const scrollKey = (e) => e.tagName + '.' + (e.classList[0] || '');
+  const scrolled = sameView ? [...root.querySelectorAll('*')].filter(e => e.scrollTop > 0 && !e.closest('.xterm, .sidebar')).map(e => [scrollKey(e), e.scrollTop]) : [];
+  const pageTop = sameView ? (document.scrollingElement?.scrollTop || 0) : 0;
   let main;
   if (isPhone()) main = phoneView();
   else if (r.view === 'pane') main = paneView(r.station, r.pane);
@@ -3022,6 +3032,11 @@ function render() {
   else root.replaceChildren(topbar(), ...kids);
   const side = document.querySelector('.sidebar');
   if (side && sideTop) side.scrollTop = sideTop;
+  for (const [key, top] of scrolled) {
+    const e = [...root.querySelectorAll(key.endsWith('.') ? key.slice(0, -1) : key)].find(x => !x.closest('.xterm, .sidebar'));
+    if (e) e.scrollTop = top;
+  }
+  if (pageTop && document.scrollingElement) document.scrollingElement.scrollTop = pageTop;
   for (const [key, t] of S.terms) if (!t._used) { t.dispose(); S.terms.delete(key); }
   // Each terminal has its look before it is first drawn.
   applyLook();
