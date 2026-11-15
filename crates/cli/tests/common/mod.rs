@@ -161,6 +161,44 @@ impl Station {
             .collect()
     }
 
+    /// Stations of one fleet that list each other as peers, each with its
+    /// own extra config and environment (given its own folder). Nothing is
+    /// waited for: the test says what it expects each to see.
+    pub fn fleet(
+        stations: &[&str],
+        each: impl Fn(&str, &Path) -> (String, Vec<(String, String)>),
+    ) -> Vec<Station> {
+        let ports: Vec<u16> = stations.iter().map(|_| free_port()).collect();
+        stations
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let others: Vec<String> = ports
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(_, port)| format!("\"127.0.0.1:{port}\""))
+                    .collect();
+                let mut s = Station::prepare(name, ports[i], "", &[]);
+                let (extra, env) = each(name, &s.root);
+                let root = s.root.clone();
+                let dir = s._dir.take();
+                s = Station::prepare_in(
+                    name,
+                    ports[i],
+                    &format!("peers = [{}]\n{extra}", others.join(", ")),
+                    root,
+                    dir,
+                );
+                s.env = env;
+                std::fs::create_dir_all(s.root.join("state")).unwrap();
+                std::fs::write(s.root.join("state/fleet.key"), "5a".repeat(32)).unwrap();
+                s.launch();
+                s
+            })
+            .collect()
+    }
+
     /// How this station sees another one, after looking again.
     pub fn sees(&self, other: &str) -> Option<String> {
         self.call("fleet.refresh", json!({}))["stations"]
@@ -221,6 +259,21 @@ impl Station {
     fn prepare(name: &str, port: u16, extra: &str, env: &[(&str, &str)]) -> Station {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
+        let mut s = Station::prepare_in(name, port, extra, root, Some(dir));
+        s.env = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        s
+    }
+
+    fn prepare_in(
+        name: &str,
+        port: u16,
+        extra: &str,
+        root: PathBuf,
+        dir: Option<tempfile::TempDir>,
+    ) -> Station {
         std::fs::create_dir_all(root.join("config")).unwrap();
         std::fs::create_dir_all(root.join("home")).unwrap();
         std::fs::create_dir_all(root.join("fake")).unwrap();
@@ -241,6 +294,12 @@ impl Station {
         } else {
             "prices.auto = false\n"
         };
+        // A test that stands in for the `tailscale` command says so itself.
+        let discovery = if extra.contains("discovery =") {
+            ""
+        } else {
+            "discovery = false\n"
+        };
         // A program that only waits stands in for the keep-awake helper.
         let wait = if spandeck_terminal::sys::WINDOWS {
             r#"["ping", "-n", "300", "127.0.0.1"]"#
@@ -250,7 +309,7 @@ impl Station {
         std::fs::write(
             root.join("config/config.toml"),
             format!(
-                "station = \"{name}\"\nweb_port = {port}\nweb_bind = [\"127.0.0.1\"]\ndiscovery = false\nkeep_awake_cmd = {wait}\n{prices}{}\n[agents.fake]\nprogram = '{FAKE}'\n{}\n",
+                "station = \"{name}\"\nweb_port = {port}\nweb_bind = [\"127.0.0.1\"]\n{discovery}keep_awake_cmd = {wait}\n{prices}{}\n[agents.fake]\nprogram = '{FAKE}'\n{}\n",
                 top.join(""),
                 tables
                     .join("")
@@ -264,11 +323,8 @@ impl Station {
             root,
             port,
             child: None,
-            env: env
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-            _dir: Some(dir),
+            env: vec![],
+            _dir: dir,
             scripts: std::sync::atomic::AtomicU32::new(0),
         }
     }

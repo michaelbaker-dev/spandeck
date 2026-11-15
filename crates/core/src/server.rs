@@ -111,7 +111,10 @@ async fn connection(daemon: Daemon, stream: Stream) -> std::io::Result<()> {
                 }
             }
         }
-        let out = match daemon.dispatch(&caller, &method, params).await {
+        let out = match daemon
+            .dispatch_timed(crate::perf::Kind::Local, None, &caller, &method, params)
+            .await
+        {
             Ok(result) => json!({"id": id, "result": result}),
             Err(e) => json!({"id": id, "error": error_json(&e)}),
         };

@@ -23,6 +23,19 @@ const SKEW_MS: u64 = 120_000;
 const REQUEST_MS: u64 = 10 * 60 * 1000;
 const MAX_PENDING: usize = 20;
 
+/// What a signature on a call turned out to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signed {
+    Yes,
+    /// Made with this fleet's key, at a time more than two minutes from
+    /// this station's clock (by this much: the caller's minus ours).
+    /// Refused.
+    Clock {
+        ahead_ms: i64,
+    },
+    No,
+}
+
 #[derive(Clone, PartialEq)]
 enum Decision {
     Waiting,
@@ -254,26 +267,41 @@ impl TrustState {
 
     /// Whether `sig` was made with this fleet's key for exactly this call.
     pub fn verify(&self, purpose: &str, body: &[u8], sig: &str) -> bool {
+        self.check(purpose, body, sig) == Signed::Yes
+    }
+
+    /// The same, saying why not when the reason is the clock. A call whose
+    /// signature was made with this fleet's key but is stamped more than two
+    /// minutes from this station's clock is refused exactly as before; the
+    /// caller is then told it is the clock, which before read as "not in
+    /// this fleet". Only a holder of the key is ever told so: with any other
+    /// signature the answer is `No`, whatever time it claims.
+    pub fn check(&self, purpose: &str, body: &[u8], sig: &str) -> Signed {
         let mut it = sig.split('.');
         let (Some(ts), Some(nonce), Some(tag), None) = (it.next(), it.next(), it.next(), it.next())
         else {
-            return false;
+            return Signed::No;
         };
         let Ok(at) = ts.parse::<u64>() else {
-            return false;
+            return Signed::No;
         };
-        if now_ms().abs_diff(at) > SKEW_MS {
-            return false;
-        }
         let Some(tag) = unhex(tag) else {
-            return false;
+            return Signed::No;
         };
-        mac(
+        let ours = mac(
             &self.key(),
             &[purpose.as_bytes(), ts.as_bytes(), nonce.as_bytes(), body],
         )
         .verify_slice(&tag)
-        .is_ok()
+        .is_ok();
+        let now = now_ms();
+        match (ours, now.abs_diff(at) > SKEW_MS) {
+            (false, _) => Signed::No,
+            (true, true) => Signed::Clock {
+                ahead_ms: at as i64 - now as i64,
+            },
+            (true, false) => Signed::Yes,
+        }
     }
 
     fn device_token(&self, id: &str) -> String {
@@ -1345,6 +1373,21 @@ mod tests {
             .into_bytes();
         assert!(!a.verify("rpc", b"x", &format!("{old}.n.{}", hex(&tag))));
         assert!(!a.verify("rpc", b"x", "junk"));
+        // Audit, section 10: that refusal read as "not in this fleet". It is
+        // still a refusal, and now says it is the clock, but only to a
+        // signature made with this fleet's key.
+        assert!(matches!(
+            a.check("rpc", b"x", &format!("{old}.n.{}", hex(&tag))),
+            Signed::Clock { ahead_ms } if (-123_000..=-120_500).contains(&ahead_ms)
+        ));
+        assert_eq!(
+            other.check("rpc", b"x", &format!("{old}.n.{}", hex(&tag))),
+            Signed::No
+        );
+        assert_eq!(
+            a.check("rpc", b"y", &format!("{old}.n.{}", hex(&tag))),
+            Signed::No
+        );
     }
 
     #[test]

@@ -2447,3 +2447,528 @@ fn a_request_is_seen_and_answered_at_any_station_of_the_fleet() {
         json!(false)
     );
 }
+
+// ----------------------------------------- performance page, Tailscale keys
+
+const DAY_MS: u64 = 86_400_000;
+
+/// A `tailscale` that prints a fixed tailnet for one station: itself, and
+/// the other devices given. The station is started with discovery on and
+/// this first on its PATH, so the real Tailscale client is never asked.
+fn standin_tailnet(
+    root: &std::path::Path,
+    me: Value,
+    peers: &[Value],
+) -> (String, Vec<(String, String)>) {
+    let dir = root.join("standin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let peers: serde_json::Map<String, Value> = peers
+        .iter()
+        .map(|p| (format!("key-{}", p["ID"].as_str().unwrap()), p.clone()))
+        .collect();
+    std::fs::write(
+        dir.join("status.json"),
+        json!({"BackendState": "Running", "Self": me, "User": {"7": {"LoginName": "owner@example.com"}}, "Peer": peers})
+            .to_string(),
+    )
+    .unwrap();
+    executable(
+        &dir.join("tailscale"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in version) echo 1.0 ;; status) cat {} ;; *) exit 1 ;; esac\n",
+            dir.join("status.json").display()
+        ),
+    );
+    let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap());
+    (
+        "discovery = true\n".to_string(),
+        vec![("PATH".to_string(), path)],
+    )
+}
+
+/// One of the owner's devices, as `tailscale status --json` lists it.
+fn device(name: &str, os: &str, expires_in_days: Option<i64>, more: Value) -> Value {
+    let now = spandeck_core::paths::now_ms();
+    let mut v = json!({"ID": format!("n-{name}"), "HostName": name, "DNSName": format!("{name}.tail0000.ts.net."),
+        "OS": os, "UserID": 7, "Online": false, "TailscaleIPs": ["127.0.0.1"]});
+    if let Some(days) = expires_in_days {
+        // Half a day inside, so that the count of whole days does not turn
+        // over while the test runs.
+        let at = now.saturating_add_signed(days * DAY_MS as i64 + DAY_MS as i64 / 2);
+        v["KeyExpiry"] = json!(spandeck_core::tailnet::rfc3339(at));
+        v["Expired"] = json!(days < 0);
+    }
+    for (k, x) in more.as_object().unwrap() {
+        v[k] = x.clone();
+    }
+    v
+}
+
+fn notices(s: &Station, holding: &str) -> Vec<Value> {
+    s.call("notify.list", json!({"limit": 100}))
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["title"].as_str().unwrap().contains(holding))
+        .cloned()
+        .collect()
+}
+
+/// The owner, 15 Nov 2026: "Control deck should have a performance page that
+/// you can see across the fleet", and "a Tailscale token expiring and lost
+/// access to the machine, how can we expose this". Each station answers
+/// `perf.get` for itself, to the owner and to another station and to no
+/// agent; a key that expires in 6 days is warned of once for the fleet, in
+/// the same words by both stations, and pushed by one; none of the owner's
+/// devices is in anything an agent can read.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "the stand-in for the tailscale command is a sh script"
+)]
+fn each_station_reports_its_numbers_and_a_key_near_expiry_is_warned_of_once() {
+    let (url, hits) = webhook();
+    let fleet = Station::fleet(&["alpha", "bravo"], |name, root| {
+        let me = |n: &str, days| device(n, "linux", days, json!({"Online": true}));
+        let (extra, env) = if name == "alpha" {
+            standin_tailnet(
+                root,
+                me("alpha", None),
+                &[
+                    device("bravo-ts", "linux", Some(6), json!({"Online": true})),
+                    device(
+                        "pocket-phone",
+                        "iOS",
+                        Some(2),
+                        json!({"TailscaleIPs": ["100.64.0.9"]}),
+                    ),
+                    device(
+                        "old-box",
+                        "linux",
+                        Some(-147),
+                        json!({"TailscaleIPs": ["100.64.0.10"]}),
+                    ),
+                ],
+            )
+        } else {
+            standin_tailnet(
+                root,
+                me("bravo-ts", Some(6)),
+                &[device("alpha", "linux", None, json!({"Online": true}))],
+            )
+        };
+        (
+            format!("{extra}at_keyboard_secs = 0\n[notify]\nwebhook_url = \"{url}\"\n"),
+            env,
+        )
+    });
+    let (a, b) = (&fleet[0], &fleet[1]);
+    let title = "Tailscale key of bravo (bravo-ts) expires within 7 days";
+    // Both raise it, in the same words (so the deck shows one entry), and
+    // only alpha, the first by name, sends it on.
+    for s in [a, b] {
+        wait_for_or(
+            "the warning",
+            30,
+            || {
+                s.call("notify.list", json!({})).to_string()
+                    + &s.call("tailnet.view", json!({})).to_string()
+            },
+            || {
+                s.call("fleet.refresh", json!({}));
+                (notices(s, "Tailscale key").len() == 1).then_some(())
+            },
+        );
+    }
+    let (at_a, at_b) = (notices(a, "Tailscale key"), notices(b, "Tailscale key"));
+    assert_eq!(
+        (at_a[0]["title"].as_str(), at_b[0]["title"].as_str()),
+        (Some(title), Some(title))
+    );
+    assert_eq!(at_a[0]["body"], at_b[0]["body"]);
+    assert!(
+        at_a[0]["body"]
+            .as_str()
+            .unwrap()
+            .contains("Disable key expiry"),
+        "{}",
+        at_a[0]
+    );
+    assert_eq!(
+        at_b[0]["pushed"],
+        json!(3),
+        "bravo leaves the push to alpha"
+    );
+    wait_for("alpha's push", 20, || {
+        (hits.load(Ordering::SeqCst) == 1).then_some(())
+    });
+
+    // What alpha answers for itself: its requests, its link to bravo, the
+    // keys, and the owner's other devices that are near expiry (the phone:
+    // 2 days; not the box that expired five months ago).
+    let perf = a.call("perf.get", json!({}));
+    assert!(
+        perf["requests"]["handled"]["local"]["count"].as_u64() > Some(0),
+        "{perf}"
+    );
+    assert!(
+        perf["periodic"]["work"]["count"].as_u64() > Some(0),
+        "{perf}"
+    );
+    assert!(perf["look"]["count"].as_u64() > Some(0), "{perf}");
+    assert_eq!(
+        perf["restarts"]["list"][0]["what"],
+        json!("started"),
+        "{perf}"
+    );
+    let link = &perf["links"][0];
+    assert_eq!(
+        (&link["station"], &link["state"]),
+        (&json!("bravo"), &json!("online")),
+        "{perf}"
+    );
+    assert!(link["rtt"]["count"].as_u64() > Some(0), "{perf}");
+    assert_eq!(link["clock"]["refused"], json!(false), "{perf}");
+    let key = &perf["tailnet"]["stations"]["bravo"];
+    assert_eq!(
+        (&key["source"], &key["id"]),
+        (&json!("tailscale"), &json!("n-bravo-ts")),
+        "{perf}"
+    );
+    assert_eq!(
+        perf["tailnet"]["stations"]["alpha"]["expires_ms"],
+        Value::Null,
+        "{perf}"
+    );
+    let near: Vec<&str> = perf["tailnet"]["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(near, ["pocket-phone"], "{perf}");
+    // The phone never opened a deck, so no notice is raised for it.
+    assert!(notices(a, "pocket-phone").is_empty());
+    // The same from the other station, through this one, as the page asks.
+    let there = a.call(
+        "peer.call",
+        json!({"station": "bravo", "method": "perf.get", "params": {}}),
+    );
+    assert_eq!(there["station"], json!("bravo"));
+    assert_eq!(
+        there["tailnet"]["stations"]["bravo"]["id"],
+        json!("n-bravo-ts"),
+        "{there}"
+    );
+    assert!(
+        there["requests"]["handled"]["station"]["count"].as_u64() > Some(0),
+        "{there}"
+    );
+    // `spandeck doctor` says the key of the machine it is run on.
+    let checks = b.call("station.doctor", json!({}));
+    let check = checks["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == json!("tailscale key"))
+        .unwrap()
+        .clone();
+    assert_eq!(check["ok"], json!(false), "{check}");
+    assert!(
+        check["detail"]
+            .as_str()
+            .unwrap()
+            .contains("expires in 6 days"),
+        "{check}"
+    );
+
+    // Rule 7: no agent reads any of it, and what an agent can read
+    // (`station.info`) names none of the owner's devices or their keys.
+    let pane = a.fake(json!({"steps": []}), json!({}));
+    for method in ["perf.get", "tailnet.view", "tailnet.report", "fleet.view"] {
+        let err = a.call_as_pane(&pane, method, json!({})).unwrap_err();
+        assert_eq!(err.code, "denied", "{method}: {}", err.message);
+    }
+    let info = a
+        .call_as_pane(&pane, "station.info", json!({}))
+        .unwrap()
+        .to_string();
+    for word in [
+        "pocket-phone",
+        "old-box",
+        "bravo-ts",
+        "n-bravo",
+        "expires",
+        "tailnet",
+        "100.64.0.9",
+    ] {
+        assert!(!info.contains(word), "station.info holds {word:?}: {info}");
+    }
+    // Nor does the fleet view, which the read-only list has.
+    let view = a.call("fleet.view", json!({})).to_string();
+    assert!(
+        !view.contains("pocket-phone") && !view.contains("n-bravo"),
+        "{view}"
+    );
+
+    // A restart does not say it again: what was said is in the database.
+    let mut fleet = fleet;
+    fleet[0].kill9();
+    fleet[0].launch();
+    let a = &fleet[0];
+    wait_for("alpha to see bravo's key again", 30, || {
+        a.call("fleet.refresh", json!({}));
+        (a.call("tailnet.view", json!({}))["stations"]["bravo"]["source"] == json!("tailscale"))
+            .then_some(())
+    });
+    a.call("fleet.refresh", json!({}));
+    assert_eq!(notices(a, "Tailscale key").len(), 1);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    // It ended without being stopped, and says so.
+    let restarts = a.call("perf.get", json!({}))["restarts"].clone();
+    assert!(
+        restarts["list"][0]["why"]
+            .as_str()
+            .unwrap()
+            .contains("without being stopped"),
+        "{restarts}"
+    );
+}
+
+/// Audit, section 10: two stations whose clocks are five minutes apart
+/// listed each other as "unreachable", a direct call said "not in this
+/// fleet: join it first", and nothing anywhere said "clock". The calls are
+/// still refused; the fleet view, the Performance page's link, a call's
+/// error and `spandeck doctor` now say why.
+#[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "moves a station's clock, which only a debug build allows"
+)]
+fn stations_whose_clocks_differ_say_so_and_still_refuse_each_other() {
+    let fleet = Station::fleet(&["alpha", "bravo"], |name, _| {
+        let env = if name == "bravo" {
+            vec![("SPANDECK_TEST_CLOCK_MS".to_string(), "300000".to_string())]
+        } else {
+            vec![]
+        };
+        (String::new(), env)
+    });
+    let (a, b) = (&fleet[0], &fleet[1]);
+    for (s, other, ms) in [(a, "bravo", 300_000i64), (b, "alpha", -300_000)] {
+        let seen = wait_for("the clock to be named", 30, || {
+            s.call("fleet.refresh", json!({}))["stations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["station"] == json!(other) && x["why"] == json!("clock"))
+                .cloned()
+        });
+        // Still not reachable: nothing about the check is weaker.
+        assert_eq!(seen["state"], json!("unreachable"), "{seen}");
+        let diff = seen["clock_diff_ms"].as_i64().unwrap();
+        assert!((ms - 5_000..=ms + 5_000).contains(&diff), "{seen}");
+        let err = s
+            .try_call(
+                "peer.call",
+                json!({"station": other, "method": "pane.list", "params": {}}),
+            )
+            .unwrap_err();
+        assert!(
+            err.message.contains("differ by 5 minutes"),
+            "{}",
+            err.message
+        );
+        let perf = s.call("perf.get", json!({}));
+        assert_eq!(perf["links"][0]["clock"]["refused"], json!(true), "{perf}");
+        assert_eq!(
+            perf["links"][0]["failures"]["last"]["why"],
+            json!("clock"),
+            "{perf}"
+        );
+        let checks = s.call("station.doctor", json!({}));
+        let check = checks["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == json!(format!("clock ({other})")))
+            .unwrap_or_else(|| panic!("no clock check: {checks}"))
+            .clone();
+        assert_eq!(check["ok"], json!(false));
+        assert!(
+            check["detail"].as_str().unwrap().contains("5 minutes"),
+            "{check}"
+        );
+    }
+}
+
+/// Not a test of anything: pictures of the Performance page and the fleet
+/// screen for a person to look at, at a computer's width and a phone's.
+/// `SPANDECK_SHOTS=<folder> cargo test -p spandeck --test phase5 pictures -- --ignored`
+#[test]
+#[ignore = "takes pictures for a person to look at; needs Chrome"]
+fn pictures_of_the_performance_page() {
+    use common::browser::Page;
+    use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png;
+    let out = std::path::PathBuf::from(std::env::var("SPANDECK_SHOTS").expect("SPANDECK_SHOTS"));
+    std::fs::create_dir_all(&out).unwrap();
+    let shoot = |s: &Station, name: &str, hash: &str, ready: &str, (w, h): (u32, u32)| {
+        let page = Page::open(s, w, h);
+        page.goto(hash);
+        page.wait(name, ready);
+        std::thread::sleep(Duration::from_millis(600));
+        let full = page.js("Math.max(document.querySelector('.perf-page, .fleet, main.phone')?.scrollHeight || 0, innerHeight)").as_u64().unwrap_or(h as u64) as u32;
+        // The whole page, not only what fits the window.
+        let tall = Page::open(s, w, full.clamp(h, 4000) + 80);
+        tall.goto(hash);
+        tall.wait(name, ready);
+        std::thread::sleep(Duration::from_millis(600));
+        let png = tall.tab.capture_screenshot(Png, None, None, true).unwrap();
+        std::fs::write(out.join(format!("{name}.png")), png).unwrap();
+        let said =
+            tall.js("document.querySelector('.perf-page, .fleet, main.phone')?.innerText || ''");
+        std::fs::write(
+            out.join(format!("{name}.txt")),
+            said.as_str().unwrap_or_default(),
+        )
+        .unwrap();
+    };
+    let all_reported = |n: usize| {
+        format!("document.querySelectorAll('.perf-verdicts .verdict').length === {n} && !document.body.innerText.includes('Asking every station')")
+    };
+    const WIDE: (u32, u32) = (1500, 900);
+    const PHONE: (u32, u32) = (390, 844);
+
+    // A healthy fleet of three, with something typed and a message sent.
+    {
+        let (a, b, _c) = Station::three();
+        let sh = a.call("pane.spawn", json!({"agent": "shell", "name": "sh"}))["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        a.call("pane.send_text", json!({"pane": sh, "text": "echo hello"}));
+        let reader = b.fake(
+            json!({"steps": [{"turn_end": "ready"}]}),
+            json!({"name": "reader"}),
+        );
+        b.wait_state(&reader, "done");
+        a.call(
+            "msg.send",
+            json!({"to": "reader@bravo", "body": "hello", "kind": "note"}),
+        );
+        std::thread::sleep(Duration::from_secs(4));
+        for s in [&a, &b] {
+            s.call("fleet.refresh", json!({}));
+        }
+        shoot(&a, "healthy-desktop", "#/perf", &all_reported(3), WIDE);
+        shoot(&a, "healthy-phone", "#/perf", &all_reported(3), PHONE);
+        shoot(
+            &b,
+            "healthy-desktop-from-bravo",
+            "#/perf",
+            &all_reported(3),
+            WIDE,
+        );
+    }
+
+    // Trouble: bravo's key expires in 6 days, charlie's has expired and it
+    // is off, delta's clock is five minutes out, echo is simply off; the
+    // phone's key has 2 days left.
+    let names = ["alpha", "bravo", "charlie", "delta", "echo"];
+    let mut fleet = Station::fleet(&names, |name, root| {
+        let on = json!({"Online": true});
+        let others: Vec<Value> = [
+            ("alpha", None),
+            ("bravo", Some(6)),
+            ("charlie", Some(-2)),
+            ("delta", None),
+            ("echo", None),
+        ]
+        .iter()
+        .filter(|(n, _)| *n != name)
+        .map(|(n, days)| device(n, "linux", *days, on.clone()))
+        .chain([
+            device(
+                "pocket-phone",
+                "iOS",
+                Some(2),
+                json!({"TailscaleIPs": ["100.64.0.9"]}),
+            ),
+            device(
+                "old-box",
+                "linux",
+                Some(-147),
+                json!({"TailscaleIPs": ["100.64.0.10"]}),
+            ),
+            device(
+                "spare-laptop",
+                "windows",
+                Some(21),
+                json!({"TailscaleIPs": ["100.64.0.11"]}),
+            ),
+        ])
+        .collect();
+        let mine = match name {
+            "bravo" => Some(6),
+            _ => None,
+        };
+        let (extra, mut env) =
+            standin_tailnet(root, device(name, "linux", mine, on.clone()), &others);
+        if name == "delta" {
+            env.push(("SPANDECK_TEST_CLOCK_MS".to_string(), "300000".to_string()));
+        }
+        (extra, env)
+    });
+    let online = |s: &Station| {
+        s.call("fleet.refresh", json!({}))["stations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|x| x["state"] == json!("online"))
+            .count()
+    };
+    wait_for("the four to find each other", 40, || {
+        (online(&fleet[0]) == 4 && online(&fleet[1]) == 4).then_some(())
+    });
+    for i in [2, 4] {
+        fleet[i].kill9();
+    }
+    wait_for("the two to be seen as off", 40, || {
+        (online(&fleet[0]) == 2 && online(&fleet[1]) == 2).then_some(())
+    });
+    let a = &fleet[0];
+    shoot(a, "trouble-desktop", "#/perf", &all_reported(5), WIDE);
+    shoot(a, "trouble-phone", "#/perf", &all_reported(5), PHONE);
+    shoot(
+        &fleet[1],
+        "trouble-desktop-from-bravo",
+        "#/perf",
+        &all_reported(5),
+        WIDE,
+    );
+    let tiles = "document.querySelectorAll('a.tile.station').length === 5 && document.body.innerText.includes('Tailscale key')";
+    shoot(a, "trouble-fleet-desktop", "#/fleet", tiles, WIDE);
+    shoot(a, "trouble-fleet-phone", "#/fleet", "document.querySelectorAll('.phone-station').length === 5 && document.body.innerText.includes('Tailscale key')", PHONE);
+    // The steps for the expired machine, as the owner would open them.
+    let page = Page::open(a, WIDE.0, WIDE.1);
+    page.goto("#/fleet");
+    page.wait("the tiles", tiles);
+    page.js("[...document.querySelectorAll('.key-chip.bad')].find(x => x.innerText.includes('expired')).click()");
+    page.wait("the steps", "!!document.querySelector('.dialog ol')");
+    std::fs::write(
+        out.join("trouble-expired-steps.png"),
+        page.tab.capture_screenshot(Png, None, None, true).unwrap(),
+    )
+    .unwrap();
+    // This device's own key: the deck opened on bravo's own machine.
+    let page = Page::open(&fleet[1], WIDE.0, WIDE.1);
+    page.wait(
+        "the line for this device",
+        "!!document.querySelector('.own-key')",
+    );
+    std::fs::write(
+        out.join("trouble-own-device-on-bravo.png"),
+        page.tab.capture_screenshot(Png, None, None, true).unwrap(),
+    )
+    .unwrap();
+}

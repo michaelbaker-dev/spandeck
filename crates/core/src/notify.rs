@@ -45,12 +45,34 @@ impl Daemon {
         title: &str,
         body: &str,
     ) {
+        self.notify_as(kind, pane, project, title, body, true);
+    }
+
+    /// A notice every station of the fleet raises in the same words, which
+    /// the Control Deck shows as one. `push`: whether this is the station
+    /// that also sends it to the phone (by the usual rules: a sink is set,
+    /// and the owner is not at a keyboard). The others mark theirs 3, "left
+    /// to another station".
+    pub(crate) fn notify_with(&self, kind: &str, title: &str, body: &str, push: bool) {
+        self.notify_as(kind, None, None, title, body, push);
+    }
+
+    fn notify_as(
+        &self,
+        kind: &str,
+        pane: Option<&str>,
+        project: Option<&str>,
+        title: &str,
+        body: &str,
+        push: bool,
+    ) {
         let id = new_id("n");
         let url = pane.map(|p| format!("/#/s/{}/p/{}", self.station, p));
+        let pushed = if push { 0 } else { 3 };
         let _ = self.db.with(|c| {
             c.execute(
-                "INSERT INTO notifications(id,ts,kind,pane,project,title,body,url) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-                rusqlite::params![id, now_ms() as i64, kind, pane, project, title, body, url],
+                "INSERT INTO notifications(id,ts,kind,pane,project,title,body,url,pushed) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                rusqlite::params![id, now_ms() as i64, kind, pane, project, title, body, url, pushed],
             )
         });
         self.emit(
@@ -132,7 +154,8 @@ impl Daemon {
                         "pane": r.get::<_, Option<String>>(3)?, "project": r.get::<_, Option<String>>(4)?,
                         "title": r.get::<_, String>(5)?, "body": r.get::<_, String>(6)?,
                         "url": r.get::<_, Option<String>>(7)?, "read": r.get::<_, i64>(8)? != 0,
-                        // 0 waiting, 1 pushed, 2 held back because you were at a keyboard
+                        // 0 waiting, 1 pushed, 2 held back because you were at a keyboard,
+                        // 3 left to another station of the fleet to push
                         "pushed": r.get::<_, i64>(9)?, "station": self.station,
                     }))
                 })?;

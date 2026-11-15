@@ -28,7 +28,9 @@ use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 use spandeck_core::daemon::{Authority, Caller, Daemon};
 use spandeck_core::fleet::Remote;
+use spandeck_core::perf::Kind;
 use spandeck_core::server::error_json;
+use spandeck_core::trust::Signed;
 use spandeck_terminal::PaneEvent;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
@@ -289,7 +291,11 @@ async fn http_rpc(
     };
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = body.get("params").cloned().unwrap_or(json!({}));
-    match web.daemon.dispatch(&who, method, params).await {
+    match web
+        .daemon
+        .dispatch_timed(Kind::Http, None, &who, method, params)
+        .await
+    {
         Ok(result) => Json(json!({"result": result})).into_response(),
         Err(e) => {
             let status = match e.code() {
@@ -395,6 +401,9 @@ async fn peer_rpc(
             "version": spandeck_core::VERSION,
             "protocol": spandeck_core::PROTOCOL,
             "fleet": web.daemon.trust.fleet_id(),
+            // This station's clock, so that two stations whose clocks are
+            // too far apart for signed calls can say that is why.
+            "now_ms": spandeck_core::paths::now_ms(),
             // What it runs, for a station that is asked to connect to it.
             "os": std::env::consts::OS,
             // When it joins a fleet it brings the stations of its own.
@@ -428,12 +437,27 @@ async fn peer_rpc(
     let signed = headers
         .get("x-spandeck-sig")
         .and_then(|s| s.to_str().ok())
-        .is_some_and(|sig| web.daemon.trust.verify("rpc", &raw, sig));
-    if !signed {
-        return refuse((
-            StatusCode::UNAUTHORIZED,
-            "not in this fleet: join it first, and approve the request on this station",
-        ));
+        .map_or(Signed::No, |sig| web.daemon.trust.check("rpc", &raw, sig));
+    match signed {
+        Signed::Yes => {}
+        // Refused as before; the reason is said, to a holder of the key.
+        Signed::Clock { ahead_ms } => {
+            let words = spandeck_core::perf::clock_words(ahead_ms);
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": {"code": "clock", "clock_diff_ms": ahead_ms, "message": format!(
+                    "the clocks of {from} and {} differ by {words}: a station's calls are taken only within 2 minutes. Set both clocks from the network; it then works again by itself",
+                    web.daemon.station
+                )}})),
+            )
+                .into_response();
+        }
+        Signed::No => {
+            return refuse((
+                StatusCode::UNAUTHORIZED,
+                "not in this fleet: join it first, and approve the request on this station",
+            ))
+        }
     }
     let who = Caller {
         authority: Authority::Peer,
@@ -441,7 +465,11 @@ async fn peer_rpc(
         client: format!("station:{from}"),
         who: from,
     };
-    match web.daemon.dispatch(&who, method, params).await {
+    match web
+        .daemon
+        .dispatch_timed(Kind::Station, None, &who, method, params)
+        .await
+    {
         Ok(result) => Json(json!({"result": result})).into_response(),
         Err(e) => Json(json!({"error": error_json(&e)})).into_response(),
     }
@@ -648,7 +676,16 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
             .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
             .collect();
     }
-    let hello = json!({"auth": {"ok": true, "station": web.daemon.station, "version": spandeck_core::VERSION, "build": assets_build(), "client": who.client, "full": who.is_owner()}});
+    // Which of the owner's devices this is, as Tailscale names it: the deck
+    // warns when the key of the device in the owner's hand is about to
+    // expire. A device that opens a deck is one the fleet warns about.
+    let device = if who.is_owner() && !who.who.starts_with("you (via ") {
+        web.daemon.note_deck_device(addr.ip());
+        web.daemon.tailnet_device_at(addr.ip())
+    } else {
+        None
+    };
+    let hello = json!({"auth": {"ok": true, "station": web.daemon.station, "version": spandeck_core::VERSION, "build": assets_build(), "client": who.client, "full": who.is_owner(), "device": device}});
     if sink
         .send(Message::Text(hello.to_string().into()))
         .await
@@ -683,15 +720,29 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     let mut rekeyed = web.daemon.trust.rekeyed();
     let mut key_replaced = false;
 
+    // Each request is stamped as it arrives, so that how long it then stood
+    // behind the ones before it is known (the Performance page). They are
+    // taken one at a time and in the order they came, as before; up to 64
+    // wait here, and past that the socket is not read, as before.
+    let (in_tx, mut in_rx) = mpsc::channel::<(std::time::Instant, Message)>(64);
+    let reader = tokio::spawn(async move {
+        while let Some(Ok(msg)) = stream.next().await {
+            if in_tx.send((std::time::Instant::now(), msg)).await.is_err() {
+                break;
+            }
+        }
+    });
+
     loop {
         let msg = tokio::select! {
-            m = stream.next() => m,
+            m = in_rx.recv() => m,
             _ = rekeyed.changed(), if rests_on_key => {
                 key_replaced = true;
                 break;
             }
         };
-        let Some(Ok(msg)) = msg else { break };
+        let Some((arrived, msg)) = msg else { break };
+        let (waited, began) = (arrived.elapsed(), std::time::Instant::now());
         let text = match msg {
             Message::Text(t) => t,
             Message::Close(_) => break,
@@ -858,6 +909,15 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                 .await
                 .map_err(|e| error_json(&e)),
         };
+        let gateway = method == "peer.call";
+        web.daemon.perf.request(
+            Kind::Deck,
+            &method,
+            gateway.then(|| req["params"]["method"].as_str()).flatten(),
+            gateway.then(|| req["params"]["station"].as_str()).flatten(),
+            began.elapsed(),
+            Some(waited),
+        );
         if id.is_null() {
             continue; // fire-and-forget (keystrokes)
         }
@@ -882,6 +942,7 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     if let Some(t) = events_task {
         t.abort();
     }
+    reader.abort();
     if key_replaced {
         // The reply to the call that replaced the key is still on its way
         // out: let it go before the connection is closed.
@@ -929,6 +990,7 @@ fn attach_local(
                 // This client fell behind: repaint it from the server's screen.
                 Err(RecvError::Lagged(_)) => match d.attach(&pane_id) {
                     Ok((snapshot, _, fresh)) => {
+                        d.perf.resyncs.add();
                         rx = fresh;
                         if out
                             .send(frame(FRAME_RESYNC, chan, &snapshot))
@@ -1057,7 +1119,14 @@ async fn attach_remote(
             Ok(Some(Ok(tungstenite::Message::Text(t)))) => {
                 let v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
                 if v.get("auth").is_some_and(|a| a["ok"] == json!(false)) {
-                    return Err(format!("{station} refused this station"));
+                    // When the clocks are too far apart, that is why.
+                    return Err(match daemon.perf.clock_of(station).filter(|c| c.refused()) {
+                        Some(c) => format!(
+                            "{station} refused this station: its clock and this station's differ by {}",
+                            spandeck_core::perf::clock_words(c.diff_ms)
+                        ),
+                        None => format!("{station} refused this station"),
+                    });
                 }
                 if let Some(c) = v["auth"]["client"].as_str() {
                     me = json!(c.chars().take(128).collect::<String>());

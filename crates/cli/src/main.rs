@@ -1395,6 +1395,9 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
             r = sys::shutdown_signal() => r?,
             _ = daemon.quit.notified() => {}
         }
+        // The ship's log says the station was stopped on purpose: the next
+        // start then knows it did not follow a crash.
+        daemon.note_stopping("asked to stop");
         // Asked to stop, not replaced: the panes end with the station.
         daemon.stop_pane_host();
         tracing::info!("spandeckd stopping");

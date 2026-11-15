@@ -313,10 +313,23 @@ pub fn path_with(path: &str, more: &[PathBuf]) -> String {
 }
 
 pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    // Debug builds only, for the test of two stations whose clocks differ:
+    // this station's clock, moved by so many milliseconds.
+    if cfg!(debug_assertions) {
+        static MOVED: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+        let by = *MOVED.get_or_init(|| {
+            std::env::var("SPANDECK_TEST_CLOCK_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        });
+        return now.saturating_add_signed(by);
+    }
+    now
 }
 
 /// 32 random bytes as hex, from the OS.

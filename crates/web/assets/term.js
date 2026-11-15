@@ -16,6 +16,7 @@
 
 import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge } from './ui.js';
 import { paneIcon, iconName, hideIcon } from './icons.js';
+import { keyTyped, paneWrote } from './perf.js';
 import { BASE, termOptions, applyPaneFrame, SIZING } from './look.js';
 
 // A terminal as every pane has it. Emoji take two cells, as the programs
@@ -77,7 +78,7 @@ export class PaneTerm {
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.onData((data) => {
-      if (this.control && this.chan !== null) this.api.send('pane.input', { chan: this.chan, data });
+      if (this.control && this.chan !== null) { keyTyped(this); this.api.send('pane.input', { chan: this.chan, data }); }
       // On a phone the pane is watched at its own size, and can still be typed
       // into: the keys go as a request of their own, without taking the size.
       else if (!this.control && opts.typeWhileWatching) this.api.on(this.station, 'pane.input', { pane: this.pane.id, data }).catch(() => {});
@@ -158,7 +159,7 @@ export class PaneTerm {
     if (this.disposed) return;
     try {
       const handlers = {
-        onData: (b) => this.term.write(b),
+        onData: (b) => { paneWrote(this); this.term.write(b); },
         onResync: (b) => { this.term.reset(); this.term.write(b); },
         onExit: (info) => this._note(`This pane's process ended (${describeExit(info)}).`),
         onUnreachable: () => this._note('The station stopped answering. Trying again…', () => this.attach()),

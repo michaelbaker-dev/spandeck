@@ -60,10 +60,16 @@ pub struct FleetState {
     /// Signs calls to other stations with the fleet key.
     pub trust: Arc<crate::trust::TrustState>,
     pub station: String,
+    /// Round trips and failures of calls to other stations are counted here.
+    pub perf: Arc<crate::perf::Perf>,
 }
 
 impl FleetState {
-    pub fn new(cfg: &Config, trust: Arc<crate::trust::TrustState>) -> FleetState {
+    pub fn new(
+        cfg: &Config,
+        trust: Arc<crate::trust::TrustState>,
+        perf: Arc<crate::perf::Perf>,
+    ) -> FleetState {
         let http = crate::http::builder()
             .timeout(Duration::from_secs(5))
             .connect_timeout(Duration::from_millis(1500))
@@ -77,6 +83,7 @@ impl FleetState {
             dropped: Mutex::new(vec![]),
             trust,
             station: cfg.station.clone(),
+            perf,
         }
     }
 
@@ -286,13 +293,32 @@ impl FleetState {
                 crate::trust::sign_with(&key, "rpc", &body),
             );
         }
-        let resp = req
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| format!("unreachable: {e}"))?;
+        // Counted for the Performance page: how long the call took, or how
+        // it failed. An answer that is an error is still an answer.
+        let began = std::time::Instant::now();
+        let resp = req.body(body).send().await.map_err(|e| {
+            let why = if e.is_timeout() {
+                "timeout"
+            } else if e.is_connect() {
+                "no connection"
+            } else {
+                "no answer"
+            };
+            self.perf.link_call(addr, began.elapsed(), Some(why));
+            format!("unreachable: {e}")
+        })?;
         let status = resp.status();
-        let body: Value = resp.json().await.map_err(|e| format!("bad reply: {e}"))?;
+        let body: Value = resp.json().await.map_err(|e| {
+            self.perf
+                .link_call(addr, began.elapsed(), Some("bad reply"));
+            format!("bad reply: {e}")
+        })?;
+        let refused = match body.pointer("/error/code").and_then(|c| c.as_str()) {
+            Some("clock") => Some("clock"),
+            _ if status == reqwest::StatusCode::UNAUTHORIZED => Some("refused"),
+            _ => None,
+        };
+        self.perf.link_call(addr, began.elapsed(), refused);
         if let Some(err) = body.get("error") {
             return Err(err
                 .get("message")
@@ -382,6 +408,7 @@ impl Daemon {
         if only_if_stale && !self.sync_look_is_stale() {
             return;
         }
+        let began = std::time::Instant::now();
         self.discover_once().await;
         // A station that was away when the fleet's key was replaced, and is
         // back: handed the key, it is in the fleet at the next look.
@@ -400,6 +427,11 @@ impl Daemon {
         // A station that was away when a request arrived here hears of it.
         self.trust_relay_send(false).await;
         self.trust_sync().await;
+        // Tailscale key expiry: what each station says of its own key, and
+        // the warnings that are due (tailnet.rs). Nothing else reads these.
+        self.tailnet_ask().await;
+        self.tailnet_watch();
+        self.perf.look.record(began.elapsed());
     }
 
     async fn discover_once(&self) {
@@ -412,7 +444,10 @@ impl Daemon {
         if self.cfg.discovery {
             let fleet = &self.fleet;
             let me = tokio::task::block_in_place(|| fleet.tailnet_self());
-            if let (Some(me), Some(status)) = (me, tokio::task::block_in_place(tailscale_status)) {
+            let status = tokio::task::block_in_place(tailscale_status);
+            // The same output says when each device's key expires.
+            self.tailnet_refresh(status.as_ref());
+            if let (Some(me), Some(status)) = (me, status) {
                 for peer in status
                     .get("Peer")
                     .and_then(|p| p.as_object())
@@ -464,18 +499,46 @@ impl Daemon {
         let probes = candidates.iter().map(|addr| {
             let addr = addr.clone();
             async move {
+                // The unsigned answer is timed, and says that station's
+                // clock: the link's round trip, and how far the clocks are
+                // apart, for the Performance page.
+                let reading = std::sync::Mutex::new(None);
                 let r = tokio::time::timeout(Duration::from_millis(2500), async {
+                    let (sent, began) = (now_ms(), std::time::Instant::now());
                     let hello = self
                         .fleet
                         .call_open(&addr, "station.hello", json!({}))
                         .await;
+                    let read = hello.as_ref().ok().map(|h| {
+                        (began.elapsed(), sent, h.get("now_ms").and_then(|n| n.as_u64()))
+                    });
+                    *reading.lock().unwrap() = read;
                     match hello {
                         // Same fleet: ask for the full picture, signed.
                         Ok(h)
                             if h.get("fleet").and_then(|f| f.as_str())
                                 == Some(self.trust.fleet_id().as_str()) =>
                         {
-                            self.fleet.call_addr(&addr, "station.info", json!({})).await
+                            let info = self.fleet.call_addr(&addr, "station.info", json!({})).await;
+                            // It holds this fleet's key and still refuses the
+                            // signed call: when its clock is surely more than
+                            // two minutes from this one's, that is why. It
+                            // is listed, as a station that cannot be reached,
+                            // and the reason is said (audit, section 10).
+                            let apart = read.and_then(|(took, sent, theirs)| {
+                                let rtt = took.as_millis() as u64;
+                                let diff = theirs? as i64 - (sent + rtt / 2) as i64;
+                                (diff.unsigned_abs()
+                                    > crate::perf::CLOCK_LIMIT_MS as u64 + rtt / 2 + 1)
+                                    .then_some(diff)
+                            });
+                            match (info, apart) {
+                                (Err(_), Some(diff)) => Ok(json!({
+                                    "station": h.get("station"), "version": h.get("version"),
+                                    "protocol": h.get("protocol"), "os": h.get("os"), "clock_refused": diff,
+                                })),
+                                (info, _) => info,
+                            }
                         }
                         Ok(mut h) => {
                             h["not_linked"] = json!(true);
@@ -486,7 +549,8 @@ impl Daemon {
                     }
                 })
                 .await;
-                (addr, r.ok().and_then(|r| r.ok()))
+                let reading = reading.into_inner().unwrap();
+                (addr, r.ok().and_then(|r| r.ok()), reading)
             }
         });
         let results = futures_join_all(probes).await;
@@ -495,8 +559,10 @@ impl Daemon {
         {
             let mut peers = self.fleet.peers.lock().unwrap();
             let mut seen_addrs = vec![];
-            for (addr, info) in results {
-                let Some(info) = info else { continue };
+            for (addr, info, _) in &results {
+                let (addr, Some(info)) = (addr.clone(), info.clone()) else {
+                    continue;
+                };
                 let Some(station) = info
                     .get("station")
                     .and_then(|s| s.as_str())
@@ -508,6 +574,23 @@ impl Daemon {
                     continue;
                 }
                 let protocol = info.get("protocol").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
+                if info.get("clock_refused").is_some() {
+                    // Not reached: what was last known of it is kept.
+                    let p = peers.entry(station.clone()).or_insert_with(|| Peer {
+                        station,
+                        addr,
+                        version: info["version"].as_str().unwrap_or("?").to_string(),
+                        protocol,
+                        state: String::new(),
+                        last_seen_ms: 0,
+                        info: json!({"os": info.get("os")}),
+                    });
+                    if p.state != "unreachable" {
+                        p.state = "unreachable".into();
+                        changed = true;
+                    }
+                    continue;
+                }
                 let state = if info.get("not_linked").is_some() {
                     "not_linked"
                 } else if protocol == PROTOCOL {
@@ -561,6 +644,19 @@ impl Daemon {
         self.remember_stations(&online);
         // The roster of the fleet's members is the same on every station.
         changed |= self.roster_merge(&online, &places);
+        // The links the Performance page shows are to the stations listed.
+        let listed: Vec<(String, String, String)> = self
+            .fleet
+            .peers()
+            .into_iter()
+            .map(|p| (p.addr, p.station, p.state))
+            .collect();
+        self.perf.links_follow(&listed);
+        for (addr, _, reading) in &results {
+            if let Some((took, sent, theirs)) = reading {
+                self.perf.link_hello(addr, *took, *sent, *theirs);
+            }
+        }
         if changed {
             self.emit("fleet.updated", None, None, json!({}));
         }
@@ -599,6 +695,14 @@ impl Daemon {
                     // Never imply anything about a station we cannot see.
                     v["working"] = Value::Null;
                     v["needs_you"] = Value::Null;
+                }
+                // It answers, holds this fleet's key, and its clock is more
+                // than two minutes from this station's: said as such.
+                if let Some(c) = self.perf.clock_of(&p.station) {
+                    if p.state == "unreachable" && c.refused() {
+                        v["why"] = json!("clock");
+                    }
+                    v["clock_diff_ms"] = json!(c.diff_ms);
                 }
                 v
             })

@@ -444,3 +444,24 @@ button.agent-row:hover { border-color: var(--blue); }
   .backdrop.beside { padding: 8px 0 0; place-items: start center; } .backdrop.beside > .dialog { height: calc(100dvh - 16px); }
   .look-sample { max-height: 30dvh; }
 }
+
+/* Performance: every station's numbers, the links between them, Tailscale keys. */
+.perf-page { flex: 1; overflow: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.perf-page h1 { font-size: calc(18px * var(--ui-scale)); margin: 0; } .perf-page h2 { font-size: calc(14px * var(--ui-scale)); margin: 10px 0 0; } .perf-page h3 { font-size: calc(13px * var(--ui-scale)); margin: 8px 0 0; color: var(--muted); }
+.perf-page p { margin: 0; } .perf-page section { display: flex; flex-direction: column; gap: 6px; }
+.perf-head { flex-wrap: wrap; }
+.perf-verdicts, .perf-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.verdict { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.verdict.warn { border-color: var(--amber-line); } .verdict.bad { border-color: var(--red-line); background: var(--err-bg); }
+.perf-table, .perf-links, .perf-slow { font-size: calc(12px * var(--ui-scale)); font-variant-numeric: tabular-nums; }
+.perf-table th { white-space: nowrap; } .perf-table td { min-width: 70px; } .perf-table th[scope=row], .perf-links th[scope=row] { color: var(--text); font-weight: 600; }
+.perf-links td { min-width: 120px; } .perf-links td.self { color: var(--dim); text-align: center; }
+.perf-page td.na, .perf-pair.na { color: var(--muted); font-style: italic; } .perf-page td.warn, .perf-pair.warn { box-shadow: inset 2px 0 0 var(--amber); } .perf-page td.bad, .perf-pair.bad { box-shadow: inset 2px 0 0 var(--red); }
+.perf-page td.bad b, .perf-pair.bad b { color: var(--red); } .perf-slow .num { text-align: right; }
+.perf-card, .perf-pair { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+.perf-card dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 6px 0 0; } .perf-card dt { color: var(--muted); } .perf-card dd { margin: 0; overflow-wrap: anywhere; }
+.perf-page.phone .perf-list li { padding: 4px 0; }
+button.key-warn, .chip.key-chip.warn { color: var(--amber); border-color: var(--amber-line); } button.key-bad, .chip.key-chip.bad { color: var(--red); border-color: var(--red-line); }
+button.chip.key-chip { background: none; cursor: pointer; min-height: 0; } .own-key { font-weight: 600; }
+.perf-btn { position: relative; } .perf-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); display: inline-block; margin-left: 5px; }
+a.btn.wide { width: 100%; justify-content: center; text-align: center; }

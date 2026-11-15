@@ -324,6 +324,10 @@ pub struct Inner {
     /// Told when the owner asked for this station to be stopped (when it
     /// was removed from the fleet with "also stop spandeck there").
     pub quit: tokio::sync::Notify,
+    /// Counters for the Performance page. Measured, never acted on.
+    pub perf: Arc<crate::perf::Perf>,
+    /// What the local Tailscale client last said of key expiry.
+    pub tailnet: crate::tailnet::TailnetState,
 }
 
 #[derive(Clone)]
@@ -400,8 +404,11 @@ impl Daemon {
         let home = crate::paths::home_dir();
         let station = cfg.station.clone();
         let trust = Arc::new(crate::trust::TrustState::load(&paths)?);
+        let perf = Arc::new(crate::perf::Perf::default());
         let daemon = Daemon(Arc::new(Inner {
-            fleet: crate::fleet::FleetState::new(&cfg, trust.clone()),
+            fleet: crate::fleet::FleetState::new(&cfg, trust.clone(), perf.clone()),
+            perf,
+            tailnet: Default::default(),
             trust,
             paths,
             cfg,
@@ -441,7 +448,8 @@ impl Daemon {
             None => false,
         };
         if !adopted {
-            daemon.recover();
+            let resumed = daemon.recover();
+            daemon.note_started(resumed);
         }
         // Keep hold of this binary. A hard link costs nothing and survives the
         // file at its path being replaced by an installer; where a link is not
@@ -490,12 +498,24 @@ impl Daemon {
         let d = self.clone();
         tokio::spawn(async move {
             let mut n: u64 = 0;
-            let mut tick = tokio::time::interval(Duration::from_millis(500));
+            let period = Duration::from_millis(500);
+            let mut tick = tokio::time::interval(period);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last: Option<std::time::Instant> = None;
             loop {
                 tick.tick().await;
                 n += 1;
+                // For the Performance page: how much later than half a
+                // second after the last one this began, and how long it took.
+                let began = std::time::Instant::now();
+                if let Some(last) = last {
+                    d.perf
+                        .tick_late
+                        .record(began.duration_since(last).saturating_sub(period));
+                }
+                last = Some(began);
                 d.tick(n).await;
+                d.perf.tick_work.record(began.elapsed());
             }
         });
     }
@@ -1774,7 +1794,8 @@ impl Daemon {
     /// After a crash or reboot: agents resume their conversation by session
     /// id. Where a pane host is used, panes it still holds are simply taken
     /// over as they are.
-    fn recover(&self) {
+    fn recover(&self) -> usize {
+        let mut resumed = 0;
         let rows: Vec<(String, String, String, Option<i64>)> = self
             .db
             .with(|c| {
@@ -1829,6 +1850,7 @@ impl Daemon {
             };
             match self.spawn_pane(opts) {
                 Ok(p) => {
+                    resumed += 1;
                     self.keep_owner_marks(&p, &meta);
                     self.record(
                         "pane.resumed",
@@ -1850,6 +1872,7 @@ impl Daemon {
                 }
             }
         }
+        resumed
     }
 
     /// A pane started again under its old id keeps what the owner set on
@@ -2004,7 +2027,7 @@ impl Daemon {
         );
         if adopted < total {
             // Whatever did not survive resumes by session id.
-            self.recover();
+            let _ = self.recover();
         }
         true
     }
@@ -2072,6 +2095,9 @@ impl Daemon {
             // Every terminal is kept through an upgrade or a restart: on Unix
             // by replacing the program in place, on Windows by the pane host.
             "live_handoff": true,
+            // It answers `perf.get` and `tailnet.report`. Nothing those
+            // say is in this answer, which an agent may read.
+            "perf": 1,
             // It lists requests that wait at other stations (`trust.relay`).
             "trust_relay": true,
             "pane_host": self.pane_host_info(),

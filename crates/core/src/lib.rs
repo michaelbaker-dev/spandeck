@@ -26,6 +26,8 @@
 //!   vault     AgentVault: station token, key use through the vault's proxy
 //!   usage     what each pane's agent has used, and the station's totals
 //!   prices    the public list of model prices and context windows, fetched daily
+//!   perf      counters for the Performance page: where time goes on this station
+//!   tailnet   Tailscale key expiry: read from the local client, shown, warned of
 //!   http      the one outgoing HTTPS client builder, and what it trusts
 
 pub mod add;
@@ -48,6 +50,7 @@ pub mod messages;
 pub mod notify;
 pub mod orders;
 pub mod paths;
+pub mod perf;
 pub mod prefs;
 pub mod prices;
 pub mod project;
@@ -58,6 +61,7 @@ pub mod rpc;
 pub mod server;
 pub mod setup;
 pub mod sync;
+pub mod tailnet;
 pub mod tasks;
 pub mod trust;
 pub mod usage;
