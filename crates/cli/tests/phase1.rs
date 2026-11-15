@@ -589,3 +589,50 @@ fn a_new_pane_continues_the_last_conversation_in_its_folder_or_starts_a_new_one(
     );
     assert_eq!(sh["resumed"], json!(false));
 }
+
+/// A bug that happened (15 Nov 2026): 20 KB pasted into a pane whose program
+/// was not reading (`sleep 600`) stopped the whole station answering, Stop
+/// and Kill included, because the sender waited on the terminal while holding
+/// the pane's lock. Input must never make the station wait.
+#[test]
+#[cfg(unix)]
+fn a_paste_into_a_program_that_is_not_reading_does_not_stop_the_station() {
+    let s = Station::start("alpha");
+    let pane = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sleep", "args": ["600"], "cwd": s.root.join("home")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let lines = "a line that nobody will ever read\n".repeat(6000);
+    s.call("pane.paste", json!({"pane": pane, "text": lines}));
+    // The station still answers, and the pane can still be ended.
+    assert_eq!(s.call("station.info", json!({}))["station"], json!("alpha"));
+    s.call("pane.stop", json!({"pane": pane}));
+    s.call("pane.kill", json!({"pane": pane}));
+    wait_for("the pane to end", 10, || {
+        (s.pane(&pane)["exited"] == json!(true)).then_some(())
+    });
+    // More than may wait is refused, and says why.
+    let quiet = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sleep", "args": ["600"], "cwd": s.root.join("home")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let big = "x".repeat(3 << 20);
+    let refused = (0..6)
+        .find_map(|_| {
+            s.try_call("pane.paste", json!({"pane": quiet, "text": big}))
+                .err()
+        })
+        .expect("input beyond the limit is refused");
+    assert!(
+        refused.message.contains("not reading"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(s.call("station.info", json!({}))["station"], json!("alpha"));
+}
