@@ -90,6 +90,8 @@ export class Api {
           const c = this.chans.get(msg.chan);
           if (c && msg.exited !== undefined) c.onExit && c.onExit(msg.exited);
           if (c && msg.unreachable) c.onUnreachable && c.onUnreachable();
+          // A pane on another station was resized there: who did it, and to what.
+          if (c && msg.resized) c.onResized && c.onResized(msg.resized);
           return;
         }
         const p = this.pending.get(msg.id);
@@ -157,7 +159,10 @@ export class Api {
     const res = await this.call('pane.attach', { pane, mode, station: station === this.station ? undefined : station });
     this.chans.set(res.chan, handlers);
     const snapshot = Uint8Array.from(atob(res.snapshot_b64), c => c.charCodeAt(0));
-    return { chan: res.chan, info: res.info, exited: res.exited, snapshot };
+    // `client`: who this tab is at the pane's station. Through a gateway that
+    // is a name the gateway made for this tab; here it is this tab's own.
+    const client = typeof res.client === 'string' && res.client ? res.client : this.client;
+    return { chan: res.chan, info: res.info, exited: res.exited, snapshot, client };
   }
 
   detach(chan) {

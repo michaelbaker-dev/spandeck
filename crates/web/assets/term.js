@@ -2,7 +2,10 @@
 //
 // Sizing rule: one size per pane, set by whoever has control. A client in
 // control fits the pane to its view and tells the station. Anyone else shows
-// the pane at its real size, scaled down and letterboxed.
+// the pane at its real size, scaled down and letterboxed. The rule is the
+// pane's station's, and is the same for a pane on another station shown
+// through this one: each tab is a client of its own there (`this.me`), and
+// that station's resizes arrive on the pane's channel (`onResized`).
 //
 // How a terminal looks (colours, font, cursor) is a look (look.js). A font
 // change follows the sizing rule: the client in control fits the pane again
@@ -43,6 +46,8 @@ export class PaneTerm {
     this.chan = null;
     this.disposed = false;
     this.size = { cols: pane.cols, rows: pane.rows };
+    // Who this tab is at the pane's station; attach says, for another station.
+    this.me = api.client;
 
     this.strip = h('div', { class: 'strip', oncontextmenu: (e) => this._menu(e) });
     this.body = h('div', { class: 'term-body' });
@@ -157,10 +162,15 @@ export class PaneTerm {
         onResync: (b) => { this.term.reset(); this.term.write(b); },
         onExit: (info) => this._note(`This pane's process ended (${describeExit(info)}).`),
         onUnreachable: () => this._note('The station stopped answering. Trying again…', () => this.attach()),
+        // Numbers from another station: whole and within a terminal's range, or passed over.
+        onResized: (r) => {
+          if (Number.isInteger(r.cols) && Number.isInteger(r.rows) && r.cols >= 2 && r.cols <= 500 && r.rows >= 1 && r.rows <= 300) this.resizedBy(String(r.controller || ''), r.cols, r.rows);
+        },
       };
       const res = await this.api.attach(this.station, this.pane.id, this.mode, handlers);
       if (this.disposed) { this.api.detach(res.chan); return; }
       this.chan = res.chan;
+      this.me = res.client;
       this.size = { cols: res.info.cols, rows: res.info.rows };
       this.term.reset();
       this.term.resize(res.info.cols, res.info.rows);
@@ -271,7 +281,7 @@ export class PaneTerm {
   resizedBy(controller, cols, rows) {
     const same = cols === this.size.cols && rows === this.size.rows;
     this.size = { cols, rows };
-    if (controller !== this.api.client && this.control && !same) {
+    if (controller !== this.me && this.control && !same) {
       this.control = false;
       this.term.options.disableStdin = true;
       this._lostControl = true;
