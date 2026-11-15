@@ -605,7 +605,23 @@ impl Daemon {
 
     /// Interrupt every agent turn that was running when the stop was issued.
     /// Processes stay (Guarantees: Stop).
-    pub fn apply_stop(&self, stop_id: &str, issued_ms: u64, by: &str) -> Value {
+    ///
+    /// "When it was issued" is worked out on this station's own clock: the
+    /// station that issued it says how long ago that was (`age_ms`, a length
+    /// of time, which two clocks that disagree still agree on), and this one
+    /// counts back from now. A station from before this sends only its own
+    /// clock's time (`issued_ms`), which is then used as it was.
+    pub fn apply_stop(
+        &self,
+        stop_id: &str,
+        issued_ms: u64,
+        age_ms: Option<u64>,
+        by: &str,
+    ) -> Value {
+        let issued_ms = match age_ms {
+            Some(age) => now_ms().saturating_sub(age),
+            None => issued_ms,
+        };
         let key = format!("stop:{stop_id}");
         if let Some(prev) = self.db.kv_get(&key) {
             // Delivered twice (a retry after a lost reply): same answer, no second stop.
@@ -643,9 +659,19 @@ impl Daemon {
     /// Each target gets its own row: requested, confirmed or unreachable.
     pub async fn stop_all(&self, scope: &str, by: &str) -> Result<Value> {
         let issued = now_ms();
+        // The fleet is its members: a machine that has not joined cannot
+        // be sent a stop (it does not take this fleet's calls), and a row
+        // for it would say "unreachable" for ever.
+        let member = |p: &Peer| p.state != "not_linked";
         let mut targets: Vec<String> = match scope {
             "fleet" => std::iter::once(self.station.clone())
-                .chain(self.fleet.peers().into_iter().map(|p| p.station))
+                .chain(
+                    self.fleet
+                        .peers()
+                        .iter()
+                        .filter(|p| member(p))
+                        .map(|p| p.station.clone()),
+                )
                 .collect(),
             "station" | "" => vec![self.station.clone()],
             other => vec![other.to_string()],
@@ -655,8 +681,15 @@ impl Daemon {
         for station in targets {
             let id = new_id("x");
             let local = station == self.station;
-            if !local && self.fleet.peer(&station).is_none() {
-                return Err(Error::NotFound(format!("station {station}")));
+            match self.fleet.peer(&station) {
+                _ if local => {}
+                None => return Err(Error::NotFound(format!("station {station}"))),
+                Some(p) if !member(&p) => {
+                    return Err(invalid(format!(
+                        "{station} is not in this fleet, so it cannot be stopped from here"
+                    )))
+                }
+                Some(_) => {}
             }
             self.db.with(|c| {
                 c.execute(
@@ -665,7 +698,7 @@ impl Daemon {
                 )
             })?;
             if local {
-                let result = self.apply_stop(&id, issued, by);
+                let result = self.apply_stop(&id, issued, None, by);
                 self.stop_mark(&id, "confirmed", &result);
             } else {
                 self.stop_try(&id, &station, issued, by).await;
@@ -693,7 +726,9 @@ impl Daemon {
             .call(
                 station,
                 "stop.apply",
-                json!({"id": id, "issued_ms": issued, "by": by}),
+                // How long ago, for the station's own clock; and when by
+                // this one's, for a station from before it read the first.
+                json!({"id": id, "issued_ms": issued, "age_ms": now_ms().saturating_sub(issued), "by": by}),
             )
             .await
         {
@@ -715,13 +750,29 @@ impl Daemon {
             })
             .unwrap_or_default();
         for (id, station, issued, by) in waiting {
-            if self
-                .fleet
-                .peer(&station)
-                .is_some_and(|p| p.state == "online")
-            {
-                self.stop_try(&id, &station, issued as u64, by.as_deref().unwrap_or("you"))
-                    .await;
+            match self.fleet.peer(&station).map(|p| p.state) {
+                // A member that answers, on any version: it is tried.
+                Some(state) if state == "online" || state == "update_needed" => {
+                    self.stop_try(&id, &station, issued as u64, by.as_deref().unwrap_or("you"))
+                        .await;
+                }
+                // It is no longer (or never was) in this fleet: the stop
+                // cannot be delivered, and is not left saying it will be.
+                Some(state) if state == "not_linked" => {
+                    let _ = self
+                        .db
+                        .with(|c| c.execute("DELETE FROM stops WHERE id=?1", [&id]));
+                    self.record(
+                        "stop.dropped",
+                        None,
+                        None,
+                        None,
+                        None,
+                        json!({"id": id, "station": station, "why": "not in this fleet"}),
+                    );
+                    self.emit("stop.updated", None, None, json!({"ids": [id]}));
+                }
+                _ => {}
             }
         }
     }
@@ -735,6 +786,10 @@ impl Daemon {
                     let status: String = r.get(5)?;
                     Ok(json!({
                         "id": r.get::<_, String>(0)?, "station": r.get::<_, String>(1)?, "scope": r.get::<_, String>(2)?,
+                        // The station that issued it, which keeps the row and delivers it,
+                        // and how long ago that was by its own clock.
+                        "from": self.station,
+                        "age_ms": now_ms().saturating_sub(r.get::<_, i64>(3)? as u64),
                         "issued_ms": r.get::<_, i64>(3)?, "by": r.get::<_, Option<String>>(4)?,
                         "label": match status.as_str() { "confirmed" => "stop confirmed", "unreachable" => "station unreachable", _ => "stop requested" },
                         "status": status, "updated_ms": r.get::<_, i64>(6)?,

@@ -97,6 +97,7 @@ async function refresh() {
   const lists = await Promise.all(stations.map(st => api.on(st, 'approval.list').catch(() => [])));
   S.approvals = lists.flat();
   await loadNotes(stations);
+  await loadStops(stations);
   try { S.trust = await api.call('trust.status'); } catch (e) { /* keep */ }
   try { S.adding = await api.call('fleet.add_status'); addChanged(); } catch (e) { /* keep */ }
   // Always from the station the deck was opened on: every station has the same copy.
@@ -141,6 +142,14 @@ async function loadNotes(stations) {
     if (notesSeeded && !n.read && fresh.length === n.at.length) notifyBrowser(n);
   }
   notesSeeded = true;
+}
+// A stop is kept by the station it was issued at, which is also the one
+// that delivers it to a station that was away. The deck shows the stops of
+// every station that answers, so the same ones wherever it is opened.
+async function loadStops(stations) {
+  const lists = await Promise.all(stations.map(st => api.on(st, 'stop.list').then(list => list.map(s => ({ from: st, ...s }))).catch(() => (S.stops || []).filter(s => s.from === st))));
+  const seen = new Set();
+  S.stops = lists.flat().filter(s => !seen.has(s.id) && seen.add(s.id)).sort((a, b) => b.issued_ms - a.issued_ms);
 }
 // Mark a notice read at every station that holds it.
 const readNote = (n) => Promise.all(n.at.map(a => api.on(a.station, 'notify.read', { id: a.id }).catch(() => {})));
@@ -1198,10 +1207,16 @@ function topbar() {
 }
 
 function stopRows() {
-  const recent = (S.fleet.stops || []).filter(s => Date.now() - s.issued_ms < 10 * 60 * 1000 || s.status !== 'confirmed').slice(0, 6);
+  // How long ago a stop was issued is what its station says (`age_ms`, by
+  // its own clock), not this browser's clock against that station's. A
+  // station from before it said so is read the old way.
+  const age = (s) => s.age_ms ?? Date.now() - s.issued_ms;
+  const recent = (S.stops || S.fleet.stops || []).filter(s => age(s) < 10 * 60 * 1000 || s.status !== 'confirmed').slice(0, 6);
+  const away = S.notesAway || [];
   if (!recent.length) return null;
-  return h('div', { class: 'stops' }, h('b', {}, 'Stop requests'), recent.map(s => h('span', { class: 'stop ' + s.status, title: `issued ${ago(s.issued_ms)} ago` },
-    `${s.station}: ${s.label}`, s.status === 'confirmed' ? ` (${s.result?.stopped?.length ?? 0} stopped)` : s.status === 'unreachable' ? ' — will be delivered when it is back' : '')));
+  return h('div', { class: 'stops' }, h('b', {}, 'Stop requests'), recent.map(s => h('span', { class: 'stop ' + s.status, title: `issued ${ago(Date.now() - age(s))} ago${s.from ? ' at ' + s.from : ''}` },
+    `${s.station}: ${s.label}`, s.status === 'confirmed' ? ` (${s.result?.stopped?.length ?? 0} stopped)` : s.status === 'unreachable' ? ` — will be delivered when it is back${s.from && !online(s.from) ? `, once ${s.from} is on too` : ''}` : '')),
+    away.length ? h('span', { class: 'muted small' }, `Stops issued at ${away.join(', ')} are not shown: not reachable.`) : null);
 }
 
 const STATION_STATE = { unreachable: 'unreachable', not_linked: 'not in this fleet', update_needed: 'on a version this station cannot control' };

@@ -137,6 +137,16 @@ fn a_deck_opened_on_either_station_shows_the_same() {
         "folded on bravo's deck too"
     );
 
+    // ---- Fault 7: a deck showed only the stops issued at the station
+    // serving it. One issued at alpha is on bravo's deck.
+    a.call("stop.all", json!({"scope": "station"}));
+    page.goto("#/fleet");
+    let stop = page.wait(
+        "alpha's stop on bravo's deck",
+        "document.querySelector('.stops .stop')?.innerText",
+    );
+    assert_eq!(stop, json!("alpha: stop confirmed (0 stopped)"));
+
     // ---- Fault 2: the owner at a deck counted as "at a keyboard" for the
     // station serving it only, so the others pushed to the phone meanwhile.
     std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -152,7 +162,58 @@ fn a_deck_opened_on_either_station_shows_the_same() {
 
 #[test]
 fn every_station_of_a_fleet_shows_the_same() {
-    let (a, b, c) = Station::three();
+    // Three stations in one fleet, and a machine that has not joined it.
+    let key = "5a".repeat(32);
+    let mut all = Station::several(&[
+        ("alpha", Some(&key)),
+        ("bravo", Some(&key)),
+        ("charlie", Some(&key)),
+        ("delta", None),
+    ]);
+    let (delta, c, b, a) = (
+        all.pop().unwrap(),
+        all.pop().unwrap(),
+        all.pop().unwrap(),
+        all.pop().unwrap(),
+    );
+    for s in [&a, &b, &c] {
+        wait_for("the stations to find each other", 20, || {
+            let v = s.call("fleet.refresh", json!({}));
+            let states = v["stations"].as_array().unwrap().iter();
+            let states: Vec<&str> = states.map(|x| x["state"].as_str().unwrap()).collect();
+            (states.iter().filter(|x| **x == "online").count() == 3
+                && states.contains(&"not_linked"))
+            .then_some(())
+        });
+    }
+
+    // ---- Fault 7: a stop for the fleet was also sent to machines that are
+    // not in it, which left a row saying "unreachable" for good. It goes to
+    // the fleet's members only, and one that is not a member is refused by
+    // name rather than queued.
+    let stops = a.call("stop.all", json!({"scope": "fleet"}));
+    let mut sent: Vec<&str> = stops["stops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["station"].as_str().unwrap())
+        .collect();
+    sent.sort();
+    assert_eq!(sent, ["alpha", "bravo", "charlie"], "{stops}");
+    assert!(stops["stops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["status"] == json!("confirmed")));
+    let not_ours = a
+        .try_call("stop.all", json!({"scope": "delta"}))
+        .unwrap_err();
+    assert!(
+        not_ours.message.contains("not in this fleet"),
+        "{}",
+        not_ours.message
+    );
+    drop(delta);
 
     // ---- Fault 1: a notice raised at one station reached only the decks
     // that station served. A deck on alpha is told what bravo raised, with
