@@ -14,6 +14,8 @@
 //!   links     project links: two projects whose agents message each other and share findings
 //!   orders    standing orders at five layers
 //!   fleet     discovery over Tailscale, trust, peer calls, stop-all
+//!   rounds    work for another station: a round per station, its schedule and back-off
+//!   loops     the periodic work, each kind in a loop of its own
 //!   stops     stop-all apart from the daemon: rows, sending, the cut-off, applying once
 //!   add       add a machine from the Control Deck: SSH in, install, start, ask to join
 //!   notify    the inbox and push rules
@@ -50,6 +52,7 @@ pub mod hooks;
 pub mod http;
 pub mod links;
 pub mod look;
+pub mod loops;
 pub mod manage;
 pub mod memory;
 pub mod messages;
@@ -65,6 +68,7 @@ pub mod relay;
 pub mod remove;
 pub mod restore;
 pub mod rids;
+pub mod rounds;
 pub mod rpc;
 pub mod server;
 pub mod setup;

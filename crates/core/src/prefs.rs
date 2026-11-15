@@ -144,32 +144,44 @@ impl Daemon {
             json!({"updated_ms": prefs.updated_ms}),
         );
         let (d, pushed) = (self.clone(), prefs.clone());
-        tokio::spawn(async move { d.prefs_send(&pushed, 0).await });
+        tokio::spawn(async move { d.prefs_send(&pushed).await });
         Ok(json!(prefs))
     }
 
-    /// Offer a copy to the online stations that keep this document, or (when
-    /// `only_if_older_than` is set) to those whose copy is older than that.
-    async fn prefs_send(&self, prefs: &Prefs, only_if_older_than: u64) {
-        for peer in self.fleet.peers() {
-            let Some(theirs) = peer.info.pointer("/prefs/updated_ms") else {
-                continue;
-            };
-            let theirs = theirs.as_u64().unwrap_or(0);
-            let reads = peer.info.pointer("/prefs/format").and_then(|f| f.as_u64());
-            if peer.state != "online"
-                || reads < Some(prefs.format as u64)
-                || (only_if_older_than > 0 && theirs >= only_if_older_than)
-            {
-                continue;
-            }
-            let r = self
-                .fleet
-                .call(&peer.station, "prefs.push", json!({"prefs": prefs}))
-                .await;
-            self.sync_sent("prefs", prefs.updated_ms, &peer.station, r)
-                .await;
+    /// Offer a copy to the online stations that keep this document, each in
+    /// a call of its own and all at the same time: one that is slow to
+    /// answer holds up none of the others.
+    async fn prefs_send(&self, prefs: &Prefs) {
+        let peers = self.fleet.peers();
+        crate::fleet::futures_join_all(peers.iter().map(|p| self.prefs_offer(p, prefs, false)))
+            .await;
+    }
+
+    /// Offer a copy to one online station. `if_older` (its round, at every
+    /// look): only when it last said its copy was older.
+    pub(crate) async fn prefs_offer(
+        &self,
+        peer: &crate::fleet::Peer,
+        prefs: &Prefs,
+        if_older: bool,
+    ) {
+        let Some(theirs) = peer.info.pointer("/prefs/updated_ms") else {
+            return;
+        };
+        let theirs = theirs.as_u64().unwrap_or(0);
+        let reads = peer.info.pointer("/prefs/format").and_then(|f| f.as_u64());
+        if peer.state != "online"
+            || reads < Some(prefs.format as u64)
+            || (if_older && theirs >= prefs.updated_ms)
+        {
+            return;
         }
+        let r = self
+            .fleet
+            .call(&peer.station, "prefs.push", json!({"prefs": prefs}))
+            .await;
+        self.sync_sent("prefs", prefs.updated_ms, &peer.station, r)
+            .await;
     }
 
     /// Another station offering its copy. Kept only if it is newer, and in a
@@ -200,13 +212,5 @@ impl Daemon {
             json!({"updated_ms": prefs.updated_ms}),
         );
         Ok(json!({"station": self.station, "ok": true, "updated_ms": prefs.updated_ms}))
-    }
-
-    /// Called after a look at the fleet: bring stations with an older copy up to date.
-    pub(crate) async fn prefs_sync(&self) {
-        let mine = self.prefs();
-        if mine.updated_ms > 0 {
-            self.prefs_send(&mine, mine.updated_ms).await;
-        }
     }
 }

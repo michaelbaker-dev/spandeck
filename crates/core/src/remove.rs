@@ -502,7 +502,9 @@ impl Daemon {
     /// After looking for stations: one that was away when the key was
     /// replaced, is back at the address it had, and still shows the old
     /// fleet, is handed the new key. Returns whether one was.
-    pub(crate) async fn rekey_stragglers(&self) -> bool {
+    ///
+    /// Asked in the round of the machine at `addr`, about that machine.
+    pub(crate) async fn rekey_stragglers(&self, addr: &str) -> bool {
         let retired = self.trust.retired();
         if retired.is_empty() {
             return false;
@@ -513,7 +515,7 @@ impl Daemon {
         for r in &retired {
             let Some(key) = unhex(&r.key) else { continue };
             let old_fleet = fleet_id_of(&key);
-            for s in &r.stations {
+            for s in r.stations.iter().filter(|s| s.addr == addr) {
                 let seen = self
                     .fleet
                     .peer(&s.station)
@@ -551,7 +553,9 @@ impl Daemon {
                 }
             }
         }
-        // Also drops what is thirty days old, and keys nobody is owed.
+        if settled.is_empty() {
+            return handed;
+        }
         let _ = self.trust.retired_change(|list| {
             for r in list {
                 r.stations

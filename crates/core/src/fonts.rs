@@ -268,7 +268,12 @@ impl Daemon {
     /// (the station that sent the document) and then from any other that
     /// keeps fonts; and delete files no longer on the list. What arrives is
     /// kept only if it is the file the document means: its bytes give the id.
-    pub(crate) async fn look_fonts_sync(&self, first: Option<&str>) {
+    /// `only`: in that station's round, it alone is asked.
+    pub(crate) async fn look_fonts_sync(
+        &self,
+        first: Option<&str>,
+        only: Option<&crate::fleet::Peer>,
+    ) {
         let look = self.look();
         let dir = self.fonts_dir();
         let mut got = 0;
@@ -277,7 +282,11 @@ impl Daemon {
                 continue;
             }
             let mut from: Vec<String> = first.map(String::from).into_iter().collect();
-            for peer in self.fleet.peers() {
+            let peers = match only {
+                Some(peer) => vec![peer.clone()],
+                None => self.fleet.peers(),
+            };
+            for peer in peers {
                 let keeps = peer.info.pointer("/look/format").and_then(|f| f.as_u64()) >= Some(2);
                 if peer.state == "online" && keeps && !from.contains(&peer.station) {
                     from.push(peer.station);

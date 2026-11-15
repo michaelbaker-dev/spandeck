@@ -272,7 +272,7 @@ impl Station {
         Station::start_keyed(name, port, extra, Some(&"5a".repeat(32)))
     }
 
-    fn start_keyed(name: &str, port: u16, extra: &str, key: Option<&str>) -> Station {
+    pub fn start_keyed(name: &str, port: u16, extra: &str, key: Option<&str>) -> Station {
         let mut s = Station::prepare(name, port, extra, &[]);
         if let Some(key) = key {
             std::fs::create_dir_all(s.root.join("state")).unwrap();

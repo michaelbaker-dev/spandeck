@@ -505,17 +505,20 @@ impl Daemon {
         setup.updated_by = format!("{by} at {}", self.station);
         let mut results = vec![self.setup_apply(&setup, by)?];
         if fleet {
-            for peer in self.fleet.peers() {
+            // Every station at the same time, each within its own five
+            // seconds: the answer waits for the slowest, not for the sum.
+            let peers = self.fleet.peers();
+            let setup = &setup;
+            let sends = peers.iter().map(|peer| async move {
                 if peer.state != "online" {
                     // It catches up by itself when it is next seen.
-                    results.push(json!({"station": peer.station, "ok": false, "pending": true, "why": "unreachable now; it will get this setup when it is back"}));
-                    continue;
+                    return json!({"station": peer.station, "ok": false, "pending": true, "why": "unreachable now; it will get this setup when it is back"});
                 }
                 let r = self
                     .fleet
                     .call(&peer.station, "setup.push", json!({"setup": setup}))
                     .await;
-                results.push(match &r {
+                let result = match &r {
                     // It kept its own copy: this setup is not on it. Said as
                     // not saved, never as saved.
                     Ok(v) if v.get("kept").is_some() => json!({
@@ -528,10 +531,12 @@ impl Daemon {
                     }),
                     Ok(v) => v.clone(),
                     Err(e) => json!({"station": peer.station, "ok": false, "why": e}),
-                });
+                };
                 self.sync_sent("setup", setup.updated_ms, &peer.station, r)
                     .await;
-            }
+                result
+            });
+            results.extend(crate::fleet::futures_join_all(sends).await);
         }
         // If a station's newer copy replaced it, say what is here now.
         Ok(json!({"setup": self.setup(), "stations": results}))
@@ -557,27 +562,22 @@ impl Daemon {
         Ok(out)
     }
 
-    /// Called after discovery: bring peers with an older setup up to date.
-    pub(crate) async fn setup_sync(&self) {
-        let mine = self.setup();
-        if mine.updated_ms == 0 {
+    /// In a station's round: bring it up to date if its setup is older.
+    pub(crate) async fn setup_offer(&self, peer: &crate::fleet::Peer, mine: &AgentSetup) {
+        let theirs = peer
+            .info
+            .pointer("/setup/updated_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if mine.updated_ms == 0 || peer.state != "online" || theirs >= mine.updated_ms {
             return;
         }
-        for peer in self.fleet.peers() {
-            let theirs = peer
-                .info
-                .pointer("/setup/updated_ms")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            if peer.state == "online" && theirs < mine.updated_ms {
-                let r = self
-                    .fleet
-                    .call(&peer.station, "setup.push", json!({"setup": mine}))
-                    .await;
-                self.sync_sent("setup", mine.updated_ms, &peer.station, r)
-                    .await;
-            }
-        }
+        let r = self
+            .fleet
+            .call(&peer.station, "setup.push", json!({"setup": mine}))
+            .await;
+        self.sync_sent("setup", mine.updated_ms, &peer.station, r)
+            .await;
     }
 
     pub fn setup_view(&self) -> Value {
@@ -646,21 +646,23 @@ impl Daemon {
         );
         let mut stations = vec![json!({"station": self.station, "sent": sent, "skipped": skipped})];
         if fleet && pane.is_none() {
-            for peer in self
-                .fleet
-                .peers()
-                .into_iter()
+            // Every station at the same time: one that does not answer
+            // holds up none of the others.
+            let peers = self.fleet.peers();
+            let calls = peers
+                .iter()
                 .filter(|p| p.state == "online")
-            {
-                let r = self
-                    .fleet
-                    .call(&peer.station, "rpc.forward", json!({"method": "agents.command", "params": {"command": command, "agent": agent, "force": force}}))
-                    .await;
-                stations.push(match r {
-                    Ok(v) => v["stations"][0].clone(),
-                    Err(e) => json!({"station": peer.station, "error": e}),
+                .map(|peer| async move {
+                    let r = self
+                        .fleet
+                        .call(&peer.station, "rpc.forward", json!({"method": "agents.command", "params": {"command": command, "agent": agent, "force": force}}))
+                        .await;
+                    match r {
+                        Ok(v) => v["stations"][0].clone(),
+                        Err(e) => json!({"station": peer.station, "error": e}),
+                    }
                 });
-            }
+            stations.extend(crate::fleet::futures_join_all(calls).await);
         }
         Ok(json!({"command": command, "stations": stations}))
     }

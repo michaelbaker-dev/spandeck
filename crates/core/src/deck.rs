@@ -152,29 +152,35 @@ impl Daemon {
         // The other stations are told without making the owner wait for them.
         // One that cannot be reached now gets the document when it is seen.
         let (d, pushed) = (self.clone(), deck.clone());
-        tokio::spawn(async move { d.deck_send(&pushed, 0).await });
+        tokio::spawn(async move { d.deck_send(&pushed).await });
         Ok(deck)
     }
 
-    /// Offer a copy to every online peer, or (when `only_if_older_than` is
-    /// set) to those that last said theirs was older than that.
-    async fn deck_send(&self, deck: &Deck, only_if_older_than: u64) {
-        for peer in self.fleet.peers() {
-            let theirs = peer
-                .info
-                .pointer("/deck/updated_ms")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            if peer.state != "online" || (only_if_older_than > 0 && theirs >= only_if_older_than) {
-                continue;
-            }
-            let r = self
-                .fleet
-                .call(&peer.station, "deck.push", json!({"deck": deck}))
-                .await;
-            self.sync_sent("deck", deck.updated_ms, &peer.station, r)
-                .await;
+    /// Offer a copy to every station that is online, each in a call of its
+    /// own and all at the same time: one that is slow to answer holds up
+    /// none of the others.
+    async fn deck_send(&self, deck: &Deck) {
+        let peers = self.fleet.peers();
+        crate::fleet::futures_join_all(peers.iter().map(|p| self.deck_offer(p, deck, false))).await;
+    }
+
+    /// Offer a copy to one station that is online. `if_older` (its round,
+    /// at every look): only when it last said its copy was older.
+    pub(crate) async fn deck_offer(&self, peer: &crate::fleet::Peer, deck: &Deck, if_older: bool) {
+        let theirs = peer
+            .info
+            .pointer("/deck/updated_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if peer.state != "online" || (if_older && theirs >= deck.updated_ms) {
+            return;
         }
+        let r = self
+            .fleet
+            .call(&peer.station, "deck.push", json!({"deck": deck}))
+            .await;
+        self.sync_sent("deck", deck.updated_ms, &peer.station, r)
+            .await;
     }
 
     pub fn deck_layout_save(&self, layout: Layout, by: &str) -> Result<Value> {
@@ -268,13 +274,5 @@ impl Daemon {
             json!({"updated_ms": deck.updated_ms}),
         );
         Ok(json!({"station": self.station, "ok": true, "updated_ms": deck.updated_ms}))
-    }
-
-    /// Called after discovery: bring peers with an older copy up to date.
-    pub(crate) async fn deck_sync(&self) {
-        let mine = self.deck();
-        if mine.updated_ms > 0 {
-            self.deck_send(&mine, mine.updated_ms).await;
-        }
     }
 }

@@ -749,6 +749,11 @@ impl Daemon {
                 "this station cannot write its database; nothing was changed"
             )));
         }
+        // A station that calls is there: if this one had it down as away,
+        // its round begins now instead of at its next turn (rounds.rs).
+        if caller.authority == Authority::Peer {
+            self.heard_from(&caller.who);
+        }
         if caller.authority == Authority::Owner && SYNCED_CHANGES.contains(&method) {
             self.sync_catch_up().await;
         }
@@ -1845,7 +1850,12 @@ impl Daemon {
             // ------------------------------------------------ add a machine
             // The owner's alone, and only at the station they are using:
             // none of the lists above has these, and they are not forwarded.
-            "fleet.candidates" => self.add_candidates(),
+            "fleet.candidates" => {
+                // The owner is choosing a machine to add: the machines
+                // that have not joined are all asked now, and not waited for.
+                self.look_soon();
+                self.add_candidates()
+            }
             "fleet.add_status" => self.add_status(),
             "fleet.add" => {
                 // The password leaves the request here and lives only in

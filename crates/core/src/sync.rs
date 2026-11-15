@@ -185,30 +185,23 @@ impl Daemon {
         }
     }
 
-    /// After a look at the fleet: note every stamp seen, and take the newest
-    /// copy of each document from a station that has a newer one than this.
-    pub(crate) async fn sync_pull(&self) {
+    /// In a station's round: note the stamps it said, and take its copy of
+    /// each document of which it has the newest in reach. A newer copy
+    /// that a third station said it has is left to that station's round,
+    /// so a copy is not taken only to be replaced a moment later.
+    pub(crate) async fn sync_pull(&self, peer: &crate::fleet::Peer) {
         for doc in DOCS {
-            let mine = self.sync_stamp_here(doc);
-            let mut newest: Option<(u64, String)> = None;
-            for peer in self.fleet.peers() {
-                let Some(theirs) = peer
-                    .info
-                    .pointer(&format!("/{doc}/updated_ms"))
-                    .and_then(|v| v.as_u64())
-                else {
-                    continue;
-                };
-                if peer.state != "online" {
-                    continue;
-                }
-                self.sync_saw(doc, theirs);
-                if theirs > mine && newest.as_ref().is_none_or(|(n, _)| theirs > *n) {
-                    newest = Some((theirs, peer.station));
-                }
-            }
-            if let Some((_, station)) = newest {
-                self.sync_pull_from(&station, doc).await;
+            let at = format!("/{doc}/updated_ms");
+            let stamp = |p: &crate::fleet::Peer| p.info.pointer(&at).and_then(|v| v.as_u64());
+            let Some(theirs) = stamp(peer) else {
+                continue;
+            };
+            self.sync_saw(doc, theirs);
+            let newer_elsewhere = self.fleet.peers().iter().any(|p| {
+                p.state == "online" && p.station != peer.station && stamp(p) > Some(theirs)
+            });
+            if theirs > self.sync_stamp_here(doc) && !newer_elsewhere {
+                self.sync_pull_from(&peer.station, doc).await;
             }
         }
     }

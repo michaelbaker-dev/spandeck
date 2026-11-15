@@ -35,6 +35,11 @@ jobs:
       # within 10 ms (they took 42 ms while each waited to be acknowledged).
       - name: The deck's socket (a stale channel number reaches no pane; answers are not held back)
         run: cargo test -p spandeck --test socket -- --ignored
+      # Four stations, one frozen and one behind a slow link: the local
+      # mail wake-up and the healthy station's sync are timed against all
+      # four healthy, and printed.
+      - name: A frozen station and a slow one delay nobody else
+        run: cargo test -p spandeck --test isolation -- --ignored --nocapture
   build:
     strategy:
       fail-fast: false

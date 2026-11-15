@@ -16,7 +16,21 @@ use spandeck_agents::AgentState;
 use crate::daemon::{invalid, Daemon, Error, Result, PROTOCOL, VERSION};
 use crate::paths::{now_ms, Config};
 use crate::relay::{BoxFuture, Envelope, RelayAck, Transport};
+use crate::rounds::{Kind, Listed, Outcome, Select};
 use crate::stops;
+
+/// `station.hello` and `station.info` are given this long together.
+const PROBE_DEADLINE: Duration = Duration::from_millis(2500);
+/// A round with one station is cut off after this long. Each call in it
+/// has the HTTP client's own five seconds; this bounds them all.
+pub const ROUND_DEADLINE: Duration = Duration::from_secs(8);
+/// A caller that waits for the fleet to be looked at waits this long at
+/// most, however many stations do not answer.
+pub const LOOK_WAIT: Duration = Duration::from_secs(5);
+
+/// A timed `station.hello`: how long it took, this station's clock when it
+/// was sent, and the clock the station said.
+type Reading = (Duration, u64, Option<u64>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Peer {
@@ -70,6 +84,10 @@ pub struct FleetState {
     /// Stations dropped from this station's list since it last looked at
     /// the fleet: the next look says so to the roster (manage.rs).
     dropped: Mutex<Vec<String>>,
+    /// Where a station of this fleet can be, as of the last look.
+    pub(crate) places: Mutex<Vec<String>>,
+    /// Held while the roster is read, merged and written back.
+    pub(crate) roster: Mutex<()>,
     /// Signs calls to other stations with the fleet key.
     pub trust: Arc<crate::trust::TrustState>,
     pub station: String,
@@ -193,6 +211,8 @@ impl FleetState {
             whois: Mutex::new(HashMap::new()),
             me: Mutex::new(None),
             dropped: Mutex::new(vec![]),
+            places: Mutex::new(vec![]),
+            roster: Mutex::new(()),
             trust,
             station: cfg.station.clone(),
             perf,
@@ -231,6 +251,11 @@ impl FleetState {
 
     pub fn peer(&self, station: &str) -> Option<Peer> {
         self.peers.lock().unwrap().get(station).cloned()
+    }
+
+    fn addr_of(&self, station: &str) -> Option<String> {
+        let peers = self.peers.lock().unwrap();
+        peers.get(station).map(|p| p.addr.clone())
     }
 
     pub(crate) fn forget(&self, station: &str) {
@@ -571,58 +596,114 @@ fn tailscale_whois(ip: IpAddr) -> Option<Value> {
 }
 
 impl Daemon {
-    /// Find stations: every online device under the same login is asked whether
-    /// it runs spandeck. Only those holding the same fleet key are trusted;
-    /// the rest are listed as not linked until the owner joins them.
+    // Finding stations: every online device under the same login is asked
+    // whether it runs spandeck. Only those holding the same fleet key are
+    // trusted; the rest are listed as not linked until the owner joins them.
+
+    /// Look at the whole fleet and wait for it, for a caller that needs
+    /// the list to be current: `fleet.refresh`, a join, a machine added.
+    /// Every address is asked now, whatever its schedule.
     pub(crate) async fn discover_peers(&self) {
         self.look_at_fleet(false).await;
     }
 
-    /// One look at a time. `only_if_stale`: a caller that only needs the
-    /// fleet to have been looked at lately, and waited for a look that was
-    /// under way, does not look again.
+    /// One look that is waited for at a time. `only_if_stale`: a caller
+    /// that only needs the fleet to have been looked at lately (the owner's
+    /// change to a synced document), and waited for a look that was under
+    /// way, does not look again.
+    ///
+    /// The lock is held only by callers that chose to wait for the fleet.
+    /// No round and no periodic loop takes it, so it cannot make one
+    /// station wait for another: what it serializes is the waiting. The
+    /// wait is bounded (`LOOK_WAIT`) however many stations do not answer;
+    /// a round still running then goes on by itself.
     pub(crate) async fn look_at_fleet(&self, only_if_stale: bool) {
         let _one = self.sync.looking.lock().await;
         if only_if_stale && !self.sync_look_is_stale() {
             return;
         }
         let began = std::time::Instant::now();
-        self.discover_once().await;
-        // A station that was away when the fleet's key was replaced, and is
-        // back: handed the key, it is in the fleet at the next look.
-        if self.rekey_stragglers().await {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            self.discover_once().await;
-        }
-        // A newer copy of a synced document is taken before this station's
-        // is offered: see sync.rs.
-        self.sync_pull().await;
-        self.setup_sync().await;
-        self.deck_sync().await;
-        self.look_sync().await;
-        self.prefs_sync().await;
-        self.sync_looked();
-        // A station that was away when a request arrived here hears of it.
-        self.trust_relay_send(false).await;
-        self.trust_sync().await;
-        // Tailscale key expiry: what each station says of its own key, and
-        // the warnings that are due (tailnet.rs). Nothing else reads these.
-        self.tailnet_ask().await;
-        self.tailnet_watch();
-        self.perf.look.record(began.elapsed());
+        let select = if only_if_stale {
+            Select::Members
+        } else {
+            Select::All
+        };
+        self.look_start(select).await;
+        self.rounds.settle(only_if_stale, LOOK_WAIT).await;
+        self.looked(began);
     }
 
-    async fn discover_once(&self) {
-        let mut candidates: Vec<String> = self.cfg.peers.clone();
+    /// The periodic look (the `fleet` loop, every ten seconds): start the
+    /// rounds that are due and return. A watcher of its own notes when the
+    /// members asked have all answered or run out of time; nothing else
+    /// waits for that.
+    pub(crate) async fn look_begin(&self) {
+        let began = std::time::Instant::now();
+        self.look_start(Select::Due).await;
+        let d = self.clone();
+        tokio::spawn(async move {
+            d.rounds.settle(true, LOOK_WAIT).await;
+            d.looked(began);
+        });
+    }
+
+    /// A machine is being chosen to add: the machines that have not joined
+    /// are all asked now. Nothing is waited for.
+    pub(crate) fn look_soon(&self) {
+        let d = self.clone();
+        tokio::spawn(async move { d.look_start(Select::All).await });
+    }
+
+    /// The station `station` made a signed call here, so it is there: if
+    /// it was listed as away, or was being asked less often, its round
+    /// begins now.
+    pub(crate) fn heard_from(&self, station: &str) {
+        if let Some(addr) = self.fleet.addr_of(station) {
+            if self.rounds.heard(&addr) {
+                self.rounds.kick(self, Select::Due);
+            }
+        }
+    }
+
+    /// Work out where stations can be, and start a round for each address
+    /// that `select` names. This asks the local Tailscale client and reads
+    /// this station's own lists; it waits for no other station.
+    async fn look_start(&self, select: Select) {
+        let mut listed: BTreeMap<String, Listed> = BTreeMap::new();
+        let mut list = |addr: &str, kind: Kind, online: Option<bool>| {
+            let l = listed.entry(addr.to_string()).or_insert(Listed {
+                addr: addr.to_string(),
+                kind,
+                online,
+            });
+            if kind == Kind::Member {
+                l.kind = kind;
+            }
+            l.online = l.online.or(online);
+        };
+        // An address the config names is asked like a member's.
+        for addr in &self.cfg.peers {
+            list(addr, Kind::Member, None);
+        }
         // Where a station of this fleet can be: the addresses in this
         // station's config, and the owner's own devices, on or off. An
         // address another station names for a member is taken only if it
         // is one of these (manage.rs, the roster).
         let mut places: Vec<String> = self.cfg.peers.clone();
+        let mut online_at: HashMap<String, bool> = HashMap::new();
         if self.cfg.discovery {
-            let fleet = &self.fleet;
-            let me = tokio::task::block_in_place(|| fleet.tailnet_self());
-            let status = tokio::task::block_in_place(tailscale_status);
+            // The local client is given four seconds: one that hangs holds
+            // up neither the rounds that are due nor anything else.
+            let d = self.clone();
+            let asked = tokio::time::timeout(
+                Duration::from_secs(4),
+                tokio::task::spawn_blocking(move || (d.fleet.tailnet_self(), tailscale_status())),
+            )
+            .await;
+            let (me, status) = match asked {
+                Ok(Ok(said)) => said,
+                _ => (None, None),
+            };
             // The same output says when each device's key expires.
             self.tailnet_refresh(status.as_ref());
             // And which addresses this machine has now: the web server
@@ -630,7 +711,7 @@ impl Daemon {
             // the client does not answer, what it last said stands.
             if let Some(status) = &status {
                 let now = Some(OwnAddrs::of(status));
-                fleet.own_addrs.send_if_modified(|held| {
+                self.fleet.own_addrs.send_if_modified(|held| {
                     let changed = *held != now;
                     *held = now;
                     changed
@@ -662,112 +743,185 @@ impl Daemon {
                         .and_then(|a| a.first())
                         .and_then(|i| i.as_str())
                     {
-                        places.push(format!("{ip}:{}", self.cfg.web_port));
+                        let addr = format!("{ip}:{}", self.cfg.web_port);
+                        places.push(addr.clone());
+                        online_at.insert(addr.clone(), online);
                         if online {
-                            candidates.push(format!("{ip}:{}", self.cfg.web_port));
+                            list(&addr, Kind::Other, Some(true));
                         }
                     }
                 }
             }
         }
-        // Stations seen before are asked too, and stay listed while they are off.
+        // Stations seen before are asked too, and stay listed while they
+        // are off. So is whatever is listed now as a station of this fleet.
         let known = self.known_stations();
+        let mut changed = false;
         {
             let mut peers = self.fleet.peers.lock().unwrap();
             for k in &known {
-                candidates.push(k.addr.clone());
+                list(&k.addr, Kind::Member, online_at.get(&k.addr).copied());
                 peers.entry(k.station.clone()).or_insert_with(|| {
                     let mut p = k.clone();
                     p.state = "unreachable".into();
+                    changed = true;
                     p
                 });
             }
-        }
-        candidates.sort();
-        candidates.dedup();
-        let probes = candidates.iter().map(|addr| {
-            let addr = addr.clone();
-            async move {
-                // The unsigned answer is timed, and says that station's
-                // clock: the link's round trip, and how far the clocks are
-                // apart, for the Performance page.
-                let reading = std::sync::Mutex::new(None);
-                let r = tokio::time::timeout(Duration::from_millis(2500), async {
-                    let (sent, began) = (now_ms(), std::time::Instant::now());
-                    let hello = self
-                        .fleet
-                        .call_open(&addr, "station.hello", json!({}))
-                        .await;
-                    let read = hello.as_ref().ok().map(|h| {
-                        (began.elapsed(), sent, h.get("now_ms").and_then(|n| n.as_u64()))
-                    });
-                    *reading.lock().unwrap() = read;
-                    match hello {
-                        // Same fleet: ask for the full picture, signed.
-                        Ok(h)
-                            if h.get("fleet").and_then(|f| f.as_str())
-                                == Some(self.trust.fleet_id().as_str()) =>
-                        {
-                            let info = self.fleet.call_addr(&addr, "station.info", json!({})).await;
-                            // It holds this fleet's key and still refuses the
-                            // signed call: when its clock is surely more than
-                            // two minutes from this one's, that is why. It
-                            // is listed, as a station that cannot be reached,
-                            // and the reason is said (audit, section 10).
-                            let apart = read.and_then(|(took, sent, theirs)| {
-                                let rtt = took.as_millis() as u64;
-                                let diff = theirs? as i64 - (sent + rtt / 2) as i64;
-                                (diff.unsigned_abs()
-                                    > crate::perf::CLOCK_LIMIT_MS as u64 + rtt / 2 + 1)
-                                    .then_some(diff)
-                            });
-                            match (info, apart) {
-                                (Err(_), Some(diff)) => Ok(json!({
-                                    "station": h.get("station"), "version": h.get("version"),
-                                    "protocol": h.get("protocol"), "os": h.get("os"), "clock_refused": diff,
-                                })),
-                                (info, _) => info,
-                            }
-                        }
-                        Ok(mut h) => {
-                            h["not_linked"] = json!(true);
-                            Ok(h)
-                        }
-                        // A station from before fleets existed still answers this.
-                        Err(_) => self.fleet.call_addr(&addr, "station.info", json!({})).await,
-                    }
-                })
-                .await;
-                let reading = reading.into_inner().unwrap();
-                (addr, r.ok().and_then(|r| r.ok()), reading)
+            for p in peers.values().filter(|p| p.state != "not_linked") {
+                list(&p.addr, Kind::Member, online_at.get(&p.addr).copied());
             }
-        });
-        let results = futures_join_all(probes).await;
-        let mut changed = false;
+        }
+        *self.fleet.places.lock().unwrap() = places;
+        // A key this fleet stopped using is kept thirty days for the
+        // stations still owed the new one: this drops what is older.
+        if !self.trust.retired().is_empty() {
+            let _ = self.trust.retired_change(|_| {});
+        }
+        // What this station itself dropped or was told to forget is put
+        // into the roster whether or not anyone answers.
+        changed |= self.roster_take(&[]);
+        self.listed_now(changed);
+        self.rounds
+            .follow(&listed.into_values().collect::<Vec<_>>());
+        self.rounds.kick(self, select);
+    }
+
+    /// The members asked at a look have answered, or run out of time.
+    fn looked(&self, began: std::time::Instant) {
+        self.sync_looked();
+        // Tailscale key expiry: the warnings that are due (tailnet.rs).
+        // After the answers, since which station sends a warning on
+        // depends on which stations are there.
+        self.tailnet_watch();
+        self.perf.look.record(began.elapsed());
+    }
+
+    /// The roster of the fleet's members, brought up to date with what the
+    /// stations in `online` say. One at a time: rounds end together.
+    fn roster_take(&self, online: &[Peer]) -> bool {
+        let _one = self.fleet.roster.lock().unwrap();
+        self.remember_stations(online);
+        let places = self.fleet.places.lock().unwrap().clone();
+        self.roster_merge(online, &places)
+    }
+
+    /// The list of stations may have changed: the links the Performance
+    /// page shows follow it, and the decks are told when it did.
+    fn listed_now(&self, changed: bool) {
+        let listed: Vec<(String, String, String)> = self
+            .fleet
+            .peers()
+            .into_iter()
+            .map(|p| (p.addr, p.station, p.state))
+            .collect();
+        self.perf.links_follow(&listed);
+        if changed {
+            self.emit("fleet.updated", None, None, json!({}));
+        }
+    }
+
+    /// Ask the machine at `addr` whether it runs spandeck, and for the full
+    /// picture if it is of this fleet. Two and a half seconds at most.
+    async fn probe(&self, addr: &str) -> (Option<Value>, Option<Reading>) {
+        // The unsigned answer is timed, and says that station's clock: the
+        // link's round trip, and how far the clocks are apart, for the
+        // Performance page.
+        let reading = std::sync::Mutex::new(None);
+        let r = tokio::time::timeout(PROBE_DEADLINE, async {
+            let (sent, began) = (now_ms(), std::time::Instant::now());
+            let hello = self.fleet.call_open(addr, "station.hello", json!({})).await;
+            let read = hello.as_ref().ok().map(|h| {
+                (
+                    began.elapsed(),
+                    sent,
+                    h.get("now_ms").and_then(|n| n.as_u64()),
+                )
+            });
+            *reading.lock().unwrap() = read;
+            match hello {
+                // Same fleet: ask for the full picture, signed.
+                Ok(h)
+                    if h.get("fleet").and_then(|f| f.as_str())
+                        == Some(self.trust.fleet_id().as_str()) =>
+                {
+                    let info = self.fleet.call_addr(addr, "station.info", json!({})).await;
+                    // It holds this fleet's key and still refuses the
+                    // signed call: when its clock is surely more than
+                    // two minutes from this one's, that is why. It
+                    // is listed, as a station that cannot be reached,
+                    // and the reason is said (audit, section 10).
+                    let apart = read.and_then(|(took, sent, theirs)| {
+                        let rtt = took.as_millis() as u64;
+                        let diff = theirs? as i64 - (sent + rtt / 2) as i64;
+                        (diff.unsigned_abs() > crate::perf::CLOCK_LIMIT_MS as u64 + rtt / 2 + 1)
+                            .then_some(diff)
+                    });
+                    match (info, apart) {
+                        (Err(_), Some(diff)) => Ok(json!({
+                            "station": h.get("station"), "version": h.get("version"),
+                            "protocol": h.get("protocol"), "os": h.get("os"), "clock_refused": diff,
+                        })),
+                        (info, _) => info,
+                    }
+                }
+                Ok(mut h) => {
+                    h["not_linked"] = json!(true);
+                    Ok(h)
+                }
+                // A station from before fleets existed still answers this.
+                Err(_) => self.fleet.call_addr(addr, "station.info", json!({})).await,
+            }
+        })
+        .await;
+        let reading = reading.into_inner().unwrap();
+        (r.ok().and_then(|r| r.ok()), reading)
+    }
+
+    /// Put what the machine at `addr` answered (or that it did not) into
+    /// the list. Only entries at that address are touched: what another
+    /// address answered, or has not answered yet, is not this round's.
+    /// Returns the station, when it is one of this fleet that this station
+    /// can work with.
+    fn probe_taken(
+        &self,
+        addr: &str,
+        info: Option<Value>,
+        reading: Option<Reading>,
+    ) -> Option<Peer> {
         let now = now_ms();
+        let mut changed = false;
+        let mut member = None;
+        let answered = info.and_then(|info| {
+            let station = info.get("station")?.as_str()?.to_string();
+            (station != self.station).then_some((station, info))
+        });
         {
             let mut peers = self.fleet.peers.lock().unwrap();
-            let mut seen_addrs = vec![];
-            for (addr, info, _) in &results {
-                let (addr, Some(info)) = (addr.clone(), info.clone()) else {
-                    continue;
-                };
-                let Some(station) = info
-                    .get("station")
-                    .and_then(|s| s.as_str())
-                    .map(String::from)
-                else {
-                    continue;
-                };
-                if station == self.station {
-                    continue;
+            match answered {
+                // A machine that is not in this fleet and no longer answers
+                // is not one of its stations that is off: it leaves the
+                // list. (A station removed from the fleet and then stopped
+                // would otherwise stay, shown as unreachable, with offers
+                // to wake it.) A station of this fleet that is away stays.
+                None => {
+                    let before = peers.len();
+                    peers.retain(|_, p| p.addr != addr || p.state != "not_linked");
+                    changed |= peers.len() != before;
+                    for p in peers.values_mut().filter(|p| p.addr == addr) {
+                        if p.state != "unreachable" {
+                            p.state = "unreachable".into();
+                            changed = true;
+                        }
+                    }
                 }
-                let protocol = info.get("protocol").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
-                if info.get("clock_refused").is_some() {
+                Some((station, info)) if info.get("clock_refused").is_some() => {
+                    let protocol =
+                        info.get("protocol").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
                     // Not reached: what was last known of it is kept.
                     let p = peers.entry(station.clone()).or_insert_with(|| Peer {
                         station,
-                        addr,
+                        addr: addr.to_string(),
                         version: info["version"].as_str().unwrap_or("?").to_string(),
                         protocol,
                         state: String::new(),
@@ -778,77 +932,98 @@ impl Daemon {
                         p.state = "unreachable".into();
                         changed = true;
                     }
-                    continue;
                 }
-                let state = if info.get("not_linked").is_some() {
-                    "not_linked"
-                } else if protocol == PROTOCOL {
-                    "online"
-                } else {
-                    "update_needed"
-                };
-                let prev = peers.get(&station).map(|p| p.state.clone());
-                if prev.as_deref() != Some(state) {
-                    changed = true;
-                }
-                seen_addrs.push(addr.clone());
-                peers.insert(
-                    station.clone(),
-                    Peer {
-                        station,
-                        addr,
-                        version: info
-                            .get("version")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("?")
-                            .to_string(),
-                        protocol,
-                        state: state.to_string(),
-                        last_seen_ms: now,
-                        info,
-                    },
-                );
-            }
-            // A machine that is not in this fleet and no longer answers is
-            // not one of its stations that is off: it leaves the list. (A
-            // station removed from the fleet and then stopped would otherwise
-            // stay, shown as unreachable, with offers to wake it.) A station
-            // of this fleet that is away is listed again from `known` above.
-            let before = peers.len();
-            peers.retain(|_, p| seen_addrs.contains(&p.addr) || p.state != "not_linked");
-            changed |= peers.len() != before;
-            for p in peers.values_mut() {
-                if !seen_addrs.contains(&p.addr) && p.state != "unreachable" {
-                    p.state = "unreachable".into();
-                    changed = true;
+                Some((station, info)) => {
+                    let protocol =
+                        info.get("protocol").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
+                    let state = if info.get("not_linked").is_some() {
+                        "not_linked"
+                    } else if protocol == PROTOCOL {
+                        "online"
+                    } else {
+                        "update_needed"
+                    };
+                    // A station that answers at two addresses is listed at
+                    // one of them, always the same one (the later in
+                    // order, as when every address was asked together).
+                    let elsewhere = peers.get(&station).is_some_and(|p| {
+                        p.addr.as_str() > addr
+                            && p.state == state
+                            && now.saturating_sub(p.last_seen_ms) < 25_000
+                    });
+                    if !elsewhere {
+                        changed |= peers.get(&station).map(|p| p.state.as_str()) != Some(state);
+                        let peer = Peer {
+                            station: station.clone(),
+                            addr: addr.to_string(),
+                            version: info
+                                .get("version")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?")
+                                .to_string(),
+                            protocol,
+                            state: state.to_string(),
+                            last_seen_ms: now,
+                            info,
+                        };
+                        member = (state == "online").then(|| peer.clone());
+                        peers.insert(station, peer);
+                    }
                 }
             }
         }
-        let online: Vec<Peer> = self
-            .fleet
-            .peers()
-            .into_iter()
-            .filter(|p| p.state == "online")
-            .collect();
-        self.remember_stations(&online);
         // The roster of the fleet's members is the same on every station.
-        changed |= self.roster_merge(&online, &places);
-        // The links the Performance page shows are to the stations listed.
-        let listed: Vec<(String, String, String)> = self
-            .fleet
-            .peers()
-            .into_iter()
-            .map(|p| (p.addr, p.station, p.state))
-            .collect();
-        self.perf.links_follow(&listed);
-        for (addr, _, reading) in &results {
-            if let Some((took, sent, theirs)) = reading {
-                self.perf.link_hello(addr, *took, *sent, *theirs);
-            }
+        if let Some(peer) = &member {
+            changed |= self.roster_take(std::slice::from_ref(peer));
         }
-        if changed {
-            self.emit("fleet.updated", None, None, json!({}));
+        self.listed_now(changed);
+        if let Some((took, sent, theirs)) = reading {
+            self.perf.link_hello(addr, took, sent, theirs);
         }
+        member
+    }
+
+    /// Everything this station does with the machine at `addr`, once: is a
+    /// station there, and if it is one of this fleet, what the two owe each
+    /// other. It runs in a task of its own (rounds.rs) and is cut off at
+    /// `ROUND_DEADLINE`; nothing waits for it but a caller that asked to.
+    async fn station_round(&self, addr: &str) -> Outcome {
+        let (info, reading) = self.probe(addr).await;
+        let answered = info.is_some();
+        let mut member = self.probe_taken(addr, info, reading);
+        // A station that was away when the fleet's key was replaced, and is
+        // back: handed the key, it is in the fleet when asked again.
+        if answered && self.rekey_stragglers(addr).await {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let (info, reading) = self.probe(addr).await;
+            member = self.probe_taken(addr, info, reading);
+        }
+        if let Some(peer) = member {
+            self.station_sync(&peer).await;
+        }
+        if answered {
+            Outcome::Answered
+        } else {
+            Outcome::Silent
+        }
+    }
+
+    /// What this station and one station of its fleet owe each other at
+    /// every look. Each call is to that station alone.
+    async fn station_sync(&self, peer: &Peer) {
+        // A newer copy of a synced document is taken before this station's
+        // is offered: see sync.rs.
+        self.sync_pull(peer).await;
+        self.setup_offer(peer, &self.setup()).await;
+        self.deck_offer(peer, &self.deck(), true).await;
+        self.look_offer(peer, &self.look(), true).await;
+        self.prefs_offer(peer, &self.prefs(), true).await;
+        // A station that was away when a request arrived here hears of it.
+        self.trust_relay_to(peer).await;
+        self.trust_sync_with(peer).await;
+        // Tailscale key expiry: what the station says of its own key.
+        self.tailnet_ask(peer).await;
+        self.look_fonts_sync(None, Some(peer)).await;
     }
 
     pub fn fleet_view(&self) -> Value {
@@ -1303,4 +1478,16 @@ pub async fn futures_join_all<F: std::future::Future>(
     })
     .await;
     out.into_iter().flatten().collect()
+}
+
+/// A round with a real station (rounds.rs).
+impl crate::rounds::Link for Daemon {
+    fn round<'a>(&'a self, addr: &'a str) -> BoxFuture<'a, Outcome> {
+        Box::pin(self.station_round(addr))
+    }
+
+    fn ended(&self, addr: &str, took: Duration, outcome: Outcome) {
+        self.perf
+            .link_round(addr, took, outcome == Outcome::Answered);
+    }
 }

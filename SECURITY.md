@@ -46,6 +46,13 @@ days, not hours.
   it as text, and accepts a member's address only if it is one it would look at by
   itself: an address in its own config, or a device under your Tailscale login. A
   station cannot make another one send a call or a key to an address it chose.
+- **A station that is slow or away costs only itself.** What a station does with
+  another station it does in a task of that station's own, cut off after eight
+  seconds, never two at once, and less often while that station keeps failing. So a
+  machine that holds its connections open, on purpose or not, delays its own share of
+  the work and nobody else's. A station's signed call makes this station ask it again
+  at once, at most every two seconds, and only at the address it is already listed at;
+  an unsigned call changes nothing about when or where this station looks.
 - **Channel numbers are not reused from one connection to the next.** What a Control
   Deck types names its pane by a channel number of its connection. Each connection
   starts counting at a random place, and a number it did not give is refused, so a key
