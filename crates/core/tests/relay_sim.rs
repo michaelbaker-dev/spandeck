@@ -117,7 +117,10 @@ fn world() -> World {
 
 fn sim(seed: u64, fail_rate: f64) -> turmoil::Sim<'static> {
     turmoil::Builder::new()
-        .simulation_duration(Duration::from_secs(600))
+        // Simulated time, not real. A sender backs off to 30 s between tries,
+        // so an unlucky run of drops needs more than ten minutes for six
+        // tasks (seed 114 did, in the nightly run of 15 Nov 2026).
+        .simulation_duration(Duration::from_secs(1800))
         .tick_duration(Duration::from_millis(5))
         .rng_seed(seed)
         .fail_rate(fail_rate)
