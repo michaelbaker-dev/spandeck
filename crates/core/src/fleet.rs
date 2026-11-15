@@ -888,6 +888,7 @@ impl Daemon {
         scope: &str,
         by: &str,
         marks: crate::holds::StopMarks,
+        mut legs: crate::rpc::StopLegs,
     ) -> Result<Value> {
         let issued = now_ms();
         // The fleet is its members: a machine that has not joined cannot
@@ -926,22 +927,40 @@ impl Daemon {
             .iter()
             .zip(&targets)
             .partition(|(_, station)| **station == self.station);
+        // A station's leg (the stop's place in the order of the connection
+        // that read it) is let go of when that station's part is done, and
+        // the legs of stations this stop is not for at once.
+        legs.retain(|station, _| targets.contains(station));
+        let leg = legs.remove(&self.station);
         // This station: on a thread of its own, since stopping a pane also
         // writes the ship's log, and a database that is slow to take that
         // must not hold up the stops for the other stations.
         let local = here.first().map(|(id, _)| {
             let (d, id, by) = (self.clone(), id.to_string(), by.to_string());
-            tokio::task::spawn_blocking(move || {
-                let result = d.apply_stop(&id, issued, None, None, &by, marks);
-                d.stops.book.mark(&id, "confirmed", result, now_ms());
-            })
+            async move {
+                if let Some(leg) = &leg {
+                    leg.turn().await;
+                }
+                tokio::task::spawn_blocking(move || {
+                    let result = d.apply_stop(&id, issued, None, None, &by, marks);
+                    d.stops.book.mark(&id, "confirmed", result, now_ms());
+                    drop(leg);
+                })
+                .await
+            }
         });
         let cutoff = self.flag_on(stops::CAP, true);
-        let sends = futures_join_all(
-            there
-                .iter()
-                .map(|(id, _)| stops::send(book, self, id, cutoff)),
-        );
+        let sends = futures_join_all(there.iter().map(|(id, station)| {
+            let leg = legs.remove(*station);
+            async move {
+                if let Some(leg) = &leg {
+                    leg.turn().await;
+                }
+                let sent = stops::send(book, self, id, cutoff).await;
+                drop(leg);
+                sent
+            }
+        }));
         let (wrote, _, _) = tokio::join!(
             self.stops_sync(false, Duration::from_secs(1)),
             async {

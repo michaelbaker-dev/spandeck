@@ -197,6 +197,16 @@ export const anyTrouble = (data) => !!data && data.rows.some(row => ['bad', 'war
 const stat = (x, what) => (x && num(x.count) ? `${ms(x.p50_ms)} / ${ms(x.p95_ms)}` : what || 'none yet');
 const statTitle = (x, of) => (x && num(x.count) ? `${of}: half took under ${ms(x.p50_ms)}, 95% under ${ms(x.p95_ms)}, the longest ${ms(x.max_ms)}; ${x.count} in the last 5 minutes` : `${of}: none in the last 5 minutes`);
 const KINDS = [['deck', 'Control Deck'], ['local', 'agents and command line'], ['station', 'other stations'], ['http', 'HTTP']];
+// A deck's requests are handled in lanes: what each kind waited, and how many
+// were refused because too many of one page's were already waiting.
+const LANES = [['input', 'What is typed'], ['urgent', 'Stop, Pause, Kill and answers'], ['write', 'Changes'], ['read', 'Reads'], ['attach', 'Attaching']];
+const lanesTitle = (w) => (!w || !w.lanes ? '' : '\n' + LANES.map(([k, name]) => `${name}: ` + (num(w.lanes[k]?.count) ? `95% under ${ms(w.lanes[k].p95_ms)}, the longest ${ms(w.lanes[k].max_ms)}` : 'none')).join('\n')
+  + `\nRefused because too many were waiting: ${num(w.busy?.last_5m) || 0}`);
+// A station that handles a deck's requests in lanes: what was typed, and Stop,
+// since a read that waits for a station that does not answer is meant to wait.
+const waitedText = (w) => (w && w.lanes && (num(w.lanes.input?.count) || num(w.lanes.urgent?.count)) ? `typing ${stat(w.lanes.input, 'none yet')} · stop ${stat(w.lanes.urgent, 'none yet')}` : stat(w?.deck, 'no deck open'));
+// The switches set on a station (config or the owner): names and values are the station's text.
+const switches = (r) => Object.entries(r && r.flags && typeof r.flags === 'object' ? r.flags : {}).slice(0, 16).map(([k, v]) => `${String(k).slice(0, 40)} = ${String(JSON.stringify(v)).slice(0, 40)}`);
 
 function stationFacts(data, row) {
   const s = row.s, r = row.report, v = verdict(data, row), key = keyInfo(keyOf(data, s.station));
@@ -208,9 +218,10 @@ function stationFacts(data, row) {
     f('Up for', r ? span(r.now_ms - r.started_ms) : na, r ? `Since ${new Date(r.started_ms).toLocaleString()}; ${r.panes} panes` : ''),
     f('Restarts, 24 h', r ? String(num(r.restarts?.last_24h) ?? 0) : na, r ? (r.restarts?.list || []).slice(0, 4).map(x => `${clock(x.at_ms)} ${x.what}: ${x.why}`).join('\n') : ''),
     f('Requests (p50 / p95)', r ? (req.length ? req.map(q => `${q.k} ${stat(q.x)}`).join(' · ') : 'none yet') : na, r ? KINDS.map(([k, name]) => statTitle(r.requests?.handled?.[k], `From ${name}`)).join('\n') : ''),
-    f('Waited in line', r ? stat(r.requests?.waited?.deck, 'no deck open') : na, r ? statTitle(r.requests?.waited?.deck, 'How long a request from a Control Deck stood behind the ones before it on its connection') : ''),
+    f('Waited in line', r ? waitedText(r.requests?.waited) : na, r ? statTitle(r.requests?.waited?.deck, 'How long a request from a Control Deck stood before it was begun') + lanesTitle(r.requests?.waited) : ''),
     f('Ran late, worst 1 min', r ? ms(r.periodic?.late?.worst_1m_ms) : na, r ? statTitle(r.periodic?.late, 'How late its twice-a-second work began') + '\n' + statTitle(r.periodic?.work, 'How long that work took') : ''),
     f('Database', r ? (r.database ? `${num(r.database.waiting) || 0} waiting, ${num(r.database.log_dropped) || 0} dropped` + (r.database.queued === false ? ' (writer off)' : '') : 'not reported') : na, r && r.database ? `Changes of state not yet written: ${num(r.database.waiting) || 0}, the oldest for ${span(num(r.database.oldest_ms) || 0)}; log entries waiting: ${num(r.database.log_waiting) || 0}, dropped since start: ${num(r.database.log_dropped) || 0}; changes dropped: ${num(r.database.state_dropped) || 0}; tries that failed: ${num(r.database.failures) || 0}; writes over 50 ms: ${num(r.database.slow) || 0}` + (r.database.last_error ? `\nFailing: ${String(r.database.last_error).slice(0, 120)}` : '') : ''),
+    f('Switches', r ? (switches(r).length ? switches(r).join(' · ') : 'none set') : na, 'What is set in this station\'s config.toml under [flags] or with station.flags; everything else is at its default. ws_lanes = false: a deck\'s requests are taken one at a time, as before lanes.'),
     f('Look at the fleet', r ? stat(r.look) : na, r ? statTitle(r.look, 'One look at every station, every 10 seconds') : ''),
     f('Repaints', r ? `${num(r.terminal?.resyncs?.last_5m) ?? 0} (${num(r.terminal?.resyncs?.since_start) ?? 0} since start)` : na, 'A client that fell behind a pane and was sent the whole screen again'),
     f('Messages', r ? `there ${stat(r.messages?.received, '—')} · told ${stat(r.messages?.woken, '—')}` + ((r.messages?.waiting || []).length ? ` · ${r.messages.waiting.reduce((a, w) => a + (num(w.count) || 0), 0)} waiting` : '') : na,

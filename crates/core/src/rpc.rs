@@ -193,6 +193,73 @@ const NEEDS_DATABASE: &[&str] = &[
     "note.add",
 ];
 
+/// The owner's calls that change nothing but are not on the read-only list
+/// (they are the owner's history, the owner's devices, or for whoever may
+/// start a pane). With `READ_METHODS` they are what a Control Deck's
+/// connection may answer in any order (`reads`).
+const OWNER_READS: &[&str] = &[
+    "pane.conversation",
+    "pane.conversation.detail",
+    "pane.titles",
+    "pane.last_session",
+    "perf.get",
+    "tailnet.view",
+    "tailnet.signin",
+    "fleet.add_status",
+];
+
+/// Does this method only read? Such a call changes nothing, so a Control
+/// Deck's connection answers several at once and in any order; every other
+/// call to a station is made in the order it arrived (web: lanes).
+pub fn reads(method: &str) -> bool {
+    READ_METHODS.contains(&method) || OWNER_READS.contains(&method)
+}
+
+/// May a caller with this authority call this method at all? What
+/// `dispatch` asks first; for whoever must act as a request is read
+/// (a stop's place in a pane's input) and so before it is dispatched.
+pub fn allowed(authority: Authority, method: &str) -> bool {
+    match authority {
+        Authority::Owner => true,
+        Authority::Agent => AGENT_METHODS.contains(&method),
+        Authority::Peer => PEER_METHODS.contains(&method),
+        Authority::ReadOnly => READ_METHODS.contains(&method),
+    }
+}
+
+/// A method that acts from the station the owner is using and is never
+/// passed on to another one.
+pub fn not_forwarded(method: &str) -> bool {
+    NOT_FORWARDED.contains(&method)
+}
+
+/// What was taken for a request the moment it was read, before it was its
+/// turn to run. A connection that handles several requests at once reads
+/// them in the order they came, and that order is the one a stop's place
+/// must have.
+#[derive(Default)]
+pub struct AtRead {
+    /// A stop's place in the input of each pane it may stop. A pane with
+    /// no entry is marked when the stop runs.
+    pub marks: crate::holds::StopMarks,
+    /// For "stop every agent": the stop's place, per station, in the order
+    /// of the connection that read it. Each station's part of the stop
+    /// waits for its own turn and lets its place go when it is done
+    /// (applied here, or answered or given up on there), so that neither
+    /// the stop nor what was read after it waits for another station.
+    pub legs: StopLegs,
+}
+
+/// A stop's place in one station's order: see `AtRead::legs`.
+pub trait StopLeg: Send + Sync {
+    /// Wait until everything read before the stop, for this station's
+    /// panes, is done.
+    fn turn(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+}
+
+/// By station. Dropping a station's entry gives its place up.
+pub type StopLegs = std::collections::HashMap<String, Box<dyn StopLeg>>;
+
 fn p<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T> {
     serde_json::from_value(params.clone()).map_err(|e| invalid(format!("bad parameters: {e}")))
 }
@@ -258,22 +325,25 @@ impl Daemon {
         Ok(())
     }
 
-    pub async fn dispatch(
+    pub async fn dispatch(&self, caller: &Caller, method: &str, params: Value) -> Result<Value> {
+        self.dispatch_at(caller, method, params, AtRead::default())
+            .await
+    }
+
+    /// `dispatch`, for a request whose stop marks were taken when it was
+    /// read (`AtRead`): a Control Deck's connection, which reads requests
+    /// in order and runs them side by side.
+    pub async fn dispatch_at(
         &self,
         caller: &Caller,
         method: &str,
         mut params: Value,
+        mut at: AtRead,
     ) -> Result<Value> {
-        match caller.authority {
-            Authority::Owner => {}
-            Authority::Agent if AGENT_METHODS.contains(&method) => {}
-            Authority::Peer if PEER_METHODS.contains(&method) => {}
-            Authority::ReadOnly if READ_METHODS.contains(&method) => {}
-            _ => {
-                return Err(Error::Denied(format!(
-                    "{method} is not available to this caller"
-                )))
-            }
+        if !allowed(caller.authority, method) {
+            return Err(Error::Denied(format!(
+                "{method} is not available to this caller"
+            )));
         }
         if caller.authority == Authority::Owner
             && !READ_METHODS.contains(&method)
@@ -525,7 +595,10 @@ impl Daemon {
                 // here, before anything is waited for. What this connection
                 // sends next is kept, and written after the interrupt key.
                 let pane = self.pane(s(&params, "pane")?)?;
-                let mark = pane.term.mark_stop();
+                let mark = at
+                    .marks
+                    .remove(&pane.id)
+                    .unwrap_or_else(|| pane.term.mark_stop());
                 let (d, id, who) = (self.clone(), pane.id.clone(), by.to_string());
                 let done = tokio::task::spawn_blocking(move || d.stop_at(&id, &who, mark, true))
                     .await
@@ -984,9 +1057,19 @@ impl Daemon {
                 self.fleet_view()
             }
             "stop.all" => {
-                // Each pane's place for this stop is taken as it is read.
-                let marks = self.stop_marks();
-                self.stop_all(opt(&params, "scope").unwrap_or("station"), by, marks)
+                // Each pane's place for this stop is taken as it is read:
+                // by the connection that read it, or here. Only where the
+                // stop is for this station: a mark holds back what is sent
+                // to its pane after it, and a stop for another station
+                // used to hold this station's panes until that one answered.
+                let scope = opt(&params, "scope").unwrap_or("station");
+                let mut marks = std::mem::take(&mut at.marks);
+                if self.stop_is_for_here(scope) {
+                    self.stop_marks_into(&mut marks);
+                } else {
+                    marks.clear();
+                }
+                self.stop_all(scope, by, marks, std::mem::take(&mut at.legs))
                     .await?
             }
             "stop.apply" => {
@@ -1015,10 +1098,11 @@ impl Daemon {
                     client: format!("via:{}", caller.who),
                     who: format!("you (via {})", caller.who),
                 };
-                Box::pin(self.dispatch(
+                Box::pin(self.dispatch_at(
                     &as_owner,
                     inner,
                     params.get("params").cloned().unwrap_or(json!({})),
+                    at,
                 ))
                 .await?
             }
@@ -1036,10 +1120,11 @@ impl Daemon {
                     )));
                 }
                 if station == self.station {
-                    Box::pin(self.dispatch(
+                    Box::pin(self.dispatch_at(
                         caller,
                         s(&params, "method")?,
                         params.get("params").cloned().unwrap_or(json!({})),
+                        at,
                     ))
                     .await?
                 } else {

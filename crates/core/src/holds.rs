@@ -312,14 +312,34 @@ impl Daemon {
     /// A stop's place in the input of every agent's pane here, for a stop
     /// that may stop any of them. Waits for nothing.
     pub fn stop_marks(&self) -> StopMarks {
-        self.list_panes()
-            .iter()
-            .filter(|p| {
+        let mut marks = StopMarks::new();
+        self.stop_marks_into(&mut marks);
+        marks
+    }
+
+    /// `stop_marks`, for the panes `marks` has no place for yet.
+    pub fn stop_marks_into(&self, marks: &mut StopMarks) {
+        self.stop_marks_unless(marks, |_| false)
+    }
+
+    /// `stop_marks_into`, passing over the panes `skip` names: a connection
+    /// that still holds something sent to a pane before the stop takes that
+    /// pane's place when its turn comes, not ahead of what came first.
+    pub fn stop_marks_unless(&self, marks: &mut StopMarks, skip: impl Fn(&str) -> bool) {
+        for p in self.list_panes() {
+            let agent = {
                 let m = p.meta.lock().unwrap();
                 m.exit.is_none() && m.agent.is_agent()
-            })
-            .map(|p| (p.id.clone(), p.term.mark_stop()))
-            .collect()
+            };
+            if agent && !marks.contains_key(&p.id) && !skip(&p.id) {
+                marks.insert(p.id.clone(), p.term.mark_stop());
+            }
+        }
+    }
+
+    /// Does a "stop every agent" with this scope stop agents here?
+    pub fn stop_is_for_here(&self, scope: &str) -> bool {
+        matches!(scope, "station" | "" | "fleet") || scope == self.station
     }
 
     /// Tell whoever sent what a stop threw away: an event that names the
