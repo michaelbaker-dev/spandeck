@@ -19,6 +19,7 @@
 //!   agents    agent programs here: found, versioned, installed when missing, updated
 //!   setup     fleet-wide agent setup: MCP servers, skills, model defaults
 //!   deck      fleet-wide deck document: global layouts and pins
+//!   look      fleet-wide look document: themes, and what the deck, a layout or a pane uses
 //!   vault     AgentVault: station token, key use through the vault's proxy
 //!   usage     what each pane's agent has used, and the station's totals
 //!   prices    the public list of model prices and context windows, fetched daily
@@ -36,6 +37,7 @@ pub mod git;
 pub mod hooks;
 pub mod http;
 pub mod links;
+pub mod look;
 pub mod manage;
 pub mod memory;
 pub mod messages;

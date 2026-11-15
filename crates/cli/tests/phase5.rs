@@ -1472,6 +1472,17 @@ fn a_removed_station_loses_its_panes_and_the_rest_of_the_fleet_gets_a_new_key() 
     let kept = json!({"kind": "pane", "station": "bravo", "id": "p-kept"});
     a.call("deck.pin", json!({"pin": pin}));
     a.call("deck.pin", json!({"pin": kept}));
+    // And gives it a look of its own, which must go too (bravo's stays).
+    let own = json!({"set": {"font.size": 15}});
+    for key in [
+        format!("charlie/{}", later["id"].as_str().unwrap()),
+        "bravo/p-kept".to_string(),
+    ] {
+        a.call(
+            "look.set",
+            json!({"level": "pane", "key": key, "choice": own}),
+        );
+    }
 
     let out = a.call("fleet.remove", json!({"station": "charlie"}));
     assert_eq!(
@@ -1525,6 +1536,9 @@ fn a_removed_station_loses_its_panes_and_the_rest_of_the_fleet_gets_a_new_key() 
     for s in [&a, &b] {
         wait_for("the deck to forget charlie", 15, || {
             (s.call("deck.get", json!({}))["pins"] == json!([kept])).then_some(())
+        });
+        wait_for("charlie's pane's own look to be forgotten", 15, || {
+            (s.call("look.get", json!({}))["panes"] == json!({"bravo/p-kept": own})).then_some(())
         });
     }
     // Each station's log says what happened and who asked; no key is shown.

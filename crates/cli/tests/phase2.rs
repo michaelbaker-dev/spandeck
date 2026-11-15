@@ -863,3 +863,140 @@ fn a_dialog_keeps_the_keyboard_while_a_pane_is_open() {
         assert!(text.contains(part), "no {part:?} in:\n{text}");
     }
 }
+
+/// The owner's request (15 Nov 2026): "if I create one I like I should be able
+/// to set as a theme to reuse", for the whole deck, with a layout's or a
+/// pane's own look winning over it. Done when: what is being edited shows on
+/// the page before anything is saved; a theme saved in the Appearance editor
+/// is on the station and on the page, and still after a reload; a pane given
+/// its own look shows it beside a pane that follows the deck; a pane's
+/// program can change none of it; a value that is more than a colour is
+/// refused by the station; and a closed pane's look is forgotten.
+#[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
+fn a_saved_theme_is_used_again_and_a_panes_own_look_wins() {
+    use common::browser::Page;
+    let s = Station::start("alpha");
+    let spawn = |name: &str| {
+        s.call(
+            "pane.spawn",
+            json!({"program": "/bin/sh", "name": name, "cwd": s.root.join("home")}),
+        )["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (one, two) = (spawn("one"), spawn("two"));
+    s.call(
+        "deck.layout.save",
+        json!({"layout": {"name": "both", "tree": {"dir": "row", "ratio": 500, "a": {"id": one}, "b": {"id": two}}}}),
+    );
+    let page = Page::open(&s, 1400, 900);
+    page.goto("#/l/both");
+    // The page's background, then each terminal's.
+    let shown = "(bg => document.querySelectorAll('.pane .xterm-rows').length === 2 && [getComputedStyle(document.body).backgroundColor, bg('one'), bg('two')])(n => [...document.querySelectorAll('.pane')].find(p => p.paneTerm.pane.name === n).paneTerm.term.options.theme.background)";
+    let shows = |what: &str, want: Value| {
+        page.wait(
+            what,
+            &format!("JSON.stringify({shown}) === {}", json!(want.to_string())),
+        );
+    };
+    let press = |sel: &str, text: &str| {
+        page.wait(
+            text,
+            &format!(
+                "(b => b ? (b.click(), true) : false)([...document.querySelectorAll({})].find(b => b.innerText.trim() === {}))",
+                json!(sel),
+                json!(text)
+            ),
+        );
+    };
+    let background = |hex: &str| {
+        page.wait(
+            "the terminal background's box",
+            &format!("(i => i ? (i.value = {}, i.dispatchEvent(new Event('input')), true) : false)(document.querySelector('.look-row[data-key=\"term.background\"] .look-hex'))", json!(hex)),
+        );
+    };
+    shows(
+        "the deck as it always was",
+        json!(["rgb(15, 19, 24)", "#0f1318", "#0f1318"]),
+    );
+
+    // The deck: the light theme with one colour changed. It is on the page
+    // at once and nowhere else until it is saved.
+    press(".topbar button", "Appearance");
+    page.wait(
+        "the editor",
+        "(s => s ? (s.value = 'spandeck-light', s.dispatchEvent(new Event('change')), true) : false)(document.querySelector('#look-theme'))",
+    );
+    background("#101820");
+    let light = json!(["rgb(244, 246, 248)", "#101820", "#101820"]);
+    shows("the change as it is made", light.clone());
+    assert_eq!(s.call("look.get", json!({}))["deck"], json!({}));
+    press(".look-foot button", "Save as theme…");
+    page.js("document.querySelector('.look-namer input').value = 'Mine'");
+    press(".look-namer button", "Save theme");
+    page.wait(
+        "the new theme to be the one chosen",
+        "document.querySelector('#look-theme').selectedOptions[0].textContent === 'Mine'",
+    );
+    press(".look-foot button", "Save");
+    page.wait("the editor to close", "!document.querySelector('.dialog')");
+    let doc = s.call("look.get", json!({}));
+    let mine = &doc["themes"][0];
+    assert_eq!(
+        (
+            &mine["name"],
+            &mine["settings"]["term.background"],
+            &mine["settings"]["deck.bg"]
+        ),
+        (&json!("Mine"), &json!("#101820"), &json!("#f4f6f8")),
+        "{doc}"
+    );
+    assert_eq!(doc["deck"], json!({"theme": mine["id"]}), "{doc}");
+    page.js("location.reload()");
+    shows("the theme after a reload", light);
+
+    // One pane gets a look of its own: it wins there, and only there.
+    page.right_click(
+        "[...document.querySelectorAll('.pane')].find(p => p.paneTerm.pane.name === 'two')?.querySelector('.strip')",
+    );
+    page.choose("Appearance");
+    background("#300000");
+    press(".look-foot button", "Save");
+    shows(
+        "the pane's own look beside the deck's",
+        json!(["rgb(244, 246, 248)", "#101820", "#300000"]),
+    );
+    let key = format!("alpha/{two}");
+    assert_eq!(
+        s.call("look.get", json!({}))["panes"],
+        json!({ key.as_str(): {"set": {"term.background": "#300000"}} })
+    );
+
+    // Rule 7: how the deck looks is the owner's. A pane's program changes none of it.
+    for (method, params) in [
+        (
+            "look.set",
+            json!({"level": "deck", "choice": {"theme": "nord"}}),
+        ),
+        ("look.theme.save", json!({"theme": {"name": "Theirs"}})),
+        ("look.theme.remove", json!({"id": mine["id"]})),
+        ("look.push", json!({"look": {"updated_ms": u64::MAX}})),
+    ] {
+        assert_eq!(
+            s.call_as_pane(&one, method, params).unwrap_err().code,
+            "denied",
+            "{method}"
+        );
+    }
+    // What a theme file or another station sends is data: more than a colour is refused.
+    let bad = json!({"theme": {"name": "Bad", "settings": {"deck.bg": "#fff;}</style><script>alert(1)</script>"}}});
+    assert_eq!(
+        s.try_call("look.theme.save", bad).unwrap_err().code,
+        "invalid"
+    );
+    // A pane that is closed takes its look with it.
+    s.call("pane.close", json!({"pane": two}));
+    assert_eq!(s.call("look.get", json!({}))["panes"], json!({}));
+}

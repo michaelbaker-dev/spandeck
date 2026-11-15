@@ -525,6 +525,9 @@ impl Daemon {
         let deck = self
             .deck_forget_station(station, by)
             .unwrap_or_else(|e| json!({"problem": e.to_string()}));
+        let looks = self
+            .look_forget_station(station, by)
+            .unwrap_or_else(|e| json!({"problem": e.to_string()}));
         let reached = left.is_ok();
         self.record(
             "fleet.removed",
@@ -552,6 +555,7 @@ impl Daemon {
             "rekeyed": rekeyed,
             "waiting": waiting,
             "deck": deck,
+            "looks": looks,
             "alone": rekeyed.is_empty() && waiting.is_empty(),
         });
         match left {

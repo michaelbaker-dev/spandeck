@@ -54,6 +54,7 @@ const AGENT_METHODS: &[&str] = &[
 const PEER_METHODS: &[&str] = &[
     "setup.push",
     "deck.push",
+    "look.push",
     "station.info",
     "relay.accept",
     "stop.apply",
@@ -108,6 +109,7 @@ const READ_METHODS: &[&str] = &[
     "setup.get",
     "agents.status",
     "deck.get",
+    "look.get",
     "vault.status",
     "trust.status",
 ];
@@ -949,6 +951,35 @@ impl Daemon {
                 let deck: crate::deck::Deck =
                     p(params.get("deck").ok_or_else(|| invalid("missing deck"))?)?;
                 self.deck_push(deck, by)?
+            }
+            // ------------------------------------------------------ the look
+            // Themes, and what the deck, a layout or a pane uses. The owner's
+            // alone, as the deck document is: no agent has a method here, and
+            // a station only the one that offers its copy.
+            "look.get" => json!(self.look()),
+            "look.theme.save" => {
+                let theme: crate::look::Theme = p(params
+                    .get("theme")
+                    .ok_or_else(|| invalid("missing theme"))?)?;
+                self.look_theme_save(theme, by)?
+            }
+            "look.theme.remove" => self.look_theme_remove(s(&params, "id")?, by)?,
+            "look.set" => {
+                let choice: Option<crate::look::Choice> = match params.get("choice") {
+                    None | Some(Value::Null) => None,
+                    Some(c) => Some(p(c)?),
+                };
+                self.look_set(s(&params, "level")?, opt(&params, "key"), choice, by)?
+            }
+            "look.push" => {
+                if caller.authority != Authority::Peer {
+                    return Err(Error::Denied(
+                        "look.push is for another station; use look.set or look.theme.save".into(),
+                    ));
+                }
+                let look: crate::look::Look =
+                    p(params.get("look").ok_or_else(|| invalid("missing look"))?)?;
+                self.look_push(look, by)?
             }
             "setup.push" => {
                 let setup: crate::setup::AgentSetup = p(params

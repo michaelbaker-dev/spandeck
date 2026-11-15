@@ -82,6 +82,8 @@ export async function copyText(text, said = 'Copied') {
 }
 
 // A modal dialog. `build(close)` returns the body; Esc and the backdrop close it.
+// `beside` puts it at the right with the page left clear to see, and a click
+// on the page does not close it: for the dialog whose changes show on the page.
 export function dialog(title, build, opts = {}) {
   const close = () => { back.remove(); removeEventListener('keydown', onKey, true); opts.onClose && opts.onClose(); };
   const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
@@ -89,7 +91,7 @@ export function dialog(title, build, opts = {}) {
     h('div', { class: 'dialog-head' }, h('h2', {}, title), h('button', { class: 'icon-btn', title: 'Close', onclick: close }, '✕')));
   const body = h('div', { class: 'dialog-body' });
   box.append(body);
-  const back = h('div', { class: 'backdrop', onmousedown: (e) => { if (e.target === back) close(); } }, box);
+  const back = h('div', { class: 'backdrop' + (opts.beside ? ' beside' : ''), onmousedown: (e) => { if (e.target === back && !opts.beside) close(); } }, box);
   overlays().append(back);
   addEventListener('keydown', onKey, true);
   body.append(build(close, body));

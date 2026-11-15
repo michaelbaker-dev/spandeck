@@ -31,5 +31,25 @@ copied as published and only scaled to the icon's size.
 
 Bundled software
 
-crates/web/assets/vendor/xterm.js and addon-fit.js are xterm.js, MIT licence;
-see crates/web/assets/vendor/XTERM-LICENSE.txt.
+crates/web/assets/vendor/xterm.js, addon-fit.js and addon-unicode11.js
+(@xterm/addon-unicode11 0.8.0) are xterm.js, MIT licence; see
+crates/web/assets/vendor/XTERM-LICENSE.txt.
+
+Colour palettes
+
+The Control Deck's built-in themes (crates/web/assets/look.js) include these
+palettes. Only the colour values are used. The deck colours shown beside each
+(bars, buttons, lines) are spandeck's own choice from the same palette, and
+the terminal's contrast floor set with the two Solarized themes is spandeck's.
+
+  Solarized Dark, Solarized Light
+               Copyright (c) 2011 Ethan Schoonover. MIT licence.
+               https://github.com/altercation/solarized
+  Dracula      Copyright (c) 2023 Dracula Theme. MIT licence.
+               https://github.com/dracula/dracula-theme
+  Gruvbox Dark Copyright (c) Pavel Pertsev. MIT/X11 licence.
+               https://github.com/morhetz/gruvbox
+  Nord         Copyright (c) 2016-present Sven Greb. MIT licence.
+               https://github.com/nordtheme/nord
+
+Spandeck Dark and Spandeck Light are spandeck's own.

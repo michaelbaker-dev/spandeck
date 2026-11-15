@@ -13,6 +13,11 @@ import { Api } from './api.js';
 import { PaneTerm } from './term.js';
 import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText } from './ui.js';
 import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
+import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage } from './look.js';
+import { lookEditor } from './lookedit.js';
+
+// The page opens in the look this browser last had, before anything is asked.
+applyRemembered();
 
 const api = new Api();
 const root = document.getElementById('app');
@@ -96,11 +101,39 @@ async function refresh() {
   try { S.adding = await api.call('fleet.add_status'); addChanged(); } catch (e) { /* keep */ }
   // Always from the station the deck was opened on: every station has the same copy.
   try { S.deck = await api.call('deck.get'); } catch (e) { /* keep */ }
+  await loadLook();
   S.loaded = true;
   update();
   vaultAtOpen();
   migrateWorkspaces();
 }
+
+// The look document: themes, and what the deck, a layout or a pane uses. Like
+// the deck document it is asked of the station the deck was opened on.
+async function loadLook() {
+  try { setDoc(await api.call('look.get')); } catch (e) { return; }
+  // What is being tried in the editor is not what to open with next time.
+  if (!lookState.preview) rememberPage(pageLook(null));
+}
+
+// Show every look again: the page's (the deck's, or the layout's on screen)
+// and each terminal's. Called on every redraw and by the Appearance editor
+// as a value changes.
+function applyLook() {
+  const layout = S.route.view === 'layout' ? S.route.layout : null;
+  const page = pageLook(layout);
+  applyPage(page);
+  for (const t of S.terms.values()) {
+    const { look, own } = paneLook(layout, `${t.station}/${t.pane.id}`);
+    t.setLook(look, own ? page : null);
+  }
+}
+// The editor for the deck, a layout ({key, name}) or a pane ({key, name}).
+function appearance(level, scope = {}) {
+  lookEditor({ api, apply: applyLook, reload: async () => { await loadLook(); } },
+    { level, ...scope, layoutKey: S.route.view === 'layout' ? S.route.layout : null });
+}
+const paneLookKey = (st, p) => `${st}/${p.id}`;
 
 let refreshTimer = null;
 function refreshSoon(ms = 120) { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, ms); }
@@ -115,7 +148,7 @@ api.onEvent((ev) => {
   if (ev.kind === 'fleet.add.output') { if (addDlg) addDlg.line(ev.data); return; }
   if (ev.kind === 'notify.new') notifyBrowser(ev.data);
   if (ev.kind === 'connection.restored') { for (const t of S.terms.values()) t.attach(); }
-  if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events|vault|trust|deck)\./.test(ev.kind)) refreshSoon();
+  if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events|vault|trust|deck|look)\./.test(ev.kind)) refreshSoon();
 });
 
 function notifyBrowser(n) {
@@ -171,6 +204,9 @@ async function copyScreen(st, p) {
 function paneMenu(e, st, p, where, term) {
   const s = stateOf(p), agent = p.agent !== 'shell', alive = !p.exited;
   const act = (m, extra) => () => rpc(st, m, { pane: p.id, ...extra }).then((r) => {
+    // A closed pane's own look goes with it. Its station sees to that; one
+    // from before themes does not know how, so it is also asked for here.
+    if (m === 'pane.close' && lookState.doc.panes[paneLookKey(st, p)]) api.call('look.set', { level: 'pane', key: paneLookKey(st, p), choice: null }).catch(() => {});
     // A restarted pane is a new program behind the same name: show it.
     if (m === 'pane.restart') for (const t of S.terms.values()) if (t.station === st && t.pane.id === p.id) { if (t.chan !== null) api.detach(t.chan); t.chan = null; t.attach(); }
     return r;
@@ -204,6 +240,7 @@ function paneMenu(e, st, p, where, term) {
     agent && alive && { label: 'Run a command in it…', action: () => commandDialog(st, p) },
     { label: 'Send it a message', action: () => messageDialog(st, p) },
     { label: 'Rename', action: () => renameDialog(st, p) },
+    { label: 'Appearance…', hint: lookState.doc.panes[paneLookKey(st, p)] ? 'its own' : undefined, action: () => appearance('pane', { key: paneLookKey(st, p), name: p.name }) },
     { label: 'Copy address', action: () => copyText(p.address, 'Copied ' + p.address) },
     '-',
     alive && { label: 'Kill the process', danger: true, action: () => confirmBox('Kill ' + p.name + '?', 'The process ends now. An agent can be resumed later by its session.', 'Kill', act('pane.kill')) },
@@ -514,6 +551,7 @@ function palette() {
     { label: 'Approval requests', run: approvalsPanel },
     { label: 'Inbox', run: inboxPanel },
     { label: 'Usage: tokens and estimated cost', run: fleetUsageDialog },
+    { label: 'Appearance: themes, colours and fonts', run: () => appearance('deck') },
     { label: 'Stop every agent on this station', run: () => rpc(api.station, 'stop.all', { scope: 'station' }) },
     { label: 'Check this station (doctor)', run: doctorPanel },
     { label: 'Agent setup: MCP servers, skills, models', run: setupPanel },
@@ -999,6 +1037,7 @@ function topbar() {
     (S.trust?.requests?.length || S.trust?.outgoing) || !isPhone() ? h('button', { class: S.trust?.requests?.length ? 'attn' : '', onclick: trustPanel, title: 'Stations and browsers allowed to control your fleet' }, 'Access', S.trust?.requests?.length ? h('span', { class: 'count' }, S.trust.requests.length) : null) : null,
     isPhone() ? null : h('button', { onclick: fleetUsageDialog, title: 'Tokens and estimated cost, per station, project, pane and model' }, 'Usage'),
     isPhone() ? null : h('button', { onclick: setupPanel, title: 'MCP servers, skills and model defaults for every agent' }, 'Agent setup'),
+    isPhone() ? null : h('button', { onclick: () => appearance('deck'), title: 'Themes, colours and fonts for the whole deck' }, 'Appearance'),
     isPhone() || !S.fleet.stations.some(x => x.vault?.found) ? null : h('button', { class: S.fleet.stations.some(x => x.state === 'online' && (['not_connected', 'token_rejected', 'locked'].includes(x.vault?.state) || x.vault?.health === 'problem')) ? 'attn' : '', onclick: vaultPanel, title: 'AgentVault: keys for agents without handing over keys' }, 'Vault'),
     h('button', { class: 'danger', onclick: stopAllMenu, title: 'Interrupt running agent turns' }, 'Stop all'),
     isPhone() ? null : h('button', { onclick: palette, title: 'Ctrl+K' }, '⌘K'));
@@ -1907,6 +1946,8 @@ function renameLayoutDialog(lay) {
       if (layoutNames(lay.station, lay.project).includes(to)) return toast(`There is already a layout named ${to}. Choose another name.`, 'error');
       const pinned = isPinned(layPin(lay)), next = { ...lay, name: to, key: lay.project ? `${lay.station}/${lay.project}/${to}` : 'global:' + to };
       await layoutSave(lay.station, lay.project, { name: to, lines: !!lay.cache.lines, tree: toServer(lay.cache.tree) });
+      // The layout's own look moves to its new name.
+      if (lookState.doc.layouts[lay.key]) await api.call('look.set', { level: 'layout', key: next.key, choice: lookState.doc.layouts[lay.key] }).catch(() => {});
       await layoutRemove(lay);
       if (pinned) { await api.call('deck.unpin', { pin: layPin(lay) }).catch(() => {}); await api.call('deck.pin', { pin: layPin(next) }).catch(() => {}); }
       close();
@@ -1921,6 +1962,8 @@ function renameLayoutDialog(lay) {
 async function duplicateLayout(lay) {
   const name = freeName(lay.name + '-copy', layoutNames(lay.station, lay.project));
   await layoutSave(lay.station, lay.project, { name, lines: !!lay.cache.lines, tree: toServer(lay.cache.tree) });
+  const copyKey = lay.project ? `${lay.station}/${lay.project}/${name}` : 'global:' + name;
+  if (lookState.doc.layouts[lay.key]) await api.call('look.set', { level: 'layout', key: copyKey, choice: lookState.doc.layouts[lay.key] }).catch(() => {});
   await refresh();
   go(layUrl({ ...lay, name }));
 }
@@ -1948,6 +1991,8 @@ function layMenu(e, lay) {
     { label: 'Rename', action: () => renameLayoutDialog(lay) },
     { label: 'Duplicate', action: () => duplicateLayout(lay) },
     { label: isPinned(pin) ? 'Unpin' : 'Pin', action: () => togglePin(pin) },
+    // Opened on the layout itself, so the change is seen as it is made.
+    !isPhone() && { label: 'Appearance…', hint: lookState.doc.layouts[lay.key] ? 'its own' : undefined, action: () => { go(layUrl(lay)); setTimeout(() => appearance('layout', { key: lay.key, name: lay.name }), 0); } },
     '-',
     { label: 'Delete', danger: true, action: () => deleteLayout(lay) }]);
 }
@@ -2059,7 +2104,8 @@ function layoutView(key) {
     lay.project ? linkedChip(lay.station, (S.projects.get(lay.station) || []).find(pr => pr.name === lay.project)) : null,
     h('span', { class: 'grow' }),
     h('button', { class: 'toggle' + (ctx.arrange ? ' on' : ''), 'aria-pressed': String(ctx.arrange), title: 'Move panes around by dragging them', onclick: () => { arranging = ctx.arrange ? null : lay.key; render(); } }, ctx.arrange ? 'Done arranging' : 'Arrange'),
-    h('button', { class: 'toggle' + (c.lines ? ' on' : ''), 'aria-pressed': String(!!c.lines), title: 'Draw lines between panes whose agents are talking', onclick: () => { c.lines = !c.lines; saveLayout(lay); render(); } }, c.lines ? 'Lines: on' : 'Lines: off'));
+    h('button', { class: 'toggle' + (c.lines ? ' on' : ''), 'aria-pressed': String(!!c.lines), title: 'Draw lines between panes whose agents are talking', onclick: () => { c.lines = !c.lines; saveLayout(lay); render(); } }, c.lines ? 'Lines: on' : 'Lines: off'),
+    h('button', { class: 'icon-btn', title: 'Layout menu', 'aria-label': 'Layout menu', onclick: (e) => layMenu(e, lay) }, '⋮'));
   const bar = ctx.arrange ? h('div', { class: 'arrange-bar' },
     h('b', {}, 'Arranging'), h('span', {}, 'Drag a pane onto another: an edge puts it beside, the middle swaps. Drag any pane in from the list.'),
     h('span', { class: 'grow' }),
@@ -2459,9 +2505,11 @@ function render() {
   else root.replaceChildren(topbar(), ...kids);
   const side = document.querySelector('.sidebar');
   if (side && sideTop) side.scrollTop = sideTop;
-  for (const [key, t] of S.terms) {
-    if (!t._used) { t.dispose(); S.terms.delete(key); }
-    else if (t._fresh) { t._fresh = false; t.mount(); }
+  for (const [key, t] of S.terms) if (!t._used) { t.dispose(); S.terms.delete(key); }
+  // Each terminal has its look before it is first drawn.
+  applyLook();
+  for (const t of S.terms.values()) {
+    if (t._fresh) { t._fresh = false; t.mount(); }
     else t.layout();
   }
   const lay = r.view === 'layout' ? findLayout(r.layout) : null;

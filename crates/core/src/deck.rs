@@ -199,6 +199,7 @@ impl Daemon {
             );
             Ok(Some(json!({"layout": name, "removed": true})))
         })?;
+        self.look_forget_layout(&format!("global:{name}"), by);
         Ok(json!({"removed": name}))
     }
 

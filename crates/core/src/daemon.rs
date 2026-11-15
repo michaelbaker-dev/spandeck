@@ -307,6 +307,8 @@ pub struct Inner {
     pub vault: crate::vault::VaultState,
     /// Held while the deck document is read, changed and written back.
     pub(crate) deck_lock: Mutex<()>,
+    /// The same for the look document.
+    pub(crate) look_lock: Mutex<()>,
     /// Held while a pane that continues the last conversation is started, so
     /// two of them asked for at once do not both choose the same one.
     pub(crate) resume_lock: Mutex<()>,
@@ -408,6 +410,7 @@ impl Daemon {
             web_addrs: Mutex::new(vec![]),
             vault: Default::default(),
             deck_lock: Mutex::new(()),
+            look_lock: Mutex::new(()),
             resume_lock: Mutex::new(()),
             agents: Default::default(),
             prices: Default::default(),
@@ -1470,6 +1473,7 @@ impl Daemon {
             )
         });
         self.cancel_pane_approvals(&p.id);
+        self.look_forget_pane(&p.id, by);
         let m = p.meta();
         self.record(
             "pane.closed",
@@ -2055,6 +2059,9 @@ impl Daemon {
             "agents": self.agents_brief(),
             "setup": {"updated_ms": self.setup().updated_ms},
             "deck": {"updated_ms": self.deck().updated_ms},
+            // Said only by a station that keeps the look document: one that
+            // does not say it is never sent a copy.
+            "look": {"updated_ms": self.look().updated_ms, "format": crate::look::FORMAT},
             "vault": self.vault_view(),
         })
     }

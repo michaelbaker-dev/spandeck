@@ -349,6 +349,7 @@ impl Daemon {
         }
         self.setup_sync().await;
         self.deck_sync().await;
+        self.look_sync().await;
     }
 
     async fn discover_once(&self) {

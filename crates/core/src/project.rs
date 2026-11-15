@@ -504,6 +504,7 @@ impl Daemon {
             return Err(Error::NotFound(format!("layout {name} in {project}")));
         }
         file.save(&path)?;
+        self.look_forget_layout(&format!("{}/{project}/{name}", self.station), by);
         self.record(
             "project.layout",
             None,

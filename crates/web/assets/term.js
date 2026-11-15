@@ -3,15 +3,24 @@
 // Sizing rule: one size per pane, set by whoever has control. A client in
 // control fits the pane to its view and tells the station. Anyone else shows
 // the pane at its real size, scaled down and letterboxed.
+//
+// How a terminal looks (colours, font, cursor) is a look (look.js). A font
+// change follows the sizing rule: the client in control fits the pane again
+// and tells the station; anyone else only scales what it shows.
 
 import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge } from './ui.js';
 import { paneIcon, iconName } from './icons.js';
+import { BASE, termOptions, applyPaneFrame, SIZING } from './look.js';
 
-const THEME = {
-  background: '#0f1318', foreground: '#d6dde6', cursor: '#6cb6ff', selectionBackground: '#2b4a6b',
-  black: '#1b2229', red: '#ff6b6b', green: '#57d38c', yellow: '#e5c07b', blue: '#6cb6ff', magenta: '#c792ea', cyan: '#56c8d8', white: '#d6dde6',
-  brightBlack: '#5c6773', brightRed: '#ff8e8e', brightGreen: '#7ee2a8', brightYellow: '#f0d399', brightBlue: '#8fc7ff', brightMagenta: '#d9b3f2', brightCyan: '#7fdbe6', brightWhite: '#ffffff',
-};
+// A terminal as every pane has it. Emoji take two cells, as the programs
+// that print them expect: the terminal's own table (Unicode 6) gives them
+// one, and the next character was drawn on top of them.
+export function newTerminal(options) {
+  const term = new Terminal({ allowProposedApi: true, ...options });
+  term.loadAddon(new Unicode11Addon.Unicode11Addon());
+  term.unicode.activeVersion = '11';
+  return term;
+}
 
 export class PaneTerm {
   // opts: {mode: 'control'|'watch', onMenu(ev, pane), onFocus(), compact}
@@ -43,10 +52,9 @@ export class PaneTerm {
     // The element leads back to its terminal (the pane menu and tests use it).
     this.el.paneTerm = this;
 
-    this.term = new Terminal({
-      fontFamily: 'ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace',
-      fontSize: opts.compact ? 11 : 13, theme: THEME, cursorBlink: true, scrollback: 5000,
-      allowProposedApi: true, disableStdin: !this.control && !opts.typeWhileWatching, macOptionIsMeta: true,
+    this.term = newTerminal({
+      ...termOptions(BASE, opts.compact), scrollback: 5000,
+      disableStdin: !this.control && !opts.typeWhileWatching, macOptionIsMeta: true,
       // A full-screen agent listens for the mouse, so a plain drag goes to it
       // and selects nothing. Option (Mac) or Shift makes the drag a selection.
       // A right-click opens our menu and leaves the selection as it is.
@@ -214,10 +222,36 @@ export class PaneTerm {
     }
   }
 
+  // The look this pane is shown in. `page` is the look of the page around
+  // it when the pane has one of its own (its frame then carries its colours),
+  // else nothing. Only what changed is given to the terminal, and the pane is
+  // fitted again only when the change moves how many cells fit.
+  setLook(look, page) {
+    applyPaneFrame(this.el, look, page);
+    const next = termOptions(look, this.opts.compact);
+    const sig = JSON.stringify(next);
+    if (sig === this._lookSig) return;
+    const was = this._lookSig ? JSON.parse(this._lookSig) : termOptions(BASE, this.opts.compact);
+    this._lookSig = sig;
+    let sizing = false;
+    for (const [k, v] of Object.entries(next)) {
+      if (JSON.stringify(v) === JSON.stringify(was[k])) continue;
+      this.term.options[k] = v;
+      sizing ||= SIZING.includes(k);
+    }
+    // In control: fit again and tell the station. Watching: scale again.
+    // Another window in control of the same pane does the same and arrives at
+    // the same size, which `resizedBy` does not take for a loss of control.
+    if (sizing && this.term.element) { clearTimeout(this._rt); this._rt = setTimeout(() => this.layout(), 60); }
+  }
+
   // Someone else resized the pane: they have control now, we letterbox.
+  // Unless they made it the size this client already holds it at (two windows
+  // that fit it alike, after a font change reached both): nothing changed.
   resizedBy(controller, cols, rows) {
+    const same = cols === this.size.cols && rows === this.size.rows;
     this.size = { cols, rows };
-    if (controller !== this.api.client && this.control) {
+    if (controller !== this.api.client && this.control && !same) {
       this.control = false;
       this.term.options.disableStdin = true;
       this._lostControl = true;
