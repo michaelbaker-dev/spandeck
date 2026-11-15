@@ -324,6 +324,223 @@ async fn a_pane_on_another_station_is_attached_through_the_gateway() {
     })
     .await;
     assert_eq!(ok, Ok(true));
+
+    // Mobile plan, phase M1: a pane's conversation, watched from a deck that
+    // another station serves. The agent on bravo runs a tool, compacts, asks
+    // for a permission and answers; the browser, which talks only to alpha,
+    // is sent each item once, as it is written.
+    let line = |v: Value| json!({"transcript": v});
+    let said = |blocks: Value| json!({"type": "assistant", "message": {"role": "assistant", "content": blocks}});
+    let worker = tokio::task::block_in_place(|| {
+        b.fake(
+            json!({"steps": [
+                {"prompt": "count the otters"},
+                line(said(json!([{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "wc -l otters.csv"}}]))),
+                line(json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "12 otters.csv"}]}, "toolUseResult": {"stdout": "12 otters.csv", "stderr": "", "interrupted": false}})),
+                line(json!({"type": "system", "subtype": "compact_boundary", "compactMetadata": {"trigger": "manual", "preTokens": 5000, "postTokens": 400}})),
+                line(json!({"type": "hologram-state", "note": "a record of a kind nobody knows"})),
+                line(said(json!([{"type": "tool_use", "id": "toolu_2", "name": "Bash", "input": {"command": "rm otters.csv"}}]))),
+                {"permission": {"name": "Bash", "command": "rm otters.csv"}},
+                line(json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_2", "content": ""}]}, "toolUseResult": {"stdout": "", "stderr": "", "interrupted": false}})),
+                {"turn_end": "twelve otters, and the file is gone"}
+            ]}),
+            json!({"name": "counter"}),
+        )
+    });
+    ws.send(Message::Text(
+        json!({"id": 7, "method": "pane.conversation.watch", "params": {"pane": worker, "station": "bravo"}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    // What the view would hold: every item by id, in the order sent.
+    let mut items: Vec<Value> = vec![];
+    let mut live = Value::Null;
+    let mut conv_chan = Value::Null;
+    let mut not_understood = 0;
+    macro_rules! watch_until {
+        ($what:expr, $done:expr) => {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    #[allow(clippy::redundant_closure_call)]
+                    if $done(&items, &live) {
+                        return;
+                    }
+                    let Some(Ok(Message::Text(t))) = ws.next().await else {
+                        continue;
+                    };
+                    let v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
+                    let page = if v["id"] == json!(7) {
+                        assert!(v.get("error").is_none(), "{v}");
+                        conv_chan = v["result"]["chan"].clone();
+                        &v["result"]
+                    } else if !conv_chan.is_null() && v["chan"] == conv_chan {
+                        &v["conversation"]
+                    } else {
+                        continue;
+                    };
+                    if page["reset"] == json!(true) {
+                        items.clear();
+                    }
+                    for item in page["items"].as_array().into_iter().flatten() {
+                        assert!(
+                            items.iter().all(|i| i["id"] != item["id"]),
+                            "{} was sent twice",
+                            item["id"]
+                        );
+                        items.push(item.clone());
+                    }
+                    for item in page["updated"].as_array().into_iter().flatten() {
+                        let old = items.iter_mut().find(|i| i["id"] == item["id"]);
+                        *old.expect("an update is for an item sent before") = item.clone();
+                    }
+                    live = page["live"].clone();
+                    not_understood = page["not_understood"].as_u64().unwrap_or(not_understood);
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {}: {items:?} {live}", $what))
+        };
+    }
+    // The request the hook holds, tied to the call it is about, once that
+    // call has been sent.
+    watch_until!("the approval", |items: &Vec<Value>, live: &Value| {
+        let about = &live["approvals"][0]["item"];
+        !about.is_null() && items.iter().any(|i| i["id"] == *about)
+    });
+    let shown: Vec<(&str, &str)> = items
+        .iter()
+        .map(|i| {
+            (
+                i["what"].as_str().or(i["kind"].as_str()).unwrap(),
+                i["status"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        vec![
+            ("user", ""),
+            ("tool", "ok"),
+            ("compacted", ""),
+            ("tool", "running")
+        ]
+    );
+    assert_eq!(not_understood, 1, "the unknown record is counted");
+    // The held approval points at the call it is about.
+    let approval = live["approvals"][0].clone();
+    assert_eq!(approval["item"], items[3]["id"], "{live}");
+    assert_eq!(live["state"], json!("needs_you"));
+    let via_alpha = |method: &str, params: Value| {
+        tokio::task::block_in_place(|| {
+            a.call(
+                "peer.call",
+                json!({"station": "bravo", "method": method, "params": params}),
+            )
+        })
+    };
+    // A call's detail on demand, through the gateway.
+    let detail = via_alpha(
+        "pane.conversation.detail",
+        json!({"pane": worker, "item": items[1]["id"]}),
+    );
+    assert_eq!(detail["output"]["text"], json!("12 otters.csv"), "{detail}");
+
+    // The owner allows it from alpha's deck: the call finishes and the reply
+    // arrives, with nothing sent twice and nothing missed.
+    via_alpha(
+        "approval.answer",
+        json!({"id": approval["approval"], "allow": true}),
+    );
+    watch_until!("the reply", |items: &Vec<Value>, live: &Value| items
+        .iter()
+        .any(|i| i["kind"] == json!("text"))
+        && live["unread"] == json!(true));
+    assert_eq!(items[3]["status"], json!("ok"));
+    assert_eq!(
+        items[4]["text"],
+        json!("twelve otters, and the file is gone")
+    );
+    assert_eq!(items.len(), 5, "{items:?}");
+
+    // Unread is kept at the pane's station, so it is the same whichever
+    // station's deck marks it or asks.
+    let unread_at_bravo = || tokio::task::block_in_place(|| b.pane(&worker))["unread"].clone();
+    assert_eq!(unread_at_bravo(), json!(true));
+    let read = via_alpha("pane.read", json!({"pane": worker}));
+    assert_eq!(read["unread"], json!(false), "{read}");
+    assert_eq!(unread_at_bravo(), json!(false));
+    watch_until!("the read mark", |_: &Vec<Value>, live: &Value| live
+        ["unread"]
+        == json!(false));
+
+    // A view that lost its connection comes back with its session and its
+    // cursor, and is sent what came after it and nothing else.
+    let session =
+        via_alpha("pane.conversation", json!({"pane": worker, "limit": 1}))["session"].clone();
+    ws.send(Message::Text(
+        json!({"id": 9, "method": "pane.conversation.watch", "params": {
+            "pane": worker, "station": "bravo", "session": session, "after": items[2]["line"]}})
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let back: Value = loop {
+        if let Some(Ok(Message::Text(t))) = ws.next().await {
+            let v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
+            if v["id"] == json!(9) {
+                break v["result"].clone();
+            }
+        }
+    };
+    assert_eq!(back["reset"], json!(false), "{back}");
+    assert_eq!(back["items"], json!([items[3], items[4]]), "{back}");
+    assert_eq!(back["updated"], json!([]));
+
+    // An agent is refused all of it, its own pane included.
+    for method in ["pane.conversation", "pane.conversation.detail", "pane.read"] {
+        let err = tokio::task::block_in_place(|| {
+            b.call_as_pane(&worker, method, json!({"pane": worker, "item": "1.0"}))
+        })
+        .unwrap_err();
+        assert_eq!(err.code, "denied", "{method}");
+    }
+    let (mut as_agent, _) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/api/ws", b.port))
+            .await
+            .unwrap();
+    let token = tokio::task::block_in_place(|| b.pane_token(&worker));
+    for msg in [
+        json!({"auth": {"token": token}}),
+        json!({"id": 1, "method": "pane.conversation.watch", "params": {"pane": worker}}),
+    ] {
+        as_agent
+            .send(Message::Text(msg.to_string().into()))
+            .await
+            .unwrap();
+    }
+    let refused: Value = loop {
+        let t = as_agent.next().await.unwrap().unwrap();
+        let v: Value = serde_json::from_str(t.to_text().unwrap()).unwrap();
+        if v["id"] == json!(1) {
+            break v;
+        }
+    };
+    assert_eq!(refused["error"]["code"], json!("denied"), "{refused}");
+    // A pane with no conversation says why, so the view opens the terminal.
+    let shell = via_alpha("pane.conversation", json!({"pane": pane}));
+    assert_eq!(shell["available"], json!(false));
+    assert_eq!(
+        shell["reason"],
+        json!("no conversation for this pane: it runs a shell, not an agent")
+    );
+    // Nothing of bravo's conversation was kept at the station that passed it on.
+    assert_eq!(
+        tokio::task::block_in_place(|| a.call("archive.sessions", json!({}))),
+        json!([])
+    );
     drop(tokio::task::spawn_blocking(move || drop((a, b))).await);
 }
 

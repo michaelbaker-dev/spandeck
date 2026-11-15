@@ -297,6 +297,9 @@ pub struct Inner {
     /// When each client last had its typing into a pane written to the log.
     pub(crate) typed: Mutex<HashMap<String, u64>>,
     pub(crate) keep_awake: Mutex<Option<std::process::Child>>,
+    /// pane -> (session, line): how far the owner has read each pane's
+    /// conversation. Kept in the key-value table; this is its copy in memory.
+    pub(crate) read_marks: Mutex<HashMap<String, (String, u64)>>,
     /// The pane host this daemon's panes live in, where one is used.
     pub(crate) host: Mutex<Option<Arc<spandeck_terminal::HostClient>>>,
     pub(crate) seq: AtomicU64,
@@ -426,6 +429,7 @@ impl Daemon {
             presence: Mutex::new(HashMap::new()),
             typed: Mutex::new(HashMap::new()),
             keep_awake: Mutex::new(None),
+            read_marks: Mutex::new(HashMap::new()),
             host: Mutex::new(None),
             seq: AtomicU64::new(0),
             web_addrs: Mutex::new(vec![]),
@@ -1510,6 +1514,7 @@ impl Daemon {
             )
         });
         self.cancel_pane_approvals(&p.id);
+        self.conversation_forget(&p.id);
         self.look_forget_pane(&p.id, by);
         let m = p.meta();
         self.record(

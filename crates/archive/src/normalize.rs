@@ -173,6 +173,10 @@ pub fn codex_line(raw: &str) -> Vec<Entry> {
                 .get("role")
                 .and_then(|r| r.as_str())
                 .unwrap_or("assistant");
+            // What Codex tells itself (seen in 0.169.0) is not conversation.
+            if matches!(role, "developer" | "system") {
+                return vec![];
+            }
             let text = payload.get("content").map(text_of).unwrap_or_default();
             let kind = if role == "user" { "prompt" } else { "reply" };
             vec![mk(

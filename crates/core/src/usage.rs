@@ -121,7 +121,11 @@ impl Daemon {
     /// A pane as callers see it: its view plus what its agent has used.
     pub fn pane_view(&self, p: &PaneEntry) -> Value {
         let mut v = p.view(&self.station);
-        v["usage"] = self.pane_usage(&p.meta());
+        let meta = p.meta();
+        v["usage"] = self.pane_usage(&meta);
+        // Whether the agent has said something the owner has not read, as
+        // this station keeps it: the same answer from every station's deck.
+        v["unread"] = json!(self.conversation_unread(&meta));
         v
     }
 

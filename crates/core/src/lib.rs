@@ -33,6 +33,7 @@
 pub mod add;
 pub mod agents;
 pub mod client;
+pub mod conversation;
 pub mod daemon;
 pub mod db;
 pub mod deck;
