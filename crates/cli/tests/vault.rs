@@ -145,7 +145,9 @@ fn a_denied_request_yields_nothing() {
     });
     let v = wait_for("the denial to be seen", 10, || {
         let v = s.call("vault.status", json!({}));
-        v["pending"].is_null().then_some(v)
+        // The request is dropped a moment before the reason is recorded
+        // (seen once on the Mac CI runner): wait for both.
+        (v["pending"].is_null() && v["problem"].is_string()).then_some(v)
     });
     assert_eq!(v["state"], json!("not_connected"));
     assert!(v["problem"].as_str().unwrap().contains("denied"));
