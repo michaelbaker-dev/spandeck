@@ -81,6 +81,19 @@ pub fn wait_for<T>(what: &str, secs: u64, mut f: impl FnMut() -> Option<T>) -> T
 }
 
 impl Station {
+    /// A station of the test fleet on a port the test chose, with the
+    /// peer addresses the test chose (a proxy's, say). Nothing is waited
+    /// for.
+    pub fn in_fleet(name: &str, port: u16, peers: &[u16], extra: &str) -> Station {
+        let peers: Vec<String> = peers.iter().map(|p| format!("\"127.0.0.1:{p}\"")).collect();
+        Station::start_keyed(
+            name,
+            port,
+            &format!("peers = [{}]\n{extra}", peers.join(", ")),
+            Some(&"5a".repeat(32)),
+        )
+    }
+
     pub fn start(name: &str) -> Station {
         Station::start_with(name, "", &[])
     }

@@ -6,7 +6,7 @@
 use std::io::{BufRead, Write};
 
 use serde_json::{json, Value};
-use spandeck_core::client::Client;
+use spandeck_core::client::{Client, ClientError};
 use spandeck_core::Paths;
 
 fn tools() -> Value {
@@ -59,8 +59,62 @@ t("wait", "Wait until another pane is done, needs the user, or fails. Never poll
     ])
 }
 
+/// What an agent is told when a tool call got no answer. It says what
+/// happened to the change, because the agent acts on exactly that: "NOT
+/// sent" is safe to do again, "may or may not" must be checked first.
+fn told(tool: &str, e: &ClientError) -> String {
+    // (nothing reached spandeck, the outcome is not known)
+    let (not_done, check) = match tool {
+        "send" => (
+            "Your message was NOT sent.",
+            "your message may or may not have been sent: read the thread before sending again",
+        ),
+        "reply" => (
+            "Your reply was NOT sent.",
+            "your reply may or may not have been sent: read the thread before replying again",
+        ),
+        "ack" => (
+            "The message was NOT marked as acted on.",
+            "the message may or may not have been marked as acted on; marking it again does no harm",
+        ),
+        "delegate" => (
+            "The task was NOT handed over.",
+            "the task may or may not have been handed over: look for the helper's pane with `crew` before delegating again",
+        ),
+        "task_result" => (
+            "Your result was NOT recorded.",
+            "your result may or may not have been recorded: if you are told the task is already completed, it was",
+        ),
+        "note_add" => (
+            "The note was NOT added.",
+            "the note may or may not have been added: look for it with `context_search` before adding it again",
+        ),
+        "inbox" => (
+            "No message was marked read.",
+            "messages may have been marked read without reaching you: call `inbox` with all set to true",
+        ),
+        "vault_call" => (
+            "The call was NOT made.",
+            "the provider may or may not have been called, and the call was not made a second time: check with the provider before calling again",
+        ),
+        _ => ("Nothing was changed; try again shortly.", "try again shortly"),
+    };
+    let secs = spandeck_core::client::TOOL_WAIT.as_secs();
+    if e.not_sent() {
+        format!("spandeck did not answer for {secs} s. {not_done}")
+    } else if e.outcome_unknown() {
+        format!("spandeck went away before it answered, and cannot confirm this: {check}.")
+    } else {
+        e.to_string()
+    }
+}
+
 fn call_tool(paths: &Paths, name: &str, args: &Value) -> Result<Value, String> {
-    let mut client = Client::from_env(paths).map_err(|e| e.to_string())?;
+    // A tool call does not fail because spandeck is being upgraded or
+    // started again: it waits, 15 s at most, and a change whose answer was
+    // lost is not made a second time (core/client.rs).
+    let mut client = Client::from_env_retrying(paths, spandeck_core::client::TOOL_WAIT)
+        .map_err(|e| e.to_string())?;
     client.set_timeout(Some(std::time::Duration::from_secs(3700)));
     let (method, params) = match name {
         "send" => ("msg.send", args.clone()),
@@ -82,7 +136,17 @@ fn call_tool(paths: &Paths, name: &str, args: &Value) -> Result<Value, String> {
         ),
         other => return Err(format!("unknown tool {other}")),
     };
-    let mut result = client.call(method, params).map_err(|e| e.to_string())?;
+    let answer = if name == "wait" {
+        // Asked again after a reconnect, for the time it has left.
+        let limit = std::time::Duration::from_millis(params["timeout_ms"].as_u64().unwrap_or(0));
+        let began = std::time::Instant::now();
+        client.call_with(method, &mut || {
+            json!({"pane": params["pane"], "timeout_ms": limit.saturating_sub(began.elapsed()).as_millis() as u64})
+        })
+    } else {
+        client.call(method, params)
+    };
+    let mut result = answer.map_err(|e| told(name, &e))?;
     if name == "crew" {
         result = json!(result
             .as_array()
