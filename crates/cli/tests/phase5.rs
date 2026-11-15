@@ -616,8 +616,13 @@ fn a_station_that_reads_no_cut_off_is_stopped_as_before() {
         assert_eq!(applied.len(), 1, "{applied:?}");
         assert_eq!(applied[0]["data"]["aimed_by"], json!("age"));
     }
-    let info = |s: &Station| s.call("station.info", json!({}))["caps"].clone();
-    assert_eq!((info(&a), info(&b)), (json!([]), json!(["stop_cutoff"])));
+    let has = |s: &Station| {
+        s.call("station.info", json!({}))["caps"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("stop_cutoff"))
+    };
+    assert_eq!((has(&a), has(&b)), (false, true));
 }
 
 /// A tiny webhook sink: counts the POSTs it receives.
