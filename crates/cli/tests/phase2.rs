@@ -1151,11 +1151,13 @@ fn a_hidden_pane_gives_its_room_to_the_others_and_comes_back_as_it_was() {
         page.js("document.querySelector('.hid-show').getAttribute('aria-label')"),
         json!("Show three, Shell, idle. Hidden.")
     );
-    // Saved with the layout, and nothing of it reached the pane: it runs on
+    // Saved with the layout (the deck gave each pane its station, so the
+    // layout means the same panes on every station), and nothing of it reached the pane: it runs on
     // at the size it had, and its screen is not on this page.
     wait_for("the layout to be saved with its hidden pane", 10, || {
-        (s.call("deck.get", json!({}))["layouts"][0]["hidden"] == json!([{"id": three}]))
-            .then_some(())
+        (s.call("deck.get", json!({}))["layouts"][0]["hidden"]
+            == json!([{"id": three, "station": "alpha"}]))
+        .then_some(())
     });
     s.call(
         "pane.send_text",

@@ -31,6 +31,13 @@ days, not hours.
   can approve where you are. It does not send them the secret the asker collects with,
   or the key: your answer is passed to the station that was asked, and it decides. An
   agent has no call that answers a request, on any station.
+- **What stations tell each other is data.** Stations of a fleet share which
+  stations are its members, the notices they raise and the documents every station
+  keeps (layouts, looks, agent setup, preferences). A station takes these only from
+  a station that signs with the fleet key, checks and bounds what it is told, shows
+  it as text, and accepts a member's address only if it is one it would look at by
+  itself: an address in its own config, or a device under your Tailscale login. A
+  station cannot make another one send a call or a key to an address it chose.
 - **Agents are not the owner.** Each pane has its own token. Agents can message, delegate
   and search history; they never get a call that administers a station. Text from agents,
   other stations and session history is shown as text and labelled as quoted, never run

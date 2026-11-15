@@ -385,6 +385,7 @@ button.agent-row:hover { border-color: var(--blue); }
 .phone-usage { order: 9; flex: 1 0 100%; display: block; text-align: left; font-size: calc(12px * var(--ui-scale)); color: var(--text); background: none; border: none; padding: 0 2px; min-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .usage-table.both { table-layout: fixed; } .usage-table.both th:first-child { width: 32%; }
 .vault-prompt { flex: none; display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: var(--panel2); border-bottom: 1px solid var(--line); border-left: 4px solid var(--blue); }
+.version-bar { border-left-color: var(--amber); flex-wrap: wrap; }
 .vault-prompt .grow { min-width: 0; } .vault-prompt .muted { overflow-wrap: anywhere; }
 .vault-checks h3 { margin: 14px 0 4px; font-size: calc(13px * var(--ui-scale)); } .vault-checks td { vertical-align: top; overflow-wrap: anywhere; } .vault-checks td:nth-child(2) { white-space: nowrap; }
 .agent-problem { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 3px; font-size: calc(12px * var(--ui-scale)); }

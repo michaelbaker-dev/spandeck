@@ -94,19 +94,74 @@ async function refresh() {
   try { S.fleet = await api.call('fleet.view'); } catch (e) { return; }
   const stations = S.fleet.stations.filter(s => s.state === 'online').map(s => s.station);
   await Promise.all(stations.map(refreshStation));
+  // How many agents are working or waiting on a station is counted from the
+  // pane list it has just given, as "needs you" in the top bar is. What the
+  // serving station last heard of another one can be ten seconds old, and
+  // differs from one serving station to the next.
+  for (const s of S.fleet.stations) {
+    const live = s.state === 'online' && S.panes.has(s.station) ? liveAgents(s.station) : null;
+    if (live) Object.assign(s, { working: live.filter(p => p.state === 'working').length, needs_you: live.filter(p => p.state === 'needs_you').length });
+  }
   const lists = await Promise.all(stations.map(st => api.on(st, 'approval.list').catch(() => [])));
   S.approvals = lists.flat();
-  try { S.notes = await api.call('notify.list', { limit: 60 }); } catch (e) { /* keep */ }
+  await loadNotes(stations);
+  // Stops are on the fleet view and the phone's: asked for where they show.
+  if (S.route.view === 'fleet' || isPhone()) await loadStops(stations);
   try { S.trust = await api.call('trust.status'); } catch (e) { /* keep */ }
   try { S.adding = await api.call('fleet.add_status'); addChanged(); } catch (e) { /* keep */ }
   // Always from the station the deck was opened on: every station has the same copy.
   try { S.deck = await api.call('deck.get'); } catch (e) { /* keep */ }
   await loadLook();
+  await loadPrefs();
   S.loaded = true;
   update();
   vaultAtOpen();
   migrateWorkspaces();
+  bindGlobalLeaves();
 }
+
+// The inbox is the whole fleet's: each station keeps the notices it raised,
+// and every station that answers is asked for them. A station that does not
+// answer is named as not counted (S.notesAway), never passed over in silence.
+// A notice every station raised for the same thing (a request to be let in)
+// is one entry that names them all.
+const fleetAway = () => S.fleet.stations.filter(s => s.state !== 'online' && s.state !== 'not_linked').map(s => s.station);
+const announced = new Set();
+let notesSeeded = false;
+async function loadNotes(stations) {
+  const failed = [];
+  const lists = await Promise.all(stations.map(st => api.on(st, 'notify.list', { limit: 60 })
+    .then(list => list.map(n => ({ ...n, station: st })))
+    // What it last said is kept on screen; it is named as not counted.
+    .catch(() => { failed.push(st); return S.notes.flatMap(n => n.at.filter(a => a.station === st).map(a => ({ ...n, ...a }))); })));
+  const merged = new Map();
+  for (const n of lists.flat().sort((a, b) => b.ts - a.ts)) {
+    const key = n.pane ? `${n.station}/${n.id}` : `${n.kind}\n${n.title}\n${n.body}`;
+    const had = merged.get(key);
+    if (had) { if (!had.at.some(a => a.station === n.station)) had.at.push({ station: n.station, id: n.id }); had.read = had.read && n.read; }
+    else merged.set(key, { ...n, at: [{ station: n.station, id: n.id }] });
+  }
+  S.notes = [...merged.values()].slice(0, 120);
+  S.notesAway = [...new Set([...fleetAway(), ...failed])].sort();
+  // A notice from a station that does not tell the others (one from before
+  // it could) is announced when it first shows in the list.
+  for (const n of S.notes) {
+    const fresh = n.at.filter(a => !announced.has(`${a.station}/${a.id}`));
+    for (const a of n.at) announced.add(`${a.station}/${a.id}`);
+    if (notesSeeded && !n.read && fresh.length === n.at.length) notifyBrowser(n);
+  }
+  notesSeeded = true;
+}
+// A stop is kept by the station it was issued at, which is also the one
+// that delivers it to a station that was away. The deck shows the stops of
+// every station that answers, so the same ones wherever it is opened.
+async function loadStops(stations) {
+  const lists = await Promise.all(stations.map(st => api.on(st, 'stop.list').then(list => list.map(s => ({ from: st, ...s }))).catch(() => (S.stops || []).filter(s => s.from === st))));
+  const seen = new Set();
+  S.stops = lists.flat().filter(s => !seen.has(s.id) && seen.add(s.id)).sort((a, b) => b.issued_ms - a.issued_ms);
+}
+// Mark a notice read at every station that holds it.
+const readNote = (n) => Promise.all(n.at.map(a => api.on(a.station, 'notify.read', { id: a.id }).catch(() => {})));
 
 // The look document: themes, and what the deck, a layout or a pane uses. Like
 // the deck document it is asked of the station the deck was opened on.
@@ -114,9 +169,19 @@ async function loadLook() {
   try { setDoc(await api.call('look.get')); } catch (e) { return; }
   // What is being tried in the editor is not what to open with next time.
   if (!lookState.preview) rememberPage(pageLook(null));
-  // The fonts the owner uploaded, from this station. Not waited for: a
-  // terminal shows in the next font of its list until one arrives.
-  loadFonts((id) => api.file('/api/font/' + id));
+  // The fonts the owner uploaded. Not waited for: a terminal shows in the
+  // next font of its list until one arrives. The serving station has the
+  // file unless it has not fetched it yet (or cannot keep fonts); then any
+  // station that has it is asked, so a font does not show on one station's
+  // deck and not on another's.
+  loadFonts(async (id) => {
+    try { return await api.file('/api/font/' + id); } catch (e) {
+      for (const st of onlineStations().filter(x => x !== api.station)) {
+        try { return Uint8Array.from(atob((await api.on(st, 'look.font.fetch', { id })).data_b64), c => c.charCodeAt(0)).buffer; } catch (e2) { /* the next station */ }
+      }
+      throw e;
+    }
+  });
 }
 // A font arrived after terminals were drawn with another in its place.
 fontListeners.add(() => { for (const t of S.terms.values()) t.remeasure(); });
@@ -153,15 +218,22 @@ api.onEvent((ev) => {
   }
   // A line from a machine being added: shown as it arrives, nothing re-read.
   if (ev.kind === 'fleet.add.output') { if (addDlg) addDlg.line(ev.data); return; }
-  if (ev.kind === 'notify.new') notifyBrowser(ev.data);
+  // Raised here, or at another station of the fleet, which told this one.
+  if (ev.kind === 'notify.new') { announced.add(`${ev.data.station}/${ev.data.id}`); notifyBrowser(ev.data); }
   if (ev.kind === 'connection.restored') { for (const t of S.terms.values()) t.attach(); }
-  if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events|vault|trust|deck|look)\./.test(ev.kind)) refreshSoon();
+  if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events|vault|trust|deck|look|prefs)\./.test(ev.kind)) refreshSoon();
 });
 
+const lastSaid = new Map(); // what was announced -> when, so one thing every station raised is said once
 function notifyBrowser(n) {
-  toast(n.title + (n.body ? ' — ' + n.body : ''), n.kind === 'error' ? 'error' : 'info');
+  const same = `${n.kind}\n${n.title}\n${n.body}`, now = Date.now();
+  for (const [k, at] of lastSaid) if (now - at > 15000) lastSaid.delete(k);
+  if (lastSaid.has(same)) return;
+  lastSaid.set(same, now);
+  const from = n.station && n.station !== api.station ? ` · ${n.station}` : '';
+  toast(n.title + from + (n.body ? ' — ' + n.body : ''), n.kind === 'error' ? 'error' : 'info');
   if (document.visibilityState !== 'visible' && 'Notification' in window && Notification.permission === 'granted') {
-    const note = new Notification(n.title, { body: n.body || '', tag: n.id });
+    const note = new Notification(n.title + from, { body: n.body || '', tag: n.id });
     note.onclick = () => { window.focus(); if (n.url) location.hash = n.url.replace(/^\/#/, '#'); };
   }
 }
@@ -294,11 +366,10 @@ function newPaneDialog(st, project, then) {
     suggest();
     // An agent can go back to the last conversation it saved in the folder.
     // The station is asked whether there is one, so the dialog can say so
-    // before the pane is started. The tick is remembered in this browser.
-    let keep = false;
-    try { keep = localStorage.getItem(RESUME_LAST_KEY) === '1'; } catch (e) { /* no storage: not ticked */ }
-    const last = h('input', { type: 'checkbox', checked: keep, style: { width: 'auto' } });
-    last.addEventListener('change', () => { try { localStorage.setItem(RESUME_LAST_KEY, last.checked ? '1' : '0'); } catch (e) { /* not kept, then */ } });
+    // before the pane is started. The tick is one of the owner's
+    // preferences: remembered for every station and every browser.
+    const last = h('input', { type: 'checkbox', checked: pref('newPane.resumeLast', false) === true, style: { width: 'auto' } });
+    last.addEventListener('change', () => setPref('newPane.resumeLast', last.checked));
     const lastNote = h('small', { class: 'muted', style: { display: 'block', margin: '2px 0 0 24px' } });
     const lastRow = h('div', { style: { marginBottom: '10px' } }, h('label', { class: 'row' }, last, 'Continue the last conversation in this folder'), lastNote);
     let canContinue = true, asked = 0, askTimer = null;
@@ -337,7 +408,49 @@ function newPaneDialog(st, project, then) {
   });
 }
 
-const RESUME_LAST_KEY = 'spandeck.newPane.resumeLast';
+// ---- the owner's preferences ----
+// Small choices that follow the owner: the fleet keeps them in one document
+// (prefs.get, prefs.set), so they are the same on every station and in every
+// browser. Each station is its own web address, so what a browser keeps for
+// one it does not have for the next; the browser's copy is only what the
+// page opens with before the station has answered, and what is used on a
+// station from before preferences. What is the device's own is not here:
+// which pane a phone shows, drafts, fit-to-screen, the sign-in token.
+const PREF_LOCAL = { 'side.folded': 'spandeck.side.folded', 'newPane.resumeLast': 'spandeck.newPane.resumeLast' };
+function prefLocal(key) {
+  try {
+    const v = localStorage.getItem(PREF_LOCAL[key]);
+    if (v === null) return undefined;
+    return key === 'newPane.resumeLast' ? v === '1' : (JSON.parse(v) ?? undefined);
+  } catch (e) { return undefined; }
+}
+function prefKeep(key, value) {
+  try { localStorage.setItem(PREF_LOCAL[key], key === 'newPane.resumeLast' ? (value ? '1' : '0') : JSON.stringify(value)); } catch (e) { /* not kept, then */ }
+}
+const pref = (key, fallback) => S.prefs?.values?.[key] ?? prefLocal(key) ?? fallback;
+let prefSaving = 0;
+function setPref(key, value) {
+  prefKeep(key, value);
+  if (!S.prefs) return;
+  S.prefs.values = { ...S.prefs.values, [key]: value };
+  prefSaving += 1;
+  api.call('prefs.set', { key, value }).catch(() => {}).then(() => { prefSaving -= 1; });
+}
+async function loadPrefs() {
+  let doc;
+  try { doc = await api.call('prefs.get'); } catch (e) { S.prefs = null; return; }
+  if (prefSaving) return; // a change of this page's is on its way: not undone by an older answer
+  doc.values ||= {};
+  S.prefs = doc;
+  for (const key of Object.keys(PREF_LOCAL)) {
+    // What this browser chose before preferences followed the owner becomes
+    // the fleet's, once, if the fleet has none.
+    const mine = prefLocal(key);
+    if (doc.values[key] === undefined) { if (mine !== undefined) setPref(key, mine); } else prefKeep(key, doc.values[key]);
+  }
+  folded.clear();
+  for (const k of pref('side.folded', [])) folded.add(k);
+}
 
 // "2 hours ago", for a time that may be days back.
 function longAgo(ms) {
@@ -514,19 +627,26 @@ function approvalsPanel() {
     : h('p', {}, 'Nothing is waiting for your approval.'));
 }
 
-function inboxPanel() {
-  api.call('msg.inbox', { all: true, peek: true }).then((msgs) => {
-    dialog('Inbox', () => h('div', {},
-      h('div', { class: 'row end' }, h('button', { class: 'mini', onclick: () => { api.call('notify.read', {}); api.call('msg.inbox', {}); refreshSoon(); } }, 'Mark all read'),
-        'Notification' in window && Notification.permission === 'default' ? h('button', { class: 'mini', onclick: () => Notification.requestPermission() }, 'Enable browser notifications') : null),
-      h('h3', {}, 'Messages to you'),
-      msgs.length ? h('div', { class: 'list' }, msgs.slice().reverse().map(m => h('div', { class: 'note' + (m.read ? '' : ' unread') },
-        h('div', {}, h('b', {}, m.from), h('span', { class: 'muted' }, ` · ${m.kind} · ${ago(m.ts)} ago`)), h('div', { class: 'pre' }, m.body)))) : h('p', { class: 'muted' }, 'No messages.'),
-      h('h3', {}, 'Notifications'),
-      S.notes.length ? h('div', { class: 'list' }, S.notes.map(n => h('button', { class: 'list-row note' + (n.read ? '' : ' unread'), onclick: () => { api.call('notify.read', { id: n.id }); if (n.url) location.hash = n.url.replace(/^\/#/, '#'); } },
-        h('span', { class: 'dot ' + (n.kind === 'approval' ? 'needs_you' : n.kind) }), h('b', {}, n.title), h('span', { class: 'muted' }, n.body), h('span', { class: 'grow' }),
-        h('span', { class: 'muted' }, n.pushed === 2 ? 'held (you were here) · ' : n.pushed === 1 ? 'pushed · ' : '', ago(n.ts))))) : h('p', { class: 'muted' }, 'No notifications.')), { wide: true });
-  }).catch(e => toast(e.message, 'error'));
+// One inbox for the fleet: what agents wrote to you and what was raised for
+// you on every station that answers, each entry with the station it is from.
+async function inboxPanel() {
+  const stations = onlineStations(), failed = [];
+  const msgs = (await Promise.all(stations.map(st => api.on(st, 'msg.inbox', { all: true, peek: true })
+    .then(list => list.map(m => ({ ...m, station: st }))).catch(() => { failed.push(st); return []; })))).flat().sort((a, b) => b.ts - a.ts);
+  const away = [...new Set([...(S.notesAway || []), ...failed])].sort();
+  // Each notice is marked at the station that holds it; so is each message.
+  const readAll = () => Promise.all(stations.flatMap(st => [api.on(st, 'notify.read', {}).catch(() => {}), api.on(st, 'msg.inbox', {}).catch(() => {})])).then(() => refreshSoon(0));
+  dialog('Inbox', (close) => h('div', {},
+    h('div', { class: 'row end' }, h('button', { class: 'mini', onclick: () => readAll().then(close) }, 'Mark all read'),
+      'Notification' in window && Notification.permission === 'default' ? h('button', { class: 'mini', onclick: () => Notification.requestPermission() }, 'Enable browser notifications') : null),
+    away.length ? h('p', { class: 'muted small' }, `Not counted, because ${away.length === 1 ? 'it is' : 'they are'} not reachable: ${away.join(', ')}.`) : null,
+    h('h3', {}, 'Messages to you'),
+    msgs.length ? h('div', { class: 'list' }, msgs.map(m => h('div', { class: 'note' + (m.read ? '' : ' unread') },
+      h('div', {}, h('b', {}, m.from), h('span', { class: 'muted' }, ` · ${m.station} · ${m.kind} · ${ago(m.ts)} ago`)), h('div', { class: 'pre' }, m.body)))) : h('p', { class: 'muted' }, 'No messages.'),
+    h('h3', {}, 'Notifications'),
+    S.notes.length ? h('div', { class: 'list' }, S.notes.map(n => h('button', { class: 'list-row note' + (n.read ? '' : ' unread'), onclick: () => { readNote(n).then(() => refreshSoon(0)); if (n.url) { close(); location.hash = n.url.replace(/^\/#/, '#'); } } },
+      h('span', { class: 'dot ' + (n.kind === 'approval' ? 'needs_you' : n.kind) }), h('b', {}, n.title), h('span', { class: 'muted' }, n.body), h('span', { class: 'grow' }),
+      h('span', { class: 'muted' }, n.at.map(a => a.station).join(', '), ' · ', n.pushed === 2 ? 'held (you were here) · ' : n.pushed === 1 ? 'pushed · ' : '', ago(n.ts))))) : h('p', { class: 'muted' }, 'No notifications.')), { wide: true });
 }
 
 function stopAllMenu(e) {
@@ -554,20 +674,23 @@ async function tasksPanel(st, project) {
 }
 
 function palette() {
+  const here = online(S.route.station) ? S.route.station : api.station;
   const actions = [
     { label: 'Go to the fleet', run: () => go('#/fleet') },
     ...S.fleet.stations.map(s => ({ label: `Go to station ${s.station}`, run: () => go(stationUrl(s.station)) })),
     ...S.fleet.stations.flatMap(s => liveAgents(s.station).map(p => ({ label: `Open pane ${p.name} on ${s.station}`, run: () => go(paneUrl(s.station, p.id)) }))),
     ...allLayouts().map(x => ({ label: `Open layout ${x.name} (${layShort(x)})`, run: () => go(layUrl(x)) })),
     { label: 'New global layout…', run: () => newLayoutDialog(null, null) },
-    { label: 'New pane…', run: () => newPaneDialog(S.route.station || api.station) },
-    { label: 'New project…', run: () => newProjectDialog(S.route.station || api.station) },
+    // An action on one station names it: which one it is depends on what
+    // is on screen, or on the station serving this deck.
+    { label: `New pane on ${here}…`, run: () => newPaneDialog(here) },
+    { label: `New project on ${here}…`, run: () => newProjectDialog(here) },
     { label: 'Approval requests', run: approvalsPanel },
     { label: 'Inbox', run: inboxPanel },
     { label: 'Usage: tokens and estimated cost', run: fleetUsageDialog },
     { label: 'Appearance: themes, colours and fonts', run: () => appearance('deck') },
-    { label: 'Stop every agent on this station', run: () => rpc(api.station, 'stop.all', { scope: 'station' }) },
-    { label: 'Check this station (doctor)', run: doctorPanel },
+    { label: `Stop every agent on ${api.station}`, run: () => rpc(api.station, 'stop.all', { scope: 'station' }) },
+    { label: `Check ${here} (doctor)`, run: () => doctorPanel(here) },
     { label: 'Agent setup: MCP servers, skills, models', run: setupPanel },
     { label: 'Vault: connect stations and set token rotation', run: vaultPanel },
     { label: 'Run a command in every agent…', run: () => commandDialog(api.station, null) },
@@ -724,8 +847,11 @@ async function setupPanel() {
     const draw = () => body.replaceChildren(content());
     const save = async () => {
       const out = await rpc(api.station, 'setup.set', { setup, fleet: true });
-      const bad = out.stations.filter(x => !x.ok);
-      toast(bad.length ? `Saved. Not yet on: ${bad.map(x => x.station).join(', ')} (they catch up when they are back)` : `Saved on ${out.stations.length} station${out.stations.length === 1 ? '' : 's'}`);
+      // A station that kept its own, newer setup did not take this one, and
+      // its copy replaces it everywhere: that is not "Saved".
+      const kept = out.stations.filter(x => x.kept), bad = out.stations.filter(x => !x.ok && !x.kept);
+      if (kept.length) toast(`Not saved: ${kept.map(x => x.station).join(', ')} had a newer agent setup, which is the one in use now. Open Agent setup again and make your change there.`, 'error');
+      else toast(bad.length ? `Saved. Not yet on: ${bad.map(x => x.station).join(', ')} (they catch up when they are back)` : `Saved on ${out.stations.length} station${out.stations.length === 1 ? '' : 's'}`);
       const problems = out.stations.flatMap(x => x.problems || []);
       if (problems.length) toast(problems.join(' · '), 'error');
       close();
@@ -834,6 +960,37 @@ function vaultPrompt(stations, url) {
     } }, 'Not now'));
   render();
 }
+// ---- one version for the fleet ----
+// The Control Deck is the serving station's own copy of it, so a station on
+// an older spandeck serves an older deck, and what the fleet keeps the same
+// is only kept so by stations that know how. When the stations do not all
+// run the same version the deck says so, in a bar that blocks nothing, with
+// the update each station already offers in its menu.
+const versionOf = (v) => String(v || '').split(/[.+-]/).slice(0, 3).map(n => parseInt(n, 10) || 0);
+const olderThan = (a, b) => { const x = versionOf(a), y = versionOf(b); for (let i = 0; i < 3; i += 1) if (x[i] !== y[i]) return x[i] < y[i]; return false; };
+let versionBox = null, versionKey = '', versionLater = '';
+function versionBar() {
+  const all = S.fleet.stations.filter(s => s.state !== 'not_linked' && s.version && s.version !== '?');
+  const newest = all.reduce((n, s) => olderThan(n, s.version) ? s.version : n, '0');
+  const behind = all.filter(s => olderThan(s.version, newest));
+  const key = behind.map(s => `${s.station}=${s.version}/${s.state}`).join(' ') + '>' + newest + '@' + api.station;
+  if (!behind.length || key === versionLater) { versionBox = null; versionKey = ''; return null; }
+  if (key === versionKey) return versionBox;
+  const me = behind.find(s => s.self), can = behind.filter(s => s.state === 'online'), names = (list) => list.map(s => `${s.station} (${s.version})`).join(', ');
+  const on = all.filter(s => s.version === newest).map(s => s.station).join(', ');
+  const update = () => Promise.all(can.map(s => api.on(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`)).catch(e => toast(`${s.station}: ${e.message}`, 'error')))).then(() => refreshSoon(1500));
+  versionKey = key;
+  versionBox = h('div', { class: 'vault-prompt version-bar', role: 'region', 'aria-label': 'Stations on different versions' },
+    h('div', { class: 'grow' },
+      h('b', {}, me ? `This deck is served by ${api.station}, which runs an older spandeck (${me.version})` : `${behind.length === 1 ? 'A station runs' : 'Some stations run'} an older spandeck`),
+      h('div', { class: 'muted' }, `${on} ${on.includes(',') ? 'run' : 'runs'} ${newest}. Older: ${names(behind)}. `,
+        me ? `What you see here can differ from the deck ${on.includes(',') ? 'those stations serve' : on + ' serves'}, and newer things may be missing. ` : 'A deck served by an older station can look different, and what the fleet keeps the same may not be kept there. ',
+        behind.some(s => s.state !== 'online') ? 'A station that is off or cannot be controlled from here is updated at that machine.' : '')),
+    can.length ? h('button', { class: 'primary', onclick: () => confirmBox(`Update ${can.map(s => s.station).join(', ')}?`, `The latest release is downloaded on ${can.length === 1 ? 'that station' : 'each of them'} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', update, false) }, can.length === 1 ? `Update ${can[0].station}` : `Update ${can.length} stations`) : null,
+    h('button', { onclick: () => { versionLater = key; render(); } }, 'Not now'));
+  return versionBox;
+}
+
 // The bar goes once none of its stations needs it: connected from elsewhere, say.
 function vaultPromptSync() {
   if (!vaultPromptBox) return;
@@ -1058,10 +1215,16 @@ function topbar() {
 }
 
 function stopRows() {
-  const recent = (S.fleet.stops || []).filter(s => Date.now() - s.issued_ms < 10 * 60 * 1000 || s.status !== 'confirmed').slice(0, 6);
+  // How long ago a stop was issued is what its station says (`age_ms`, by
+  // its own clock), not this browser's clock against that station's. A
+  // station from before it said so is read the old way.
+  const age = (s) => s.age_ms ?? Date.now() - s.issued_ms;
+  const recent = (S.stops || S.fleet.stops || []).filter(s => age(s) < 10 * 60 * 1000 || s.status !== 'confirmed').slice(0, 6);
+  const away = S.notesAway || [];
   if (!recent.length) return null;
-  return h('div', { class: 'stops' }, h('b', {}, 'Stop requests'), recent.map(s => h('span', { class: 'stop ' + s.status, title: `issued ${ago(s.issued_ms)} ago` },
-    `${s.station}: ${s.label}`, s.status === 'confirmed' ? ` (${s.result?.stopped?.length ?? 0} stopped)` : s.status === 'unreachable' ? ' — will be delivered when it is back' : '')));
+  return h('div', { class: 'stops' }, h('b', {}, 'Stop requests'), recent.map(s => h('span', { class: 'stop ' + s.status, title: `issued ${ago(Date.now() - age(s))} ago${s.from ? ' at ' + s.from : ''}` },
+    `${s.station}: ${s.label}`, s.status === 'confirmed' ? ` (${s.result?.stopped?.length ?? 0} stopped)` : s.status === 'unreachable' ? ` — will be delivered when it is back${s.from && !online(s.from) ? `, once ${s.from} is on too` : ''}` : '')),
+    away.length ? h('span', { class: 'muted small' }, `Stops issued at ${away.join(', ')} are not shown: not reachable.`) : null);
 }
 
 // ---- from one station's Control Deck to another's, with no second approval
@@ -1167,7 +1330,7 @@ function stationMenu(e, s) {
     up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`))) },
     s.state === 'unreachable' && { label: 'Wake it (same network only)', action: () => rpc(api.station, 'fleet.wake', { station: s.station }).then((r) => toast(`Sent ${r.sent} wake packets to ${s.station}. Give it a minute.`)) },
     s.state === 'unreachable' && { label: 'Start spandeck there (over SSH)', action: () => rpc(api.station, 'fleet.start', { station: s.station }).then((r) => toast(`${s.station} is ${r.state}`)) },
-    s.state === 'unreachable' && { label: 'Forget this station', danger: true, action: () => confirmBox(`Forget ${s.station}?`, 'It is removed from this list. If it comes back it is listed again.', 'Forget', () => rpc(api.station, 'fleet.forget', { station: s.station })) },
+    s.state === 'unreachable' && { label: 'Forget this station', danger: true, action: () => confirmBox(`Forget ${s.station}?`, 'It is taken off the list on every station of the fleet (the others follow within seconds, one that is off when it is back). If it comes back it is listed again.', 'Forget', () => rpc(api.station, 'fleet.forget', { station: s.station })) },
     up && { label: 'Stop every agent here', danger: true, action: () => rpc(api.station, 'stop.all', { scope: s.station === api.station ? 'station' : s.station }) },
     up && { label: 'Close all panes here…', danger: true, action: () => closeAllDialog(s) },
     // A station that is not in the fleet has nothing to be removed from,
@@ -1539,11 +1702,12 @@ function paneTile(st, p) {
 // (each with its layouts, Watch and panes), then the global layouts. What is
 // selected in it is what the right-hand side shows.
 
-// Which groups are folded away is this browser's own business.
-const folded = new Set((() => { try { return JSON.parse(localStorage.getItem('spandeck.side.folded')) || []; } catch (e) { return []; } })());
+// Which groups are folded away is one of the owner's preferences: the same
+// on every station and in every browser.
+const folded = new Set(prefLocal('side.folded') || []);
 function fold(key) {
   if (!folded.delete(key)) folded.add(key);
-  try { localStorage.setItem('spandeck.side.folded', JSON.stringify([...folded])); } catch (e) { /* not kept, then */ }
+  setPref('side.folded', [...folded].slice(0, 256));
   render();
 }
 const caret = (key, what) => h('button', { class: 'caret', type: 'button', 'aria-expanded': String(!folded.has(key)), 'aria-label': `${folded.has(key) ? 'Show' : 'Hide'} ${what}`,
@@ -1871,8 +2035,40 @@ function saveLayout(lay) {
   }, 250);
 }
 
-// How a layout names and finds a pane.
-const leafStation = (lay, n) => n.station || lay.station || api.station;
+// How a layout names and finds a pane. A project's layout is kept on one
+// station, and a leaf with no station is on that one. A global layout is the
+// same on every station, so each of its leaves names its station; one that
+// does not (saved through the API, or by an older deck, for which it meant
+// "the station this deck is served by") is on no station until it is given
+// the one its pane is found on (bindGlobalLeaves). It is never read as the
+// serving station: that made one layout show different panes on each station.
+const leafStation = (lay, n) => n.station || lay.station || null;
+// The stations a leaf with no station could mean: those where its pane is.
+const leafCandidates = (n) => onlineStations().filter(st => n.id !== undefined ? panesOf(st).some(p => p.id === n.id)
+  : panesOf(st).some(p => !p.exited && (p.project || null) === (n.project || null) && p.name === n.pane)
+    || (!!n.project && (S.projects.get(st) || []).some(pr => pr.name === n.project && (pr.definition?.pane || []).some(x => x.name === n.pane))));
+// Give each such leaf its station, once, and save: from then on the layout
+// names the same panes wherever it is opened. A pane's id is its own on every
+// station, so a pane in no project is bound where it is found. A named pane
+// could be in a project of the same name on a station that is away, so it is
+// bound only when one station has it and every station of the fleet answers.
+// Otherwise the leaf waits, and says so where it would be shown.
+const bindTried = new Set(); // a save that failed is not tried again by itself
+function bindGlobalLeaves() {
+  if (!S.loaded) return;
+  const allHere = !fleetAway().length && onlineStations().every(st => S.panes.has(st) && S.projects.has(st));
+  for (const def of S.deck.layouts || []) {
+    const lay = findLayout('global:' + def.name);
+    if (!lay || lay.cache.dirty || bindTried.has(JSON.stringify(def))) continue;
+    let bound = 0;
+    for (const n of leaves(lay.cache.tree)) {
+      if (n.station) continue;
+      const where = leafCandidates(n);
+      if (where.length === 1 && (n.id !== undefined || allHere)) { n.station = where[0]; bound += 1; }
+    }
+    if (bound) { bindTried.add(JSON.stringify(def)); saveLayout(lay); }
+  }
+}
 function leafPane(lay, n) {
   const st = leafStation(lay, n);
   if (n.id !== undefined) return panesOf(st).find(p => p.id === n.id) || null;
@@ -1883,7 +2079,7 @@ function leafPane(lay, n) {
 // "web/logs" (another project), "spark2:web/logs" (another station),
 // "#p-01abc" (a pane in no project).
 function leafRef(lay, n) {
-  const st = lay.station ? (n.station && n.station !== lay.station ? n.station : '') : (n.station || api.station);
+  const st = lay.station ? (n.station && n.station !== lay.station ? n.station : '') : (n.station || '');
   const at = st ? st + ':' : '';
   if (n.id !== undefined) return `${at}#${n.id}`;
   return at + (n.project && (n.project !== lay.project || st) ? n.project + '/' : '') + n.pane;
@@ -1905,7 +2101,10 @@ function paneLeaf(lay, st, p) {
 function leafGuest(lay, n) {
   const st = leafStation(lay, n);
   const project = n.id !== undefined ? null : (n.project || lay.project || null);
-  return [project && project !== lay.project ? 'from ' + project : '', st !== (lay.station || api.station) ? 'on ' + st : ''].filter(Boolean).join(' ') || null;
+  // In a global layout every pane says its station, whichever station serves
+  // the deck; in a fleet of one there is nothing to tell apart.
+  const elsewhere = st && st !== lay.station && (lay.station || S.fleet.stations.filter(s => s.state !== 'not_linked').length > 1);
+  return [project && project !== lay.project ? 'from ' + project : '', elsewhere ? 'on ' + st : ''].filter(Boolean).join(' ') || null;
 }
 
 function ctxFor(lay) {
@@ -1921,6 +2120,14 @@ function ctxFor(lay) {
     emptyText: 'This layout is empty. Press Arrange, or drag a pane here from the list on the left.',
     missing: (n) => {
       const st = leafStation(lay, n), project = n.pane !== undefined ? (n.project || lay.project) : null;
+      // Saved without a station, and not yet given one: it is not guessed.
+      if (!st) {
+        const where = leafCandidates(n), give = (to) => { n.station = to; saveLayout(lay); render(); };
+        return h('div', { class: 'empty' }, h('p', {}, `${label(n)}${project ? ' in ' + project : ''} was saved in this layout without its station. `,
+          where.length > 1 ? 'More than one station has such a pane: say which it is.' : where.length ? `${where[0]} has such a pane, but a station that is not reachable may too.` : 'No station that answers has such a pane.'),
+          where.map(to => h('button', { onclick: () => give(to) }, `It is the one on ${to}`)),
+          h('button', { class: 'mini', onclick: () => { ctx.remove(refOf(n)); render(); } }, 'Take out of this layout'));
+      }
       if (!online(st)) return h('div', { class: 'empty' }, h('p', {}, `${st} is unreachable, so ${label(n)} cannot be shown.`));
       return h('div', { class: 'empty' }, h('p', {}, n.pane !== undefined ? `${label(n)}${project ? ' in ' + project : ''} is not running.` : 'This pane was closed.'),
         project ? h('button', { onclick: () => rpc(st, 'project.open', { name: project }) }, `Start ${project}'s panes`) : null,
@@ -2384,7 +2591,7 @@ function hiddenStrip(ctx) {
   const chip = (n) => {
     const r = ctx.resolve(n), p = r?.p || null, name = ctx.label(n), guest = ctx.guest(n), ref = ctx.refOf(n);
     const state = p ? stateOf(p) : 'missing';
-    const stateText = p ? (p.exited ? 'ended' : STATE_LABEL[state] || state) : (online(ctx.stationOf(n)) ? 'not running' : 'unreachable');
+    const stateText = p ? (p.exited ? 'ended' : STATE_LABEL[state] || state) : (!ctx.stationOf(n) ? 'no station' : online(ctx.stationOf(n)) ? 'not running' : 'unreachable');
     const says = (p ? paneSays(p) : `${name}, ${stateText}`) + (guest ? `, ${guest}` : '') + (p?.needs_reason && state === 'needs_you' ? `: ${p.needs_reason}` : '');
     const menu = (e) => {
       e.preventDefault();
@@ -2804,7 +3011,7 @@ function render() {
   if (!layCtx) arranging = null;
   // A view that is already on the page stays attached: replacing it would
   // take the keyboard away from whatever is being typed into.
-  const kids = vaultPromptBox ? [vaultPromptBox, main] : [main];
+  const kids = [versionBar(), vaultPromptBox, main].filter(Boolean);
   if (root.children.length === kids.length + 1 && kids.every((k, i) => root.children[i + 1] === k)) root.replaceChild(topbar(), root.children[0]);
   else root.replaceChildren(topbar(), ...kids);
   const side = document.querySelector('.sidebar');

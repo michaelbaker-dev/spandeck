@@ -507,9 +507,10 @@ fn the_list_makes_layouts_in_projects_and_global_ones_takes_any_pane_and_pins() 
             ev('mousedown', from.left + 30, from.top + 8, row); ev('mousemove', x, y); ev('mouseup', x, y); return true; }})()", pane_row(id)));
     };
     drag(&a.pane("logs")["id"], ".workspace .arr[data-empty]", 0.5);
+    // In a global layout a pane says its station on every deck, alpha's too.
     page.wait(
         "the pane from web",
-        "document.querySelector('.workspace .arr[data-ref=\"alpha:web/logs\"] .chip.guest')?.innerText === 'from web'",
+        "document.querySelector('.workspace .arr[data-ref=\"alpha:web/logs\"] .chip.guest')?.innerText === 'from web on alpha'",
     );
     page.js("[...document.querySelectorAll('.lay-head button')].find(b => b.innerText === 'Done arranging').click()");
     page.wait(

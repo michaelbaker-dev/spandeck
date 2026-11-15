@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::daemon::{invalid, write_private, Daemon, Error, Result};
-use crate::paths::{new_id, now_ms};
+use crate::paths::new_id;
 use crate::project::valid_name;
 
 /// The newest shape of the document this version reads and writes.
@@ -272,6 +272,9 @@ pub struct Look {
     /// kept beside the document, by id: see fonts.rs.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fonts: Vec<crate::fonts::Font>,
+    /// Which stations' changes this copy holds (sync.rs).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub changes: crate::sync::Changes,
 }
 
 impl Look {
@@ -314,6 +317,10 @@ impl Look {
             layouts: level(self.layouts, is_layout_key, "layout")?,
             panes: level(self.panes, is_pane_key, "pane")?,
             fonts: crate::fonts::clean_list(self.fonts)?,
+            // A record that is not one is dropped, not a reason to refuse.
+            changes: Some(self.changes)
+                .filter(crate::sync::changes_ok)
+                .unwrap_or_default(),
         })
     }
 
@@ -387,7 +394,9 @@ impl Daemon {
             // Never back to an older format: a station holding this copy
             // would then refuse the next one.
             look.format = look.format.max(if look.fonts.is_empty() { 1 } else { 2 });
-            look.updated_ms = now_ms().max(look.updated_ms + 1);
+            let base = look.updated_ms;
+            look.updated_ms = self.sync_stamp("look", base);
+            self.sync_mark(&mut look.changes, base, look.updated_ms);
             self.look_write(&look)?;
             self.record("look.changed", None, None, None, Some(by), what);
             look
@@ -424,9 +433,11 @@ impl Daemon {
             {
                 continue;
             }
-            let _ = self
+            let r = self
                 .fleet
                 .call(&peer.station, "look.push", json!({"look": look}))
+                .await;
+            self.sync_sent("look", look.updated_ms, &peer.station, r)
                 .await;
         }
     }
@@ -541,15 +552,35 @@ impl Daemon {
         Ok(json!({"ok": true}))
     }
 
-    /// A pane was closed here: its own look goes with it.
+    /// A pane was closed here: its own look goes with it, in this station's
+    /// copy. Nobody asked for this change, so it is not one the fleet is
+    /// told to take: the copy keeps its stamp and is not offered. Stamping
+    /// it would make this copy the newest in the fleet whatever it had
+    /// missed, and a station that had just come back would wipe out themes
+    /// saved while it was away. The other stations drop the entry with the
+    /// owner's next change made here (`look_change` prunes), or when the
+    /// Control Deck that closed the pane asks, which it does.
     pub(crate) fn look_forget_pane(&self, id: &str, by: &str) {
         let key = format!("{}/{id}", self.station);
-        let _ = self.look_change(by, |look| {
-            Ok(look
-                .panes
-                .remove(&key)
-                .map(|_| json!({"level": "pane", "key": key, "cleared": true})))
-        });
+        {
+            let _held = self.look_lock.lock().unwrap();
+            let mut look = self.look();
+            if look.format > FORMAT || look.panes.remove(&key).is_none() {
+                return;
+            }
+            if self.look_write(&look).is_err() {
+                return;
+            }
+        }
+        self.record(
+            "look.changed",
+            None,
+            None,
+            None,
+            Some(by),
+            json!({"level": "pane", "key": key, "cleared": true, "here_only": true}),
+        );
+        self.emit("look.updated", None, None, json!({}));
     }
 
     /// A layout was deleted: its own look goes with it.
@@ -586,6 +617,7 @@ impl Daemon {
             );
         }
         let look = look.clean().map_err(invalid)?;
+        self.sync_saw("look", look.updated_ms);
         {
             let _held = self.look_lock.lock().unwrap();
             let mine = self.look();
@@ -599,6 +631,7 @@ impl Daemon {
                     json!({"station": self.station, "ok": true, "kept": "this station's copy is as new or newer", "updated_ms": mine.updated_ms}),
                 );
             }
+            self.sync_replaced("look", &mine.changes, &look.changes);
             self.look_write(&look)?;
         }
         self.record(

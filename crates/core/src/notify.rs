@@ -59,6 +59,64 @@ impl Daemon {
             project,
             json!({"id": id, "kind": kind, "title": title, "body": body, "url": url, "station": self.station}),
         );
+        // A Control Deck open on another station hears of it too.
+        self.notify_relay(
+            json!({"id": id, "kind": kind, "title": title, "body": body, "url": url}),
+        );
+    }
+
+    /// Tell the other stations of the fleet, so that a Control Deck served by
+    /// any of them shows what this one raised (or that its inbox was read).
+    /// Nothing is stored there: the notice stays in this station's inbox.
+    /// A notice can be raised from a thread that is not the runtime's.
+    fn notify_relay(&self, what: Value) {
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let d = self.clone();
+        rt.spawn(async move {
+            let online = d.fleet.peers().into_iter().filter(|p| p.state == "online");
+            let calls = online.map(|p| {
+                let (d, what) = (d.clone(), what.clone());
+                async move { d.fleet.call(&p.station, "notify.relay", what).await }
+            });
+            // A station from before this refuses the call: a deck there shows
+            // the notice at its next look at this station's inbox.
+            let _ = crate::fleet::futures_join_all(calls).await;
+        });
+    }
+
+    /// Another station of the fleet saying it raised a notice, or that its
+    /// inbox was read. A station's signed call only. What it says is text
+    /// from another machine: bounded, cleaned, shown to the decks connected
+    /// here and kept nowhere.
+    pub(crate) fn notify_relayed(&self, from: &str, params: &Value) -> Value {
+        let text = |key: &str, max: usize| -> String {
+            params
+                .get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| !c.is_control() || *c == '\n')
+                .take(max)
+                .collect()
+        };
+        if params.get("read").is_some() {
+            self.emit("notify.read", None, None, json!({"station": from}));
+            return json!({"ok": true});
+        }
+        // A link is only ever a place in the Control Deck.
+        let url = Some(text("url", 300)).filter(|u| u.starts_with("/#/"));
+        self.emit(
+            "notify.new",
+            None,
+            None,
+            json!({
+                "id": text("id", 64), "kind": text("kind", 32), "title": text("title", 200),
+                "body": text("body", 2000), "url": url, "station": from, "relayed": true,
+            }),
+        );
+        json!({"ok": true})
     }
 
     pub fn notifications(&self, unread_only: bool, limit: u32) -> Vec<Value> {
@@ -89,6 +147,26 @@ impl Daemon {
             None => c.execute("UPDATE notifications SET read=1", []),
         });
         self.emit("notify.read", None, None, json!({"id": id}));
+        self.notify_relay(json!({"read": true}));
+    }
+
+    /// The owner is at a Control Deck served by this station: say so to the
+    /// other stations, so that none of them pushes to the phone meanwhile.
+    /// It is the owner's own `presence.touch`, passed on as a deck's calls to
+    /// another station are, so a station of any version takes it.
+    pub(crate) fn presence_relay(&self) {
+        let d = self.clone();
+        tokio::spawn(async move {
+            let online = d.fleet.peers().into_iter().filter(|p| p.state == "online");
+            let calls = online.map(|p| {
+                let d = d.clone();
+                async move {
+                    let touch = json!({"method": "presence.touch", "params": {}});
+                    d.fleet.call(&p.station, "rpc.forward", touch).await
+                }
+            });
+            let _ = crate::fleet::futures_join_all(calls).await;
+        });
     }
 
     /// Decide, for each new notification, whether it is pushed or held back.
