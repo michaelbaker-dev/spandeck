@@ -685,6 +685,20 @@ pub mod browser {
             }
         }
 
+        /// The window this page opened at an address holding `at`, once
+        /// the browser has it.
+        pub fn opened(&self, at: &str) -> Page {
+            let tab = wait_for("the window the page opened", 20, || {
+                let tabs = self._browser.get_tabs().lock().unwrap().clone();
+                tabs.into_iter()
+                    .find(|t| !std::sync::Arc::ptr_eq(t, &self.tab) && t.get_url().contains(at))
+            });
+            Page {
+                _browser: self._browser.clone(),
+                tab,
+            }
+        }
+
         pub fn js(&self, expr: &str) -> Value {
             // Values come back as JSON text, so arrays and objects survive.
             let wrapped = format!("(async () => JSON.stringify(await ({expr})))()");

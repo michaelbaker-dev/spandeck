@@ -2277,42 +2277,77 @@ fn a_request_is_seen_and_answered_at_any_station_of_the_fleet() {
     assert_eq!(lets_in(c, &laptop_token), 200);
 
     // The owner goes from one station's Control Deck to another's without a
-    // second approval: the deck this browser is signed in to hands the
-    // browser's own token to the other deck, in the address's fragment.
-    page.tab
-        .navigate_to(&format!("{}#token={laptop_token}", a.url("/")))
-        .unwrap();
+    // second approval: the deck this browser is signed in to opens the
+    // other deck and hands it the browser's own token as a window message.
+    // The token is never in an address, so it is in no history.
+    // (This browser was at bravo's deck with bravo's own token: it is
+    // taken away, so that bravo's deck has no sign-in for this browser.)
+    page.js("(localStorage.removeItem('spandeck.token'), true)");
+    page.visit(a);
+    page.js(&format!(
+        "(localStorage.setItem('spandeck.token', {}), location.reload(), true)",
+        json!(laptop_token)
+    ));
     page.wait(
         "alpha's deck, signed in as the laptop",
         &format!(
-            "location.port === '{}' && !!document.querySelector('.topbar') && !location.href.includes('token')",
-            a.port
+            "localStorage.getItem('spandeck.token') === {} && !!document.querySelector('.topbar')",
+            json!(laptop_token)
         ),
     );
     page.goto("/fleet");
-    page.js("(window.open = (url) => { window.__opened = url; return null; }, true)");
+    page.js("(real => { window.open = (url, ...rest) => { window.__opened = url; return real.call(window, url, ...rest); }; return true; })(window.open)");
     page.right_click(
         "[...document.querySelectorAll('a.tile.station')].find(x => x.innerText.includes('bravo'))",
     );
     page.choose("Open bravo's own Control Deck");
-    let link = page.js("window.__opened");
     assert_eq!(
-        link,
-        json!(format!("http://127.0.0.1:{}/#token={laptop_token}", b.port))
+        page.js("window.__opened"),
+        json!(format!("http://127.0.0.1:{}/#/fleet", b.port))
     );
-    page.tab.navigate_to(link.as_str().unwrap()).unwrap();
-    page.wait(
+    let there = page.opened(&format!(":{}/", b.port));
+    there.wait(
         "bravo's deck, signed in with no new approval",
         &format!(
-            "location.port === '{}' && !!document.querySelector('.topbar') && !location.href.includes('token')",
-            b.port
+            "location.port === '{}' && !!document.querySelector('.topbar') && localStorage.getItem('spandeck.token') === {}",
+            b.port,
+            json!(laptop_token)
         ),
     );
+    // Every address either window was at, or came from.
+    for window in [&page, &there] {
+        let visited = window
+            .js("[location.href, document.referrer, ...performance.getEntriesByType('navigation').map(e => e.name)].join(' ')")
+            .to_string();
+        assert!(
+            !visited.contains("dev.") && !visited.contains("token"),
+            "{visited}"
+        );
+    }
     assert!(relayed(b).is_none());
     assert_eq!(devices(b), left);
+    // A window that was not opened by the deck is told nothing, and the
+    // window that was is answered once.
+    assert_eq!(
+        page.js("new Promise(done => { let got = 0; addEventListener('message', e => { if (e.data && e.data.kind) got++; }); window.postMessage('spandeck:hop-ready', '*'); setTimeout(() => done(got), 300); })"),
+        json!(0)
+    );
+    assert_eq!(
+        there.js("new Promise(done => { let got = 0; addEventListener('message', e => { if (e.data && e.data.kind) got++; }); window.opener.postMessage('spandeck:hop-ready', '*'); setTimeout(() => done(got), 300); })"),
+        json!(0)
+    );
     // The station's own token is never handed on: only a browser's.
-    page.visit(a);
-    page.goto("/fleet");
+    page.js(&format!(
+        "(localStorage.setItem('spandeck.token', {}), location.reload(), true)",
+        json!(a.token())
+    ));
+    page.wait(
+        "alpha's deck, with alpha's own token",
+        &format!(
+            "localStorage.getItem('spandeck.token') === {} && !!document.querySelector('a.tile.station')",
+            json!(a.token())
+        ),
+    );
     page.right_click(
         "[...document.querySelectorAll('a.tile.station')].find(x => x.innerText.includes('bravo'))",
     );
