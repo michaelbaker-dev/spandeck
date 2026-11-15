@@ -442,7 +442,7 @@ impl Daemon {
             .kv_set("trust.devices", &Value::Array(devices).to_string());
     }
 
-    fn revoked_devices(&self) -> Vec<String> {
+    pub(crate) fn revoked_devices(&self) -> Vec<String> {
         self.db
             .kv_get("trust.revoked")
             .and_then(|v| serde_json::from_str(&v).ok())
@@ -585,7 +585,11 @@ impl Daemon {
             Decision::Approved => {
                 let r = map.remove(id).expect("checked above");
                 Ok(match r.kind {
-                    "station" => json!({"status": "approved", "key": hex(&self.trust.key())}),
+                    // With the key go the browsers signed out in this fleet:
+                    // their tokens were made with this key, and a station that
+                    // arrives must refuse them too.
+                    "station" => json!({"status": "approved", "key": hex(&self.trust.key()),
+                        "revoked": self.revoked_devices()}),
                     _ => json!({"status": "approved", "token": self.trust.device_token(&r.id)}),
                 })
             }
@@ -593,8 +597,12 @@ impl Daemon {
     }
 
     /// A station's request that is waiting here and shows this code: its id,
-    /// the station's name, and when it lapses.
-    pub(crate) fn trust_station_request(&self, code: &str) -> Option<(String, String, u64)> {
+    /// the station's name, the fleet-mates it says it brings, and when it
+    /// lapses.
+    pub(crate) fn trust_station_request(
+        &self,
+        code: &str,
+    ) -> Option<(String, String, Vec<String>, u64)> {
         let now = now_ms();
         self.trust
             .requests
@@ -607,7 +615,7 @@ impl Daemon {
                     && r.expires_ms > now
                     && r.code == code
             })
-            .map(|r| (r.id.clone(), r.name.clone(), r.expires_ms))
+            .map(|r| (r.id.clone(), r.name.clone(), r.with.clone(), r.expires_ms))
     }
 
     /// The requests waiting at this station, as its fleet-mates are told of
@@ -884,6 +892,22 @@ impl Daemon {
         Ok(json!({"revoked": id}))
     }
 
+    /// The browsers signed out in a fleet, as sent with its key (at a join,
+    /// and with `fleet.rekey`): each is refused here from now on. Ids from
+    /// another station: at most 500 are taken, and nothing else is done
+    /// with them.
+    pub(crate) fn devices_revoked_with_key(&self, list: Option<&Value>) {
+        for id in list
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .take(500)
+        {
+            self.device_revoked_elsewhere(id);
+        }
+    }
+
     /// Another station tells this one about a revoked browser.
     pub(crate) fn device_revoked_elsewhere(&self, id: &str) {
         let mut revoked = self.revoked_devices();
@@ -963,8 +987,12 @@ impl Daemon {
     }
 
     async fn fleet_join_wait(&self) {
+        let mut asked = 0u32;
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            // Often at first, when the owner is likely at the other screen.
+            asked += 1;
+            let wait = if asked <= 40 { 400 } else { 1500 };
+            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
             let Some(o) = self.trust.outgoing.lock().unwrap().clone() else {
                 return;
             };
@@ -1017,6 +1045,9 @@ impl Daemon {
                         Ok(mates) => mates,
                         Err(e) => return ended(Some(e.to_string())),
                     };
+                    // Browsers signed out in that fleet are signed out here,
+                    // before the mates are handed the key and the same list.
+                    self.devices_revoked_with_key(v.get("revoked"));
                     self.record(
                         "trust.joined",
                         None,

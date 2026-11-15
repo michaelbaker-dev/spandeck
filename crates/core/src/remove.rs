@@ -313,7 +313,7 @@ impl Daemon {
             .into_iter()
             .filter(|p| p.station != removed)
             .collect();
-        let params = json!({"key": hex(&new), "removed": removed, "by": by});
+        let params = json!({"key": hex(&new), "removed": removed, "by": by, "revoked": self.revoked_devices()});
         let calls = others.iter().map(|p| {
             let params = params.clone();
             async move {
@@ -453,6 +453,8 @@ impl Daemon {
         self.take_key(new, old, (removed, joined, by), stragglers)?;
         // Right for both: the browsers' tokens were made with the old key.
         self.devices_forget(None);
+        // Browsers signed out in the fleet whose key this is stay signed out.
+        self.devices_revoked_with_key(params.get("revoked"));
         if !removed.is_empty() {
             self.forget_removed(removed);
         }
@@ -523,6 +525,7 @@ impl Daemon {
                                 &s.addr,
                                 "fleet.rekey",
                                 json!({"key": hex(&self.trust.key()), "removed": r.removed, "joined": r.joined,
+                                    "revoked": self.revoked_devices(),
                                     "by": if r.by.is_empty() || r.joined.is_empty() { "the fleet" } else { r.by.as_str() }}),
                                 &key,
                             )
