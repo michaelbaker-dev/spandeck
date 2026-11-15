@@ -303,6 +303,7 @@ is working. To keep it awake whenever spandeckd runs, add `stay_awake = true` to
 | Standing orders | Rules and guidance at five layers. Rules are enforced by hooks and shown as enforced only where the agent can really be blocked. |
 | API keys | Optional [AgentVault](https://github.com/michaelbaker-dev/agentvault) integration: agents use keys through the vault and never see them. See `docs/vault.md`. |
 | Usage | Model, tokens and context per pane; totals per station, project and model for today and all time; cost estimated from a public price list fetched daily. |
+| Performance | One page for the fleet, the same from any station: a sentence per station, request and link timings, restarts and why, clocks that differ, and each machine's Tailscale key expiry with warnings at 14, 7, 3 and 1 day. |
 | Agent setup | MCP servers, skills and default model and effort, set once and applied on every station; run a command (`/login`, `/model …`) in one agent or all of them. |
 
 ## Not verified

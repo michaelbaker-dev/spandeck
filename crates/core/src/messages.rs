@@ -295,6 +295,10 @@ impl Daemon {
         if waiting.is_empty() {
             return None;
         }
+        self.note_woken(
+            &waiting.iter().map(|w| w.0.clone()).collect::<Vec<_>>(),
+            now,
+        );
         mail.mark_announced(
             &waiting.iter().map(|w| w.0.clone()).collect::<Vec<_>>(),
             now,
@@ -339,6 +343,10 @@ impl Daemon {
             let Some((_, sender, _)) = waiting.first().cloned() else {
                 continue;
             };
+            self.note_woken(
+                &waiting.iter().map(|w| w.0.clone()).collect::<Vec<_>>(),
+                now,
+            );
             mail.mark_announced(
                 &waiting.iter().map(|w| w.0.clone()).collect::<Vec<_>>(),
                 now,
@@ -363,9 +371,31 @@ impl Daemon {
         if mail.queued() == 0 {
             return;
         }
-        let delivered = mail.pump(&self.fleet, now_ms()).await;
+        let delivered = mail.pump(&Timed(self), now_ms()).await;
         if delivered > 0 {
             self.emit("msg.relayed", None, None, json!({"delivered": delivered}));
+        }
+    }
+
+    /// For the Performance page: how long a message stored here waited
+    /// before its agent was told of it (a typed nudge, or a hook's notice).
+    fn note_woken(&self, ids: &[String], now: u64) {
+        let list = json!(ids).to_string();
+        let stored: Vec<i64> = self
+            .db
+            .with(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT received FROM messages WHERE announced=0 AND received IS NOT NULL
+                     AND id IN (SELECT value FROM json_each(?1))",
+                )?;
+                let rows = stmt.query_map([list], |r| r.get(0))?;
+                rows.collect()
+            })
+            .unwrap_or_default();
+        for at in stored {
+            self.perf.msg_woken.record(std::time::Duration::from_millis(
+                now.saturating_sub(at as u64),
+            ));
         }
     }
 
@@ -424,5 +454,31 @@ impl Daemon {
             }
         }
         ack
+    }
+}
+
+/// The station link, timed for the Performance page: from a message being
+/// sent here to its being stored at the other station, on this station's
+/// clock throughout. A duplicate (a retry after a lost reply) is not counted.
+struct Timed<'a>(&'a Daemon);
+
+impl crate::relay::Transport for Timed<'_> {
+    fn deliver<'a>(
+        &'a self,
+        station: &'a str,
+        env: &'a crate::relay::Envelope,
+    ) -> crate::relay::BoxFuture<'a, std::result::Result<crate::relay::RelayAck, String>> {
+        Box::pin(async move {
+            let ack = self.0.fleet.deliver(station, env).await?;
+            if ack.received && !ack.duplicate {
+                self.0
+                    .perf
+                    .msg_received
+                    .record(std::time::Duration::from_millis(
+                        now_ms().saturating_sub(env.ts),
+                    ));
+            }
+            Ok(ack)
+        })
     }
 }

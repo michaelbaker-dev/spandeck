@@ -15,6 +15,7 @@ import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, sta
 import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
 import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners } from './look.js';
 import { lookEditor } from './lookedit.js';
+import { perfPage, gather, anyTrouble, keyInfo, keySteps, clockWords, refreshTook } from './perf.js';
 
 // The page opens in the look this browser last had, before anything is asked.
 applyRemembered();
@@ -44,6 +45,7 @@ const S = {
 function parseRoute() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
   if (parts[0] === 'l' && parts[1]) return { view: 'layout', layout: 'global:' + parts[1] };
+  if (parts[0] === 'perf') return { view: 'perf' };
   if (parts[0] === 's' && parts[1]) {
     const station = parts[1];
     if (parts[2] === 'p' && parts[3]) return { view: 'pane', station, pane: parts[3] };
@@ -91,6 +93,7 @@ async function refreshStation(st) {
 
 async function refresh() {
   if (!api.connected) return;
+  const began = performance.now();
   try { S.fleet = await api.call('fleet.view'); } catch (e) { return; }
   const stations = S.fleet.stations.filter(s => s.state === 'online').map(s => s.station);
   await Promise.all(stations.map(refreshStation));
@@ -113,11 +116,59 @@ async function refresh() {
   try { S.deck = await api.call('deck.get'); } catch (e) { /* keep */ }
   await loadLook();
   await loadPrefs();
+  refreshTook(performance.now() - began);
+  loadPerf();
   S.loaded = true;
   update();
   vaultAtOpen();
   migrateWorkspaces();
   bindGlobalLeaves();
+}
+
+// The Performance page's numbers, and Tailscale key expiry for the tiles.
+// Asked of every station that answers: every 4 s while the page is open, and
+// once a minute otherwise, which is what the dot on its button is drawn from.
+// Not waited for: nothing else on the deck depends on it.
+let perfAsking = false;
+async function loadPerf(now) {
+  const every = S.route.view === 'perf' ? 4000 : 60000;
+  if (perfAsking || (!now && S.perf && Date.now() - S.perf.at < every)) return;
+  perfAsking = true;
+  try {
+    S.perf = await gather(api, S.fleet);
+    // Each station's key as the station serving this deck knows it. A
+    // station from before this has no such call: then nothing is shown.
+    try { S.tailnet = await api.call('tailnet.view'); } catch (e) { S.tailnet = null; }
+  } finally { perfAsking = false; }
+  if (S.route.view === 'perf' || now) update();
+}
+// A station's Tailscale key in words, or null when nothing is known of it.
+const stationKey = (st) => keyInfo(S.tailnet?.stations?.[st]);
+const keyName = (st) => S.tailnet?.stations?.[st]?.name || st;
+// What a key's state means and what to do about it. The steps are the deck's
+// own words; the name is text from a station.
+function keyDialog(name, info) {
+  dialog(`Tailscale key of ${name}`, (close) => h('div', { class: 'consequences' },
+    h('p', {}, h('b', {}, `${name}'s Tailscale key ${info.text}.`), info.expired ? ' It cannot be reached over Tailscale until that is put right. Its agents may still be running.' : ' When it expires the machine drops off your Tailscale network, and spandeck cannot reach it.'),
+    h('p', { class: 'muted small' }, 'The Tailscale key is the machine\'s sign-in to Tailscale, which Tailscale ends after 180 days unless told otherwise.'),
+    h('ol', {}, keySteps(name, info).map(line => h('li', {}, line))),
+    h('div', { class: 'row end' }, h('button', { class: 'primary', onclick: close }, 'Close'))), { wide: true });
+}
+const keyChip = (st) => { const k = stationKey(st); return k && k.level !== 'ok' ? h('button', { class: 'chip key-chip ' + k.level, title: 'What to do', onclick: (e) => { e.preventDefault(); e.stopPropagation(); keyDialog(keyName(st), k); } }, 'Tailscale key ' + k.text) : null; };
+// Why a station that is listed cannot be reached, when that is known: its
+// clock, or its Tailscale key. Otherwise null, and it is just unreachable.
+function awayWhy(s) {
+  if (s.state !== 'unreachable') return null;
+  if (s.why === 'clock') return `Its clock differs from ${api.station}'s by ${clockWords(s.clock_diff_ms || 0)}. Calls between them are refused until the clocks agree: set both from the network.`;
+  const k = stationKey(s.station);
+  return k?.expired ? `Its Tailscale key ${k.text}, so it cannot be reached.` : null;
+}
+// The device this browser is on, when its own key is within 14 days.
+function ownKey() {
+  const st = Object.entries(S.tailnet?.stations || {}).find(([, k]) => k.id && k.id === api.device);
+  const d = st ? { name: st[1].name || st[0], k: st[1] } : (S.tailnet?.devices || []).filter(x => x.id && x.id === api.device).map(x => ({ name: String(x.name || 'this device'), k: { known: true, ...x } }))[0];
+  const info = d ? keyInfo(d.k) : null;
+  return info && (info.expired || info.left <= 14) ? { name: d.name, info } : null;
 }
 
 // The inbox is the whole fleet's: each station keeps the notices it raised,
@@ -688,6 +739,7 @@ function palette() {
     { label: 'Approval requests', run: approvalsPanel },
     { label: 'Inbox', run: inboxPanel },
     { label: 'Usage: tokens and estimated cost', run: fleetUsageDialog },
+    { label: 'Performance: stations, links and Tailscale keys', run: () => go('#/perf') },
     { label: 'Appearance: themes, colours and fonts', run: () => appearance('deck') },
     { label: `Stop every agent on ${api.station}`, run: () => rpc(api.station, 'stop.all', { scope: 'station' }) },
     { label: `Check ${here} (doctor)`, run: () => doctorPanel(here) },
@@ -1191,7 +1243,9 @@ function topbar() {
   const pane = r.view === 'pane' ? findPane(r.station, r.pane) : null;
   const lay = r.view === 'layout' ? findLayout(r.layout) : null;
   const project = pane?.project || lay?.project || (r.view === 'watch' ? r.project : null);
-  const here = pane ? pane.name : lay ? lay.name : r.view === 'watch' ? 'Watch' : null;
+  const here = pane ? pane.name : lay ? lay.name : r.view === 'watch' ? 'Watch' : r.view === 'perf' ? 'Performance' : null;
+  const own = ownKey();
+  const trouble = anyTrouble(S.perf);
   const crumbs = [h('a', { href: '#/fleet' }, 'Fleet')];
   if (r.station) crumbs.push('›', h('a', { href: stationUrl(r.station) }, r.station));
   else if (lay) crumbs.push('›', h('span', {}, 'Layouts'));
@@ -1202,11 +1256,13 @@ function topbar() {
     h('nav', { class: 'crumbs', 'aria-label': 'Where you are' }, crumbs),
     h('span', { class: 'grow' }),
     !api.connected ? h('span', { class: 'chip bad' }, api.authError || 'reconnecting…') : null,
+    own ? h('button', { class: 'chip key-chip own-key ' + own.info.level, onclick: () => keyDialog(own.name, own.info), title: 'This is the device you are using. When its key expires it can no longer open the Control Deck.' }, `This device's Tailscale key ${own.info.text}`) : null,
     needs ? h('span', { class: 'chip needs', title: 'Agents waiting for you' }, `${needs} need${needs === 1 ? 's' : ''} you`) : null,
     h('button', { class: S.approvals.length ? 'attn' : '', onclick: approvalsPanel }, 'Approvals', S.approvals.length ? h('span', { class: 'count' }, S.approvals.length) : null),
     h('button', { onclick: inboxPanel }, 'Inbox', unread ? h('span', { class: 'count' }, unread) : null),
     (S.trust?.requests?.length || S.trust?.outgoing) || !isPhone() ? h('button', { class: S.trust?.requests?.length ? 'attn' : '', onclick: trustPanel, title: 'Stations and browsers allowed to control your fleet' }, 'Access', S.trust?.requests?.length ? h('span', { class: 'count' }, S.trust.requests.length) : null) : null,
     isPhone() ? null : h('button', { onclick: fleetUsageDialog, title: 'Tokens and estimated cost, per station, project, pane and model' }, 'Usage'),
+    isPhone() ? null : h('button', { class: 'perf-btn', onclick: () => go('#/perf'), 'aria-label': trouble ? 'Performance: something needs a look' : 'Performance', title: 'Where time goes on every station, the links between them, and Tailscale keys' }, 'Performance', trouble ? h('span', { class: 'perf-dot', 'aria-hidden': 'true' }) : null),
     isPhone() ? null : h('button', { onclick: setupPanel, title: 'MCP servers, skills and model defaults for every agent' }, 'Agent setup'),
     isPhone() ? null : h('button', { onclick: () => appearance('deck'), title: 'Themes, colours and fonts for the whole deck' }, 'Appearance'),
     isPhone() || !S.fleet.stations.some(x => x.vault?.found) ? null : h('button', { class: S.fleet.stations.some(x => x.state === 'online' && (['not_connected', 'token_rejected', 'locked'].includes(x.vault?.state) || x.vault?.health === 'problem')) ? 'attn' : '', onclick: vaultPanel, title: 'AgentVault: keys for agents without handing over keys' }, 'Vault'),
@@ -1325,11 +1381,16 @@ function stationMenu(e, s) {
     hopOrigin(s) && { label: `Open ${s.station}'s own Control Deck`, action: () => hopOpen(s) },
     { label: 'Agent programs and versions…', action: agentsPanel },
     { label: 'Usage: tokens and estimated cost…', action: fleetUsageDialog },
+    { label: 'Performance…', action: () => go('#/perf') },
+    stationKey(s.station) && { label: `Tailscale key: ${stationKey(s.station).text}…`, action: () => keyDialog(keyName(s.station), stationKey(s.station)) },
     s.state === 'not_linked' && { label: `Add ${s.station} to this fleet…`, action: () => addMachineDialog({ station: s.station, kind: 'join' }) },
     up && { label: 'Restart spandeck here (keeps terminals)', action: () => confirmBox(`Restart spandeck on ${s.station}?`, 'Every terminal and agent keeps running. If it does not come back healthy, the restart is undone.', 'Restart', () => rpc(s.station, 'station.restart', {}).then(() => toast(`${s.station} is restarting`))) },
     up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`))) },
-    s.state === 'unreachable' && { label: 'Wake it (same network only)', action: () => rpc(api.station, 'fleet.wake', { station: s.station }).then((r) => toast(`Sent ${r.sent} wake packets to ${s.station}. Give it a minute.`)) },
-    s.state === 'unreachable' && { label: 'Start spandeck there (over SSH)', action: () => rpc(api.station, 'fleet.start', { station: s.station }).then((r) => toast(`${s.station} is ${r.state}`)) },
+    // A station that is on, and refused for its clock or its Tailscale key,
+    // is not helped by waking or starting it.
+    awayWhy(s) && { note: awayWhy(s) },
+    s.state === 'unreachable' && !awayWhy(s) && { label: 'Wake it (same network only)', action: () => rpc(api.station, 'fleet.wake', { station: s.station }).then((r) => toast(`Sent ${r.sent} wake packets to ${s.station}. Give it a minute.`)) },
+    s.state === 'unreachable' && !awayWhy(s) && { label: 'Start spandeck there (over SSH)', action: () => rpc(api.station, 'fleet.start', { station: s.station }).then((r) => toast(`${s.station} is ${r.state}`)) },
     s.state === 'unreachable' && { label: 'Forget this station', danger: true, action: () => confirmBox(`Forget ${s.station}?`, 'It is taken off the list on every station of the fleet (the others follow within seconds, one that is off when it is back). If it comes back it is listed again.', 'Forget', () => rpc(api.station, 'fleet.forget', { station: s.station })) },
     up && { label: 'Stop every agent here', danger: true, action: () => rpc(api.station, 'stop.all', { scope: s.station === api.station ? 'station' : s.station }) },
     up && { label: 'Close all panes here…', danger: true, action: () => closeAllDialog(s) },
@@ -1453,8 +1514,8 @@ function stationTile(s) {
       h('span', {}, h('b', {}, s.working ?? 0), ' working'), h('span', { class: s.needs_you ? 'needs' : '' }, h('b', {}, s.needs_you ?? 0), ' need you'),
       s.load != null ? h('span', { class: 'muted' }, 'load ' + Number(s.load).toFixed(1)) : null, s.keep_awake ? h('span', { class: 'chip' }, 'kept awake') : null,
       s.codex_sandbox_blocked ? h('span', { class: 'chip warn', title: 'Codex cannot run commands on this station: the system blocks its sandbox. On the station, run "spandeck doctor --fix" once. It asks for your password.' }, 'Codex blocked') : null,
-      s.service === false ? h('span', { class: 'chip warn', title: 'spandeck does not start at login on this station. After a reboot it stays down until someone starts it. Run "spandeck service --install" there.' }, 'not started at login') : null, vaultChip(s))
-      : h('div', { class: 'tile-stats warn-text' }, s.state === 'update_needed' ? 'Needs an update before it can be controlled' : s.state === 'unreachable' ? `Unreachable · last seen ${ago(s.last_seen_ms)} ago. Right-click to wake or start it.` : s.state === 'not_linked' ? ['Not in this fleet. ', h('button', { class: 'mini add-station', onclick: (e) => { e.preventDefault(); e.stopPropagation(); addMachineDialog({ station: s.station, kind: 'join' }); } }, `Add ${s.station} to this fleet…`)] : `Unreachable · last seen ${ago(s.last_seen_ms)} ago`),
+      s.service === false ? h('span', { class: 'chip warn', title: 'spandeck does not start at login on this station. After a reboot it stays down until someone starts it. Run "spandeck service --install" there.' }, 'not started at login') : null, vaultChip(s), keyChip(s.station))
+      : h('div', { class: 'tile-stats warn-text' }, s.state === 'update_needed' ? 'Needs an update before it can be controlled' : awayWhy(s) ? [awayWhy(s), ' ', s.why === 'clock' ? null : keyChip(s.station)] : s.state === 'unreachable' ? [`Unreachable · last seen ${ago(s.last_seen_ms)} ago. Right-click to wake or start it. `, keyChip(s.station)] : s.state === 'not_linked' ? ['Not in this fleet. ', h('button', { class: 'mini add-station', onclick: (e) => { e.preventDefault(); e.stopPropagation(); addMachineDialog({ station: s.station, kind: 'join' }); } }, `Add ${s.station} to this fleet…`)] : `Unreachable · last seen ${ago(s.last_seen_ms)} ago`),
     h('div', { class: 'tile-agents' }, agents.slice(0, 8).map(p => h('div', { class: 'agent-line' }, dot(p), paneMark(p), h('span', {}, p.name), h('span', { class: 'muted' }, p.tool || p.needs_reason || STATE_LABEL[stateOf(p)]))),
       up && !agents.length ? h('span', { class: 'muted' }, 'No agents running') : null));
 }
@@ -2540,6 +2601,14 @@ function fleetView() {
     stations.length <= 1 ? h('p', { class: 'muted hint' }, 'Other stations appear here on their own: any machine under your Tailscale login that runs spandeckd.') : null)));
 }
 
+// Performance: every station's own numbers, the links between them, and
+// what this browser measured. The same page from any station.
+function perfView() {
+  loadPerf();
+  const page = perfPage({ data: S.perf, api, phone: isPhone(), reload: () => loadPerf(true), explain: keyDialog });
+  return isPhone() ? page : shell(page);
+}
+
 // One station: every running pane as a tile.
 function stationView(st) {
   const info = S.fleet.stations.find(s => s.station === st);
@@ -2908,10 +2977,10 @@ function phoneList() {
     const projects = up ? (S.projects.get(st) || []) : [];
     const loose = up ? panesOf(st).filter(p => !p.project && !p.exited).sort(byState) : [];
     return h('div', { class: 'phone-station' },
-      h('div', { class: 'row' }, h('span', { class: 'dot ' + (up ? 'idle' : 'unreachable') }), h('b', {}, st), h('span', { class: 'muted' }, up ? `${s.working ?? 0} working · ${s.needs_you ?? 0} need you` : STATION_STATE[s.state] || s.state.replace('_', ' ')), h('span', { class: 'grow' }),
+      h('div', { class: 'row' }, h('span', { class: 'dot ' + (up ? 'idle' : 'unreachable') }), h('b', {}, st), h('span', { class: 'muted' }, up ? `${s.working ?? 0} working · ${s.needs_you ?? 0} need you` : s.why === 'clock' ? `clock differs by ${clockWords(s.clock_diff_ms || 0)}` : STATION_STATE[s.state] || s.state.replace('_', ' ')), keyChip(st), h('span', { class: 'grow' }),
         up ? h('button', { onclick: () => newPaneDialog(st) }, 'New') : null,
-        s.state === 'unreachable' ? h('button', { onclick: () => rpc(api.station, 'fleet.wake', { station: st }).then((r) => toast(`Sent ${r.sent} wake packets. Give it a minute.`)) }, 'Wake') : null,
-        s.state === 'unreachable' ? h('button', { onclick: () => rpc(api.station, 'fleet.start', { station: st }).then((r) => toast(`${st} is ${r.state}`)) }, 'Start') : null,
+        s.state === 'unreachable' && !awayWhy(s) ? h('button', { onclick: () => rpc(api.station, 'fleet.wake', { station: st }).then((r) => toast(`Sent ${r.sent} wake packets. Give it a minute.`)) }, 'Wake') : null,
+        s.state === 'unreachable' && !awayWhy(s) ? h('button', { onclick: () => rpc(api.station, 'fleet.start', { station: st }).then((r) => toast(`${st} is ${r.state}`)) }, 'Start') : null,
         up ? h('button', { class: 'danger', onclick: () => confirmBox(`Stop every agent on ${st}?`, 'Running turns are interrupted. Processes stay.', 'Stop', () => rpc(api.station, 'stop.all', { scope: s.self ? 'station' : st })) }, 'Stop') : null,
         // Everything else a station offers, with closing its panes and removing it.
         h('button', { class: 'station-more', 'aria-label': `More for ${st}`, title: `More for ${st}`, onclick: (e) => stationMenu(e, s) }, '⋯')),
@@ -2933,7 +3002,8 @@ function phoneList() {
     h('section', {}, h('h2', {}, 'Stations'), stationsByName().map(station), addRow()),
     globals.length ? h('section', { class: 'phone-layouts' }, h('h2', {}, 'Layouts'), globals.map(x => layRow(x, 'every station'))) : null,
     stopRows(),
-    h('section', {}, h('button', { class: 'wide', onclick: fleetUsageDialog }, 'Usage: tokens and estimated cost')),
+    h('section', {}, h('button', { class: 'wide', onclick: fleetUsageDialog }, 'Usage: tokens and estimated cost'),
+      h('a', { class: 'btn wide perf-btn', href: '#/perf' }, 'Performance', anyTrouble(S.perf) ? h('span', { class: 'perf-dot', 'aria-hidden': 'true' }) : null)),
     h('section', {}, h('button', { class: 'danger big wide', onclick: () => confirmBox('Stop the whole fleet?', 'Every running agent turn on every station is interrupted.', 'Stop everything', () => rpc(api.station, 'stop.all', { scope: 'fleet' })) }, 'Stop every agent in the fleet')));
 }
 
@@ -2948,6 +3018,7 @@ function phoneView() {
     h('div', { class: 'row' }, h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'), h('b', {}, `Watch · ${r.project}`), h('span', { class: 'muted' }, 'on ' + r.station)),
     watchView(r.station, r.project));
   if (r.view === 'pane') return phonePaneView(r.station, r.pane);
+  if (r.view === 'perf') return perfView();
   return phoneList();
 }
 
@@ -3023,6 +3094,7 @@ function render() {
   else if (r.view === 'layout') main = layoutView(r.layout);
   else if (r.view === 'watch') main = watchPage(r.station, r.project);
   else if (r.view === 'station') main = stationView(r.station);
+  else if (r.view === 'perf') main = perfView();
   else main = fleetView();
   if (!layCtx) arranging = null;
   // A view that is already on the page stays attached: replacing it would
@@ -3045,7 +3117,7 @@ function render() {
     else t.layout();
   }
   const lay = r.view === 'layout' ? findLayout(r.layout) : null;
-  const what = r.view === 'pane' ? (findPane(r.station, r.pane)?.name || 'pane') : lay ? lay.name : r.view === 'watch' ? `Watch ${r.project}` : r.station || '';
+  const what = r.view === 'pane' ? (findPane(r.station, r.pane)?.name || 'pane') : lay ? lay.name : r.view === 'watch' ? `Watch ${r.project}` : r.view === 'perf' ? 'Performance' : r.station || '';
   document.title = (what ? what + ' · ' : '') + 'spandeck';
   // Lines are drawn once the panes have their places on screen.
   const links = pendingLinks;

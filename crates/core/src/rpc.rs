@@ -71,6 +71,14 @@ const PEER_METHODS: &[&str] = &[
     "notify.relay",
     "sync.pull",
     "prefs.push",
+    // The Performance page shows the fleet from any station, and a station
+    // says its own Tailscale key's expiry to its fleet. The owner has these
+    // too. None is on the agents' list or the read-only one: call timings
+    // show when other projects are busy, and the others list the owner's
+    // devices.
+    "perf.get",
+    "tailnet.report",
+    "tailnet.view",
 ];
 
 /// The owner's changes to a document every station keeps a copy of. Before
@@ -815,6 +823,9 @@ impl Daemon {
             "orders.table" => self.enforcement_table(),
 
             // --------------------------------------------------------- fleet
+            "perf.get" => self.perf_view(),
+            "tailnet.view" => self.tailnet_view(),
+            "tailnet.report" => self.tailnet_report(),
             "fleet.view" => self.fleet_view(),
             "fleet.refresh" => {
                 self.discover_peers().await;

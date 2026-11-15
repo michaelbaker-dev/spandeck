@@ -48,6 +48,11 @@ export class Api {
     this.client = clientId();
     this.connected = false;
     this.authError = null;
+    // For the Performance page: how often this page lost its station.
+    this.reconnects = 0;
+    this.lastReconnect = 0;
+    // Which of the owner's Tailscale devices the station takes this one for.
+    this.device = null;
   }
 
   onEvent(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
@@ -79,6 +84,7 @@ export class Api {
           this.authError = null;
           this.station = msg.auth.station;
           this.version = msg.auth.version;
+          this.device = typeof msg.auth.device === 'string' ? msg.auth.device : null;
           this.connected = true;
           opened = true;
           this.call('events.subscribe', {}).catch(() => {});
@@ -116,7 +122,7 @@ export class Api {
     });
   }
 
-  _reconnected() { for (const fn of this.listeners) fn({ kind: 'connection.restored', data: {} }); }
+  _reconnected() { this.reconnects += 1; this.lastReconnect = Date.now(); for (const fn of this.listeners) fn({ kind: 'connection.restored', data: {} }); }
 
   _binary(buf) {
     if (buf.length < 5) return;

@@ -96,6 +96,55 @@ impl Daemon {
                 }
             },
         );
+        // This machine's Tailscale key: when it lapses the station drops off
+        // the tailnet, and nothing else says so beforehand.
+        if let Some(t) = self.tailnet.get() {
+            let now = crate::paths::now_ms();
+            if let Some(me) = t.devices.iter().find(|d| d.me) {
+                let (ok, detail) = match me.expires_ms {
+                    None => (true, "this machine's key never expires".to_string()),
+                    Some(e) if me.expired || e <= now => (
+                        false,
+                        format!("this machine's key expired on {} (UTC): sign in to Tailscale again here", crate::tailnet::utc_date(e)),
+                    ),
+                    Some(e) => {
+                        let days = crate::tailnet::days_left(e, now);
+                        (
+                            days > 14,
+                            format!(
+                                "this machine's key expires in {days} day{} (on {}, UTC){}",
+                                if days == 1 { "" } else { "s" },
+                                crate::tailnet::utc_date(e),
+                                if days > 14 { "" } else { ": sign in to Tailscale again here, or choose \"Disable key expiry\" for it in Tailscale's admin console" }
+                            ),
+                        )
+                    }
+                };
+                add("tailscale key", ok, false, detail);
+            }
+        }
+        // Stations whose clocks are far from this one's: past two minutes
+        // their calls are refused, and they list each other as unreachable.
+        for p in self.fleet.peers() {
+            let Some(c) = self.perf.clock_of(&p.station) else {
+                continue;
+            };
+            if c.diff_ms.unsigned_abs() < 30_000 {
+                continue;
+            }
+            let words = crate::perf::clock_words(c.diff_ms);
+            let which = if c.diff_ms > 0 { "ahead of" } else { "behind" };
+            add(
+                &format!("clock ({})", p.station),
+                !c.refused(),
+                false,
+                if c.refused() {
+                    format!("{}'s clock is {words} {which} this station's: calls between them are refused (the limit is 2 minutes), so each lists the other as unreachable. Set both clocks from the network", p.station)
+                } else {
+                    format!("{}'s clock is {words} {which} this station's: past 2 minutes, calls between them are refused", p.station)
+                },
+            );
+        }
         let web = self.web_addrs.lock().unwrap().clone();
         add(
             "control deck",
