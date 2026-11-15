@@ -80,6 +80,7 @@ const NOT_FORWARDED: &[&str] = &[
     "fleet.add_status",
     "fleet.add_cancel",
     "fleet.add_enable",
+    "fleet.uninstall",
 ];
 
 const READ_METHODS: &[&str] = &[
@@ -1123,7 +1124,34 @@ impl Daemon {
                     }
                     _ => None,
                 };
-                self.add_start(s(&params, "machine")?, s(&params, "user")?, password, by)?
+                // A machine to install on, or a station that is running
+                // already and is only to be made to ask.
+                match opt(&params, "station") {
+                    Some(station) => {
+                        self.add_station_start(station, s(&params, "user")?, password, by)?
+                    }
+                    None => {
+                        self.add_start(s(&params, "machine")?, s(&params, "user")?, password, by)?
+                    }
+                }
+            }
+            // Uninstall spandeck on a station, over SSH from this one. The
+            // owner's alone, at the station they are using, like adding.
+            "fleet.uninstall" => {
+                let password = match params.as_object_mut().and_then(|o| o.remove("password")) {
+                    Some(Value::String(text)) if !text.is_empty() => {
+                        Some(crate::add::Secret::new(text))
+                    }
+                    _ => None,
+                };
+                self.uninstall_start(
+                    s(&params, "station")?,
+                    s(&params, "user")?,
+                    password,
+                    flag(&params, "erase"),
+                    caller,
+                )
+                .await?
             }
             "fleet.add_cancel" => self.add_cancel(by),
             "fleet.add_enable" => self.add_enable(

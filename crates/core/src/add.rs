@@ -6,6 +6,14 @@
 //! way `spandeck fleet --join` does. The owner then approves the code as for
 //! any other station.
 //!
+//! Two more things go the same way, over the same connection and under the
+//! same switch (15 Nov 2026). A station that is running but is not in this
+//! fleet is added without the owner going to it: nothing is installed, it
+//! is only made to ask (`add_station_start`). And spandeck is uninstalled
+//! from a station (`uninstall_start`): the station there closes its panes,
+//! stops and takes its login service out, as it does when it is removed
+//! with "also stop spandeck there", and then the programs are deleted.
+//!
 //! The password, when one is needed, is used for that one connection. It is
 //! never written to disk, a log, an event, an error or a command line: ssh
 //! asks for it through an askpass helper (this same binary), which is handed
@@ -65,14 +73,25 @@ enum JoinBy {
 #[derive(Clone)]
 struct Job {
     id: String,
+    /// "add": install on a machine and have it join. "join": a station that
+    /// is running already is made to ask. "uninstall": spandeck is taken
+    /// off a station.
+    kind: &'static str,
+    /// Uninstall: also delete the station's history, archive and settings.
+    erase: bool,
+    /// The fleet-mates the station says it brings, once it has asked.
+    with: Vec<String>,
+    /// Join: whether the station there is new enough to bring its mates.
+    brings_mates: bool,
     machine: String,
     name: String,
     address: String,
     os: String,
     user: String,
     by: String,
-    /// connecting, installing, starting, joining, approve, joined: in
-    /// progress. needs_password, failed, done: finished.
+    /// connecting, installing, starting, joining, approve, joined,
+    /// stopping, removing: in progress. needs_password, failed, done:
+    /// finished.
     stage: &'static str,
     problem: Option<(&'static str, String)>,
     lines: VecDeque<String>,
@@ -84,13 +103,47 @@ struct Job {
 }
 
 impl Job {
+    fn new(kind: &'static str, name: &str, address: &str, os: &str, user: &str, by: &str) -> Job {
+        Job {
+            id: new_id("add"),
+            kind,
+            erase: false,
+            with: vec![],
+            brings_mates: false,
+            machine: String::new(),
+            name: name.to_string(),
+            address: address.to_string(),
+            os: os.to_string(),
+            user: user.to_string(),
+            by: by.to_string(),
+            stage: "connecting",
+            problem: None,
+            lines: VecDeque::new(),
+            code: None,
+            request: None,
+            station: None,
+            started_ms: now_ms(),
+            cancel: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
     fn running(&self) -> bool {
         !matches!(self.stage, "needs_password" | "failed" | "done")
     }
 
+    /// The ship's log entry this job writes.
+    fn log_kind(&self) -> &'static str {
+        match self.kind {
+            "uninstall" => "fleet.uninstall",
+            _ => "fleet.add",
+        }
+    }
+
     fn view(&self) -> Value {
         json!({
-            "id": self.id, "machine": self.machine, "name": self.name, "address": self.address,
+            "id": self.id, "kind": self.kind, "erase": self.erase, "with": self.with,
+            "brings_mates": self.brings_mates,
+            "machine": self.machine, "name": self.name, "address": self.address,
             "os": self.os, "user": self.user, "by": self.by, "stage": self.stage,
             "running": self.running(),
             "problem": self.problem.as_ref().map(|(kind, text)| json!({"kind": kind, "text": text})),
@@ -365,7 +418,7 @@ impl Daemon {
             return;
         };
         self.record(
-            "fleet.add",
+            j.log_kind(),
             None,
             None,
             None,
@@ -381,7 +434,12 @@ impl Daemon {
         let changed = self.add_update(id, |j| {
             let name = &j.name;
             let windows = j.os == "Windows";
+            let uninstall = j.kind == "uninstall";
             let text = match kind {
+                "not_running" => format!("spandeck's command was not found on {name}, or spandeck is not answering there: the last lines below say which. Start it on that machine (`spandeck daemon`), or use Add a machine to install it again."),
+                "stop" => format!("spandeck on {name} did not stop when it was asked to, so nothing was deleted there: the last lines below say why. Try again, or stop it on that machine."),
+                "remove" => format!("spandeck was stopped on {name} and no longer starts at login, but its programs could not all be deleted: the last lines below say which."),
+                "timeout" if uninstall => format!("Uninstalling spandeck on {name} took more than ten minutes and was stopped: try again."),
                 "ssh_off" if windows => format!("The OpenSSH server is not installed or not running on {name}: on that machine open Settings, System, Optional features, add OpenSSH Server, then in a PowerShell window run as administrator: Start-Service sshd; Set-Service sshd -StartupType Automatic. Then try again."),
                 "blocked" => format!("Windows on {name} refused to run spandeck: Smart App Control (or another application control policy) blocks programs it does not know, and spandeck's releases are not signed. spandeck was downloaded there but cannot run until that is turned off in Windows Security, App & browser control, Smart App Control settings; Windows does not let it be turned on again without a reset, so that is yours to decide."),
                 "start" if windows => format!("spandeck was installed on {name} but did not start: it starts when you log on there, so log on at that machine (a Windows station runs only while you are logged on), or run `spandeck daemon` there to see why."),
@@ -420,6 +478,31 @@ impl Daemon {
         password: Option<Secret>,
         by: &str,
     ) -> Result<Value> {
+        let user = self.add_checks(user)?;
+        // The address is the one Tailscale gives for the machine picked. A
+        // caller names a machine, never an address.
+        let found = self
+            .add_candidates_now()
+            .ok_or_else(|| invalid("Tailscale is not answering on this station"))?;
+        let cand = found.into_iter().find(|c| c.id == machine).ok_or_else(|| {
+            Error::NotFound(
+                "that machine is not online under your Tailscale login, or is already a station"
+                    .into(),
+            )
+        })?;
+        let job = Job::new("add", &cand.name, &cand.address, &cand.os, &user, by);
+        self.add_begin(
+            Job {
+                machine: cand.id.clone(),
+                ..job
+            },
+            password,
+        )
+    }
+
+    /// What every connection to another machine needs first: the owner's
+    /// switch is on, and the names that go on a command line are plain.
+    fn add_checks(&self, user: &str) -> Result<String> {
         if !self.add_enabled() {
             return Err(Error::Denied(
                 "adding a machine is off on this station. Turn it on from the Add a machine tile, or put add_machines = true in its config.toml.".into(),
@@ -449,52 +532,164 @@ impl Daemon {
                 "this station's name has characters that cannot be sent to another machine; rename it in config.toml",
             ));
         }
-        // The address is the one Tailscale gives for the machine picked. A
-        // caller names a machine, never an address.
-        let found = self
-            .add_candidates_now()
-            .ok_or_else(|| invalid("Tailscale is not answering on this station"))?;
-        let cand = found.into_iter().find(|c| c.id == machine).ok_or_else(|| {
-            Error::NotFound(
-                "that machine is not online under your Tailscale login, or is already a station"
-                    .into(),
-            )
-        })?;
-        let job = Job {
-            id: new_id("add"),
-            machine: cand.id.clone(),
-            name: cand.name.clone(),
-            address: cand.address.clone(),
-            os: cand.os.clone(),
-            user: user.to_string(),
-            by: by.to_string(),
-            stage: "connecting",
-            problem: None,
-            lines: VecDeque::new(),
-            code: None,
-            request: None,
-            station: None,
-            started_ms: now_ms(),
-            cancel: Arc::new(tokio::sync::Notify::new()),
+        Ok(user.to_string())
+    }
+
+    /// A station this one can see, as a machine to connect to: its address
+    /// and what it runs. The caller names a station, never an address; the
+    /// address is the one the station was found at, and it must be a
+    /// Tailscale address or one the owner wrote in this station's config.
+    fn station_target(&self, station: &str) -> Result<(Peer, String, String)> {
+        let peer = self
+            .fleet
+            .peer(station)
+            .ok_or_else(|| Error::NotFound(format!("no station called {station} is known here")))?;
+        if peer.state == "unreachable" {
+            return Err(invalid(format!(
+                "{station} is not answering, so it cannot be reached over SSH either: wake it or start it first"
+            )));
+        }
+        let host = host_of(&peer.addr)
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
+        let tailnet = host.parse::<IpAddr>().is_ok_and(is_tailscale_address);
+        if !tailnet && !self.cfg.peers.contains(&peer.addr) {
+            return Err(invalid(format!(
+                "{station} was found at {host}, which is not a Tailscale address, so this station does not connect to it"
+            )));
+        }
+        // What it runs: it says so itself; an older one does not, and then
+        // Tailscale does.
+        let said = peer.info["os"].as_str().map(str::to_lowercase);
+        let os = said.or_else(|| {
+            let status = tokio::task::block_in_place(tailscale_status)?;
+            status
+                .get("Peer")?
+                .as_object()?
+                .values()
+                .find(|p| {
+                    p["TailscaleIPs"]
+                        .as_array()
+                        .is_some_and(|a| a.iter().any(|i| i.as_str() == Some(host.as_str())))
+                })?
+                .get("OS")?
+                .as_str()
+                .map(str::to_lowercase)
+        });
+        let os = match os.as_deref() {
+            Some("macos") => "macOS",
+            Some("windows") => "Windows",
+            _ => "Linux",
         };
+        Ok((peer, host, os.to_string()))
+    }
+
+    /// "Add X to this fleet": a station that is running but is not in this
+    /// fleet is made to ask to join it, over SSH, so the owner does not go
+    /// to that machine. Nothing is installed. The code it shows is approved
+    /// here as for any station, and its fleet-mates come with it.
+    pub fn add_station_start(
+        &self,
+        station: &str,
+        user: &str,
+        password: Option<Secret>,
+        by: &str,
+    ) -> Result<Value> {
+        let user = self.add_checks(user)?;
+        let (peer, address, os) = self.station_target(station)?;
+        if peer.state != "not_linked" {
+            return Err(invalid(format!("{station} is already in this fleet")));
+        }
+        let job = Job::new("join", station, &address, &os, &user, by);
+        self.add_begin(
+            Job {
+                station: Some(station.to_string()),
+                brings_mates: peer.info["merge"] == json!(true),
+                ..job
+            },
+            password,
+        )
+    }
+
+    /// "Uninstall spandeck on X": for a station of this fleet, first the
+    /// fleet removal (its panes closed, the fleet's key replaced, the
+    /// station forgotten), exactly as "Remove" does; then, over SSH, the
+    /// station there stops, takes its login service out, and its programs
+    /// are deleted. With `erase` its history, archive and settings go too.
+    /// The owner's project folders are never touched.
+    pub async fn uninstall_start(
+        &self,
+        station: &str,
+        user: &str,
+        password: Option<Secret>,
+        erase: bool,
+        caller: &crate::daemon::Caller,
+    ) -> Result<Value> {
+        let user = self.add_checks(user)?;
+        if station == self.station {
+            return Err(invalid(
+                "this is the station you are using, and it cannot uninstall itself: do it from another station",
+            ));
+        }
+        // Where to connect is settled before the station is forgotten.
+        let (peer, address, os) = self.station_target(station)?;
+        self.add_slot_free()?;
+        let removed = if peer.state != "not_linked" {
+            Some(self.fleet_remove(station, false, caller).await?)
+        } else {
+            None
+        };
+        let job = Job::new("uninstall", station, &address, &os, &user, &caller.who);
+        let view = self.add_begin(
+            Job {
+                station: Some(station.to_string()),
+                erase,
+                ..job
+            },
+            password,
+        )?;
+        Ok(json!({"job": view, "removed": removed}))
+    }
+
+    fn add_slot_free(&self) -> Result<()> {
+        match self
+            .adding
+            .job
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|j| j.running())
+        {
+            Some(j) => Err(invalid(format!(
+                "{} is being worked on now: wait for it, or cancel it first",
+                j.name
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Take the one slot and start the job.
+    fn add_begin(&self, job: Job, password: Option<Secret>) -> Result<Value> {
         {
             let mut slot = self.adding.job.lock().unwrap();
             if let Some(j) = slot.as_ref().filter(|j| j.running()) {
                 return Err(invalid(format!(
-                    "{} is being added now: wait for it, or cancel it first",
+                    "{} is being worked on now: wait for it, or cancel it first",
                     j.name
                 )));
             }
             *slot = Some(job.clone());
         }
         self.record(
-            "fleet.add",
+            job.log_kind(),
             None,
             None,
             None,
-            Some(by),
+            Some(&job.by),
             json!({"machine": job.name, "address": job.address, "user": job.user,
-                "outcome": "started", "with_password": password.is_some()}),
+                "outcome": "started", "with_password": password.is_some(),
+                "what": job.kind, "erase": job.erase}),
         );
         let (me, view) = (self.clone(), job.view());
         tokio::spawn(async move { me.add_run(job, password).await });
@@ -511,7 +706,7 @@ impl Daemon {
             // this instant still stops.
             job.cancel.notify_one();
             self.record(
-                "fleet.add",
+                job.log_kind(),
                 None,
                 None,
                 None,
@@ -559,9 +754,25 @@ impl Daemon {
             }
             Err(kind) => return self.add_fail(&id, kind),
         };
+        if job.kind == "uninstall" {
+            // It is gone: it leaves the list, and is a machine to add again.
+            self.discover_peers().await;
+            if self.add_update(&id, |j| j.stage = "done") {
+                self.add_audit(
+                    &id,
+                    if job.erase {
+                        "uninstalled; everything erased"
+                    } else {
+                        "uninstalled"
+                    },
+                );
+                self.emit("fleet.updated", None, None, json!({}));
+            }
+            return;
+        }
         // The code came over SSH from the other machine, so it is only
         // believed if this station holds a request that shows the same one.
-        let Some((request, station, expires_ms)) = self.trust_station_request(&code) else {
+        let Some((request, station, with, expires_ms)) = self.trust_station_request(&code) else {
             return self.add_fail(&id, "join");
         };
         self.add_update(&id, |j| {
@@ -569,8 +780,16 @@ impl Daemon {
             j.code = Some(code);
             j.request = Some(request);
             j.station = Some(station.clone());
+            j.with = with;
         });
-        self.add_audit(&id, "installed; waiting for approval");
+        self.add_audit(
+            &id,
+            if job.kind == "join" {
+                "asked to join; waiting for approval"
+            } else {
+                "installed; waiting for approval"
+            },
+        );
         let mut seen_by = None;
         loop {
             tokio::select! {
@@ -688,15 +907,7 @@ impl Daemon {
             }
             _ => String::new(),
         };
-        let join_lines = match join {
-            JoinBy::Code => format!(
-                r#"out=$("$bin" --json fleet --join '{station}') || {{ printf '%s\n' "$out"; fail join; }}
-code=$(printf '%s\n' "$out" | sed -n 's/.*"code": *"\([A-Z0-9]*\)".*/\1/p' | head -n 1)
-[ -n "$code" ] || fail join
-say "code $code""#,
-                station = self.station
-            ),
-        };
+        let join_lines = unix_join_lines(&self.station, join);
         format!(
             r#"main() {{
 set -u
@@ -748,6 +959,52 @@ main </dev/null
         )
     }
 
+    /// What runs on a station that is to ask to join this fleet: nothing is
+    /// installed. The command is looked for where the installer puts it,
+    /// then on the PATH, then where a build from source leaves it.
+    fn join_script(&self, join: JoinBy, os: &str) -> String {
+        let station = &self.station;
+        if os == "Windows" {
+            let join_lines = windows_join_lines(station, join);
+            return format!(
+                r#"$ErrorActionPreference = 'Continue'
+function Say($m) {{ Write-Output "@spandeck $m" }}
+function Fail($kind) {{ Say "fail $kind"; exit 1 }}
+Say 'step join'
+$binDir = if ($env:SPANDECK_BIN_DIR) {{ $env:SPANDECK_BIN_DIR }} else {{ Join-Path $env:LOCALAPPDATA 'Programs\spandeck' }}
+$bin = Join-Path $binDir 'spandeck.exe'
+if (-not (Test-Path $bin)) {{
+    $found = Get-Command spandeck.exe -ErrorAction SilentlyContinue
+    if ($found) {{ $bin = $found.Source }} else {{ Write-Output 'The spandeck command was not found on this machine.'; Fail 'not_running' }}
+}}
+$ok = $false
+try {{ & $bin status *> $null; $ok = ($LASTEXITCODE -eq 0) }} catch {{ Write-Output "$_" }}
+if (-not $ok) {{ Write-Output 'spandeck is not answering on this machine. It runs only while you are logged on there.'; Fail 'not_running' }}
+{join_lines}
+exit 0
+"#
+            );
+        }
+        let join_lines = unix_join_lines(station, join);
+        format!(
+            r#"main() {{
+set -u
+say() {{ printf '@spandeck %s\n' "$*"; }}
+fail() {{ say "fail $1"; exit 1; }}
+say step join
+bin=
+for at in "${{SPANDECK_BIN_DIR:-$HOME/.local/bin}}/spandeck" "$(command -v spandeck 2>/dev/null)" "$HOME/.cargo/bin/spandeck"; do
+  if [ -n "$at" ] && [ -x "$at" ]; then bin=$at; break; fi
+done
+[ -n "$bin" ] || {{ echo "The spandeck command was not found on this machine."; fail not_running; }}
+"$bin" status >/dev/null 2>&1 || {{ echo "spandeck is not answering on this machine."; fail not_running; }}
+{join_lines}
+}}
+main </dev/null
+"#
+        )
+    }
+
     /// What runs on a Windows machine: the same steps in Windows PowerShell
     /// 5.1, with `install.ps1` inside it. The start step registers the task
     /// that starts spandeck at log on and runs it; a Windows station runs in
@@ -755,6 +1012,172 @@ main </dev/null
     fn add_script_windows(&self, join: JoinBy) -> String {
         windows_script(&self.station, self.cfg.update.url.as_deref(), join)
     }
+}
+
+/// The lines that make a station ask to join `station`'s fleet and say the
+/// code it was given. They use only what every release has.
+fn unix_join_lines(station: &str, join: JoinBy) -> String {
+    match join {
+        JoinBy::Code => format!(
+            r#"out=$("$bin" --json fleet --join '{station}') || {{ printf '%s\n' "$out"; fail join; }}
+code=$(printf '%s\n' "$out" | sed -n 's/.*"code": *"\([A-Z0-9]*\)".*/\1/p' | head -n 1)
+[ -n "$code" ] || fail join
+say "code $code""#
+        ),
+    }
+}
+
+fn windows_join_lines(station: &str, join: JoinBy) -> String {
+    match join {
+        JoinBy::Code => format!(
+            r#"$out = (& $bin --json fleet --join '{station}' 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0) {{ Write-Output $out; Fail 'join' }}
+if ($out -match '"code":\s*"([A-Z0-9]+)"') {{ Say "code $($Matches[1])" }} else {{ Fail 'join' }}"#
+        ),
+    }
+}
+
+/// What runs on a station that is being uninstalled.
+///
+/// The station there does the part that touches the system, with the code
+/// that removal with "also stop spandeck there" already uses
+/// (`station.leave`): it closes its panes, takes its login service out and
+/// ends. That code only touches the login service when the account it runs
+/// under has one. The script touches it itself only when spandeck was not
+/// running, and then only if the service's own file is in this account.
+/// It never stops a process by name.
+///
+/// Then the programs are deleted. The state and config folders are kept
+/// unless `erase` is set, and are deleted only if they look like spandeck's.
+/// Nothing else on the machine is touched.
+fn uninstall_script(erase: bool, os: &str) -> String {
+    if os == "Windows" {
+        let erase_lines = if erase {
+            r#"foreach ($dir in @($state, $config)) {
+    $ours = (Test-Path (Join-Path $dir 'spandeck.db')) -or (Test-Path (Join-Path $dir 'fleet.key')) -or (Test-Path (Join-Path $dir 'config.toml')) -or ((Split-Path $dir -Leaf) -eq 'spandeck')
+    if ((Test-Path $dir) -and $ours) { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue; Write-Output "Deleted $dir" }
+}"#
+        } else {
+            r#"Write-Output "Kept: $state and $config""#
+        };
+        return format!(
+            r#"$ErrorActionPreference = 'Continue'
+function Say($m) {{ Write-Output "@spandeck $m" }}
+function Fail($kind) {{ Say "fail $kind"; exit 1 }}
+Say 'step stop'
+$binDir = if ($env:SPANDECK_BIN_DIR) {{ $env:SPANDECK_BIN_DIR }} else {{ Join-Path $env:LOCALAPPDATA 'Programs\spandeck' }}
+$bin = Join-Path $binDir 'spandeck.exe'
+if (-not (Test-Path $bin)) {{
+    $found = Get-Command spandeck.exe -ErrorAction SilentlyContinue
+    if ($found) {{ $bin = $found.Source; $binDir = Split-Path $bin -Parent }}
+}}
+$state = if ($env:SPANDECK_STATE_DIR) {{ $env:SPANDECK_STATE_DIR }} else {{ Join-Path $env:LOCALAPPDATA 'spandeck' }}
+$config = if ($env:SPANDECK_CONFIG_DIR) {{ $env:SPANDECK_CONFIG_DIR }} else {{ Join-Path $env:APPDATA 'spandeck' }}
+function Running {{ try {{ & $bin status *> $null; return ($LASTEXITCODE -eq 0) }} catch {{ return $false }} }}
+if ((Test-Path $bin) -and (Running)) {{
+    try {{ & $bin rpc station.leave '{{\"stop\": true}}' *> $null }} catch {{ }}
+    $n = 0
+    while (Running) {{
+        $n++
+        if ($n -gt 30) {{ Write-Output 'spandeck did not stop.'; Fail 'stop' }}
+        Start-Sleep -Seconds 1
+    }}
+    Write-Output 'spandeck was stopped and its panes closed.'
+}}
+$task = Join-Path $config 'start-at-login.ps1'
+if (Test-Path $task) {{
+    & schtasks.exe /Delete /TN spandeckd /F *> $null
+    Remove-Item -Force $task -ErrorAction SilentlyContinue
+}}
+Say 'step remove'
+$left = @()
+foreach ($name in @('spandeck.exe', 'sd.exe', 'spandeckd.exe')) {{
+    $file = Join-Path $binDir $name
+    $n = 0
+    while ((Test-Path $file) -and ($n -lt 20)) {{
+        Remove-Item -Force $file -ErrorAction SilentlyContinue
+        if (Test-Path $file) {{ $n++; Start-Sleep -Seconds 1 }}
+    }}
+    if (Test-Path $file) {{ $left += $file }}
+}}
+if ($left.Count -gt 0) {{ Write-Output "Could not delete (still in use?): $($left -join ', ')"; Fail 'remove' }}
+if ((Test-Path $binDir) -and -not (Get-ChildItem -Force $binDir)) {{ Remove-Item -Force $binDir -ErrorAction SilentlyContinue }}
+Remove-Item -Recurse -Force (Join-Path $state 'bin') -ErrorAction SilentlyContinue
+Write-Output "Deleted the spandeck programs in $binDir"
+{erase_lines}
+Say 'done'
+exit 0
+"#
+        );
+    }
+    let erase_lines = if erase {
+        r#"for dir in "$state" "$config"; do
+  ours "$dir" || continue
+  rm -rf "$dir" && echo "Deleted $dir"
+done"#
+    } else {
+        r#"echo "Kept: $state and $config""#
+    };
+    format!(
+        r#"main() {{
+set -u
+say() {{ printf '@spandeck %s\n' "$*"; }}
+fail() {{ say "fail $1"; exit 1; }}
+# A folder is deleted only if it is spandeck's: never the home folder or /.
+ours() {{
+  [ -n "$1" ] && [ "$1" != / ] && [ "$1" != "$HOME" ] && [ "$1" != "$HOME/" ] && [ -d "$1" ] || return 1
+  [ -f "$1/spandeck.db" ] || [ -f "$1/fleet.key" ] || [ -f "$1/config.toml" ] || [ "$(basename "$1")" = spandeck ]
+}}
+say step stop
+bin_dir=${{SPANDECK_BIN_DIR:-$HOME/.local/bin}}
+state=${{SPANDECK_STATE_DIR:-$HOME/.local/state/spandeck}}
+config=${{SPANDECK_CONFIG_DIR:-$HOME/.config/spandeck}}
+# Where the installer puts the command, then the PATH, then a build from source.
+bin=
+for at in "$bin_dir/spandeck" "$(command -v spandeck 2>/dev/null)" "$HOME/.cargo/bin/spandeck"; do
+  if [ -n "$at" ] && [ -x "$at" ]; then bin=$at; break; fi
+done
+if [ -n "$bin" ] && "$bin" status >/dev/null 2>&1; then
+  "$bin" rpc station.leave '{{"stop": true}}' >/dev/null 2>&1 || true
+  n=0
+  while "$bin" status >/dev/null 2>&1; do
+    n=$((n + 1))
+    [ "$n" -le 30 ] || {{ echo "spandeck did not stop."; fail stop; }}
+    sleep 1
+  done
+  echo "spandeck was stopped and its panes closed."
+fi
+# It was not running, so it did not take its own login service out. Only a
+# service whose file is in this account is this account's to remove.
+case "$(uname -s)" in
+  Darwin)
+    unit=$HOME/Library/LaunchAgents/dev.spandeck.spandeckd.plist
+    if [ -f "$unit" ]; then
+      launchctl bootout "gui/$(id -u)/dev.spandeck.spandeckd" 2>/dev/null || true
+      rm -f "$unit"
+    fi ;;
+  *)
+    unit=$HOME/.config/systemd/user/spandeckd.service
+    if [ -f "$unit" ]; then
+      systemctl --user disable --now spandeckd 2>/dev/null || true
+      rm -f "$unit"
+      systemctl --user daemon-reload 2>/dev/null || true
+    fi ;;
+esac
+say step remove
+rm -f "$bin_dir/spandeck" "$bin_dir/sd" || fail remove
+if [ -n "$bin" ] && [ -e "$bin" ]; then
+  rm -f "$bin" "$(dirname "$bin")/sd" || {{ echo "Could not delete $bin"; fail remove; }}
+fi
+if ours "$state"; then rm -rf "$state/bin"; fi
+[ ! -e "$bin_dir/spandeck" ] || fail remove
+echo "Deleted the spandeck programs in $bin_dir"
+{erase_lines}
+say done
+}}
+main </dev/null
+"#
+    )
 }
 
 /// The line a Windows machine is given over SSH: PowerShell reads all of
@@ -769,13 +1192,7 @@ fn windows_script(station: &str, releases: Option<&str>, join: JoinBy) -> String
             }
             _ => String::new(),
         };
-        let join_lines = match join {
-            JoinBy::Code => format!(
-                r#"$out = (& $bin --json fleet --join '{station}' 2>&1 | Out-String)
-if ($LASTEXITCODE -ne 0) {{ Write-Output $out; Fail 'join' }}
-if ($out -match '"code":\s*"([A-Z0-9]+)"') {{ Say "code $($Matches[1])" }} else {{ Fail 'join' }}"#
-            ),
-        };
+        let join_lines = windows_join_lines(station, join);
         format!(
             r#"$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -894,7 +1311,11 @@ impl Daemon {
             .spawn()
             .map_err(|_| "no_ssh")?;
         if let Some(mut stdin) = child.stdin.take() {
-            let script = self.add_script(join, &job.os);
+            let script = match job.kind {
+                "join" => self.join_script(join, &job.os),
+                "uninstall" => uninstall_script(job.erase, &job.os),
+                _ => self.add_script(join, &job.os),
+            };
             tokio::spawn(async move {
                 let _ = stdin.write_all(script.as_bytes()).await;
                 let _ = stdin.shutdown().await;
@@ -923,7 +1344,7 @@ impl Daemon {
 
         let deadline = tokio::time::Instant::now() + ADD_TIMEOUT;
         let (mut code, mut failed, mut said) = (None::<String>, None::<&'static str>, vec![]);
-        let mut missing = false;
+        let (mut missing, mut done) = (false, false);
         loop {
             let (is_err, line) = tokio::select! {
                 next = rx.recv() => match next { Some(l) => l, None => break },
@@ -938,11 +1359,14 @@ impl Daemon {
                             "install" => "installing",
                             "start" => "starting",
                             "join" => "joining",
+                            "stop" => "stopping",
+                            "remove" => "removing",
                             _ => continue,
                         };
                         self.add_update(id, |j| j.stage = stage);
                     }
                     ("code", c) => code = Some(c.to_string()),
+                    ("done", _) => done = true,
                     ("fail", kind) => {
                         failed = Some(match kind {
                             "blocked" => "blocked",
@@ -950,6 +1374,9 @@ impl Daemon {
                             "network" => "network",
                             "start" => "start",
                             "join" => "join",
+                            "not_running" => "not_running",
+                            "stop" => "stop",
+                            "remove" => "remove",
                             _ => "install",
                         })
                     }
@@ -1001,6 +1428,14 @@ impl Daemon {
             };
             return Err(ssh_problem(&said, password));
         }
+        if job.kind == "uninstall" {
+            // No code to wait for: it says when it has finished.
+            return if done {
+                Ok(String::new())
+            } else {
+                Err("remove")
+            };
+        }
         code.filter(|c| (4..=12).contains(&c.len()) && c.chars().all(|c| c.is_ascii_alphanumeric()))
             .ok_or("join")
     }
@@ -1048,6 +1483,100 @@ async fn askpass_serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The owner's request (15 Nov 2026): uninstalling with "erase
+    /// everything" deletes spandeck's programs, history and settings, and
+    /// "the owner's project folders are never touched". The script is run
+    /// here as it is run there, in a made-up home with stand-ins for the
+    /// service manager first on its PATH, so nothing of this machine's is
+    /// reached. A state folder that is not spandeck's is left alone.
+    #[test]
+    #[cfg(unix)]
+    fn the_uninstall_script_deletes_only_what_is_spandecks() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        // The script looks for the command on its PATH, which here is the
+        // stand-ins and the system's own folders. A machine that has
+        // spandeck in one of those is not one to run this on.
+        if ["/usr/bin/spandeck", "/bin/spandeck"]
+            .iter()
+            .any(|p| std::path::Path::new(p).exists())
+        {
+            return;
+        }
+        let run = |erase: bool, state_is_home: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().join("home");
+            let at = |p: &str| home.join(p);
+            for d in [
+                ".local/bin",
+                ".local/state/spandeck/bin",
+                ".config/spandeck",
+                "project",
+                "fake",
+            ] {
+                std::fs::create_dir_all(at(d)).unwrap();
+            }
+            for f in [
+                ".local/bin/sd",
+                ".local/bin/other-program",
+                ".local/state/spandeck/spandeck.db",
+                ".local/state/spandeck/bin/running",
+                ".config/spandeck/config.toml",
+                "project/keep.txt",
+                "notes.txt",
+            ] {
+                std::fs::write(at(f), "x").unwrap();
+            }
+            for tool in ["systemctl", "launchctl"] {
+                let path = at("fake").join(tool);
+                std::fs::write(
+                    &path,
+                    format!("#!/bin/sh\necho {tool} >> {}\n", at("fake/used").display()),
+                )
+                .unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let mut cmd = std::process::Command::new("sh");
+            cmd.arg("-s")
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", format!("{}:/usr/bin:/bin", at("fake").display()))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped());
+            if state_is_home {
+                cmd.env("SPANDECK_STATE_DIR", &home);
+            }
+            let mut child = cmd.spawn().unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(uninstall_script(erase, "Linux").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            let said = String::from_utf8_lossy(&out.stdout).to_string();
+            assert!(said.contains("@spandeck done"), "{said}");
+            // No login service is in this home, so none was touched.
+            assert!(!at("fake/used").exists(), "{said}");
+            let left = |p: &str| at(p).exists();
+            assert!(!left(".local/bin/sd"), "{said}");
+            assert!(
+                left(".local/bin/other-program") && left("project/keep.txt") && left("notes.txt")
+            );
+            (dir, home)
+        };
+        let (_keep, home) = run(false, false);
+        assert!(home.join(".local/state/spandeck/spandeck.db").exists());
+        assert!(!home.join(".local/state/spandeck/bin").exists());
+        assert!(home.join(".config/spandeck/config.toml").exists());
+        let (_keep, home) = run(true, false);
+        assert!(!home.join(".local/state/spandeck").exists());
+        assert!(!home.join(".config/spandeck").exists());
+        // A state folder that is the home folder itself is never deleted.
+        let (_keep, home) = run(true, true);
+        assert!(home.join("project/keep.txt").exists() && home.join(".local/state").exists());
+    }
 
     // The host key rule: the address ssh is given must be a Tailscale
     // address. A bug here would let a status line point ssh anywhere.

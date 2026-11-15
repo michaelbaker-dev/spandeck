@@ -207,6 +207,16 @@ there.
 5. The new station asks to join, and the tile shows its code with **Approve** and
    **Refuse**. Approve it, and the tile becomes the new station.
 
+A machine that already runs spandeck but is not in this fleet has a tile of its own, with
+**Add … to this fleet**. That does steps 3 and 5 only: nothing is installed, the station
+there is made to ask, and you approve its code here. If it is in a fleet with other
+stations, they come with it.
+
+**Uninstall spandeck on …**, in a station's menu, is the reverse: the station is removed
+from the fleet, spandeck is stopped there and no longer starts at login, and its programs
+are deleted. Its history and settings stay on that machine, so adding it back picks them
+up, unless you tick **Erase everything**. Your project folders are never touched.
+
 If it does not work, the tile says why and what to do. The usual reasons:
 
 | It says | Do this |

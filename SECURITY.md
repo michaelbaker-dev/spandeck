@@ -59,8 +59,9 @@ days, not hours.
   Deck (or `spandeck trust --revoke`); stations that are off at the time learn of it only
   from a later sign-out. Joining another fleet replaces the key on the station that asked
   and on every station of the fleet it was in, and signs out every browser that was
-  signed in to those. A browser you signed out in the fleet that was joined is not
-  known to the stations that arrive: sign it out again after a join if it matters.
+  signed in to those. The list of browsers you signed out travels with the key, so a
+  station that arrives refuses them too; a station on an older version ignores the list,
+  so update it, or sign the browser out again after it joins.
 - Every station of a fleet holds the same key. Removing a station therefore gives the
   stations that stay a new key, which also signs every browser out. A station that is
   off at that moment keeps the old key until it is seen again, and until then the
@@ -72,6 +73,13 @@ days, not hours.
 - `remote_start = true` lets a station run a start command on your other machines over
   Tailscale SSH. It is off by default; what it may do there is governed by your
   Tailscale SSH rules, not by spandeck.
+- The same switch (`add_machines`) covers two more things a station does over SSH when
+  you ask from the Control Deck: making a station that is already running ask to join
+  this fleet, and uninstalling spandeck on a station. Uninstalling stops spandeck there,
+  removes its login service and deletes its programs; its history and settings are
+  deleted only if you tick "Erase everything". It deletes spandeck's own folders and
+  nothing else: your project folders are not touched. An agent cannot ask for either,
+  and neither can another station.
 - `add_machines = true` lets a station connect to another of your machines over SSH and
   install spandeck there when you ask it to from the Control Deck. It is off by default.
   A password you type for it is used for that one connection and kept nowhere, but it

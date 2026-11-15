@@ -395,6 +395,10 @@ async fn peer_rpc(
             "version": spandeck_core::VERSION,
             "protocol": spandeck_core::PROTOCOL,
             "fleet": web.daemon.trust.fleet_id(),
+            // What it runs, for a station that is asked to connect to it.
+            "os": std::env::consts::OS,
+            // When it joins a fleet it brings the stations of its own.
+            "merge": true,
         }))),
         "fleet.join.request" => Some(
             web.daemon.trust_request(

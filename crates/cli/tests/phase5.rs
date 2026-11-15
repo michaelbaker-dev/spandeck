@@ -1074,8 +1074,16 @@ fn a_machine_is_added_from_the_deck_and_its_password_is_kept_nowhere() {
     );
     // The machine's own service manager is not this machine's: there, the
     // login service cannot be started, and spandeck is started directly.
+    // Each notes what it was asked: the uninstall below must reach these,
+    // never this machine's real login service.
     for tool in ["systemctl", "launchctl", "loginctl"] {
-        executable(&at("remote-bin").join(tool), "#!/bin/sh\nexit 1\n");
+        executable(
+            &at("remote-bin").join(tool),
+            &format!(
+                "#!/bin/sh\necho \"{tool} $*\" >> {}/tools\nexit 1\n",
+                at("seen").display()
+            ),
+        );
     }
     std::fs::write(at("standin/right"), RIGHT).unwrap();
     std::fs::write(
@@ -1294,6 +1302,193 @@ exec env -i PATH={remote_bin}:/usr/bin:/bin HOME={c}/home SPANDECK_STATE_DIR={c}
         .filter_map(|m| m["name"].as_str())
         .collect();
     assert_eq!(left, ["studio", "winbox"], "{listed}");
+
+    // ---- "I shouldnt have to go to that machine, I should just say add to
+    // the fleet", and "I also cant delete the machine then re-add it"
+    // (15 Nov 2026). charlie is removed from the fleet and keeps running,
+    // outside it. The owner adds it back from alpha: alpha connects over
+    // SSH, installs nothing, and has charlie ask; the code is approved here.
+    let charlie_state = |a: &Station| a.sees("charlie");
+    let listed_machines = |a: &Station| -> Vec<String> {
+        a.call("fleet.candidates", json!({}))["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["name"].as_str().map(String::from))
+            .collect()
+    };
+    a.call("fleet.remove", json!({"station": "charlie"}));
+    wait_for("charlie to be outside the fleet", 20, || {
+        (charlie_state(&a).as_deref() == Some("not_linked")).then_some(())
+    });
+    // Only the owner, at this station, for both new calls.
+    for (method, params) in [
+        ("fleet.add", json!({"station": "charlie", "user": "sam"})),
+        (
+            "fleet.uninstall",
+            json!({"station": "charlie", "user": "sam"}),
+        ),
+    ] {
+        let err = a.call_as_pane(&pane, method, params.clone()).unwrap_err();
+        assert_eq!(err.code, "denied", "{method}: {}", err.message);
+        let err = a
+            .try_call(
+                "peer.call",
+                json!({"station": "charlie", "method": method, "params": params}),
+            )
+            .unwrap_err();
+        assert!(
+            err.message.contains("cannot be forwarded"),
+            "{method}: {}",
+            err.message
+        );
+    }
+    let installs_before = std::fs::read_to_string(at("seen/ssh")).unwrap().len();
+    // From the Control Deck: the button on charlie's tile, the user name,
+    // then the password it turns out to need.
+    let page = common::browser::Page::open(&a, 1200, 900);
+    page.goto("/fleet");
+    let dialog_says = |what: &str, needle: &str| {
+        page.wait(
+            what,
+            &format!(
+                "(document.querySelector('.dialog')?.innerText || '').includes({}) && document.querySelector('.dialog').innerText",
+                json!(needle)
+            ),
+        )
+        .as_str()
+        .unwrap()
+        .to_string()
+    };
+    let fill = |selector: &str, text: &str| {
+        page.wait(
+            "a box to type in",
+            &format!(
+                "(el => el ? (el.value = {}, true) : false)(document.querySelector({}))",
+                json!(text),
+                json!(selector)
+            ),
+        );
+    };
+    let press = |label: &str| {
+        page.wait(
+            &format!("the {label} button"),
+            &format!(
+                "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.dialog button')].find(b => b.innerText.trim() === {}))",
+                json!(label)
+            ),
+        );
+    };
+    const USER: &str = ".dialog input[aria-label='User name on that machine']";
+    const PASS: &str = ".dialog input[type=password]";
+    page.wait(
+        "the button on charlie's tile",
+        "(b => b ? (b.click(), true) : false)(document.querySelector('a.tile.station button.add-station'))",
+    );
+    let said = dialog_says("the add dialog", "nothing is installed on it");
+    assert!(said.contains("Add charlie to this fleet"), "{said}");
+    fill(USER, "sam");
+    press("Connect and ask");
+    dialog_says("the password to be asked for", "asks for a password");
+    fill(PASS, RIGHT);
+    press("Connect and ask");
+    dialog_says("charlie's code", "asks to join this fleet as");
+    let v = rest_at(&a, &["approve"]);
+    // Nothing was downloaded or installed for it.
+    assert!(!v["lines"].to_string().contains("Downloading"), "{v}");
+    press("Approve");
+    dialog_says("charlie to be in the fleet", "is in your fleet");
+    press("Done");
+    assert_eq!(charlie_state(&a).as_deref(), Some("online"));
+    // The station was reached where alpha found it, as the user named.
+    let seen = std::fs::read_to_string(at("seen/ssh")).unwrap();
+    assert!(
+        seen[installs_before..].contains("argv: sam 127.0.0.1"),
+        "{}",
+        &seen[installs_before..]
+    );
+    a.call("fleet.add_cancel", json!({}));
+
+    // ---- Uninstall spandeck on charlie, from alpha. A file of the owner's
+    // on that machine must outlive all of it.
+    std::fs::create_dir_all(at("charlie/home/project")).unwrap();
+    std::fs::write(at("charlie/home/project/keep.txt"), "mine").unwrap();
+    let service_files = [
+        at("charlie/home/.config/systemd/user/spandeckd.service"),
+        at("charlie/home/Library/LaunchAgents/dev.spandeck.spandeckd.plist"),
+    ];
+    assert!(service_files.iter().any(|f| f.exists()));
+    let old_fleet = fleet_of(&a);
+    // From the station's menu. The dialog names the station, says what
+    // happens in order, and opens on Cancel.
+    page.right_click(
+        "[...document.querySelectorAll('a.tile.station')].find(x => x.innerText.includes('charlie'))",
+    );
+    page.choose("Uninstall spandeck on charlie");
+    let said = dialog_says("the uninstall dialog", "never touched");
+    assert!(
+        said.contains("Uninstall spandeck on charlie?")
+            && said.contains("charlie is removed from the fleet")
+            && said.contains("No pane is on charlie.")
+            && said.contains("Erase everything"),
+        "{said}"
+    );
+    assert_eq!(page.js("document.activeElement.innerText"), json!("Cancel"));
+    assert!(at("charlie/bin/spandeck").exists());
+    // No key lets alpha in. charlie is in the fleet, so it is removed from
+    // it first, as "Remove" does; then a password is asked for, and nothing
+    // has been deleted there.
+    fill(USER, "sam");
+    press("Uninstall spandeck on charlie");
+    dialog_says(
+        "the password to be asked for",
+        "Nothing has been deleted on charlie yet",
+    );
+    assert_ne!(fleet_of(&a), old_fleet);
+    assert_eq!(rest_at(&a, &["needs_password"])["kind"], json!("uninstall"));
+    assert!(at("charlie/bin/spandeck").exists());
+    // With the password: stopped, its login service taken out, programs
+    // deleted. Its history and settings are kept.
+    fill(PASS, RIGHT);
+    press("Connect and uninstall");
+    dialog_says(
+        "the uninstall to finish",
+        "listed under Add a machine again",
+    );
+    press("Done");
+    assert!(!at("charlie/bin/spandeck").exists() && !at("charlie/bin/sd").exists());
+    assert!(!at("charlie/state/bin").exists());
+    assert!(at("charlie/state/spandeck.db").exists() && at("charlie/config/config.toml").exists());
+    assert!(!service_files.iter().any(|f| f.exists()));
+    // What stopped it starting at login was asked of the stand-ins.
+    let tools = std::fs::read_to_string(at("seen/tools")).unwrap();
+    assert!(tools.contains("spandeckd"), "{tools}");
+    let pid = std::fs::read_to_string(at("charlie/state/spandeckd.pid")).unwrap();
+    wait_for("charlie's daemon to be gone", 10, || {
+        (!pid_alive(pid.trim())).then_some(())
+    });
+    // (Nothing is left for the end of the test to stop.)
+    let _ = std::fs::remove_file(at("charlie/state/spandeckd.pid"));
+    assert_eq!(
+        std::fs::read_to_string(at("charlie/home/project/keep.txt")).unwrap(),
+        "mine"
+    );
+    // It is gone from the fleet, and is a machine to add again.
+    assert_eq!(charlie_state(&a), None);
+    assert!(listed_machines(&a).contains(&"charlie".to_string()));
+    let outcomes: Vec<String> = a
+        .log("fleet.uninstall")
+        .iter()
+        .map(|e| {
+            assert_eq!(e["actor"], json!("you"), "{e}");
+            e["data"]["outcome"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert!(
+        outcomes.contains(&"uninstalled".to_string()),
+        "{outcomes:?}"
+    );
+    a.call("fleet.add_cancel", json!({}));
 
     // The audit log: who, which machine, which user, how it went.
     let log = a.log("fleet.add");
@@ -1687,30 +1882,66 @@ fn a_station_that_joins_another_fleet_brings_its_fleet_mates_with_it() {
         .then_some(())
     });
     let old_fleet = fleet_of(a);
-    let page = common::browser::Page::open(a, 1200, 800);
-    page.goto("/fleet");
-    let tile = "[...document.querySelectorAll('a.tile.station')].find(x => x.innerText.includes('charlie'))";
-    page.wait("charlie's tile", &format!("!!{tile}"));
+    // Two browsers are signed in to charlie's fleet, and one is signed out
+    // again. A station that arrives must refuse that one too.
+    let web = |s: &Station, path: &str, token: Option<&str>, body: Value| -> (u16, Value) {
+        let url = s.url(path);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut req = reqwest::Client::new().post(url).json(&body);
+            if let Some(t) = token {
+                req = req.bearer_auth(t);
+            }
+            let r = req.send().await.unwrap();
+            (r.status().as_u16(), r.json().await.unwrap_or(Value::Null))
+        })
+    };
+    let sign_in = |name: &str| -> (String, String) {
+        let asked = web(c, "/api/device/request", None, json!({"name": name})).1["result"].clone();
+        c.call("trust.approve", json!({"request": asked["id"]}));
+        let got = web(
+            c,
+            "/api/device/collect",
+            None,
+            json!({"id": asked["id"], "collect": asked["collect"]}),
+        );
+        (
+            asked["id"].as_str().unwrap().to_string(),
+            got.1["result"]["token"]
+                .as_str()
+                .expect("a token")
+                .to_string(),
+        )
+    };
+    let lets_in = |s: &Station, token: &str| {
+        web(
+            s,
+            "/api/rpc",
+            Some(token),
+            json!({"method": "pane.list", "params": {}}),
+        )
+        .0
+    };
+    let (_, kept_token) = sign_in("laptop");
+    let (gone, gone_token) = sign_in("lost phone");
+    c.call("device.revoke", json!({"device": gone}));
+    assert_eq!(
+        (lets_in(c, &kept_token), lets_in(c, &gone_token)),
+        (200, 401)
+    );
     // delta is off when it happens.
     d.signal(SIGSTOP);
 
-    // alpha asks to join charlie. The request names the mates it brings.
-    // Asked from alpha's Control Deck, which says what it means: a merge.
-    page.right_click(tile);
-    page.choose("Merge this fleet into charlie's");
-    let said = page.wait(
-        "the dialog to show the code",
-        "document.querySelector('.dialog .code') && document.querySelector('.dialog').innerText",
-    );
-    let said = said.as_str().unwrap();
+    // alpha asks to join charlie, as `spandeck fleet --join charlie` does.
+    // The request names the mates it brings.
+    let asked = a.call("fleet.join", json!({"station": "charlie"}));
+    assert_eq!(asked["with"], json!(["bravo", "delta"]), "{asked}");
     assert!(
-        said.contains(
-            "alpha and 2 other stations (bravo, delta) then move into one fleet with charlie"
-        ) && said.contains("these 3 stations"),
-        "{said}"
+        asked["next"]
+            .as_str()
+            .unwrap()
+            .contains("Browsers signed in to those 3 stations"),
+        "{asked}"
     );
-    let code = page.js("document.querySelector('.dialog .code').innerText");
-    let asked = json!({"code": code});
     let waiting = c.call("trust.status", json!({}));
     assert_eq!(
         waiting["requests"][0]["with"],
@@ -1764,6 +1995,17 @@ fn a_station_that_joins_another_fleet_brings_its_fleet_mates_with_it() {
     });
     assert!(reaches(c, "bravo") && reaches(c, "delta") && reaches(a, "bravo"));
     assert!(reaches(b, "charlie") && reaches(d, "charlie") && reaches(d, "alpha"));
+    // A gap found on 15 Nov 2026: the stations that arrive accept the
+    // browsers of the fleet they joined, and must refuse the one that was
+    // signed out there: the asker, its mate, and the one that was off.
+    for s in [a, b, d] {
+        assert_eq!(
+            (lets_in(s, &kept_token), lets_in(s, &gone_token)),
+            (200, 401),
+            "{}",
+            s.name
+        );
+    }
     assert!(c.call("trust.status", json!({}))["requests"]
         .as_array()
         .unwrap()
