@@ -23,9 +23,13 @@ function clientId() {
   return `${id}-${tab}`;
 }
 
-// The localhost token arrives once in the URL fragment and is kept locally.
+// A token arrives once in the URL fragment and is kept locally: the
+// station's own from `spandeck cc`, or this browser's, handed over by the
+// Control Deck of another station of the fleet it is already signed in to.
+// A fragment is never sent to a server, and it is taken out of the address
+// at once.
 function takeToken() {
-  const m = location.hash.match(/token=([0-9a-f]{32,})/);
+  const m = location.hash.match(/token=((?:dev\.[A-Za-z0-9-]{1,64}\.)?[0-9a-f]{32,})/);
   if (m) {
     localStorage.setItem('spandeck.token', m[1]);
     history.replaceState(null, '', location.pathname + '#/fleet');

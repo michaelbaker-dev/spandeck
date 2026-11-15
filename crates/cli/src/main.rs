@@ -157,8 +157,8 @@ enum Cmd {
     Approve { code: String },
     /// Refuse a station or browser that asked to be let in.
     Deny { code: String },
-    /// Requests waiting for you at any station of the fleet, and browsers
-    /// signed in here.
+    /// Requests waiting for you at any station of the fleet, and the
+    /// browsers signed in to the fleet: the same list on every station.
     Trust {
         /// Stop trusting a signed-in browser, by its id.
         #[arg(long, value_name = "DEVICE")]
@@ -981,10 +981,19 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 }
                 for d in v["devices"].as_array().into_iter().flatten() {
                     out.push(format!(
-                        "signed in: {}  {}  from {}",
+                        "signed in: {}  {}  from {}{}{}",
                         d["id"].as_str().unwrap_or(""),
                         d["name"].as_str().unwrap_or(""),
-                        d["from"].as_str().unwrap_or("")
+                        d["from"].as_str().unwrap_or(""),
+                        match d["at"].as_str() {
+                            Some(at) if !at.is_empty() => format!("  approved at {at}"),
+                            _ => String::new(),
+                        },
+                        if d["unconfirmed"] == json!(true) {
+                            "  (listed from before; may no longer be signed in)"
+                        } else {
+                            ""
+                        }
                     ));
                 }
                 out.join("\n")

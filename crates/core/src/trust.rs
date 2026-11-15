@@ -400,7 +400,30 @@ impl Daemon {
     /// A token the owner approved for a browser on another device.
     pub fn device_for_token(&self, token: &str) -> Option<String> {
         let id = self.trust.device_of(token)?;
-        (!self.revoked_devices().contains(&id)).then_some(id)
+        if self.revoked_devices().contains(&id) {
+            return None;
+        }
+        self.device_seen(&id);
+        Some(id)
+    }
+
+    /// A browser just showed a token this fleet's key made. The list must
+    /// have it, or it could not be signed out: one this station never heard
+    /// of is listed from now on, and one listed from before entries said
+    /// which key made them is now known to be signed in.
+    fn device_seen(&self, id: &str) {
+        let fleet = self.trust.fleet_id();
+        let mut all = self.stored_devices();
+        match all.iter_mut().find(|d| d["id"].as_str() == Some(id)) {
+            Some(d) if d["fleet"].as_str() == Some(fleet.as_str()) => return,
+            Some(d) => d["fleet"] = json!(fleet),
+            None => all.push(json!({"id": id, "name": "a browser", "from": "",
+                "at": self.station, "approved_ms": 0, "fleet": fleet})),
+        }
+        self.db
+            .kv_set("trust.devices", &Value::Array(all).to_string());
+        self.emit("trust.updated", None, None, json!({}));
+        self.trust_sync_soon();
     }
 
     /// A new token for the browser that made this call, when it is one the
@@ -414,19 +437,25 @@ impl Daemon {
     }
 
     /// Every browser signed in from another device was signed in under the
-    /// old key. Their tokens no longer work, so they are not listed.
+    /// old key. Their tokens no longer work, so they are not listed. The
+    /// one kept is the browser that was given a token made with the new key.
     pub(crate) fn devices_forget(&self, keep: Option<&str>) {
+        let fleet = self.trust.fleet_id();
         let kept: Vec<Value> = self
-            .known_devices()
+            .stored_devices()
             .into_iter()
             .filter(|d| keep.is_some() && d["id"].as_str() == keep)
+            .map(|mut d| {
+                d["fleet"] = json!(fleet);
+                d
+            })
             .collect();
         self.db
             .kv_set("trust.devices", &Value::Array(kept).to_string());
     }
 
     /// This station's record of the browser that made a call, if it is one
-    /// signed in here from another device.
+    /// signed in from another device.
     pub(crate) fn device_entry(&self, who: &str) -> Option<Value> {
         let (id, _) = self.device_token_again(who)?;
         self.known_devices()
@@ -434,26 +463,221 @@ impl Daemon {
             .find(|d| d["id"].as_str() == Some(id.as_str()))
     }
 
-    pub(crate) fn devices_keep(&self, entry: Value) {
-        let mut devices = self.known_devices();
+    pub(crate) fn devices_keep(&self, mut entry: Value) {
+        entry["fleet"] = json!(self.trust.fleet_id());
+        let mut devices = self.stored_devices();
         devices.retain(|d| d["id"] != entry["id"]);
         devices.push(entry);
         self.db
             .kv_set("trust.devices", &Value::Array(devices).to_string());
     }
 
+    /// The browsers signed out in this fleet. The list belongs to the key
+    /// that made their tokens, named beside it: once this station holds
+    /// another key, those tokens are refused for that reason alone, and the
+    /// list is empty. While the key is in use nothing is ever taken off it.
     pub(crate) fn revoked_devices(&self) -> Vec<String> {
+        if self
+            .db
+            .kv_get("trust.revoked.fleet")
+            .is_some_and(|f| f != self.trust.fleet_id())
+        {
+            return vec![];
+        }
         self.db
             .kv_get("trust.revoked")
             .and_then(|v| serde_json::from_str(&v).ok())
             .unwrap_or_default()
     }
 
-    fn known_devices(&self) -> Vec<Value> {
+    /// Add to the browsers signed out in this fleet. Returns whether any
+    /// was new here.
+    fn revoked_add<'a>(&self, ids: impl IntoIterator<Item = &'a str>) -> bool {
+        let mut revoked = self.revoked_devices();
+        let before = revoked.len();
+        for id in ids {
+            let plain = !id.is_empty() && id.len() <= 64 && !id.chars().any(char::is_control);
+            if plain && !revoked.iter().any(|r| r == id) {
+                revoked.push(id.to_string());
+            }
+        }
+        if revoked.len() == before {
+            return false;
+        }
+        self.db.kv_set("trust.revoked", &json!(revoked).to_string());
+        self.db
+            .kv_set("trust.revoked.fleet", &self.trust.fleet_id());
+        true
+    }
+
+    /// Every entry this station has kept, whatever key it was made under.
+    fn stored_devices(&self) -> Vec<Value> {
         self.db
             .kv_get("trust.devices")
             .and_then(|v| serde_json::from_str(&v).ok())
             .unwrap_or_default()
+    }
+
+    /// The browsers signed in to this fleet: approved under the key this
+    /// station holds, and not signed out. An entry from before entries said
+    /// which key made them is kept, marked as not known to be signed in,
+    /// until its token is seen or the key changes.
+    fn known_devices(&self) -> Vec<Value> {
+        let fleet = self.trust.fleet_id();
+        let revoked = self.revoked_devices();
+        let mut devices: Vec<Value> = self
+            .stored_devices()
+            .into_iter()
+            .filter(|d| {
+                d["fleet"].as_str().is_none_or(|f| f == fleet)
+                    && d["id"]
+                        .as_str()
+                        .is_some_and(|id| !revoked.iter().any(|r| r == id))
+            })
+            .collect();
+        devices.sort_by_key(|d| {
+            (
+                d["approved_ms"].as_u64().unwrap_or(0),
+                d["id"].as_str().unwrap_or_default().to_string(),
+            )
+        });
+        devices
+    }
+
+    /// What every station of the fleet must hold alike: the browsers signed
+    /// in and the browsers signed out, under the key named.
+    fn trust_doc(&self) -> Value {
+        let fleet = self.trust.fleet_id();
+        let devices: Vec<Value> = self
+            .known_devices()
+            .into_iter()
+            .filter(|d| d["fleet"].as_str() == Some(fleet.as_str()))
+            .collect();
+        json!({"fleet": fleet, "devices": devices, "revoked": self.revoked_devices()})
+    }
+
+    /// Take in another station's copy. A sign-out always wins: the lists of
+    /// signed-out browsers are joined, and a browser on it is listed
+    /// nowhere. A browser one station knows and the other does not is
+    /// added. Text from another station: cleaned and capped, only shown.
+    /// Returns whether anything here changed.
+    fn trust_merge(&self, doc: &Value) -> bool {
+        let fleet = self.trust.fleet_id();
+        if doc["fleet"].as_str() != Some(fleet.as_str()) {
+            return false;
+        }
+        let mut changed = self.revoked_add(
+            doc["revoked"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str()),
+        );
+        let revoked = self.revoked_devices();
+        let mut all = self.stored_devices();
+        let text = |v: &Value, max: usize| -> String {
+            v.as_str()
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(max)
+                .collect()
+        };
+        for d in doc["devices"].as_array().into_iter().flatten().take(500) {
+            let id = text(&d["id"], 64);
+            if id.is_empty() || revoked.contains(&id) {
+                continue;
+            }
+            let theirs = json!({
+                "id": id, "name": clean_name(&text(&d["name"], 60)), "from": text(&d["from"], 64),
+                "at": clean_name(&text(&d["at"], 60)),
+                "approved_ms": d["approved_ms"].as_u64().unwrap_or(0), "fleet": fleet,
+            });
+            match all
+                .iter_mut()
+                .find(|m| m["id"].as_str() == Some(id.as_str()))
+            {
+                // The one that says when it was approved is the fuller one.
+                Some(mine) => {
+                    let known = mine["fleet"].as_str() == Some(fleet.as_str());
+                    if !known
+                        || mine["approved_ms"].as_u64().unwrap_or(0)
+                            < theirs["approved_ms"].as_u64().unwrap_or(0)
+                    {
+                        *mine = theirs;
+                        changed = true;
+                    }
+                }
+                None => {
+                    all.push(theirs);
+                    changed = true;
+                }
+            }
+        }
+        // What is signed out, or was made under a key that is gone, goes.
+        let before = all.len();
+        all.retain(|d| {
+            d["fleet"].as_str().is_none_or(|f| f == fleet)
+                && d["id"]
+                    .as_str()
+                    .is_some_and(|id| !revoked.iter().any(|r| r == id))
+        });
+        changed |= all.len() != before;
+        if changed {
+            self.db
+                .kv_set("trust.devices", &Value::Array(all).to_string());
+            self.emit("trust.updated", None, None, json!({}));
+        }
+        changed
+    }
+
+    /// Another station of this fleet sends its copy and gets this one's.
+    pub(crate) fn trust_synced(&self, caller: &Caller, params: &Value) -> Result<Value> {
+        if caller.authority != Authority::Peer {
+            return Err(Error::Denied(
+                "trust.sync is for another station of this fleet".into(),
+            ));
+        }
+        self.trust_merge(params);
+        Ok(self.trust_doc())
+    }
+
+    /// Make the lists of browsers the same on every station of the fleet
+    /// that answers: each is sent this station's copy and replies with its
+    /// own. Run whenever stations are looked for, so one that was off when
+    /// a browser was signed in or out has it within a look of coming back,
+    /// and at once after a change here. A station too old to know the call
+    /// is skipped.
+    pub(crate) async fn trust_sync(&self) {
+        let mates: Vec<String> = self
+            .fleet
+            .peers()
+            .into_iter()
+            .filter(|p| p.state == "online" && p.info["trust_relay"] == json!(true))
+            .map(|p| p.addr)
+            .collect();
+        if mates.is_empty() {
+            return;
+        }
+        let doc = self.trust_doc();
+        let calls = mates
+            .iter()
+            .map(|addr| self.fleet.call_addr(addr, "trust.sync", doc.clone()));
+        for theirs in crate::fleet::futures_join_all(calls)
+            .await
+            .into_iter()
+            .flatten()
+        {
+            self.trust_merge(&theirs);
+        }
+    }
+
+    fn trust_sync_soon(&self) {
+        // Not from a test of this file alone, which has no runtime.
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let d = self.clone();
+            rt.spawn(async move { d.trust_sync().await });
+        }
     }
 
     /// What the owner sees: the fleet, requests waiting here, and this
@@ -480,14 +704,16 @@ impl Daemon {
         let outgoing = self.trust.outgoing.lock().unwrap().clone().map(|o| {
             json!({"station": o.station, "code": o.code, "expires_ms": o.expires_ms, "problem": o.problem, "with": o.with})
         });
-        let revoked = self.revoked_devices();
+        // One list for the fleet: see `trust_sync`.
+        let fleet = self.trust.fleet_id();
         let devices: Vec<Value> = self
             .known_devices()
             .into_iter()
-            .filter(|d| {
-                d["id"]
-                    .as_str()
-                    .is_some_and(|id| !revoked.iter().any(|r| r == id))
+            .map(|mut d| {
+                if d["fleet"].as_str() != Some(fleet.as_str()) {
+                    d["unconfirmed"] = json!(true);
+                }
+                d
             })
             .collect();
         json!({
@@ -845,11 +1071,9 @@ impl Daemon {
             ));
         };
         if approve && r.kind == "device" {
-            let mut devices = self.known_devices();
-            devices
-                .push(json!({"id": r.id, "name": r.name, "from": r.from, "approved_ms": now_ms()}));
-            self.db
-                .kv_set("trust.devices", &Value::Array(devices).to_string());
+            self.devices_keep(json!({"id": r.id, "name": r.name, "from": r.from,
+                "at": self.station, "approved_ms": now_ms()}));
+            self.trust_sync_soon();
         }
         self.record(
             if approve {
@@ -873,13 +1097,11 @@ impl Daemon {
         Ok(json!({"kind": r.kind, "name": r.name, "with": r.with, "approved": approve}))
     }
 
-    /// Stop a signed-in browser from being trusted here.
-    pub fn device_revoke(&self, id: &str, by: &str) -> Result<Value> {
-        let mut revoked = self.revoked_devices();
-        if !revoked.iter().any(|r| r == id) {
-            revoked.push(id.to_string());
-            self.db.kv_set("trust.revoked", &json!(revoked).to_string());
-        }
+    /// Sign a browser out of the fleet. It is refused here at once, and by
+    /// every station that answers as soon as it is told; one that is off
+    /// is told when it is next seen (`trust_sync`).
+    pub async fn device_revoke(&self, id: &str, by: &str) -> Result<Value> {
+        self.revoked_add([id]);
         self.record(
             "trust.revoked",
             None,
@@ -889,31 +1111,36 @@ impl Daemon {
             json!({"device": id, "by": by}),
         );
         self.emit("trust.updated", None, None, json!({}));
+        self.trust_sync().await;
+        // A station from before the lists were shared takes one at a time,
+        // and only while it is on.
+        for peer in self.fleet.peers() {
+            if peer.state == "online" && peer.info["trust_relay"] != json!(true) {
+                let _ = self
+                    .fleet
+                    .call(&peer.station, "trust.revoked", json!({"device": id}))
+                    .await;
+            }
+        }
         Ok(json!({"revoked": id}))
     }
 
     /// The browsers signed out in a fleet, as sent with its key (at a join,
     /// and with `fleet.rekey`): each is refused here from now on. Ids from
-    /// another station: at most 500 are taken, and nothing else is done
-    /// with them.
+    /// another station: nothing else is done with them.
     pub(crate) fn devices_revoked_with_key(&self, list: Option<&Value>) {
-        for id in list
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|v| v.as_str())
-            .take(500)
-        {
-            self.device_revoked_elsewhere(id);
-        }
+        self.revoked_add(
+            list.and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str()),
+        );
     }
 
     /// Another station tells this one about a revoked browser.
     pub(crate) fn device_revoked_elsewhere(&self, id: &str) {
-        let mut revoked = self.revoked_devices();
-        if !revoked.iter().any(|r| r == id) && id.len() <= 64 {
-            revoked.push(id.to_string());
-            self.db.kv_set("trust.revoked", &json!(revoked).to_string());
+        if self.revoked_add([id]) {
+            self.emit("trust.updated", None, None, json!({}));
         }
     }
 

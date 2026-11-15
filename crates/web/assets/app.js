@@ -495,11 +495,13 @@ function trustPanel() {
       t.outgoing ? h('p', { class: t.outgoing.problem ? 'warn-text' : '' }, t.outgoing.problem
         ? `Joining ${t.outgoing.station}'s fleet did not finish: ${t.outgoing.problem}.`
         : `Waiting for an approval at ${t.outgoing.station}, or at any station of its fleet, of the request that shows the code ${t.outgoing.code}. ${(t.outgoing.with || []).length ? `This station${cameWith(t.outgoing.with)} then move into one fleet with ${t.outgoing.station}.` : `This station then joins ${t.outgoing.station}'s fleet.`}`) : null,
-      h('h3', {}, 'Browsers signed in here'),
+      h('h3', {}, 'Browsers signed in to this fleet'),
       (t.devices || []).length ? h('div', { class: 'list' }, t.devices.map(d => h('div', { class: 'note' },
-        h('div', { class: 'row' }, h('b', {}, d.name), h('span', { class: 'muted' }, ` · from ${d.from} · ${ago(d.approved_ms)} ago`), h('span', { class: 'grow' }),
-          h('button', { class: 'mini danger', onclick: () => rpc(api.station, 'device.revoke', { device: d.id }).then(close) }, 'Sign out')))))
+        h('div', { class: 'row' }, h('b', {}, d.name), h('span', { class: 'muted' }, [d.from ? `from ${d.from}` : '', d.approved_ms ? `approved${d.at ? ` at ${d.at}` : ''} ${ago(d.approved_ms)} ago` : d.at ? `first seen at ${d.at}` : ''].filter(Boolean).map(x => ' · ' + x).join('')), h('span', { class: 'grow' }),
+          h('button', { class: 'mini danger', title: 'Every station of the fleet refuses it from now on; a station that is off, as soon as it is back', onclick: () => rpc(api.station, 'device.revoke', { device: d.id }).then(close) }, 'Sign out')),
+        d.unconfirmed ? h('div', { class: 'muted small' }, `Listed since before this list was shared between stations. If it was approved before ${t.station} last changed fleets, it is no longer signed in.`) : null)))
         : h('p', { class: 'muted' }, 'None. A browser on another device asks to sign in the first time it opens the Control Deck.'),
+      h('p', { class: 'muted small' }, 'The same list on every station of the fleet: a browser approved at one is accepted by all, and signing one out here signs it out everywhere.'),
       h('p', { class: 'muted' }, `Fleet ${t.fleet || ''}. To add a station that is running, choose "Add … to this fleet" on its tile; to add a machine that has no spandeck yet, use Add a machine. Either way you approve its code here or at any station of this fleet. If it is in a fleet of its own, every station of that fleet joins with it: there is one fleet afterwards.`));
   });
 }
@@ -1060,6 +1062,24 @@ function stopRows() {
     `${s.station}: ${s.label}`, s.status === 'confirmed' ? ` (${s.result?.stopped?.length ?? 0} stopped)` : s.status === 'unreachable' ? ' — will be delivered when it is back' : '')));
 }
 
+// Each station's Control Deck is its own web address, and a browser keeps
+// its sign-in per address. This browser's token is already accepted by every
+// station of the fleet, so the deck it is signed in to can hand it to
+// another station's deck: in the fragment of the address, which no server is
+// sent and which that deck takes out at once. Only for a browser's own token
+// (never this station's), and only to a station that proved it holds the
+// fleet key, at the address it gave in a signed answer.
+function hopUrl(s) {
+  let token = '';
+  try { token = localStorage.getItem('spandeck.token') || ''; } catch (e) { return null; }
+  if (!token.startsWith('dev.') || s.self || s.state !== 'online') return null;
+  const local = (a) => /^(127\.|\[::1\]|localhost)/.test(a);
+  const addrs = (s.web || []).filter(a => typeof a === 'string');
+  // A loopback address is another machine's own, unless this page is local too.
+  const at = addrs.find(a => !local(a)) || (local(location.host) ? addrs.find(local) : null);
+  return at ? `http://${at}/#token=${token}` : null;
+}
+
 const STATION_STATE = { unreachable: 'unreachable', not_linked: 'not in this fleet', update_needed: 'on a version this station cannot control' };
 
 function stationMenu(e, s) {
@@ -1071,6 +1091,7 @@ function stationMenu(e, s) {
     up && { label: 'New pane here…', action: () => newPaneDialog(s.station) },
     up && { label: 'New project here…', action: () => newProjectDialog(s.station) },
     up && { label: 'Check this station', action: () => doctorPanel(s.station) },
+    hopUrl(s) && { label: `Open ${s.station}'s own Control Deck`, action: () => window.open(hopUrl(s), '_blank', 'noopener') },
     { label: 'Agent programs and versions…', action: agentsPanel },
     { label: 'Usage: tokens and estimated cost…', action: fleetUsageDialog },
     s.state === 'not_linked' && { label: `Add ${s.station} to this fleet…`, action: () => addMachineDialog({ station: s.station, kind: 'join' }) },
