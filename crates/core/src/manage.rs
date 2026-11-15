@@ -121,7 +121,7 @@ impl Daemon {
         known.sort_by(|a, b| a.station.cmp(&b.station));
         let after = serde_json::to_string(&known).unwrap_or_default();
         if after != before {
-            self.db.kv_set("fleet.known", &after);
+            self.db.kv_put("fleet.known", &after);
         }
     }
 
@@ -256,8 +256,8 @@ impl Daemon {
             serde_json::to_string(&forgotten).unwrap_or_default(),
         );
         if after != before {
-            self.db.kv_set("fleet.known", &after.0);
-            self.db.kv_set("fleet.forgotten", &after.1);
+            self.db.kv_put("fleet.known", &after.0);
+            self.db.kv_put("fleet.forgotten", &after.1);
         }
         self.fleet
             .follow_roster(&known, |p| gone(&p.station, p.last_seen_ms))

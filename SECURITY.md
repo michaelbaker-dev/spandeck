@@ -137,6 +137,15 @@ days, not hours.
   at an upgrade, in the same private file as the terminals. They hold the hash of what
   the asker collects with, never the key or a token, and one already approved is not
   carried.
+- What the database had not taken when the daemon is replaced at an upgrade (it was
+  locked, or the disk was full) travels in that same private file and is written by the
+  daemon that takes over: pane records with their pane tokens (the file already held
+  those), stops, answers to approvals, notices, entries of the ship's log. The file is
+  readable only by your user and is deleted once read. A station that cannot write its
+  database refuses new messages, tasks and panes; it never refuses Stop, Pause, Kill or
+  an answer to an approval, and what those change is held in memory until it can be
+  written: if the daemon ends first, a pause or the record of who approved is lost, and
+  you were told it was not saved (15 Nov 2026).
 - `remote_start = true` lets a station run a start command on your other machines over
   Tailscale SSH. It is off by default; what it may do there is governed by your
   Tailscale SSH rules, not by spandeck.

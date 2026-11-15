@@ -174,7 +174,7 @@ impl Daemon {
         let now = now_ms();
         let existing: Option<String> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 c.query_row(
                     "SELECT id FROM routes WHERE project=?1 AND sender=?2 AND station=?3 AND status='approved' AND expires>?4",
                     rusqlite::params![project, sender, station, now as i64],
@@ -383,7 +383,7 @@ impl Daemon {
         let list = json!(ids).to_string();
         let stored: Vec<i64> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT received FROM messages WHERE announced=0 AND received IS NOT NULL
                      AND id IN (SELECT value FROM json_each(?1))",

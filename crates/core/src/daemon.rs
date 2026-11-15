@@ -361,6 +361,8 @@ pub struct Inner {
     /// The switches later steps read (`[flags]` in the config, and what the
     /// owner set with `station.flags`), and what the last start found.
     pub(crate) restore: crate::restore::RestoreState,
+    /// The owner has been told that this station cannot write its database.
+    pub(crate) db_told: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
@@ -399,6 +401,12 @@ pub struct HandoffState {
     /// daemon from before this neither writes nor reads them.
     #[serde(default)]
     pub trust_requests: Vec<Value>,
+    /// What the database had not taken when the image was replaced (it was
+    /// locked, or the disk was full): pane records, stops, answers to
+    /// approvals, entries of the ship's log. The next image writes them. A
+    /// daemon from before this neither writes nor reads them.
+    #[serde(default)]
+    pub unwritten: crate::db::Unwritten,
 }
 
 impl Daemon {
@@ -448,6 +456,7 @@ impl Daemon {
             perf,
             tailnet: Default::default(),
             restore: Default::default(),
+            db_told: Default::default(),
             trust,
             stops: crate::stops::StopsState::new(db.clone(), &cfg.station),
             paths,
@@ -611,6 +620,7 @@ impl Daemon {
             .await;
             self.usage_changed(&changed.unwrap_or_default());
             self.pump_mail();
+            self.db_health();
         }
         self.pump_relay(n).await;
         self.pump_recipes().await;
@@ -645,6 +655,40 @@ impl Daemon {
             data,
         };
         let _ = self.bus.send(ev);
+    }
+
+    /// The owner is told, once, when this station cannot write its
+    /// database (writes have failed for 30 seconds, or 1,024 changes of
+    /// state wait), and the ship's log says when it can again. Looked at
+    /// every second.
+    fn db_health(&self) {
+        let healthy = self.db.healthy();
+        if self.db_told.swap(!healthy, Ordering::Relaxed) == !healthy {
+            return;
+        }
+        let stats = self.db.stats();
+        self.record(
+            "station.database",
+            None,
+            None,
+            None,
+            None,
+            json!({"writes": healthy, "waiting": stats.waiting, "log_waiting": stats.log_waiting,
+                   "log_dropped": stats.log_dropped, "error": stats.last_error}),
+        );
+        if !healthy {
+            self.notify(
+                "station.database",
+                None,
+                None,
+                &format!("{} cannot write its database", self.station),
+                &format!(
+                    "{}. Stop, Pause, Kill, typing and approvals still work, and what they change is kept in memory ({} changes now) and written when the database takes it; new messages, tasks and panes are refused until then. If spandeck is stopped first, what is in memory is lost. Check the disk the state folder is on.",
+                    stats.last_error.as_deref().unwrap_or("Too many changes are waiting to be written"),
+                    stats.waiting
+                ),
+            );
+        }
     }
 
     /// Emit and write to the ship's log.
@@ -1120,6 +1164,22 @@ impl Daemon {
         (args, env)
     }
 
+    /// Is this pane's record written? Waits for the database for at most a
+    /// second. For what the owner is answered about (a pane started,
+    /// closed, paused): in ordinary running the record is written before
+    /// the answer, as it always was; when the database is locked the answer
+    /// says `saved: false` and the record is written when it can be.
+    pub(crate) fn pane_saved(&self, id: &str) -> bool {
+        self.db.saved_within(
+            &[
+                format!("pane:{id}"),
+                format!("pane-closed:{id}"),
+                format!("pane-unlisted:{id}"),
+            ],
+            crate::db::ACK_WAIT,
+        )
+    }
+
     pub(crate) fn save_pane(&self, p: &PaneEntry) {
         let meta = p.meta();
         // A pane held back after three restarts keeps an open record, so a
@@ -1130,23 +1190,16 @@ impl Daemon {
             (false, 0) => meta.exit.map(|_| now_ms() as i64),
             (false, at) => Some(at as i64),
         };
-        let r = self.db.with(|c| {
-            c.execute(
-                "INSERT INTO panes(id,meta,token,pid,created,closed) VALUES(?1,?2,?3,?4,?5,?6)
-                 ON CONFLICT(id) DO UPDATE SET meta=excluded.meta, pid=excluded.pid, closed=excluded.closed",
-                rusqlite::params![
-                    meta.id,
-                    serde_json::to_string(&meta).unwrap_or_default(),
-                    p.token,
-                    p.term.pid(),
-                    meta.created_ms as i64,
-                    closed
-                ],
-            )
+        // Kept until it is written, the newest state of each pane; nothing
+        // waits for it (db.rs). Pause and holds are part of the record.
+        self.db.put(crate::db::Op::Pane {
+            id: meta.id.clone(),
+            meta: serde_json::to_string(&meta).unwrap_or_default(),
+            token: p.token.clone(),
+            pid: Some(p.term.pid() as i64),
+            created: meta.created_ms as i64,
+            closed,
         });
-        if let Err(e) = r {
-            tracing::warn!(error = %e, "pane record write failed");
-        }
     }
 
     fn on_pane_event(&self, id: &str, ev: PaneEvent) {
@@ -1488,8 +1541,12 @@ impl Daemon {
         Ok(())
     }
 
-    /// Pause: no new work is delivered; the current turn finishes.
-    pub fn pause(&self, id: &str, paused: bool, by: &str) -> Result<()> {
+    /// Pause: no new work is delivered; the current turn finishes. It
+    /// holds from the moment it is set in memory. Returns whether it is
+    /// saved too: false when the database could not be written within a
+    /// second (it is kept and written when it can be; if this station ends
+    /// before that, the pane comes back not paused).
+    pub fn pause(&self, id: &str, paused: bool, by: &str) -> Result<bool> {
         let p = self.pane(id)?;
         let meta = {
             let mut m = p.meta.lock().unwrap();
@@ -1509,7 +1566,7 @@ impl Daemon {
             Some(by),
             json!({}),
         );
-        Ok(())
+        Ok(self.pane_saved(&p.id))
     }
 
     /// Stop: the agent's current turn is interrupted; the process stays.
@@ -1603,11 +1660,9 @@ impl Daemon {
         }
         p.term.forget();
         self.panes.write().unwrap().remove(&p.id);
-        let _ = self.db.with(|c| {
-            c.execute(
-                "UPDATE panes SET closed=?2 WHERE id=?1 AND closed IS NULL",
-                rusqlite::params![p.id, now_ms() as i64],
-            )
+        self.db.put(crate::db::Op::PaneClosed {
+            id: p.id.clone(),
+            at: now_ms() as i64,
         });
         self.cancel_pane_approvals(&p.id);
         self.conversation_forget(&p.id);
@@ -1928,7 +1983,7 @@ impl Daemon {
         let mut found = crate::restore::Recovery::default();
         let rows: Vec<(String, String, String, Option<i64>)> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt =
                     c.prepare("SELECT id, meta, token, pid FROM panes WHERE closed IS NULL")?;
                 let rows =
@@ -2138,6 +2193,10 @@ impl Daemon {
             prev_exe: self.exe.clone(),
             panes,
             trust_requests: self.trust.requests_for_handoff(),
+            // Last: every pane is still now. The writer is given two
+            // seconds, then stopped; what it could not write goes with the
+            // panes, so nothing is written behind the next image's back.
+            unwritten: self.db.drain(Duration::from_secs(2)),
         }
     }
 
@@ -2161,6 +2220,9 @@ impl Daemon {
             tracing::error!("handoff state is not for this process; resuming agents by session id");
             return false;
         }
+        // What the image before could not write is written by this one,
+        // and before anything this one changes.
+        self.db.restore(state.unwritten);
         // Whoever was waiting to be let in is still waiting.
         self.trust.adopt_requests(&state.trust_requests);
         let total = state.panes.len();
@@ -2227,6 +2289,9 @@ impl Daemon {
 
     /// Put panes back into service after an exec that did not happen.
     pub fn readopt(&self, state: HandoffState) {
+        // The writer was stopped for the image that did not come: it still
+        // holds everything, and writes again.
+        self.db.resume();
         for hp in state.panes {
             let id = hp.meta.id.clone();
             let (tx, _) = broadcast::channel(1024);

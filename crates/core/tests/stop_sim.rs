@@ -525,10 +525,13 @@ fn a_stop_is_applied_when_the_database_takes_no_writes() {
         until(1000).await;
 
         let ids = book.issue(&["bravo".to_string()], "bravo", "you", link.now_ms());
-        assert!(!book.save());
+        // (Not the second a station gives its database: nothing here is
+        // timed by the clock on the wall.)
+        let soon = std::time::Duration::from_millis(20);
+        assert!(!book.save_within(soon));
         assert_eq!(row(&book, "bravo")["saved"], json!(false));
         stops::send(&book, &link, &ids[0], true).await;
-        assert!(!book.save());
+        assert!(!book.save_within(soon));
         let done = row(&book, "bravo");
         assert_eq!(
             (&done["status"], &done["saved"]),

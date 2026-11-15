@@ -1403,6 +1403,11 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
         daemon.note_stopping("asked to stop");
         // Asked to stop, not replaced: the panes end with the station.
         daemon.stop_pane_host();
+        // What the database has not taken yet is written before the
+        // process ends: two seconds at most.
+        if !daemon.db.flush(std::time::Duration::from_secs(2)) {
+            tracing::error!(waiting = daemon.db.stats().waiting, "stopping with changes the database did not take");
+        }
         tracing::info!("spandeckd stopping");
         let _ = std::fs::remove_file(daemon.paths.socket());
         Ok(0)

@@ -22,6 +22,10 @@ jobs:
       # for the every-change check, so they are ignored there.
       - name: After a restart (crash, restart in place, Tailscale address)
         run: cargo test -p spandeck --test restore -- --ignored
+      # The same for a database another program holds locked: each holds it
+      # for 12 to 35 seconds.
+      - name: Nothing waits for the database (locked 12 s, at an upgrade, 30 s)
+        run: cargo test -p spandeck --test dblock -- --ignored
   build:
     strategy:
       fail-fast: false

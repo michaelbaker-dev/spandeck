@@ -612,7 +612,22 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// A pane's record is written a moment after the pane is started (the
+/// station does not wait for its database), so it is looked for again
+/// for a few seconds.
 fn rusqlite_token(db: &Path, pane: &str) -> Option<String> {
+    let start = Instant::now();
+    loop {
+        match rusqlite_token_now(db, pane) {
+            None if start.elapsed() < Duration::from_secs(5) => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            found => return found,
+        }
+    }
+}
+
+fn rusqlite_token_now(db: &Path, pane: &str) -> Option<String> {
     let conn =
         rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()?;

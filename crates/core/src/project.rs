@@ -301,7 +301,7 @@ pub(crate) fn valid_name(name: &str) -> bool {
 impl Daemon {
     pub fn project_path(&self, name: &str) -> Option<String> {
         self.db
-            .with(|c| {
+            .read(|c| {
                 c.query_row("SELECT path FROM projects WHERE name=?1", [name], |r| {
                     r.get(0)
                 })
@@ -466,7 +466,7 @@ impl Daemon {
     pub fn projects(&self) -> Vec<Value> {
         let names: Vec<String> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare("SELECT name FROM projects ORDER BY name")?;
                 let rows = stmt.query_map([], |r| r.get(0))?;
                 rows.collect()
@@ -535,7 +535,7 @@ impl Daemon {
     pub fn project_view(&self, name: &str) -> Result<Value> {
         let (path, open): (String, i64) = self
             .db
-            .with(|c| {
+            .read(|c| {
                 c.query_row(
                     "SELECT path, open FROM projects WHERE name=?1",
                     [name],
@@ -567,7 +567,7 @@ impl Daemon {
     fn last_slot_meta(&self, project: &str, slot: &str) -> Option<PaneMeta> {
         let metas: Vec<String> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt =
                     c.prepare("SELECT meta FROM panes ORDER BY created DESC LIMIT 500")?;
                 let rows = stmt.query_map([], |r| r.get(0))?;

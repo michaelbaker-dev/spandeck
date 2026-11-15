@@ -112,7 +112,7 @@ impl Daemon {
 
     pub fn task_get(&self, id: &str) -> Result<Value> {
         self.db
-            .with(|c| {
+            .read(|c| {
                 c.query_row(
                     &format!("SELECT {TASK_COLS} FROM tasks WHERE id=?1"),
                     [id],
@@ -124,7 +124,7 @@ impl Daemon {
 
     pub fn tasks(&self, project: Option<&str>, active_only: bool, limit: u32) -> Vec<Value> {
         self.db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare(&format!(
                     "SELECT {TASK_COLS} FROM tasks WHERE (?1 IS NULL OR project=?1)
                      AND (?2=0 OR state NOT IN ('completed','failed','cancelled')) ORDER BY created DESC LIMIT ?3"
@@ -257,7 +257,7 @@ impl Daemon {
             .as_ref()
             .and_then(|t| {
                 self.db
-                    .with(|c| {
+                    .read(|c| {
                         c.query_row(
                             "SELECT path, commit_sha FROM checkpoints WHERE task=?1 ORDER BY ts DESC LIMIT 1",
                             [t],
@@ -405,7 +405,12 @@ impl Daemon {
             ..Default::default()
         });
         let pane = match pane {
-            Ok(p) => p,
+            Ok(p) => {
+                // The helper's record is written before the requester is
+                // told of it, when the database answers within a second.
+                self.pane_saved(&p.id);
+                p
+            }
             Err(e) => {
                 let _ = self.task_set_state(
                     &task,
@@ -633,7 +638,7 @@ impl Daemon {
         let dirty = is_dirty(path);
         let last: Option<(String, i64, String, String)> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 c.query_row(
                     "SELECT commit_sha, ts, by, note FROM signoffs WHERE project=?1 ORDER BY ts DESC, rowid DESC LIMIT 1",
                     [project],

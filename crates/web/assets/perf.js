@@ -129,6 +129,7 @@ export function verdict(data, row) {
   const skew = apart.length * 2 > read.length ? apart[0] : null;
   if (skew) return { level: skew.c.refused ? 'bad' : 'warn', text: `clock differs from ${skew.l.station}'s by ${clockWords(skew.c.diff_ms)}` + (skew.c.refused ? '' : ' (past 2 min, calls are refused)') };
   if ((num(r.restarts?.last_hour) || 0) >= 3) return { level: 'bad', text: `restarted ${r.restarts.last_hour} times in the last hour` };
+  if (r.database && r.database.healthy === false) return { level: 'bad', text: `cannot write its database (${num(r.database.waiting) || 0} changes waiting)` };
   const late = num(r.periodic?.late?.worst_1m_ms) || 0;
   if (late >= 250) return { level: 'warn', text: `busy: its work ran ${ms(late)} late` };
   const slow = (r.links || []).filter(l => l.state === 'online' && (num(l.rtt?.p95_ms) || 0) >= 150).sort((a, b) => b.rtt.p95_ms - a.rtt.p95_ms)[0];
@@ -158,6 +159,7 @@ function stationFacts(data, row) {
     f('Requests (p50 / p95)', r ? (req.length ? req.map(q => `${q.k} ${stat(q.x)}`).join(' · ') : 'none yet') : na, r ? KINDS.map(([k, name]) => statTitle(r.requests?.handled?.[k], `From ${name}`)).join('\n') : ''),
     f('Waited in line', r ? stat(r.requests?.waited?.deck, 'no deck open') : na, r ? statTitle(r.requests?.waited?.deck, 'How long a request from a Control Deck stood behind the ones before it on its connection') : ''),
     f('Ran late, worst 1 min', r ? ms(r.periodic?.late?.worst_1m_ms) : na, r ? statTitle(r.periodic?.late, 'How late its twice-a-second work began') + '\n' + statTitle(r.periodic?.work, 'How long that work took') : ''),
+    f('Database', r ? (r.database ? `${num(r.database.waiting) || 0} waiting, ${num(r.database.log_dropped) || 0} dropped` + (r.database.queued === false ? ' (writer off)' : '') : 'not reported') : na, r && r.database ? `Changes of state not yet written: ${num(r.database.waiting) || 0}, the oldest for ${span(num(r.database.oldest_ms) || 0)}; log entries waiting: ${num(r.database.log_waiting) || 0}, dropped since start: ${num(r.database.log_dropped) || 0}; changes dropped: ${num(r.database.state_dropped) || 0}; tries that failed: ${num(r.database.failures) || 0}; writes over 50 ms: ${num(r.database.slow) || 0}` + (r.database.last_error ? `\nFailing: ${String(r.database.last_error).slice(0, 120)}` : '') : ''),
     f('Look at the fleet', r ? stat(r.look) : na, r ? statTitle(r.look, 'One look at every station, every 10 seconds') : ''),
     f('Repaints', r ? `${num(r.terminal?.resyncs?.last_5m) ?? 0} (${num(r.terminal?.resyncs?.since_start) ?? 0} since start)` : na, 'A client that fell behind a pane and was sent the whole screen again'),
     f('Messages', r ? `there ${stat(r.messages?.received, '—')} · told ${stat(r.messages?.woken, '—')}` + ((r.messages?.waiting || []).length ? ` · ${r.messages.waiting.reduce((a, w) => a + (num(w.count) || 0), 0)} waiting` : '') : na,

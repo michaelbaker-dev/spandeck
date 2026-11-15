@@ -96,7 +96,7 @@ impl Daemon {
         if words.is_empty() {
             return self
                 .db
-                .with(|c| {
+                .read(|c| {
                     let mut stmt = c.prepare(
                         "SELECT id,ts,kind,author,task,text FROM notes WHERE project=?1 AND kind!='auto' ORDER BY id DESC LIMIT ?2",
                     )?;
@@ -107,7 +107,7 @@ impl Daemon {
         }
         let run = |fts: String| -> Vec<Value> {
             self.db
-                .with(|c| {
+                .read(|c| {
                     let mut stmt = c.prepare(
                         "SELECT n.id,n.ts,n.kind,n.author,n.task,n.text FROM notes_fts f JOIN notes n ON n.id=f.rowid
                          WHERE notes_fts MATCH ?1 AND n.project=?2 AND (?4=0 OR n.kind!='auto') ORDER BY n.id DESC LIMIT ?3",
@@ -150,7 +150,7 @@ impl Daemon {
         // Skip an exact repeat of the last capture from this pane.
         let last: Option<String> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 c.query_row(
                     "SELECT text FROM notes WHERE project=?1 AND kind='auto' AND author=?2 ORDER BY id DESC LIMIT 1",
                     rusqlite::params![project, meta.name],
@@ -161,12 +161,15 @@ impl Daemon {
         if last.as_deref() == Some(scrub(&text).as_str()) {
             return;
         }
-        let _ = self.note_add(
+        // Captured in a hook, which does not wait for the database: best
+        // effort, like the ship's log (db.rs).
+        self.db.note_later(
+            now_ms(),
             project,
             "auto",
             Some(&meta.name),
             meta.task.as_deref(),
-            &text,
+            &scrub(&truncate(&text, 4000)),
         );
     }
 
@@ -235,7 +238,7 @@ impl Daemon {
         }
         let posted = |project: &str, limit: u32| -> Vec<(String, Option<String>, String)> {
             self.db
-                .with(|c| {
+                .read(|c| {
                     let mut stmt = c.prepare(
                         "SELECT kind, author, text FROM notes WHERE project=?1 AND kind IN ('decision','finding','note','status') ORDER BY id DESC LIMIT ?2",
                     )?;
@@ -274,7 +277,7 @@ impl Daemon {
         }
         let autos: Vec<String> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare("SELECT author || ': ' || text FROM notes WHERE project=?1 AND kind='auto' ORDER BY id DESC LIMIT 5")?;
                 let rows = stmt.query_map([project], |r| r.get(0))?;
                 rows.collect()

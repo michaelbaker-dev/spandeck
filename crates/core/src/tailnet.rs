@@ -389,7 +389,7 @@ impl Daemon {
             };
             seen.remove(&oldest);
         }
-        self.db.kv_set(
+        self.db.kv_put(
             "tailnet.decks",
             &serde_json::to_string(&seen).unwrap_or_default(),
         );
@@ -492,7 +492,7 @@ impl Daemon {
         };
         let old: BTreeMap<String, Report> = serde_json::from_str(&before).unwrap_or_default();
         if stale(&reports) != stale(&old) {
-            self.db.kv_set(
+            self.db.kv_put(
                 "tailnet.members",
                 &serde_json::to_string(&reports).unwrap_or_default(),
             );
@@ -650,7 +650,7 @@ impl Daemon {
             ) else {
                 continue;
             };
-            self.db.kv_set(&mark_key, &format!("{expires}:{level}"));
+            self.db.kv_put(&mark_key, &format!("{expires}:{level}"));
             // A device that is not a station and expired long ago is not news.
             if w["station"].is_null() && now.saturating_sub(expires) > 30 * DAY_MS {
                 continue;

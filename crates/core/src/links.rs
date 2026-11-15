@@ -23,7 +23,7 @@ impl Daemon {
     /// The projects linked to a local project: (project, station).
     pub(crate) fn links_of(&self, project: &str) -> Vec<(String, String)> {
         self.db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT other, station FROM project_links WHERE project=?1 ORDER BY other, station",
                 )?;
@@ -35,7 +35,7 @@ impl Daemon {
 
     pub(crate) fn linked(&self, project: &str, other: &str, station: &str) -> bool {
         self.db
-            .with(|c| {
+            .read(|c| {
                 c.query_row(
                     "SELECT 1 FROM project_links WHERE project=?1 AND other=?2 AND station=?3",
                     [project, other, station],
@@ -160,7 +160,7 @@ impl Daemon {
 
     pub fn project_links(&self, project: Option<&str>) -> Vec<Value> {
         self.db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT project, other, station, since FROM project_links
                      WHERE (?1 IS NULL OR project=?1) ORDER BY project, other, station",

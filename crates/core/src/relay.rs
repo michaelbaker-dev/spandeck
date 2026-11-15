@@ -137,7 +137,7 @@ impl MessageStore {
         let local = dest == self.station;
         let env = self
             .db
-            .with_tx(|tx| {
+            .with_tx_stored(|tx| {
                 let seq: i64 = tx.query_row("SELECT COALESCE(MAX(seq),0)+1 FROM messages WHERE thread=?1", [&thread], |r| r.get(0))?;
                 let env = Envelope {
                     id: id.clone(),
@@ -191,7 +191,7 @@ impl MessageStore {
                 None => return refused("a task from another station needs an authorization"),
             }
         }
-        let r = self.db.with_tx(|tx| {
+        let r = self.db.with_tx_stored(|tx| {
             let seen: Option<i64> = tx
                 .query_row("SELECT ts FROM receipts WHERE msg=?1", [&env.id], |r| {
                     r.get(0)
@@ -226,7 +226,7 @@ impl MessageStore {
     pub async fn pump(&self, transport: &dyn Transport, now: u64) -> usize {
         let heads: Vec<(String, String)> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT o.msg, o.dest FROM outbox o
                      WHERE o.state='pending' AND o.ord = (SELECT MIN(ord) FROM outbox WHERE dest=o.dest AND state='pending')
@@ -283,7 +283,7 @@ impl MessageStore {
 
     pub fn queued(&self) -> u64 {
         self.db
-            .with(|c| {
+            .read(|c| {
                 c.query_row(
                     "SELECT COUNT(*) FROM outbox WHERE state='pending'",
                     [],
@@ -295,7 +295,7 @@ impl MessageStore {
 
     pub fn get(&self, id: &str) -> Option<Envelope> {
         self.db
-            .with(|c| {
+            .read(|c| {
                 c.query_row(
                     "SELECT id,thread,seq,ts,sender,recipient,kind,body,refs,task,project,auth FROM messages WHERE id=?1",
                     [id],
@@ -319,7 +319,7 @@ impl MessageStore {
         let list = json!(recipients).to_string();
         let rows: Vec<Value> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT id,thread,seq,ts,sender,recipient,kind,body,refs,task,project,status,read,acted FROM messages
                      WHERE recipient IN (SELECT value FROM json_each(?1)) AND received IS NOT NULL
@@ -355,7 +355,7 @@ impl MessageStore {
     ) -> Vec<(String, String, String)> {
         let list = json!(names.iter().map(|n| self.qualify(n)).collect::<Vec<_>>()).to_string();
         self.db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT id, sender, body FROM messages WHERE recipient IN (SELECT value FROM json_each(?1))
                      AND received IS NOT NULL AND read IS NULL AND (announced=0 OR announced < ?2) ORDER BY received",
@@ -391,7 +391,7 @@ impl MessageStore {
 
     pub fn thread(&self, thread: &str) -> Vec<Value> {
         self.db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT id,thread,seq,ts,sender,recipient,kind,body,refs,task,project,status,read,acted FROM messages
                      WHERE thread=?1 ORDER BY seq",
@@ -404,7 +404,7 @@ impl MessageStore {
 
     pub fn recent(&self, project: Option<&str>, limit: u32) -> Vec<Value> {
         self.db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT id,thread,seq,ts,sender,recipient,kind,body,refs,task,project,status,read,acted FROM messages
                      WHERE (?1 IS NULL OR project=?1) ORDER BY ts DESC LIMIT ?2",
