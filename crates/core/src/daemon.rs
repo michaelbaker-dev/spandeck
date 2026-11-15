@@ -2041,6 +2041,8 @@ impl Daemon {
             // Every terminal is kept through an upgrade or a restart: on Unix
             // by replacing the program in place, on Windows by the pane host.
             "live_handoff": true,
+            // It lists requests that wait at other stations (`trust.relay`).
+            "trust_relay": true,
             "pane_host": self.pane_host_info(),
             "arch": std::env::consts::ARCH,
             "panes": panes.iter().filter(|p| p.meta.lock().unwrap().exit.is_none()).count(),

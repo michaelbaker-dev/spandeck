@@ -17,6 +17,12 @@
 //!
 //! What follows from the key being new: every browser signed in from another
 //! device signs in again, and connections made under the old key are closed.
+//!
+//! A station that joins another fleet uses the same machinery for the
+//! stations of the fleet it was in (`fleet_joined`): it takes the key it was
+//! given, keeps the old one for the one purpose in step 3, and hands the new
+//! key to each of them when it next looks, which it does at once. So a join
+//! moves a whole fleet, and never leaves part of it behind.
 
 use std::time::Duration;
 
@@ -98,7 +104,7 @@ impl Daemon {
     }
 
     /// Every station this one counts as in its fleet, other than itself.
-    fn fleet_members(&self) -> Vec<Peer> {
+    pub(crate) fn fleet_members(&self) -> Vec<Peer> {
         let mut all: Vec<Peer> = self
             .fleet
             .peers()
@@ -342,21 +348,25 @@ impl Daemon {
                 });
             }
         }
-        self.take_key(new, old, removed, stragglers)?;
+        self.take_key(new, old, (removed, "", ""), stragglers)?;
         Ok((rekeyed, waiting))
     }
 
     /// Start using `new`, and keep `old` only to hand `new` to `stragglers`.
+    /// `why` is (the station removed, the station whose fleet was joined,
+    /// who asked): one of the first two is empty.
     fn take_key(
         &self,
         new: Vec<u8>,
         old: Vec<u8>,
-        removed: &str,
+        why: (&str, &str, &str),
         stragglers: Vec<Straggler>,
     ) -> Result<()> {
         let retired = Retired {
             key: hex(&old),
-            removed: removed.to_string(),
+            removed: why.0.to_string(),
+            joined: why.1.to_string(),
+            by: why.2.to_string(),
             since_ms: now_ms(),
             stations: stragglers,
         };
@@ -366,8 +376,39 @@ impl Daemon {
             .map_err(|e| invalid(format!("could not save the new fleet key: {e}")))
     }
 
+    /// This station was let into `joined`'s fleet and given its key. It
+    /// takes the key, and every station of the fleet it was in is owed it:
+    /// each is handed it, in a call signed with the old key, the next time
+    /// this station looks for stations (`rekey_stragglers`), whether that is
+    /// in a moment or in three weeks. Returns those stations' names.
+    ///
+    /// The key is taken first and the mates told second, so that stopping
+    /// halfway leaves a list of stations still to be told, not a fleet that
+    /// moved without the station that asked.
+    pub(crate) fn fleet_joined(&self, new: Vec<u8>, joined: &str, by: &str) -> Result<Vec<String>> {
+        let old = self.trust.key();
+        if new == old {
+            return Ok(vec![]);
+        }
+        let mates: Vec<Straggler> = self
+            .fleet_members()
+            .into_iter()
+            .filter(|p| p.station != joined)
+            .map(|p| Straggler {
+                station: p.station,
+                addr: p.addr,
+            })
+            .collect();
+        let names = mates.iter().map(|m| m.station.clone()).collect();
+        self.take_key(new, old, ("", joined, by), mates)?;
+        // Their tokens were made with the old key.
+        self.devices_forget(None);
+        Ok(names)
+    }
+
     /// Another station of this fleet hands over the key that replaces the
-    /// one both hold, because a station was removed. Trusted for the same
+    /// one both hold: a station was removed (`removed`), or the fleet joined
+    /// another one (`joined`, with `removed` empty). Trusted for the same
     /// reason any call from it is: it is signed with the key held here.
     pub(crate) fn fleet_rekeyed(&self, caller: &Caller, params: &Value) -> Result<Value> {
         if caller.authority != Authority::Peer {
@@ -377,6 +418,13 @@ impl Daemon {
         }
         let get = |k: &str| params.get(k).and_then(|v| v.as_str()).unwrap_or_default();
         let (removed, by) = (get("removed"), get("by"));
+        // A name from another station, shown in a notice: cleaned like one.
+        let joined: String = get("joined")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+            .take(60)
+            .collect();
+        let joined = joined.as_str();
         let Some(new) = unhex(get("key")).filter(|k| k.len() == 32) else {
             return Err(invalid("the key is not usable"));
         };
@@ -386,7 +434,9 @@ impl Daemon {
         let old = self.trust.key();
         if new == old {
             // Told twice: it has the key already.
-            self.forget_removed(removed);
+            if !removed.is_empty() {
+                self.forget_removed(removed);
+            }
             return Ok(json!({"station": self.station, "ok": true}));
         }
         // Stations this one knows that may not have heard: they are handed
@@ -400,24 +450,40 @@ impl Daemon {
                 addr: p.addr,
             })
             .collect();
-        self.take_key(new, old, removed, stragglers)?;
+        self.take_key(new, old, (removed, joined, by), stragglers)?;
+        // Right for both: the browsers' tokens were made with the old key.
         self.devices_forget(None);
-        self.forget_removed(removed);
+        if !removed.is_empty() {
+            self.forget_removed(removed);
+        }
         self.record(
             "fleet.rekeyed",
             None,
             None,
             None,
             Some(by),
-            json!({"removed": removed, "from": caller.who, "fleet": self.trust.fleet_id()}),
+            json!({"removed": removed, "joined": joined, "from": caller.who, "fleet": self.trust.fleet_id()}),
         );
-        self.notify(
-            "fleet.removed",
-            None,
-            None,
-            &format!("Station {removed} was removed from the fleet"),
-            "The fleet has a new key, so the removed station can no longer act here. Browsers signed in from other devices must sign in again.",
-        );
+        if removed.is_empty() {
+            self.notify(
+                "fleet.merged",
+                None,
+                None,
+                &match joined {
+                    "" => "This station's fleet joined another fleet".to_string(),
+                    j => format!("This station's fleet joined {j}'s fleet"),
+                },
+                &format!("{} was let into that fleet and brought this station with it: the stations of both are now one fleet. Browsers signed in to this station from other devices must sign in again.", caller.who),
+            );
+        } else {
+            self.notify(
+                "fleet.removed",
+                None,
+                None,
+                &format!("Station {removed} was removed from the fleet"),
+                "The fleet has a new key, so the removed station can no longer act here. Browsers signed in from other devices must sign in again.",
+            );
+        }
         self.emit("fleet.updated", None, None, json!({}));
         self.emit("trust.updated", None, None, json!({}));
         let d = self.clone();
@@ -456,7 +522,8 @@ impl Daemon {
                             .call_with_key(
                                 &s.addr,
                                 "fleet.rekey",
-                                json!({"key": hex(&self.trust.key()), "removed": r.removed, "by": "the fleet"}),
+                                json!({"key": hex(&self.trust.key()), "removed": r.removed, "joined": r.joined,
+                                    "by": if r.by.is_empty() || r.joined.is_empty() { "the fleet" } else { r.by.as_str() }}),
                                 &key,
                             )
                             .await;
@@ -469,7 +536,7 @@ impl Daemon {
                                 None,
                                 None,
                                 None,
-                                json!({"station": s.station, "removed": r.removed}),
+                                json!({"station": s.station, "removed": r.removed, "joined": r.joined}),
                             );
                         }
                     }

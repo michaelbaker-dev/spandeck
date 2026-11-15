@@ -14,7 +14,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::daemon::{invalid, Daemon, Error, Result};
+use crate::daemon::{invalid, Authority, Caller, Daemon, Error, Result};
 use crate::paths::{now_ms, random_token, Paths};
 
 /// How far apart two stations' clocks may be for a signed call to count.
@@ -39,8 +39,27 @@ struct Request {
     from: String,
     /// Shown on both sides so the owner can see they match.
     code: String,
+    /// The fleet-mates a station says it brings with it. Names only, for the
+    /// owner to read: what joins is whoever holds that fleet's key.
+    with: Vec<String>,
     collect_hash: [u8; 32],
     decision: Decision,
+    expires_ms: u64,
+}
+
+/// A request that waits at another station of this fleet. That station told
+/// this one, so the owner can see and answer it here. It holds no secret:
+/// the answer is passed to the station that was asked, which decides.
+#[derive(Clone, PartialEq)]
+struct Relayed {
+    /// The station that was asked, and that holds the request.
+    at: String,
+    id: String,
+    kind: &'static str,
+    name: String,
+    from: String,
+    code: String,
+    with: Vec<String>,
     expires_ms: u64,
 }
 
@@ -53,15 +72,22 @@ struct Outgoing {
     code: String,
     expires_ms: u64,
     problem: Option<String>,
+    /// Who asked for the join, for the ship's log.
+    by: String,
+    /// The fleet-mates that come along if it is approved.
+    with: Vec<String>,
 }
 
 pub struct TrustState {
     key: RwLock<Vec<u8>>,
     file: PathBuf,
     requests: Mutex<BTreeMap<String, Request>>,
+    /// Requests waiting at other stations of this fleet, by id.
+    relayed: Mutex<BTreeMap<String, Relayed>>,
     outgoing: Mutex<Option<Outgoing>>,
-    /// Goes up each time the key is replaced because a station left the
-    /// fleet. A connection that was let in with the old key ends then.
+    /// Goes up each time the key is replaced: a station left the fleet, or
+    /// the fleet joined another. A connection that was let in with the old
+    /// key ends then.
     epoch: tokio::sync::watch::Sender<u64>,
     /// Held while the list of retired keys is read, changed and written.
     retired_lock: Mutex<()>,
@@ -75,13 +101,20 @@ pub struct Straggler {
     pub addr: String,
 }
 
-/// A key the fleet stopped using when a station was removed. Nothing is
-/// accepted under it. It is kept only to hand the new key to the stations
-/// that were away at that moment, which still hold it.
+/// A key the fleet stopped using: a station was removed, or the fleet joined
+/// another one. Nothing is accepted under it. It is kept only to hand the
+/// new key to the stations that still hold it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Retired {
     pub key: String,
+    /// The station that was removed; empty when the fleet joined another.
     pub removed: String,
+    /// The station whose fleet this one joined; empty for a removal.
+    #[serde(default)]
+    pub joined: String,
+    /// Who asked for it.
+    #[serde(default)]
+    pub by: String,
     pub since_ms: u64,
     pub stations: Vec<Straggler>,
 }
@@ -140,6 +173,7 @@ impl TrustState {
             key: RwLock::new(key),
             file,
             requests: Mutex::new(BTreeMap::new()),
+            relayed: Mutex::new(BTreeMap::new()),
             outgoing: Mutex::new(None),
             epoch: tokio::sync::watch::Sender::new(0),
             retired_lock: Mutex::new(()),
@@ -169,6 +203,7 @@ impl TrustState {
         *self.key.write().unwrap() = key;
         // Requests that were waiting were made to the old fleet.
         self.requests.lock().unwrap().clear();
+        self.relayed.lock().unwrap().clear();
         *self.outgoing.lock().unwrap() = None;
         self.epoch.send_modify(|n| *n += 1);
         Ok(())
@@ -288,6 +323,64 @@ fn short_code() -> String {
         .collect()
 }
 
+/// Up to twenty names another machine sent, each cleaned like any name.
+fn clean_names(names: Option<&Value>) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for n in names.and_then(|v| v.as_array()).into_iter().flatten() {
+        let Some(n) = n.as_str().map(clean_name) else {
+            continue;
+        };
+        if n != "unnamed" && !out.contains(&n) && out.len() < 20 {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// "Station spark2", or "Station spark2 and 2 other stations (a, b)".
+fn asker(kind: &str, name: &str, with: &[String]) -> String {
+    match (kind, with.len()) {
+        ("station", 0) => format!("Station {name}"),
+        ("station", 1) => format!("Station {name} and 1 other station ({})", with[0]),
+        ("station", n) => format!(
+            "Station {name} and {n} other stations ({})",
+            with.join(", ")
+        ),
+        _ => name.to_string(),
+    }
+}
+
+/// The notice for a request, as (title, body). `at` is the station that was
+/// asked, when that is not this one.
+fn request_notice(
+    kind: &str,
+    name: &str,
+    with: &[String],
+    from: &str,
+    code: &str,
+    at: Option<&str>,
+) -> (String, String) {
+    let who = asker(kind, name, with);
+    let title = match (kind, with.is_empty()) {
+        ("station", true) => format!("{who} asks to join this fleet"),
+        ("station", false) => format!("{who} ask to join this fleet"),
+        _ => format!("A browser asks to sign in: {who}"),
+    };
+    let mut body = match at {
+        Some(at) => format!("Asked at {at}, from {from}. "),
+        None => format!("From {from}. "),
+    };
+    body.push_str(&format!(
+        "Approve only if it shows the code {code}. It will be able to control every station."
+    ));
+    if !with.is_empty() {
+        body.push_str(
+            " Every station that holds its fleet's key comes with it, whatever names it gives.",
+        );
+    }
+    (title, body)
+}
+
 fn clean_name(name: &str) -> String {
     let n: String = name
         .chars()
@@ -372,11 +465,20 @@ impl Daemon {
             map.retain(|_, r| r.expires_ms > now);
             map.values()
                 .filter(|r| r.decision == Decision::Waiting)
-                .map(|r| json!({"id": r.id, "kind": r.kind, "name": r.name, "from": r.from, "code": r.code, "expires_ms": r.expires_ms}))
+                .map(|r| json!({"id": r.id, "kind": r.kind, "name": r.name, "with": r.with, "from": r.from, "code": r.code, "expires_ms": r.expires_ms, "at": self.station}))
+                .collect()
+        };
+        // And those waiting at the other stations of the fleet.
+        let requests: Vec<Value> = {
+            let mut map = self.trust.relayed.lock().unwrap();
+            map.retain(|_, r| r.expires_ms > now);
+            requests
+                .into_iter()
+                .chain(map.values().map(|r| json!({"id": r.id, "kind": r.kind, "name": r.name, "with": r.with, "from": r.from, "code": r.code, "expires_ms": r.expires_ms, "at": r.at})))
                 .collect()
         };
         let outgoing = self.trust.outgoing.lock().unwrap().clone().map(|o| {
-            json!({"station": o.station, "code": o.code, "expires_ms": o.expires_ms, "problem": o.problem})
+            json!({"station": o.station, "code": o.code, "expires_ms": o.expires_ms, "problem": o.problem, "with": o.with})
         });
         let revoked = self.revoked_devices();
         let devices: Vec<Value> = self
@@ -398,9 +500,17 @@ impl Daemon {
     }
 
     /// Someone on the owner's tailnet asks to be let in. Nothing is granted
-    /// until the owner approves it here. Returns what the asker needs to
-    /// collect the answer.
-    pub fn trust_request(&self, kind: &str, name: &str, from: &str) -> Result<Value> {
+    /// until the owner approves it, here or at another station of this
+    /// fleet. Returns what the asker needs to collect the answer. `with` is
+    /// the fleet-mates a station says come with it: text from another
+    /// machine, cleaned and shown, never acted on.
+    pub fn trust_request(
+        &self,
+        kind: &str,
+        name: &str,
+        with: Option<&Value>,
+        from: &str,
+    ) -> Result<Value> {
         let kind: &'static str = match kind {
             "station" => "station",
             "device" => "device",
@@ -408,6 +518,11 @@ impl Daemon {
         };
         let now = now_ms();
         let name = clean_name(name);
+        let mut with = match kind {
+            "station" => clean_names(with),
+            _ => vec![],
+        };
+        with.retain(|n| *n != name);
         let collect = random_token();
         let req = Request {
             id: crate::paths::new_id("q"),
@@ -415,6 +530,7 @@ impl Daemon {
             name: name.clone(),
             from: from.to_string(),
             code: short_code(),
+            with: with.clone(),
             collect_hash: Sha256::digest(collect.as_bytes()).into(),
             decision: Decision::Waiting,
             expires_ms: now + REQUEST_MS,
@@ -431,16 +547,7 @@ impl Daemon {
             }
             map.insert(req.id.clone(), req.clone());
         }
-        let (title, body) = match kind {
-            "station" => (
-                format!("Station {name} asks to join this fleet"),
-                format!("From {from}. Approve only if it shows the code {}. It will be able to control every station.", req.code),
-            ),
-            _ => (
-                format!("A browser asks to sign in: {name}"),
-                format!("From {from}. Approve only if it shows the code {}. It will be able to control every station.", req.code),
-            ),
-        };
+        let (title, body) = request_notice(kind, &name, &with, from, &req.code, None);
         self.notify("trust.request", None, None, &title, &body);
         self.record(
             "trust.request",
@@ -448,9 +555,10 @@ impl Daemon {
             None,
             None,
             None,
-            json!({"kind": kind, "name": name, "from": from}),
+            json!({"kind": kind, "name": name, "from": from, "with": with}),
         );
         self.emit("trust.updated", None, None, json!({}));
+        self.trust_relay_soon();
         Ok(
             json!({"id": req.id, "collect": collect, "code": req.code, "expires_ms": req.expires_ms, "station": self.station}),
         )
@@ -502,7 +610,205 @@ impl Daemon {
             .map(|r| (r.id.clone(), r.name.clone(), r.expires_ms))
     }
 
-    /// The owner's answer. `which` is a request id or the code shown.
+    /// The requests waiting at this station, as its fleet-mates are told of
+    /// them: who asks and the code to match. Never the value the asker
+    /// collects with, and never the key.
+    fn trust_waiting(&self) -> Vec<Value> {
+        let now = now_ms();
+        self.trust
+            .requests
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|r| r.decision == Decision::Waiting && r.expires_ms > now)
+            .map(|r| json!({"id": r.id, "kind": r.kind, "name": r.name, "with": r.with, "from": r.from, "code": r.code, "expires_ms": r.expires_ms}))
+            .collect()
+    }
+
+    /// Tell the other stations of the fleet which requests wait here, so the
+    /// owner can answer at whichever one they are using. The whole list is
+    /// sent each time: a request that was answered is no longer in it. A
+    /// station that is away, or too old to know the call, is skipped.
+    pub(crate) async fn trust_relay_send(&self, even_if_none: bool) {
+        let requests = self.trust_waiting();
+        if requests.is_empty() && !even_if_none {
+            return;
+        }
+        let params = json!({"requests": requests});
+        let mates: Vec<String> = self
+            .fleet
+            .peers()
+            .into_iter()
+            .filter(|p| p.state == "online" && p.info["trust_relay"] == json!(true))
+            .map(|p| p.addr)
+            .collect();
+        let calls = mates
+            .iter()
+            .map(|addr| self.fleet.call_addr(addr, "trust.relay", params.clone()));
+        crate::fleet::futures_join_all(calls).await;
+    }
+
+    fn trust_relay_soon(&self) {
+        let d = self.clone();
+        tokio::spawn(async move { d.trust_relay_send(true).await });
+    }
+
+    /// Another station of this fleet says which requests wait there. They
+    /// are listed here beside this station's own and raise the same notice.
+    /// Everything in the call is text from another machine: cleaned, capped,
+    /// and only ever shown.
+    pub(crate) fn trust_relayed(&self, caller: &Caller, params: &Value) -> Result<Value> {
+        if caller.authority != Authority::Peer {
+            return Err(Error::Denied(
+                "trust.relay is for another station of this fleet".into(),
+            ));
+        }
+        // The name it is known by here, so the answer can be sent to it.
+        let at = match self.fleet.peer(&caller.who) {
+            Some(p) => p.station,
+            None => clean_name(&caller.who),
+        };
+        let now = now_ms();
+        let plain =
+            |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        let mut theirs: Vec<Relayed> = vec![];
+        for r in params["requests"].as_array().into_iter().flatten() {
+            let text = |k: &str, max: usize| -> String {
+                r[k].as_str()
+                    .unwrap_or_default()
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(max)
+                    .collect()
+            };
+            let kind: &'static str = match r["kind"].as_str() {
+                Some("station") => "station",
+                Some("device") => "device",
+                _ => continue,
+            };
+            let (id, code) = (text("id", 64), text("code", 12));
+            if !plain(&id) || !plain(&code) || theirs.len() >= MAX_PENDING {
+                continue;
+            }
+            theirs.push(Relayed {
+                at: at.clone(),
+                id,
+                kind,
+                name: clean_name(&text("name", 60)),
+                from: text("from", 64),
+                code,
+                with: clean_names(r.get("with")),
+                // Never kept longer than a request made here would be.
+                expires_ms: r["expires_ms"].as_u64().unwrap_or(0).min(now + REQUEST_MS),
+            });
+        }
+        theirs.retain(|r| r.expires_ms > now);
+        let mut fresh = vec![];
+        let changed = {
+            let mut map = self.trust.relayed.lock().unwrap();
+            map.retain(|_, r| r.expires_ms > now);
+            let before: Vec<Relayed> = map.values().filter(|r| r.at == at).cloned().collect();
+            map.retain(|_, r| r.at != at);
+            for r in theirs {
+                // An id another station already uses is that station's.
+                if map.contains_key(&r.id) {
+                    continue;
+                }
+                if !before.iter().any(|b| b.id == r.id) {
+                    fresh.push(r.clone());
+                }
+                map.insert(r.id.clone(), r);
+            }
+            let after: Vec<Relayed> = map.values().filter(|r| r.at == at).cloned().collect();
+            before != after
+        };
+        for r in &fresh {
+            let (title, body) =
+                request_notice(r.kind, &r.name, &r.with, &r.from, &r.code, Some(&r.at));
+            self.notify("trust.request", None, None, &title, &body);
+        }
+        if changed {
+            self.emit("trust.updated", None, None, json!({}));
+        }
+        Ok(json!({"ok": true}))
+    }
+
+    /// The owner's answer, given at this station. A request that waits here
+    /// is decided here. One that waits at another station of the fleet is
+    /// passed to that station as the owner's request (`rpc.forward`), and it
+    /// decides: the first answer to reach it stands. `here_only` is set on a
+    /// request that was passed on, so it is never passed on twice.
+    pub async fn trust_answer(
+        &self,
+        which: &str,
+        approve: bool,
+        by: &str,
+        here_only: bool,
+    ) -> Result<Value> {
+        match self.trust_decide(which, approve, by) {
+            Err(Error::NotFound(_)) if !here_only => {}
+            answered => return answered,
+        }
+        let now = now_ms();
+        let found = self
+            .trust
+            .relayed
+            .lock()
+            .unwrap()
+            .values()
+            .find(|r| {
+                r.expires_ms > now && (r.id == which || r.code.eq_ignore_ascii_case(which.trim()))
+            })
+            .cloned();
+        let Some(r) = found else {
+            return Err(Error::NotFound(
+                "no waiting request with that id or code".into(),
+            ));
+        };
+        let method = if approve {
+            "trust.approve"
+        } else {
+            "trust.deny"
+        };
+        let sent = self
+            .fleet
+            .call(
+                &r.at,
+                "rpc.forward",
+                json!({"method": method, "params": {"request": r.id, "here": true}}),
+            )
+            .await;
+        let forget = || {
+            self.trust.relayed.lock().unwrap().remove(&r.id);
+            self.emit("trust.updated", None, None, json!({}));
+        };
+        match sent {
+            Ok(mut v) => {
+                forget();
+                self.record(
+                    "trust.passed_on",
+                    None,
+                    None,
+                    None,
+                    Some(by),
+                    json!({"kind": r.kind, "name": r.name, "from": r.from, "at": r.at, "approved": approve}),
+                );
+                v["at"] = json!(r.at);
+                Ok(v)
+            }
+            Err(e) if e.contains("no waiting request") => {
+                forget();
+                Err(Error::NotFound(format!(
+                    "{} no longer has that request: it was answered already, or it lapsed",
+                    r.at
+                )))
+            }
+            Err(e) => Err(invalid(format!("{}: {e}", r.at))),
+        }
+    }
+
+    /// The owner's answer to a request that waits at this station. `which`
+    /// is a request id or the code shown.
     pub fn trust_decide(&self, which: &str, approve: bool, by: &str) -> Result<Value> {
         let found = {
             let mut map = self.trust.requests.lock().unwrap();
@@ -547,14 +853,16 @@ impl Daemon {
             None,
             None,
             None,
-            json!({"kind": r.kind, "name": r.name, "from": r.from, "by": by}),
+            json!({"kind": r.kind, "name": r.name, "from": r.from, "with": r.with, "by": by}),
         );
         self.emit("trust.updated", None, None, json!({}));
+        // The other stations of the fleet stop listing it.
+        self.trust_relay_soon();
         if r.kind == "station" {
             // An add from the Control Deck may be waiting on this answer.
             self.add_decided(&r.code, approve);
         }
-        Ok(json!({"kind": r.kind, "name": r.name, "approved": approve}))
+        Ok(json!({"kind": r.kind, "name": r.name, "with": r.with, "approved": approve}))
     }
 
     /// Stop a signed-in browser from being trusted here.
@@ -586,18 +894,26 @@ impl Daemon {
     }
 
     /// Ask another station to let this one into its fleet. The owner approves
-    /// there; this station then takes that fleet's key in place of its own.
-    pub async fn fleet_join(&self, station: &str) -> Result<Value> {
+    /// at any station of that fleet; this station then takes that fleet's key
+    /// in place of its own, and hands it to the stations of the fleet it was
+    /// in, so they come with it: a join is a merge, never a split.
+    pub async fn fleet_join(&self, station: &str, by: &str) -> Result<Value> {
         let peer = self
             .fleet
             .peer(station)
             .ok_or_else(|| invalid(format!("no station called {station} was found")))?;
+        let with: Vec<String> = self
+            .fleet_members()
+            .into_iter()
+            .map(|p| p.station)
+            .filter(|s| s != station)
+            .collect();
         let out = self
             .fleet
             .call_open(
                 &peer.addr,
                 "fleet.join.request",
-                json!({"station": self.station}),
+                json!({"station": self.station, "with": with}),
             )
             .await
             .map_err(|e| invalid(format!("{station}: {e}")))?;
@@ -617,13 +933,32 @@ impl Daemon {
             code: code.clone(),
             expires_ms,
             problem: None,
+            by: by.to_string(),
+            with: with.clone(),
         });
+        self.record(
+            "trust.join_asked",
+            None,
+            None,
+            None,
+            Some(by),
+            json!({"station": station, "with": with}),
+        );
         self.emit("trust.updated", None, None, json!({}));
         let me = self.clone();
         tokio::spawn(async move { me.fleet_join_wait().await });
+        let stations = with.len() + 1;
+        let what = match with.len() {
+            0 => format!("This station then joins {station}'s fleet. Browsers signed in to this station from other devices sign in again."),
+            n => format!(
+                "This station and the {} of its fleet ({}) then move into one fleet with {station}. Browsers signed in to those {stations} stations from other devices sign in again.",
+                if n == 1 { "other station".to_string() } else { format!("{n} other stations") },
+                with.join(", ")
+            ),
+        };
         Ok(
-            json!({"station": station, "code": code, "expires_ms": expires_ms,
-            "next": format!("On {station}, approve the request that shows the code {code}: in its Control Deck, or with `spandeck approve {code}`.")}),
+            json!({"station": station, "code": code, "expires_ms": expires_ms, "with": with,
+            "next": format!("At {station}, or at any station of its fleet, approve the request that shows the code {code}: in the Control Deck, or with `spandeck approve {code}`. {what}")}),
         )
     }
 
@@ -634,15 +969,17 @@ impl Daemon {
                 return;
             };
             let ended = |problem: Option<String>| {
-                let mut out = self.trust.outgoing.lock().unwrap();
-                match problem {
-                    Some(p) => {
-                        if let Some(o) = out.as_mut() {
-                            o.problem = Some(p);
-                            o.expires_ms = 0;
+                {
+                    let mut out = self.trust.outgoing.lock().unwrap();
+                    match problem {
+                        Some(p) => {
+                            if let Some(o) = out.as_mut() {
+                                o.problem = Some(p);
+                                o.expires_ms = 0;
+                            }
                         }
+                        None => *out = None,
                     }
-                    None => *out = None,
                 }
                 self.emit("trust.updated", None, None, json!({}));
             };
@@ -674,26 +1011,39 @@ impl Daemon {
                     let Some(key) = key else {
                         return ended(Some(format!("{} sent an unusable key", o.station)));
                     };
-                    if let Err(e) = write_private(&self.trust.file, &hex(&key)) {
-                        return ended(Some(format!("could not save the fleet key: {e}")));
-                    }
-                    *self.trust.key.write().unwrap() = key;
+                    // The key is taken, and the stations of the fleet this
+                    // one was in are owed it: see `fleet_joined`.
+                    let mates = match self.fleet_joined(key, &o.station, &o.by) {
+                        Ok(mates) => mates,
+                        Err(e) => return ended(Some(e.to_string())),
+                    };
                     self.record(
                         "trust.joined",
                         None,
                         None,
                         None,
-                        None,
-                        json!({"station": o.station, "fleet": self.trust.fleet_id()}),
+                        Some(&o.by),
+                        json!({"station": o.station, "fleet": self.trust.fleet_id(), "with": mates}),
                     );
+                    let stations = mates.len() + 1;
+                    let body = if mates.is_empty() {
+                        "Browsers that were signed in to this station from other devices need to sign in again.".to_string()
+                    } else {
+                        format!(
+                            "The stations of the fleet it was in come with it ({}): each is handed the new key now if it is on, or when it is next seen. Browsers that were signed in to those {stations} stations from other devices need to sign in again.",
+                            mates.join(", ")
+                        )
+                    };
                     self.notify(
                         "trust.joined",
                         None,
                         None,
                         &format!("This station joined {}'s fleet", o.station),
-                        "Browsers that were signed in to this station need to sign in again.",
+                        &body,
                     );
                     ended(None);
+                    self.emit("fleet.updated", None, None, json!({}));
+                    // Looking again is what hands the mates the key.
                     self.discover_peers().await;
                     return;
                 }
@@ -713,6 +1063,7 @@ mod tests {
             key: RwLock::new(vec![key; 32]),
             file: PathBuf::new(),
             requests: Mutex::new(BTreeMap::new()),
+            relayed: Mutex::new(BTreeMap::new()),
             outgoing: Mutex::new(None),
             epoch: tokio::sync::watch::Sender::new(0),
             retired_lock: Mutex::new(()),

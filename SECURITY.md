@@ -18,13 +18,19 @@ days, not hours.
   Tailscale daemon, and never trusts identity headers. Second, the caller must prove
   itself, because Tailscale says which device is calling, not which program on it:
   - another **station** signs every call with the fleet key. A station gets the key
-    only when you approve its request on a station that already has it;
+    only when you approve its request on a station that already has it, or when a
+    station of its own fleet, which you approved, hands it the key that fleet moved to;
   - a **browser** holds a token it was given when you approved it, once, on a station
     or in a Control Deck that was already signed in;
   - on the station itself, the local token from `spandeck cc`.
 - **What that means.** A program on one of your devices that has neither the fleet key
   nor a token gets nothing. Anyone who can run code as your user on a station can read
   that station's key and tokens, and so controls the fleet.
+- **Requests are shown on every station, and only you answer them.** A station that
+  is asked tells the others in its fleet who is asking and the code to match, so you
+  can approve where you are. It does not send them the secret the asker collects with,
+  or the key: your answer is passed to the station that was asked, and it decides. An
+  agent has no call that answers a request, on any station.
 - **Agents are not the owner.** Each pane has its own token. Agents can message, delegate
   and search history; they never get a call that administers a station. Text from agents,
   other stations and session history is shown as text and labelled as quoted, never run
@@ -41,10 +47,20 @@ days, not hours.
 
 - Approving a station or a browser gives it control of every station. Check the code
   it shows matches the one you are asked to approve.
+- Approving a station approves its whole fleet: every station that holds that fleet's
+  key joins with it. The request lists the names the asking station gives, but those
+  are only what it says; a station it did not name, or one that is off and still holds
+  that key, joins too (for 30 days). Approve a station only if you would approve every
+  machine it has shared a fleet with.
+- Any station of the fleet can pass on your answer to a request, because any station
+  already holds the key and can act as you on the others. The relay adds no power a
+  station did not have.
 - A signed-in browser's token does not expire. Sign it out under Access in the Control
   Deck (or `spandeck trust --revoke`); stations that are off at the time learn of it only
-  from a later sign-out. Joining another fleet replaces the key and signs every browser
-  out.
+  from a later sign-out. Joining another fleet replaces the key on the station that asked
+  and on every station of the fleet it was in, and signs out every browser that was
+  signed in to those. A browser you signed out in the fleet that was joined is not
+  known to the stations that arrive: sign it out again after a join if it matters.
 - Every station of a fleet holds the same key. Removing a station therefore gives the
   stations that stay a new key, which also signs every browser out. A station that is
   off at that moment keeps the old key until it is seen again, and until then the

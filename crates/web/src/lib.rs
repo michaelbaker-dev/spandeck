@@ -317,6 +317,7 @@ async fn device_request(
             body.get("name")
                 .and_then(|n| n.as_str())
                 .unwrap_or("a browser"),
+            None,
             ip,
         )
     })
@@ -402,6 +403,7 @@ async fn peer_rpc(
                     .get("station")
                     .and_then(|s| s.as_str())
                     .unwrap_or(&from),
+                params.get("with"),
                 &asker,
             ),
         ),
@@ -669,7 +671,8 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
 
     // A browser signed in from another device, or another station relaying
     // its user, was let in on the strength of the fleet key. When a station
-    // is removed the key is replaced, and such a connection ends: what it
+    // is removed, or this station's fleet joins another one, the key is
+    // replaced, and such a connection ends: what it
     // was let in with no longer counts. The token this station made for
     // its own Control Deck, and a pane's token, do not rest on the key.
     let rests_on_key = who.is_owner() && who.who != "you";

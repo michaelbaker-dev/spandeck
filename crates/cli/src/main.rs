@@ -137,7 +137,9 @@ enum Cmd {
     },
     /// The fleet: every station under your Tailscale login.
     Fleet {
-        /// Ask this station to let this one into its fleet. Approve it there.
+        /// Ask this station to let this one into its fleet. Approve it there,
+        /// or at any station of that fleet. The stations of the fleet this
+        /// one is in come with it: afterwards there is one fleet.
         #[arg(long, value_name = "STATION")]
         join: Option<String>,
         /// Remove a station from the fleet: its panes are closed, and the
@@ -150,11 +152,13 @@ enum Cmd {
         #[arg(long, requires = "remove")]
         stop: bool,
     },
-    /// Approve a station or browser that asked to be let in, by the code it shows.
+    /// Approve a station or browser that asked to be let in, by the code it
+    /// shows. Works at any station of the fleet, whichever one was asked.
     Approve { code: String },
     /// Refuse a station or browser that asked to be let in.
     Deny { code: String },
-    /// Requests waiting for you, and browsers signed in here.
+    /// Requests waiting for you at any station of the fleet, and browsers
+    /// signed in here.
     Trust {
         /// Stop trusting a signed-in browser, by its id.
         #[arg(long, value_name = "DEVICE")]
@@ -937,14 +941,19 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             let v = c.call(method, json!({"request": code}))?;
             show(j, &v, |v| {
                 format!(
-                    "{} {} {}",
+                    "{} {} {}{}{}",
                     if v["approved"] == json!(true) {
                         "approved"
                     } else {
                         "refused"
                     },
                     v["kind"].as_str().unwrap_or(""),
-                    v["name"].as_str().unwrap_or("")
+                    v["name"].as_str().unwrap_or(""),
+                    came_with(&v["with"]),
+                    match v["at"].as_str() {
+                        Some(at) => format!("  (it was asked at {at}, which decided)"),
+                        None => String::new(),
+                    }
                 )
             });
         }
@@ -957,10 +966,15 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 let mut out = vec![format!("fleet {}", v["fleet"].as_str().unwrap_or(""))];
                 for r in v["requests"].as_array().into_iter().flatten() {
                     out.push(format!(
-                        "waiting: {} {} from {}  code {}   (spandeck approve {})",
+                        "waiting: {} {}{} from {}{}  code {}   (spandeck approve {})",
                         r["kind"].as_str().unwrap_or(""),
                         r["name"].as_str().unwrap_or(""),
+                        came_with(&r["with"]),
                         r["from"].as_str().unwrap_or(""),
+                        match r["at"].as_str() {
+                            Some(at) if r["at"] != v["station"] => format!(", asked at {at}"),
+                            _ => String::new(),
+                        },
                         r["code"].as_str().unwrap_or(""),
                         r["code"].as_str().unwrap_or("")
                     ));
@@ -1378,6 +1392,24 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
         let _ = std::fs::remove_file(daemon.paths.socket());
         Ok(0)
     })
+}
+
+/// " and 2 other stations (a, b)": the fleet-mates a station says come with
+/// it when it joins. Names from another machine: printed without anything
+/// a terminal would act on.
+fn came_with(with: &Value) -> String {
+    let names: Vec<String> = with
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| n.as_str())
+        .map(|n| n.chars().filter(|c| !c.is_control()).collect())
+        .collect();
+    match names.len() {
+        0 => String::new(),
+        1 => format!(" and 1 other station ({})", names[0]),
+        n => format!(" and {n} other stations ({})", names.join(", ")),
+    }
 }
 
 /// What `fleet.remove` did, in the owner's words.

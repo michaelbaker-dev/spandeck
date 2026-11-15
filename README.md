@@ -67,8 +67,9 @@ the station, or approve it under **Access** in a Control Deck that is already si
 On the station itself, use the address `spandeck cc` prints (it carries a local token).
 
 To add a second station, use **Add a machine** in the Control Deck (below), or install
-spandeck on it and run `spandeck fleet --join <first station>`, then approve the code on
-the first station. Stations under your Tailscale
+spandeck on it and run `spandeck fleet --join <first station>` (if it already has
+fleet-mates, they all come with it: there is only ever one fleet), then approve the code on
+the first station, or on any station already in its fleet. Stations under your Tailscale
 login see each other without this, but neither controls the other until you approve.
 
 To update a station without losing its terminals: install the new release, then

@@ -350,6 +350,8 @@ impl Daemon {
         self.setup_sync().await;
         self.deck_sync().await;
         self.look_sync().await;
+        // A station that was away when a request arrived here hears of it.
+        self.trust_relay_send(false).await;
     }
 
     async fn discover_once(&self) {
