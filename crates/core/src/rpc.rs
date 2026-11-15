@@ -465,6 +465,9 @@ impl Daemon {
                     }
                 }
                 self.save_pane(&pane);
+                // What the owner set is waited for, like a pause: a station
+                // killed a moment later came back without it.
+                self.pane_saved(&pane.id);
                 self.emit("pane.updated", Some(&pane.id), None, json!({}));
                 self.pane_view(&pane)
             }
