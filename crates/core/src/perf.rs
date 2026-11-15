@@ -248,6 +248,39 @@ impl Kind {
     }
 }
 
+/// The lane a Control Deck's request was handled in (web: lanes). A
+/// request waits only behind what shares its lane: what is typed and what
+/// stops behind the same pane, a change behind the changes to its station,
+/// a read for one of the places reads have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    /// Typing, pasting, sent text, resizing.
+    Input = 0,
+    /// Stop, Pause, Kill, Release, an approval's answer.
+    Urgent = 1,
+    /// Every other change, in order per station.
+    Write = 2,
+    Read = 3,
+    /// Attaching to a pane, watching a conversation.
+    Attach = 4,
+    /// Calls that wait on purpose.
+    Held = 5,
+}
+
+impl Lane {
+    pub const ALL: [Lane; 6] = [
+        Lane::Input,
+        Lane::Urgent,
+        Lane::Write,
+        Lane::Read,
+        Lane::Attach,
+        Lane::Held,
+    ];
+    pub fn name(self) -> &'static str {
+        ["input", "urgent", "write", "read", "attach", "held"][self as usize]
+    }
+}
+
 struct Slow {
     at_sec: u64,
     at_ms: u64,
@@ -337,6 +370,11 @@ pub struct Perf {
     /// A Control Deck's requests are taken one at a time: how long one
     /// waited behind the ones before it on its connection.
     waited: Hist,
+    /// The same, by the lane the request was handled in.
+    waited_in: [Hist; 6],
+    /// Requests a deck's connection refused at once because too many were
+    /// already waiting.
+    pub busy: Count,
     slow: Mutex<Vec<Slow>>,
     /// The periodic work (every half second): how late it began, and how
     /// long it took.
@@ -408,6 +446,12 @@ impl Perf {
             },
             station: station.map(clean),
         });
+    }
+
+    /// How long a Control Deck's request stood in its lane before it was
+    /// begun. Counted beside `request`'s `waited`, which is every lane's.
+    pub fn lane_waited(&self, lane: Lane, waited: Duration) {
+        self.waited_in[lane as usize].record(waited);
     }
 
     /// After a look: the stations listed, and when each last changed state.
@@ -520,6 +564,15 @@ impl Perf {
                 )
             })
             .collect();
+        let lanes: serde_json::Map<String, Value> = Lane::ALL
+            .iter()
+            .map(|l| {
+                (
+                    l.name().to_string(),
+                    self.waited_in[*l as usize].summary_at(now, FIVE_MIN).json(),
+                )
+            })
+            .collect();
         let mut slow: Vec<&Slow> = vec![];
         let held = self.slow.lock().unwrap();
         slow.extend(held.iter().filter(|s| now.saturating_sub(s.at_sec) <= 300));
@@ -533,7 +586,7 @@ impl Perf {
         late["worst_1m_ms"] =
             json!((self.tick_late.summary_at(now, ONE_MIN).max_us as f64 / 10.0).round() / 100.0);
         json!({
-            "requests": {"handled": handled, "waited": {"deck": self.waited.summary_at(now, FIVE_MIN).json()}, "slowest": slowest},
+            "requests": {"handled": handled, "waited": {"deck": self.waited.summary_at(now, FIVE_MIN).json(), "lanes": lanes, "busy": self.busy.json()}, "slowest": slowest},
             "periodic": {"late": late, "work": self.tick_work.summary_at(now, FIVE_MIN).json()},
             "look": self.look.summary_at(now, FIVE_MIN).json(),
             "terminal": {"resyncs": self.resyncs.json()},

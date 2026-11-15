@@ -79,7 +79,74 @@ pub struct FleetState {
     /// said at the last look at the fleet. The web server listens on what
     /// this says. `None` until a look has read them.
     pub own_addrs: tokio::sync::watch::Sender<Option<OwnAddrs>>,
+    /// Addresses whose last calls got no answer at all: see `not_answering`.
+    silent: Mutex<Silence>,
 }
+
+/// Calls in a row to one address that got no answer (no connection, or
+/// nothing within the call's five seconds).
+#[derive(Default, Clone, Copy)]
+struct Silent {
+    fails: u32,
+    since_ms: u64,
+    probed: bool,
+    probe_ms: u64,
+}
+
+/// Which addresses are not answering: the whole of the rule, apart from
+/// the calls that feed it and the clock.
+#[derive(Default)]
+pub struct Silence {
+    by_addr: HashMap<String, Silent>,
+}
+
+impl Silence {
+    /// A call to `addr` was answered (whatever the answer), or got no
+    /// answer at all.
+    pub fn note(&mut self, addr: &str, answered: bool, now_ms: u64) {
+        if answered {
+            self.by_addr.remove(addr);
+            return;
+        }
+        if self.by_addr.len() >= 256 && !self.by_addr.contains_key(addr) {
+            return;
+        }
+        let s = self.by_addr.entry(addr.to_string()).or_default();
+        if s.fails == 0 {
+            s.since_ms = now_ms;
+        }
+        s.fails = s.fails.saturating_add(1);
+    }
+
+    /// Not answering, and since when: from the second call in a row with
+    /// no answer until the first answer.
+    pub fn since(&self, addr: &str) -> Option<u64> {
+        self.by_addr
+            .get(addr)
+            .filter(|s| s.fails >= SILENT_AFTER)
+            .map(|s| s.since_ms)
+    }
+
+    /// May a call go to `addr` to find out whether it is back? Once in
+    /// `SILENT_PROBE_MS`; always for an address that is answering.
+    pub fn probe(&mut self, addr: &str, now_ms: u64) -> bool {
+        match self.by_addr.get_mut(addr) {
+            Some(s) if s.probed && now_ms.saturating_sub(s.probe_ms) < SILENT_PROBE_MS => false,
+            Some(s) => {
+                (s.probed, s.probe_ms) = (true, now_ms);
+                true
+            }
+            None => true,
+        }
+    }
+}
+
+/// After this many calls in a row with no answer a station is taken to be
+/// not answering.
+pub const SILENT_AFTER: u32 = 2;
+/// While a station is not answering, one of a Control Deck's calls to it is
+/// let through this often, to find out whether it is back.
+pub const SILENT_PROBE_MS: u64 = 2000;
 
 /// See `FleetState::own_addrs`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -130,7 +197,36 @@ impl FleetState {
             station: cfg.station.clone(),
             perf,
             own_addrs: tokio::sync::watch::Sender::new(None),
+            silent: Mutex::new(Silence::default()),
         }
+    }
+
+    /// A call to this address was answered (whatever the answer), or was
+    /// not answered at all.
+    fn note_answer(&self, addr: &str, answered: bool) {
+        self.silent.lock().unwrap().note(addr, answered, now_ms());
+    }
+
+    /// Is this station not answering: did its last calls, two or more in a
+    /// row, get no answer? Since when (this station's clock). It is so
+    /// from the second such call and until the first answer to any call,
+    /// the look at the fleet every ten seconds included. Nothing a station
+    /// does by itself reads this (a stop is always sent): it is for a
+    /// Control Deck's connection, which then refuses a call to that
+    /// station at once where each would wait out its five seconds.
+    pub fn not_answering(&self, station: &str) -> Option<u64> {
+        let addr = self.peer(station)?.addr;
+        self.silent.lock().unwrap().since(&addr)
+    }
+
+    /// May one call be let through to a station that is not answering, to
+    /// find out whether it is back? Once every two seconds, for whoever
+    /// asks first.
+    pub fn probe(&self, station: &str) -> bool {
+        let Some(addr) = self.peer(station).map(|p| p.addr) else {
+            return true;
+        };
+        self.silent.lock().unwrap().probe(&addr, now_ms())
     }
 
     pub fn peer(&self, station: &str) -> Option<Peer> {
@@ -378,6 +474,7 @@ impl FleetState {
                 "no answer"
             };
             self.perf.link_call(addr, began.elapsed(), Some(why));
+            self.note_answer(addr, false);
             // No connection was made: nothing was sent.
             let sent = match e.is_connect() {
                 true => Sent::No,
@@ -385,6 +482,7 @@ impl FleetState {
             };
             (sent, format!("unreachable: {e}"))
         })?;
+        self.note_answer(addr, true);
         let status = resp.status();
         let body: Value = resp.json().await.map_err(|e| {
             self.perf
@@ -934,6 +1032,7 @@ impl Daemon {
         scope: &str,
         by: &str,
         marks: crate::holds::StopMarks,
+        mut legs: crate::rpc::StopLegs,
         rid_key: Option<&str>,
     ) -> Result<Value> {
         let issued = now_ms();
@@ -978,22 +1077,40 @@ impl Daemon {
             .iter()
             .zip(&targets)
             .partition(|(_, station)| **station == self.station);
+        // A station's leg (the stop's place in the order of the connection
+        // that read it) is let go of when that station's part is done, and
+        // the legs of stations this stop is not for at once.
+        legs.retain(|station, _| targets.contains(station));
+        let leg = legs.remove(&self.station);
         // This station: on a thread of its own, since stopping a pane also
         // writes the ship's log, and a database that is slow to take that
         // must not hold up the stops for the other stations.
         let local = here.first().map(|(id, _)| {
             let (d, id, by) = (self.clone(), id.to_string(), by.to_string());
-            tokio::task::spawn_blocking(move || {
-                let result = d.apply_stop(&id, issued, None, None, &by, marks);
-                d.stops.book.mark(&id, "confirmed", result, now_ms());
-            })
+            async move {
+                if let Some(leg) = &leg {
+                    leg.turn().await;
+                }
+                tokio::task::spawn_blocking(move || {
+                    let result = d.apply_stop(&id, issued, None, None, &by, marks);
+                    d.stops.book.mark(&id, "confirmed", result, now_ms());
+                    drop(leg);
+                })
+                .await
+            }
         });
         let cutoff = self.flag_on(stops::CAP, true);
-        let sends = futures_join_all(
-            there
-                .iter()
-                .map(|(id, _)| stops::send(book, self, id, cutoff)),
-        );
+        let sends = futures_join_all(there.iter().map(|(id, station)| {
+            let leg = legs.remove(*station);
+            async move {
+                if let Some(leg) = &leg {
+                    leg.turn().await;
+                }
+                let sent = stops::send(book, self, id, cutoff).await;
+                drop(leg);
+                sent
+            }
+        }));
         let (wrote, _, _) = tokio::join!(
             self.stops_sync(false, Duration::from_secs(1)),
             async {

@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -30,12 +30,18 @@ use serde_json::{json, Value};
 use spandeck_core::daemon::{Authority, Caller, Daemon};
 use spandeck_core::fleet::Remote;
 use spandeck_core::perf::Kind;
+use spandeck_core::rids::Retry;
+use spandeck_core::rpc::AtRead;
 use spandeck_core::server::error_json;
 use spandeck_core::trust::Signed;
 use spandeck_terminal::PaneEvent;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
+use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite;
+
+mod lanes;
+use lanes::{Lane, Lines, Scope};
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
@@ -762,6 +768,10 @@ enum Chan {
         tx: mpsc::Sender<String>,
         peer_chan: u64,
         control: bool,
+        /// Whose pane it is, and its id there: what typed into this
+        /// channel keeps its order with (lanes).
+        station: String,
+        pane: String,
         task: tokio::task::JoinHandle<()>,
     },
     /// A conversation being watched: items go down, nothing comes up.
@@ -857,6 +867,757 @@ fn frame(kind: u8, chan: u32, payload: &[u8]) -> Message {
     Message::Binary(buf.into())
 }
 
+/// A connection's channels, shared by the loop that reads its requests and
+/// the tasks that attach: an attach is answered after its channel is in
+/// here, and one that finishes after the connection ended is closed again.
+struct Open {
+    chans: Channels<Chan>,
+    ended: bool,
+}
+
+/// What every task that runs one of a connection's requests needs of it.
+#[derive(Clone)]
+struct Conn {
+    web: Web,
+    who: Arc<Caller>,
+    out: mpsc::Sender<Message>,
+    open: Arc<Mutex<Open>>,
+}
+
+/// One request as it was read.
+struct Req {
+    arrived: std::time::Instant,
+    id: Value,
+    method: String,
+    params: Value,
+    /// The request's id, and on a second try how long ago the first was
+    /// written (rids.rs).
+    retry: Option<Retry>,
+}
+
+impl Req {
+    /// Is this a second try of a request written before?
+    fn again(&self) -> bool {
+        self.retry.as_ref().is_some_and(|r| r.again_ms.is_some())
+    }
+}
+
+/// What is typed is never sent a second time: a second try of it is told
+/// that what became of the first is not known.
+fn typed_twice() -> Value {
+    json!({"code": "outcome_unknown", "message": "could not confirm whether what was typed arrived. Nothing was sent again: look at the pane before typing it again."})
+}
+
+/// Where what is typed into a channel goes.
+enum Typed {
+    /// Not taken, and why.
+    No(Value),
+    /// A pane of this station.
+    Here(String),
+    /// A pane of another station, down the connection made for it.
+    There {
+        tx: mpsc::Sender<String>,
+        text: String,
+        station: String,
+        pane: String,
+    },
+}
+
+fn denied(message: &str) -> Value {
+    json!({"code": "denied", "message": message})
+}
+
+impl Conn {
+    fn daemon(&self) -> &Daemon {
+        &self.web.daemon
+    }
+
+    /// `pane.attach` and `pane.conversation.watch`: the channel is in the
+    /// connection's list before the answer that names it is given.
+    async fn attach(&self, method: &str, params: &Value) -> Result<Value, Value> {
+        let (daemon, who) = (self.daemon(), &self.who);
+        let watch = method == "pane.conversation.watch";
+        if !who.is_owner() {
+            return Err(denied(if watch {
+                "a conversation is for the user's clients"
+            } else {
+                "attaching is for the user's clients"
+            }));
+        }
+        let chan = self.open.lock().unwrap().chans.fresh();
+        let station = params
+            .get("station")
+            .and_then(|s| s.as_str())
+            .filter(|s| *s != daemon.station)
+            .map(String::from);
+        // The conversation view's live stream: the first page as the
+        // reply, then every change on this channel, the pane's file
+        // looked at five times a second for as long as someone watches.
+        // The owner's clients only, as attaching is; a pane on another
+        // station is watched there and passed through, and nothing of
+        // it is kept here.
+        if watch {
+            let (result, task) = match station {
+                None => watch_local(daemon, params, chan, self.out.clone())
+                    .await
+                    .map_err(|e| error_json(&e))?,
+                Some(station) => {
+                    watch_remote(
+                        daemon,
+                        &station,
+                        params,
+                        &who.client,
+                        chan,
+                        self.out.clone(),
+                    )
+                    .await?
+                }
+            };
+            self.opened(chan, Chan::Watch { task })?;
+            return Ok(result);
+        }
+        let pane = params
+            .get("pane")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string();
+        let control = params.get("mode").and_then(|m| m.as_str()) != Some("watch");
+        match station {
+            None => {
+                let (result, task) =
+                    attach_local(daemon, &pane, &who.client, chan, self.out.clone())
+                        .map_err(|e| error_json(&e))?;
+                let pane = result["pane"].as_str().unwrap_or(&pane).to_string();
+                daemon.note_attach(&pane, &who.who, &who.client, control);
+                self.opened(
+                    chan,
+                    Chan::Local {
+                        pane,
+                        control,
+                        task,
+                    },
+                )?;
+                Ok(result)
+            }
+            Some(station) => {
+                let (result, tx, peer_chan, task) = attach_remote(
+                    daemon,
+                    &station,
+                    &pane,
+                    control,
+                    &who.client,
+                    chan,
+                    self.out.clone(),
+                )
+                .await
+                .map_err(|e| json!({"code": "unreachable", "message": e}))?;
+                let pane = result["pane"].as_str().unwrap_or(&pane).to_string();
+                self.opened(
+                    chan,
+                    Chan::Remote {
+                        tx,
+                        peer_chan,
+                        control,
+                        station,
+                        pane,
+                        task,
+                    },
+                )?;
+                Ok(result)
+            }
+        }
+    }
+
+    /// Put a new channel in the connection's list; if the connection ended
+    /// while it was being made, close it instead.
+    fn opened(&self, chan: u32, what: Chan) -> Result<(), Value> {
+        let mut open = self.open.lock().unwrap();
+        if open.ended {
+            what.close();
+            return Err(json!({"code": "internal", "message": "the connection ended"}));
+        }
+        open.chans.open(chan, what);
+        Ok(())
+    }
+
+    fn detach(&self, params: &Value) -> Value {
+        let gone = self.open.lock().unwrap().chans.close(params);
+        if let Some(c) = gone {
+            c.close();
+        }
+        json!({"ok": true})
+    }
+
+    /// Typing and resizing name the channel they are for. A number this
+    /// connection did not give names nothing, whatever pane a connection
+    /// before this one had under it.
+    fn typed(&self, method: &str, params: &Value) -> Typed {
+        let watching = || Typed::No(denied("watching only: take control to type"));
+        let open = self.open.lock().unwrap();
+        match open.chans.get(params) {
+            Some(Chan::Watch { .. }) => Typed::No(denied("a watched conversation takes no typing")),
+            Some(Chan::Local { control, .. }) | Some(Chan::Remote { control, .. }) if !control => {
+                watching()
+            }
+            Some(Chan::Local { pane, .. }) => Typed::Here(pane.clone()),
+            Some(Chan::Remote {
+                tx,
+                peer_chan,
+                station,
+                pane,
+                ..
+            }) => {
+                let mut p = params.clone();
+                p["chan"] = json!(peer_chan);
+                Typed::There {
+                    tx: tx.clone(),
+                    text: json!({"id": null, "method": method, "params": p}).to_string(),
+                    station: station.clone(),
+                    pane: pane.clone(),
+                }
+            }
+            None => Typed::No(json!({"code": "not_found", "message": "no such channel"})),
+        }
+    }
+
+    /// Carry a request out. `retry`: its id, when it came with one, so
+    /// that a change is done once whichever lane it runs in (rids.rs).
+    async fn dispatch(
+        &self,
+        method: &str,
+        params: Value,
+        retry: Option<Retry>,
+        at: AtRead,
+    ) -> Result<Value, Value> {
+        self.daemon()
+            .dispatch_read(&self.who, method, params, retry, at)
+            .await
+            .map_err(|e| error_json(&e))
+    }
+
+    /// A request was handled: count it, and give its answer if it asked
+    /// for one (a keystroke does not).
+    fn done(
+        &self,
+        req: &Req,
+        lane: Option<Lane>,
+        began: std::time::Instant,
+        reply: Result<Value, Value>,
+    ) -> Option<Message> {
+        let gateway = req.method == "peer.call";
+        let waited = began.duration_since(req.arrived);
+        let perf = &self.daemon().perf;
+        perf.request(
+            Kind::Deck,
+            &req.method,
+            gateway.then(|| req.params["method"].as_str()).flatten(),
+            gateway.then(|| req.params["station"].as_str()).flatten(),
+            began.elapsed(),
+            Some(waited),
+        );
+        if let Some(lane) = lane {
+            perf.lane_waited(lane, waited);
+        }
+        answer(&req.id, reply)
+    }
+
+    /// `done`, from a task: the answer waits for room on the way out.
+    async fn finish(
+        &self,
+        req: &Req,
+        lane: Lane,
+        began: std::time::Instant,
+        reply: Result<Value, Value>,
+    ) {
+        if let Some(msg) = self.done(req, Some(lane), began, reply) {
+            let _ = self.out.send(msg).await;
+        }
+    }
+
+    /// Give an answer from the loop that reads requests, which waits for
+    /// nothing: when the way out is full, a task of its own waits.
+    fn say(&self, msg: Option<Message>) {
+        if let Some(msg) = msg {
+            if let Err(mpsc::error::TrySendError::Full(msg)) = self.out.try_send(msg) {
+                let out = self.out.clone();
+                tokio::spawn(async move {
+                    let _ = out.send(msg).await;
+                });
+            }
+        }
+    }
+
+    /// What is typed for a pane of another station could not be handed to
+    /// the connection made for it: said on the pane's channel, since a key
+    /// asks for no answer.
+    fn input_refused(&self, params: &Value, station: &str) {
+        if let Some(chan) = Channels::<Chan>::named(params) {
+            let short: String = station.chars().take(64).collect();
+            self.say(Some(Message::Text(
+                json!({"chan": chan, "input_refused": 1, "why": "busy", "station": short})
+                    .to_string()
+                    .into(),
+            )));
+        }
+    }
+}
+
+fn answer(id: &Value, reply: Result<Value, Value>) -> Option<Message> {
+    if id.is_null() {
+        return None; // fire-and-forget (keystrokes)
+    }
+    let out = match reply {
+        Ok(result) => json!({"id": id, "result": result}),
+        Err(error) => json!({"id": id, "error": error}),
+    };
+    Some(Message::Text(out.to_string().into()))
+}
+
+/// The requests of one connection that are running: its lines, its limits,
+/// and the tasks.
+struct Running {
+    conn: Conn,
+    lines: Lines,
+    counts: lanes::Counts,
+    reads: Arc<Semaphore>,
+    reads_to: HashMap<String, Arc<Semaphore>>,
+    attaches: Arc<Semaphore>,
+    attaches_to: HashMap<String, Arc<Semaphore>>,
+    /// Ended with the connection: reads, attaches, waits.
+    ending: JoinSet<()>,
+    /// Run to their end whatever becomes of the connection: everything
+    /// that changes something, as before.
+    lasting: JoinSet<()>,
+    /// Did the page say it knows `busy`?
+    page_knows_busy: bool,
+}
+
+impl Running {
+    fn new(conn: Conn, page_knows_busy: bool) -> Running {
+        Running {
+            conn,
+            lines: Lines::default(),
+            counts: lanes::Counts::default(),
+            reads: Arc::new(Semaphore::new(lanes::READS)),
+            reads_to: HashMap::new(),
+            attaches: Arc::new(Semaphore::new(lanes::ATTACHES)),
+            attaches_to: HashMap::new(),
+            ending: JoinSet::new(),
+            lasting: JoinSet::new(),
+            page_knows_busy,
+        }
+    }
+
+    /// Refuse a request at once: too much is waiting where it would wait.
+    fn busy(&self, req: &Req, busy: &lanes::Busy) {
+        self.conn.daemon().perf.busy.add();
+        self.conn
+            .say(answer(&req.id, Err(busy.error(self.page_knows_busy))));
+    }
+
+    /// A pane of this station by the name a request gave: its id, so that
+    /// two names for one pane are one pane's order.
+    fn scope_here(&self, scope: Option<Scope>) -> Option<Scope> {
+        match scope {
+            Some(Scope::Pane(name)) => Some(Scope::Pane(
+                self.conn
+                    .daemon()
+                    .pane(&name)
+                    .map(|p| p.id.clone())
+                    .unwrap_or(name),
+            )),
+            other => other,
+        }
+    }
+
+    /// Take one request: put it in its lane. Waits for nothing (what is
+    /// typed into a pane of this station is handed to the pane's own queue
+    /// here, which never waits).
+    async fn take(&mut self, req: Req) {
+        let conn = self.conn.clone();
+        let method = req.method.as_str();
+        let by_chan = req.params.get("chan").is_some_and(|c| !c.is_null());
+        match method {
+            "pane.detach" | "pane.conversation.unwatch" => {
+                let reply = Ok(conn.detach(&req.params));
+                return conn.say(conn.done(&req, None, std::time::Instant::now(), reply));
+            }
+            "pane.input" | "pane.resize" if by_chan => return self.typed(req).await,
+            _ => {}
+        }
+        let route = lanes::route(&conn.daemon().station, method, &req.params);
+        let station = route.station.clone();
+        let line = station.clone().unwrap_or_default();
+        let lane = route.lane;
+        let scope = match &station {
+            None => self.scope_here(route.scope.clone()),
+            Some(_) => route.scope.clone(),
+        };
+        // What is typed into a pane of this station that nothing read
+        // before it is still being done for: straight to the pane.
+        if lane == Lane::Input
+            && station.is_none()
+            && scope.as_ref().is_none_or(|s| self.lines.free("", s))
+        {
+            let began = std::time::Instant::now();
+            let reply = conn
+                .dispatch(
+                    method,
+                    req.params.clone(),
+                    req.retry.clone(),
+                    AtRead::default(),
+                )
+                .await;
+            return conn.say(conn.done(&req, Some(lane), began, reply));
+        }
+        // A station that has stopped answering: what is asked of it is
+        // refused at once, where each call would wait out its own five
+        // seconds, but for one call every two seconds that finds out
+        // whether it is back. A Stop, a Pause, a Kill or an answer for it
+        // is always sent.
+        let mut finds_out = false;
+        if let Some(to) = station.as_deref() {
+            let fleet = &conn.daemon().fleet;
+            let silent = fleet.not_answering(to);
+            if let Some(since) = lanes::held_back(lane, silent, || fleet.probe(to)) {
+                conn.daemon().perf.busy.add();
+                let for_ms = spandeck_core::paths::now_ms().saturating_sub(since);
+                let no = lanes::not_answering(to, for_ms, self.page_knows_busy);
+                return conn.say(answer(&req.id, Err(no)));
+            }
+            // Let through to find out: not asked again at its turn.
+            finds_out = silent.is_some();
+        }
+        // Attaching to a pane of another station is counted for that
+        // station and has that station's places: it waits for that station
+        // (four seconds to connect, five for its answer) and must hold up
+        // no attach here or anywhere else.
+        let attach_to = (lane == Lane::Attach)
+            .then(|| req.params.get("station").and_then(|s| s.as_str()))
+            .flatten()
+            .filter(|s| *s != conn.daemon().station)
+            .map(String::from);
+        let counted = match self
+            .counts
+            .admit(station.as_deref().or(attach_to.as_deref()), lane)
+        {
+            Ok(c) => c,
+            Err(busy) => return self.busy(&req, &busy),
+        };
+        // A stop's place in a pane's input is where it is read: here,
+        // unless something typed for that pane before it is still waiting
+        // its turn, when the stop takes its place at its own turn.
+        let mut at = AtRead::default();
+        let mut place = None;
+        let stop_all = station.is_none() && route.method == "stop.all";
+        // A second try of a stop takes nothing here: it is answered from
+        // the record of the first, or, with none, stops as any stop does
+        // and takes its places when it runs.
+        let again = req.again();
+        if station.is_none() && lane == Lane::Urgent && conn.who.is_owner() && !again {
+            let daemon = conn.daemon();
+            match (route.method.as_str(), &scope) {
+                ("pane.stop", Some(Scope::Pane(id))) if !self.lines.input_waits("", id) => {
+                    if let Ok(pane) = daemon.pane(id) {
+                        at.marks.insert(pane.id.clone(), pane.term.mark_stop());
+                    }
+                }
+                ("stop.all", _) => {
+                    let whom = route.stop_scope.as_deref().unwrap_or("station");
+                    let mut legs: Vec<(String, String)> = vec![];
+                    if daemon.stop_is_for_here(whom) {
+                        daemon
+                            .stop_marks_unless(&mut at.marks, |id| self.lines.input_waits("", id));
+                        legs.push((daemon.station.clone(), String::new()));
+                    }
+                    match whom {
+                        "fleet" => legs.extend(
+                            daemon
+                                .fleet
+                                .peers()
+                                .iter()
+                                .map(|p| (p.station.clone(), p.station.clone())),
+                        ),
+                        other if !daemon.stop_is_for_here(other) => {
+                            legs.push((other.to_string(), other.to_string()))
+                        }
+                        _ => {}
+                    }
+                    // The stop's place among what is for each station's
+                    // panes; each station's part waits for its own turn.
+                    for (name, line) in legs {
+                        let leg = self.lines.enter(&line, Scope::AllPanes, false);
+                        at.legs.insert(name, Box::new(leg));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !stop_all || (at.legs.is_empty() && !again) {
+            place = scope.map(|s| self.lines.enter(&line, s, lane == Lane::Input));
+        }
+        // A read for another station has that station's places and no
+        // others, so stations that do not answer hold up no read of this
+        // station or of a station that does. (A name that is no station of
+        // the fleet is refused at once, wherever it waits.)
+        let places = match lane {
+            Lane::Read => Some(
+                match station
+                    .as_ref()
+                    .filter(|s| conn.daemon().fleet.peer(s).is_some())
+                {
+                    Some(s) => self
+                        .reads_to
+                        .entry(s.clone())
+                        .or_insert_with(|| Arc::new(Semaphore::new(lanes::READS_PER_STATION)))
+                        .clone(),
+                    None => self.reads.clone(),
+                },
+            ),
+            Lane::Attach => Some(
+                match attach_to.filter(|s| conn.daemon().fleet.peer(s).is_some()) {
+                    Some(s) => self
+                        .attaches_to
+                        .entry(s)
+                        .or_insert_with(|| Arc::new(Semaphore::new(lanes::READS_PER_STATION)))
+                        .clone(),
+                    None => self.attaches.clone(),
+                },
+            ),
+            _ => None,
+        };
+        let knows = self.page_knows_busy;
+        // The parameters of the call that acts, for what is said if a
+        // station gives no answer.
+        let route_params = match req.method.as_str() {
+            "peer.call" => req.params.get("params").cloned().unwrap_or(Value::Null),
+            _ => req.params.clone(),
+        };
+        let ends_with_connection = route.ends_with_connection;
+        let task = async move {
+            let _counted = counted;
+            // Its place among the reads, and its turn in its line. For
+            // another station that wait has an end: a call that has stood
+            // four seconds behind others for that station is not sent, and
+            // is told so (nothing was changed), so what it costs its caller
+            // is bounded whatever that station does.
+            let waits = async {
+                let held = match places {
+                    Some(places) => places.acquire_owned().await.ok(),
+                    None => None,
+                };
+                if let Some(place) = &place {
+                    place.turn().await;
+                }
+                held
+            };
+            let began;
+            let reply = match &station {
+                None => {
+                    let _held = waits.await;
+                    began = std::time::Instant::now();
+                    match lane {
+                        Lane::Attach => conn.attach(&req.method, &req.params).await,
+                        _ => {
+                            conn.dispatch(&req.method, req.params.clone(), req.retry.clone(), at)
+                                .await
+                        }
+                    }
+                }
+                Some(to) => {
+                    let held = tokio::time::timeout(lanes::STATION_WAIT, waits).await;
+                    began = std::time::Instant::now();
+                    let fleet = &conn.daemon().fleet;
+                    // While it waited the station may have stopped
+                    // answering: then it is not sent either (a Stop is).
+                    let silent = lanes::held_back(lane, fleet.not_answering(to), || {
+                        finds_out || fleet.probe(to)
+                    });
+                    match (held, silent) {
+                        (Err(_), _) => Err(lanes::not_sent(to, knows)),
+                        (Ok(_), Some(since)) => {
+                            let for_ms = spandeck_core::paths::now_ms().saturating_sub(since);
+                            Err(lanes::not_answering(to, for_ms, knows))
+                        }
+                        // Given up here after the deadline, whatever the
+                        // call underneath is doing.
+                        (Ok(_held), None) => {
+                            let call = conn.dispatch(
+                                &req.method,
+                                req.params.clone(),
+                                req.retry.clone(),
+                                at,
+                            );
+                            match tokio::time::timeout(lanes::STATION_DEADLINE, call).await {
+                                Ok(reply) => reply,
+                                Err(_) => Err(lanes::no_answer(
+                                    to,
+                                    &route.method,
+                                    spandeck_core::rpc::repeatable(&route.method, &route_params),
+                                    knows,
+                                )),
+                            }
+                        }
+                    }
+                }
+            };
+            drop(place);
+            conn.finish(&req, lane, began, reply).await;
+        };
+        if ends_with_connection {
+            self.ending.spawn(task);
+        } else {
+            self.lasting.spawn(task);
+        }
+    }
+
+    /// `pane.input` and `pane.resize` for a channel.
+    async fn typed(&mut self, mut req: Req) {
+        let conn = self.conn.clone();
+        let began = std::time::Instant::now();
+        match conn.typed(&req.method, &req.params) {
+            Typed::No(why) => conn.say(conn.done(&req, Some(Lane::Input), began, Err(why))),
+            Typed::Here(pane) => {
+                let scope = Scope::Pane(pane.clone());
+                req.params["pane"] = json!(pane);
+                if self.lines.free("", &scope) {
+                    let reply = conn
+                        .dispatch(
+                            &req.method,
+                            req.params.clone(),
+                            req.retry.clone(),
+                            AtRead::default(),
+                        )
+                        .await;
+                    return conn.say(conn.done(&req, Some(Lane::Input), began, reply));
+                }
+                // Something for this pane read before it is still being
+                // done (a Stop, a Pause): it follows.
+                let counted = match self.counts.admit(None, Lane::Input) {
+                    Ok(c) => c,
+                    Err(busy) => return self.busy(&req, &busy),
+                };
+                let place = self.lines.enter("", scope, true);
+                self.lasting.spawn(async move {
+                    let _counted = counted;
+                    place.turn().await;
+                    let began = std::time::Instant::now();
+                    let reply = conn
+                        .dispatch(
+                            &req.method,
+                            req.params.clone(),
+                            req.retry.clone(),
+                            AtRead::default(),
+                        )
+                        .await;
+                    drop(place);
+                    conn.finish(&req, Lane::Input, began, reply).await;
+                });
+            }
+            Typed::There {
+                tx,
+                text,
+                station,
+                pane,
+            } => {
+                // Handed to the connection made for that pane, never
+                // waited for: when that station takes nothing and 256
+                // things already wait, this one is refused and the page
+                // told, where it used to stop every request of this page.
+                if req.again() {
+                    let no = Err(typed_twice());
+                    return conn.say(conn.done(&req, Some(Lane::Input), began, no));
+                }
+                let scope = Scope::Pane(pane);
+                let (to, knows) = (station.clone(), self.page_knows_busy);
+                let hand = move |conn: &Conn, req: &Req| match tx.try_send(text) {
+                    Ok(()) => Ok(json!({"ok": true})),
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        conn.daemon().perf.busy.add();
+                        conn.input_refused(&req.params, &to);
+                        Err(
+                            json!({"code": if knows { lanes::CAP_BUSY } else { "internal" }, "message": format!("{to} is not taking what is typed: this was not sent")}),
+                        )
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => Err(
+                        json!({"code": "unreachable", "message": "the connection to that station ended"}),
+                    ),
+                };
+                if self.lines.free(&station, &scope) {
+                    let reply = hand(&conn, &req);
+                    return conn.say(conn.done(&req, Some(Lane::Input), began, reply));
+                }
+                // A paste or a Stop for that pane, sent through a call of
+                // its own, has not been answered yet: this follows it.
+                let counted = match self.counts.admit(Some(&station), Lane::Input) {
+                    Ok(c) => c,
+                    Err(busy) => {
+                        conn.input_refused(&req.params, &station);
+                        return self.busy(&req, &busy);
+                    }
+                };
+                let place = self.lines.enter(&station, scope, true);
+                self.lasting.spawn(async move {
+                    let _counted = counted;
+                    // Not kept for later than the four seconds any call
+                    // for another station may wait its turn.
+                    let turn = tokio::time::timeout(lanes::STATION_WAIT, place.turn()).await;
+                    let began = std::time::Instant::now();
+                    let reply = match turn {
+                        Ok(()) => hand(&conn, &req),
+                        Err(_) => {
+                            conn.input_refused(&req.params, &station);
+                            Err(lanes::not_sent(&station, knows))
+                        }
+                    };
+                    drop(place);
+                    conn.finish(&req, Lane::Input, began, reply).await;
+                });
+            }
+        }
+    }
+
+    /// One request, as before lanes (`ws_lanes = false`): waited for here,
+    /// so the next is not read until it is done.
+    async fn one_at_a_time(&mut self, req: Req) {
+        let conn = self.conn.clone();
+        let began = std::time::Instant::now();
+        let by_chan = req.params.get("chan").is_some_and(|c| !c.is_null());
+        let reply = match req.method.as_str() {
+            "pane.attach" | "pane.conversation.watch" => {
+                conn.attach(&req.method, &req.params).await
+            }
+            "pane.detach" | "pane.conversation.unwatch" => Ok(conn.detach(&req.params)),
+            "pane.input" | "pane.resize" if by_chan => match conn.typed(&req.method, &req.params) {
+                Typed::No(why) => Err(why),
+                Typed::Here(pane) => {
+                    let mut p = req.params.clone();
+                    p["pane"] = json!(pane);
+                    conn.dispatch(&req.method, p, req.retry.clone(), AtRead::default())
+                        .await
+                }
+                Typed::There { .. } if req.again() => Err(typed_twice()),
+                Typed::There { tx, text, .. } => {
+                    let _ = tx.send(text).await;
+                    Ok(json!({"ok": true}))
+                }
+            },
+            _ => {
+                conn.dispatch(
+                    &req.method,
+                    req.params.clone(),
+                    req.retry.clone(),
+                    AtRead::default(),
+                )
+                .await
+            }
+        };
+        if let Some(msg) = conn.done(&req, None, began, reply) {
+            let _ = conn.out.send(msg).await;
+        }
+    }
+}
+
 async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     // The token travels in the first message, never in a cookie or the URL.
@@ -890,6 +1651,10 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
             .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
             .collect();
     }
+    // What the page says it understands that a page from before does not.
+    let page_knows_busy = auth["caps"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|c| c == lanes::CAP_BUSY));
     // Which of the owner's devices this is, as Tailscale names it: the deck
     // warns when the key of the device in the owner's hand is about to
     // expire. A device that opens a deck is one the fleet warns about.
@@ -899,7 +1664,9 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     } else {
         None
     };
-    let hello = json!({"auth": {"ok": true, "station": web.daemon.station, "version": spandeck_core::VERSION, "build": assets_build(), "client": who.client, "full": who.is_owner(), "device": device}});
+    // Read once, here: a connection keeps the way it began.
+    let in_lanes = web.daemon.flag_on(lanes::FLAG, true);
+    let hello = json!({"auth": {"ok": true, "station": web.daemon.station, "version": spandeck_core::VERSION, "build": assets_build(), "client": who.client, "full": who.is_owner(), "device": device, "lanes": in_lanes, "caps": web.daemon.caps()}});
     if sink
         .send(Message::Text(hello.to_string().into()))
         .await
@@ -920,7 +1687,6 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
         }
     });
 
-    let mut chans: Channels<Chan> = Channels::starting_from(chan_seed());
     let mut events_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // A browser signed in from another device, or another station relaying
@@ -933,10 +1699,23 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     let mut rekeyed = web.daemon.trust.rekeyed();
     let mut key_replaced = false;
 
+    let conn = Conn {
+        web: web.clone(),
+        who: Arc::new(who),
+        out: out_tx.clone(),
+        open: Arc::new(Mutex::new(Open {
+            chans: Channels::starting_from(chan_seed()),
+            ended: false,
+        })),
+    };
+    let who = conn.who.clone();
+    let mut running = Running::new(conn.clone(), page_knows_busy);
+
     // Each request is stamped as it arrives, so that how long it then stood
-    // behind the ones before it is known (the Performance page). They are
-    // taken one at a time and in the order they came, as before; up to 64
-    // wait here, and past that the socket is not read, as before.
+    // before it was begun is known (the Performance page). They are read in
+    // the order they came; up to 64 wait here, and past that the socket is
+    // not read, as before. Reading one never waits for the one before it
+    // (lanes.rs), unless the switch `ws_lanes` is off.
     let (in_tx, mut in_rx) = mpsc::channel::<(std::time::Instant, Message)>(64);
     let reader = tokio::spawn(async move {
         while let Some(Ok(msg)) = stream.next().await {
@@ -953,9 +1732,11 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                 key_replaced = true;
                 break;
             }
+            // Tasks that are done are let go of as they finish.
+            Some(_) = running.ending.join_next(), if !running.ending.is_empty() => continue,
+            Some(_) = running.lasting.join_next(), if !running.lasting.is_empty() => continue,
         };
         let Some((arrived, msg)) = msg else { break };
-        let (waited, began) = (arrived.elapsed(), std::time::Instant::now());
         let text = match msg {
             Message::Text(t) => t,
             Message::Close(_) => break,
@@ -965,249 +1746,90 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
             continue;
         };
         let id = req.get("id").cloned().unwrap_or(Value::Null);
-        let method = req
-            .get("method")
-            .and_then(|m| m.as_str())
-            .unwrap_or("")
-            .to_string();
-        let params = req.get("params").cloned().unwrap_or(json!({}));
-        let reply: Result<Value, Value> = match method.as_str() {
-            "pane.attach" => {
-                if !who.is_owner() {
-                    Err(json!({"code": "denied", "message": "attaching is for the user's clients"}))
-                } else {
-                    let chan = chans.fresh();
-                    let pane = params
-                        .get("pane")
-                        .and_then(|p| p.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let control = params.get("mode").and_then(|m| m.as_str()) != Some("watch");
-                    let station = params
-                        .get("station")
-                        .and_then(|s| s.as_str())
-                        .filter(|s| *s != web.daemon.station)
-                        .map(String::from);
-                    match station {
-                        None => match attach_local(
-                            &web.daemon,
-                            &pane,
-                            &who.client,
-                            chan,
-                            out_tx.clone(),
-                        ) {
-                            Ok((result, task)) => {
-                                web.daemon.note_attach(
-                                    result["pane"].as_str().unwrap_or(&pane),
-                                    &who.who,
-                                    &who.client,
-                                    control,
-                                );
-                                chans.open(
-                                    chan,
-                                    Chan::Local {
-                                        pane: result["pane"].as_str().unwrap_or(&pane).to_string(),
-                                        control,
-                                        task,
-                                    },
-                                );
-                                Ok(result)
-                            }
-                            Err(e) => Err(error_json(&e)),
-                        },
-                        Some(station) => match attach_remote(
-                            &web.daemon,
-                            &station,
-                            &pane,
-                            control,
-                            &who.client,
-                            chan,
-                            out_tx.clone(),
-                        )
-                        .await
+        let retry = match Retry::parse(req.get("rid"), req.get("again_ms")) {
+            Ok(retry) => retry,
+            Err(why) => {
+                conn.say(answer(&id, Err(json!({"code": "invalid", "message": why}))));
+                continue;
+            }
+        };
+        let req = Req {
+            arrived,
+            retry,
+            id,
+            method: req
+                .get("method")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string(),
+            params: req.get("params").cloned().unwrap_or(json!({})),
+        };
+        if req.method == "events.subscribe" {
+            let reply = if !who.is_owner() {
+                Err(denied("events are for the user's clients"))
+            } else {
+                if let Some(t) = events_task.take() {
+                    t.abort();
+                }
+                let mut rx = web.daemon.bus.subscribe();
+                let tx = out_tx.clone();
+                events_task = Some(tokio::spawn(async move {
+                    loop {
+                        let msg = match rx.recv().await {
+                            Ok(ev) => json!({"event": ev}),
+                            Err(RecvError::Lagged(n)) => json!({"events_lost": n}),
+                            Err(RecvError::Closed) => break,
+                        };
+                        if tx
+                            .send(Message::Text(msg.to_string().into()))
+                            .await
+                            .is_err()
                         {
-                            Ok((result, tx, peer_chan, task)) => {
-                                chans.open(
-                                    chan,
-                                    Chan::Remote {
-                                        tx,
-                                        peer_chan,
-                                        control,
-                                        task,
-                                    },
-                                );
-                                Ok(result)
-                            }
-                            Err(e) => Err(json!({"code": "unreachable", "message": e})),
-                        },
-                    }
-                }
-            }
-            "pane.detach" | "pane.conversation.unwatch" => {
-                if let Some(c) = chans.close(&params) {
-                    c.close();
-                }
-                Ok(json!({"ok": true}))
-            }
-            // The conversation view's live stream: the first page as the
-            // reply, then every change on this channel, the pane's file
-            // looked at five times a second for as long as someone watches.
-            // The owner's clients only, as attaching is; a pane on another
-            // station is watched there and passed through, and nothing of
-            // it is kept here.
-            "pane.conversation.watch" => {
-                if !who.is_owner() {
-                    Err(
-                        json!({"code": "denied", "message": "a conversation is for the user's clients"}),
-                    )
-                } else {
-                    let chan = chans.fresh();
-                    let station = params
-                        .get("station")
-                        .and_then(|s| s.as_str())
-                        .filter(|s| *s != web.daemon.station)
-                        .map(String::from);
-                    let watched = match station {
-                        None => watch_local(&web.daemon, &params, chan, out_tx.clone())
-                            .await
-                            .map_err(|e| error_json(&e)),
-                        Some(station) => {
-                            watch_remote(
-                                &web.daemon,
-                                &station,
-                                &params,
-                                &who.client,
-                                chan,
-                                out_tx.clone(),
-                            )
-                            .await
-                        }
-                    };
-                    watched.map(|(result, task)| {
-                        chans.open(chan, Chan::Watch { task });
-                        result
-                    })
-                }
-            }
-            // Typing and resizing name the channel they are for. A number
-            // this connection did not give names nothing, whatever pane a
-            // connection before this one had under it.
-            "pane.input" | "pane.resize" if params.get("chan").is_some_and(|c| !c.is_null()) => {
-                match chans.get(&params) {
-                    Some(Chan::Watch { .. }) => Err(
-                        json!({"code": "denied", "message": "a watched conversation takes no typing"}),
-                    ),
-                    Some(Chan::Local { pane, control, .. }) => {
-                        if !control {
-                            Err(
-                                json!({"code": "denied", "message": "watching only: take control to type"}),
-                            )
-                        } else {
-                            let mut p = params.clone();
-                            p["pane"] = json!(pane);
-                            web.daemon
-                                .dispatch(&who, &method, p)
-                                .await
-                                .map_err(|e| error_json(&e))
+                            break;
                         }
                     }
-                    Some(Chan::Remote {
-                        tx,
-                        peer_chan,
-                        control,
-                        ..
-                    }) => {
-                        if !control {
-                            Err(
-                                json!({"code": "denied", "message": "watching only: take control to type"}),
-                            )
-                        } else {
-                            let mut p = params.clone();
-                            p["chan"] = json!(peer_chan);
-                            let _ = tx
-                                .send(
-                                    json!({"id": null, "method": method, "params": p}).to_string(),
-                                )
-                                .await;
-                            Ok(json!({"ok": true}))
-                        }
-                    }
-                    None => Err(json!({"code": "not_found", "message": "no such channel"})),
-                }
-            }
-            "events.subscribe" => {
-                if !who.is_owner() {
-                    Err(json!({"code": "denied", "message": "events are for the user's clients"}))
-                } else {
-                    if let Some(t) = events_task.take() {
-                        t.abort();
-                    }
-                    let mut rx = web.daemon.bus.subscribe();
-                    let tx = out_tx.clone();
-                    events_task = Some(tokio::spawn(async move {
-                        loop {
-                            let msg = match rx.recv().await {
-                                Ok(ev) => json!({"event": ev}),
-                                Err(RecvError::Lagged(n)) => json!({"events_lost": n}),
-                                Err(RecvError::Closed) => break,
-                            };
-                            if tx
-                                .send(Message::Text(msg.to_string().into()))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    }));
-                    Ok(json!({"subscribed": true}))
-                }
-            }
-            _ => web
-                .daemon
-                .dispatch(&who, &method, params)
-                .await
-                .map_err(|e| error_json(&e)),
-        };
-        let gateway = method == "peer.call";
-        web.daemon.perf.request(
-            Kind::Deck,
-            &method,
-            gateway.then(|| req["params"]["method"].as_str()).flatten(),
-            gateway.then(|| req["params"]["station"].as_str()).flatten(),
-            began.elapsed(),
-            Some(waited),
-        );
-        if id.is_null() {
-            continue; // fire-and-forget (keystrokes)
-        }
-        let out = match reply {
-            Ok(result) => json!({"id": id, "result": result}),
-            Err(error) => json!({"id": id, "error": error}),
-        };
-        if out_tx
-            .send(Message::Text(out.to_string().into()))
-            .await
-            .is_err()
-        {
-            break;
+                }));
+                Ok(json!({"subscribed": true}))
+            };
+            conn.say(conn.done(&req, None, std::time::Instant::now(), reply));
+        } else if in_lanes {
+            running.take(req).await;
+        } else {
+            running.one_at_a_time(req).await;
         }
     }
 
-    for (_, c) in chans.live {
+    // The connection is over. What only it would have read the answer to
+    // is ended; what changes something runs to its end, as it always did.
+    let chans = {
+        let mut open = conn.open.lock().unwrap();
+        open.ended = true;
+        std::mem::take(&mut open.chans.live)
+    };
+    for (_, c) in chans {
         c.close();
     }
     if let Some(t) = events_task {
         t.abort();
     }
     reader.abort();
+    running.ending.shutdown().await;
     if key_replaced {
         // The reply to the call that replaced the key is still on its way
-        // out: let it go before the connection is closed.
+        // out: let that call finish, and its answer go, before the
+        // connection is closed.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while running.lasting.join_next().await.is_some() {}
+        })
+        .await;
+        running.lasting.detach_all();
+        drop(running);
+        drop(conn);
         drop(out_tx);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), writer).await;
         return;
     }
+    running.lasting.detach_all();
     writer.abort();
 }
 

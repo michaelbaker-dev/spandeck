@@ -32,6 +32,7 @@ const S = {
   route: { view: 'fleet' },
   fleet: { stations: [], stops: [] },
   panes: new Map(),      // station -> [pane]
+  busy: new Map(),       // station -> since when its answers have not come and no more is asked of it
   tasks: new Map(),      // station -> [active task]
   msgs: new Map(),       // station -> [recent message]
   projects: new Map(),   // station -> [project]
@@ -92,7 +93,13 @@ async function refreshStation(st) {
     S.projects.set(st, projects);
     S.tasks.set(st, tasks);
     S.msgs.set(st, msgs);
-  } catch (e) { /* unreachable: the fleet view says so */ }
+    S.busy.delete(st);
+  } catch (e) {
+    // Unreachable: the fleet view says so. `busy`: the serving station still
+    // waits for this station's answers to earlier questions and took no more
+    // (it answers so at once); what is shown of it is from before.
+    if (e.code === 'busy' || e.code === 'not_answering') S.busy.set(st, S.busy.get(st) || Date.now()); else S.busy.delete(st);
+  }
 }
 
 async function refresh() {
@@ -1577,6 +1584,7 @@ function stationTile(s) {
     up ? h('div', { class: 'tile-stats' },
       h('span', {}, h('b', {}, s.working ?? 0), ' working'), h('span', { class: s.needs_you ? 'needs' : '' }, h('b', {}, s.needs_you ?? 0), ' need you'),
       s.load != null ? h('span', { class: 'muted' }, 'load ' + Number(s.load).toFixed(1)) : null, s.keep_awake ? h('span', { class: 'chip' }, 'kept awake') : null,
+      S.busy.has(s.station) ? h('span', { class: 'chip warn', title: `${api.station} is still waiting for ${s.station} to answer what this page asked before, and asks it no more until it does. What is shown here is from ${ago(S.busy.get(s.station))} ago. Everything else on this page is unaffected.` }, 'not answering: shown from before') : null,
       s.codex_sandbox_blocked ? h('span', { class: 'chip warn', title: 'Codex cannot run commands on this station: the system blocks its sandbox. On the station, run "spandeck doctor --fix" once. It asks for your password.' }, 'Codex blocked') : null,
       s.service === false ? h('span', { class: 'chip warn', title: 'spandeck does not start at login on this station. After a reboot it stays down until someone starts it. Run "spandeck service --install" there.' }, 'not started at login') : null, vaultChip(s), keyChip(s.station))
       : h('div', { class: 'tile-stats warn-text' }, s.state === 'update_needed' ? 'Needs an update before it can be controlled' : awayWhy(s) ? [awayWhy(s), ' ', s.why === 'clock' ? null : keyChip(s.station)] : s.state === 'unreachable' ? [`Unreachable · last seen ${ago(s.last_seen_ms)} ago. Right-click to wake or start it. `, keyChip(s.station)] : s.state === 'not_linked' ? ['Not in this fleet. ', h('button', { class: 'mini add-station', onclick: (e) => { e.preventDefault(); e.stopPropagation(); addMachineDialog({ station: s.station, kind: 'join' }); } }, `Add ${s.station} to this fleet…`)] : `Unreachable · last seen ${ago(s.last_seen_ms)} ago`),

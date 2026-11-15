@@ -168,6 +168,12 @@ export class PaneTerm {
           if (Number.isInteger(r.cols) && Number.isInteger(r.rows) && r.cols >= 2 && r.cols <= 500 && r.rows >= 1 && r.rows <= 300) this.resizedBy(String(r.controller || ''), r.cols, r.rows);
         },
         onDiscarded: (n) => { if (n > 0) toast(`Not sent: the pane was stopped before ${n === 1 ? 'what you typed' : n + ' things you typed'} reached its program.`, 'error'); },
+        // Said once in a while, not for every key: the station names itself as text.
+        onRefused: (station) => {
+          if (Date.now() - (this.refusedAt || 0) < 4000) return;
+          this.refusedAt = Date.now();
+          toast(`Not sent: ${station || this.station} is not taking what is typed. What you type now is not kept for later.`, 'error');
+        },
       };
       const res = await this.api.attach(this.station, this.pane.id, this.mode, handlers);
       if (this.disposed) { this.api.detach(res.chan); return; }

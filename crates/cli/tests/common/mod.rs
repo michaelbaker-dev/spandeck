@@ -264,6 +264,14 @@ impl Station {
         s
     }
 
+    /// A station of the test fleet (the key every `pair` and `three` has)
+    /// on a port and with a config of the caller's choosing: for a fleet
+    /// in which one station reaches another through something in between.
+    #[allow(dead_code)]
+    pub fn keyed_on(name: &str, port: u16, extra: &str) -> Station {
+        Station::start_keyed(name, port, extra, Some(&"5a".repeat(32)))
+    }
+
     fn start_keyed(name: &str, port: u16, extra: &str, key: Option<&str>) -> Station {
         let mut s = Station::prepare(name, port, extra, &[]);
         if let Some(key) = key {

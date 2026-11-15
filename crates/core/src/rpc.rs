@@ -196,6 +196,73 @@ const NEEDS_DATABASE: &[&str] = &[
     "note.add",
 ];
 
+/// The owner's calls that change nothing but are not on the read-only list
+/// (they are the owner's history, the owner's devices, or for whoever may
+/// start a pane). With `READ_METHODS` they are what a Control Deck's
+/// connection may answer in any order (`reads`).
+const OWNER_READS: &[&str] = &[
+    "pane.conversation",
+    "pane.conversation.detail",
+    "pane.titles",
+    "pane.last_session",
+    "perf.get",
+    "tailnet.view",
+    "tailnet.signin",
+    "fleet.add_status",
+];
+
+/// Does this method only read? Such a call changes nothing, so a Control
+/// Deck's connection answers several at once and in any order; every other
+/// call to a station is made in the order it arrived (web: lanes).
+pub fn reads(method: &str) -> bool {
+    READ_METHODS.contains(&method) || OWNER_READS.contains(&method)
+}
+
+/// May a caller with this authority call this method at all? What
+/// `dispatch` asks first; for whoever must act as a request is read
+/// (a stop's place in a pane's input) and so before it is dispatched.
+pub fn allowed(authority: Authority, method: &str) -> bool {
+    match authority {
+        Authority::Owner => true,
+        Authority::Agent => AGENT_METHODS.contains(&method),
+        Authority::Peer => PEER_METHODS.contains(&method),
+        Authority::ReadOnly => READ_METHODS.contains(&method),
+    }
+}
+
+/// A method that acts from the station the owner is using and is never
+/// passed on to another one.
+pub fn not_forwarded(method: &str) -> bool {
+    NOT_FORWARDED.contains(&method)
+}
+
+/// What was taken for a request the moment it was read, before it was its
+/// turn to run. A connection that handles several requests at once reads
+/// them in the order they came, and that order is the one a stop's place
+/// must have.
+#[derive(Default)]
+pub struct AtRead {
+    /// A stop's place in the input of each pane it may stop. A pane with
+    /// no entry is marked when the stop runs.
+    pub marks: crate::holds::StopMarks,
+    /// For "stop every agent": the stop's place, per station, in the order
+    /// of the connection that read it. Each station's part of the stop
+    /// waits for its own turn and lets its place go when it is done
+    /// (applied here, or answered or given up on there), so that neither
+    /// the stop nor what was read after it waits for another station.
+    pub legs: StopLegs,
+}
+
+/// A stop's place in one station's order: see `AtRead::legs`.
+pub trait StopLeg: Send + Sync {
+    /// Wait until everything read before the stop, for this station's
+    /// panes, is done.
+    fn turn(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+}
+
+/// By station. Dropping a station's entry gives its place up.
+pub type StopLegs = std::collections::HashMap<String, Box<dyn StopLeg>>;
+
 /// Calls that are safe to make a second time when no answer came to the
 /// first: they only read, or set something to what it already is. A
 /// caller that lost its connection sends one of these again without an
@@ -221,6 +288,8 @@ const REPEATABLE: &[&str] = &[
     "fleet.refresh",
     "fleet.candidates",
     "fleet.add_status",
+    // It only reads (and what it answers is kept nowhere).
+    "tailnet.signin",
     "look.font.fetch",
     "sync.pull",
     "presence.touch",
@@ -350,6 +419,8 @@ struct Ctx {
     mark: Option<SendMark>,
     /// Where "Stop everything" records the stops it issued.
     stop_key: Option<String>,
+    /// What the connection that read the request took for it then.
+    at: AtRead,
 }
 
 fn p<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T> {
@@ -420,12 +491,9 @@ impl Daemon {
     /// Which caller may call what. Asked before anything else is looked
     /// at, a request's id included.
     fn permit(&self, caller: &Caller, method: &str) -> Result<()> {
-        match caller.authority {
-            Authority::Owner => Ok(()),
-            Authority::Agent if AGENT_METHODS.contains(&method) => Ok(()),
-            Authority::Peer if PEER_METHODS.contains(&method) => Ok(()),
-            Authority::ReadOnly if READ_METHODS.contains(&method) => Ok(()),
-            _ => Err(Error::Denied(format!(
+        match allowed(caller.authority, method) {
+            true => Ok(()),
+            false => Err(Error::Denied(format!(
                 "{method} is not available to this caller"
             ))),
         }
@@ -446,20 +514,46 @@ impl Daemon {
         params: Value,
         retry: Option<Retry>,
     ) -> Result<Value> {
+        self.dispatch_read(caller, method, params, retry, AtRead::default())
+            .await
+    }
+
+    /// `dispatch_rid`, for a request whose stop marks were taken when it
+    /// was read (`AtRead`): a Control Deck's connection, which reads
+    /// requests in order and runs them side by side. What was taken goes
+    /// with the request to whatever carries it out, and is let go of at
+    /// once when nothing does (a second try answered from what is kept).
+    pub async fn dispatch_read(
+        &self,
+        caller: &Caller,
+        method: &str,
+        params: Value,
+        retry: Option<Retry>,
+        at: AtRead,
+    ) -> Result<Value> {
         let Some(retry) = retry else {
-            return self
-                .dispatch_inner(caller, method, params, Ctx::default())
-                .await;
+            let ctx = Ctx {
+                at,
+                ..Default::default()
+            };
+            return self.dispatch_inner(caller, method, params, ctx).await;
         };
         self.permit(caller, method)?;
         // Passed on with the request: this station keeps nothing of it.
         if matches!(method, "peer.call" | "rpc.forward") {
             let ctx = Ctx {
                 retry: Some(retry),
+                at,
                 ..Default::default()
             };
             return self.dispatch_inner(caller, method, params, ctx).await;
         }
+        // Whichever way the request is carried out, once.
+        let mut at = Some(at);
+        let mut with = |ctx: Ctx| Ctx {
+            at: at.take().unwrap_or_default(),
+            ..ctx
+        };
         // Whose request it is, from the token it came with: every owner's
         // client is the one owner, whichever station passed the request
         // on; an agent is its pane. A station's own calls keep no ids.
@@ -474,17 +568,19 @@ impl Daemon {
                 "{method}: could not confirm whether this was carried out ({why}). Nothing was done now: check before asking again."
             ))
         };
-        let plain = Ctx::default;
         match (class(method, &params), who) {
-            (Class::Repeat, _) => self.dispatch_inner(caller, method, params, plain()).await,
+            (Class::Repeat, _) => {
+                self.dispatch_inner(caller, method, params, with(Ctx::default()))
+                    .await
+            }
             (Class::Stop, Some(who)) => {
                 for _ in 0..100 {
                     match self.rids.stop_begin(&who, &retry.rid) {
                         StopBegin::First(key) => {
-                            let ctx = Ctx {
+                            let ctx = with(Ctx {
                                 stop_key: Some(key.clone()),
                                 ..Default::default()
-                            };
+                            });
                             let out = self.dispatch_inner(caller, method, params, ctx).await;
                             if out.is_err() {
                                 self.rids.stop_refused(&key);
@@ -506,7 +602,10 @@ impl Daemon {
                 Ok(json!({"repeat": true, "stops": []}))
             }
             // No ids kept here: a stop errs on the side of stopping.
-            (Class::Stop, None) => self.dispatch_inner(caller, method, params, plain()).await,
+            (Class::Stop, None) => {
+                self.dispatch_inner(caller, method, params, with(Ctx::default()))
+                    .await
+            }
             (Class::OwnRecord, _) => {
                 if let Some(done) = retry
                     .again_ms
@@ -514,7 +613,8 @@ impl Daemon {
                 {
                     return done;
                 }
-                self.dispatch_inner(caller, method, params, plain()).await
+                self.dispatch_inner(caller, method, params, with(Ctx::default()))
+                    .await
             }
             (Class::Once(mark), Some(who)) => {
                 // This image is being replaced and writes nothing more: a
@@ -534,14 +634,14 @@ impl Daemon {
                     .begin(&who, method, &hash, &retry, mark, now_ms())
                 {
                     Begin::Run(run) => {
-                        let ctx = Ctx {
+                        let ctx = with(Ctx {
                             mark: (mark == crate::rids::Mark::InTx).then(|| SendMark {
                                 key: run.key.clone(),
                                 method: method.to_string(),
                                 hash: hash.clone(),
                             }),
                             ..Default::default()
-                        };
+                        });
                         let out = self.dispatch_inner(caller, method, params, ctx).await;
                         run.finish(
                             match &out {
@@ -569,14 +669,17 @@ impl Daemon {
                         "{method}: this request id was already used for a different request; nothing was done"
                     ))),
                     // Too many to remember one more: never refused for that.
-                    Begin::Unkept => self.dispatch_inner(caller, method, params, plain()).await,
+                    Begin::Unkept => self.dispatch_inner(caller, method, params, with(Ctx::default())).await,
                 }
             }
             // Nothing is kept for it (or ids are switched off here): a
             // first try runs as it always did, and a second is not run.
             (Class::Once(_) | Class::Never, _) => match retry.again_ms {
                 Some(_) => Err(unknown("this station keeps no record of such a request")),
-                None => self.dispatch_inner(caller, method, params, plain()).await,
+                None => {
+                    self.dispatch_inner(caller, method, params, with(Ctx::default()))
+                        .await
+                }
             },
         }
     }
@@ -632,7 +735,7 @@ impl Daemon {
         caller: &Caller,
         method: &str,
         mut params: Value,
-        ctx: Ctx,
+        mut ctx: Ctx,
     ) -> Result<Value> {
         self.permit(caller, method)?;
         if caller.authority == Authority::Owner
@@ -885,7 +988,11 @@ impl Daemon {
                 // here, before anything is waited for. What this connection
                 // sends next is kept, and written after the interrupt key.
                 let pane = self.pane(s(&params, "pane")?)?;
-                let mark = pane.term.mark_stop();
+                let mark = ctx
+                    .at
+                    .marks
+                    .remove(&pane.id)
+                    .unwrap_or_else(|| pane.term.mark_stop());
                 let (d, id, who) = (self.clone(), pane.id.clone(), by.to_string());
                 let done = tokio::task::spawn_blocking(move || d.stop_at(&id, &who, mark, true))
                     .await
@@ -1346,12 +1453,23 @@ impl Daemon {
                 self.fleet_view()
             }
             "stop.all" => {
-                // Each pane's place for this stop is taken as it is read.
-                let marks = self.stop_marks();
+                // Each pane's place for this stop is taken as it is read:
+                // by the connection that read it, or here. Only where the
+                // stop is for this station: a mark holds back what is sent
+                // to its pane after it, and a stop for another station
+                // used to hold this station's panes until that one answered.
+                let scope = opt(&params, "scope").unwrap_or("station");
+                let mut marks = std::mem::take(&mut ctx.at.marks);
+                if self.stop_is_for_here(scope) {
+                    self.stop_marks_into(&mut marks);
+                } else {
+                    marks.clear();
+                }
                 self.stop_all(
-                    opt(&params, "scope").unwrap_or("station"),
+                    scope,
                     by,
                     marks,
+                    std::mem::take(&mut ctx.at.legs),
                     ctx.stop_key.as_deref(),
                 )
                 .await?
@@ -1391,11 +1509,12 @@ impl Daemon {
                 if let Some(age) = retry.as_mut().and_then(|r| r.again_ms.as_mut()) {
                     *age = age.saturating_add(crate::rids::FAR_MS);
                 }
-                Box::pin(self.dispatch_rid(
+                Box::pin(self.dispatch_read(
                     &as_owner,
                     inner,
                     params.get("params").cloned().unwrap_or(json!({})),
                     retry,
+                    ctx.at,
                 ))
                 .await?
             }
@@ -1415,7 +1534,8 @@ impl Daemon {
                 let inner = s(&params, "method")?;
                 let inner_params = params.get("params").cloned().unwrap_or(json!({}));
                 if station == self.station {
-                    Box::pin(self.dispatch_rid(caller, inner, inner_params, ctx.retry)).await?
+                    Box::pin(self.dispatch_read(caller, inner, inner_params, ctx.retry, ctx.at))
+                        .await?
                 } else {
                     self.forward(station, inner, inner_params, ctx.retry)
                         .await?
@@ -2156,6 +2276,33 @@ pub(crate) fn constant_eq(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
     use crate::rids::Mark;
+
+    /// Two lists say what a read is: what a Control Deck's connection may
+    /// answer in any order (`reads`), and what is safe to ask a second
+    /// time (`repeatable`). They must not disagree: whatever is answered
+    /// out of order as a read is also asked again as one, and nothing a
+    /// request id keeps, or that must never run twice, is taken for a read.
+    #[test]
+    fn what_is_answered_in_any_order_is_safe_to_ask_twice() {
+        let none = json!({});
+        for m in READ_METHODS.iter().chain(OWNER_READS) {
+            assert!(reads(m), "{m}");
+            assert_eq!(class(m, &none), Class::Repeat, "{m} is a read");
+        }
+        for m in DONE_ONCE {
+            assert!(!reads(m), "{m} is done once by its id, and is no read");
+        }
+        for m in [
+            "msg.send",
+            "msg.reply",
+            "msg.inbox",
+            "stop.all",
+            "pane.stop",
+            "pane.input",
+        ] {
+            assert!(!reads(m), "{m}");
+        }
+    }
 
     /// Review B3, and the Guarantees for Stop and Trust: what is typed,
     /// stopped or answered never goes through the store; an answer that

@@ -66,7 +66,10 @@ export class Api {
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
       let opened = false;
-      ws.onopen = () => ws.send(JSON.stringify({ auth: { token: takeToken(), client: this.client } }));
+      // `caps`: what this page understands that a page from before does not:
+      // the error code `busy` (too many of this page's requests are waiting for
+      // a station), and `input_refused` on a pane's channel.
+      ws.onopen = () => ws.send(JSON.stringify({ auth: { token: takeToken(), client: this.client, caps: ['busy'] } }));
       ws.onmessage = (ev) => {
         if (typeof ev.data !== 'string') return this._binary(new Uint8Array(ev.data));
         const msg = JSON.parse(ev.data);
@@ -102,6 +105,9 @@ export class Api {
           if (c && msg.resized) c.onResized && c.onResized(msg.resized);
           // A stop threw away what this client had sent and the program had not been given.
           if (c && msg.input_discarded) c.onDiscarded && c.onDiscarded(Number(msg.input_discarded) || 0);
+          // What was typed for a pane of another station was not sent: that
+          // station is not taking it, and too much already waits.
+          if (c && msg.input_refused) c.onRefused && c.onRefused(String(msg.station || '').slice(0, 64));
           // A watched conversation (chat.js): what is new, or that it ended.
           if (c && msg.conversation) c.onConversation && c.onConversation(msg.conversation);
           if (c && msg.conversation_end) c.onEnd && c.onEnd(msg.conversation_end);
