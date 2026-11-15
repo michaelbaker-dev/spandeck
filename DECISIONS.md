@@ -322,6 +322,14 @@ The owner's approval: "execute ... the updated performance plan" (15 Nov 2026). 
 - **What is left, and said so.** This makes a wrong pane unlikely, not impossible: a number left over names a live channel only if the two connections started within a few numbers of each other, which is a chance of about one in fifty million for a deck with ten panes open. Unit 03b closes it: the page names each attachment with a number it never reuses and the station takes input only for a name attached on that connection.
 - **Mixed versions.** Only the station serving the deck matters. A deck served by a 0.4.4 station still counts from 1, for its own panes and for panes of an updated station shown through it; a deck served by an updated station is right for every pane, a 0.4.4 station's included. A 0.4.4 page loaded before its station was updated works unchanged.
 
+## Answers are not held back for 40 ms (15 Nov 2026)
+
+The owner's approval: "execute ... the updated performance plan" (15 Nov 2026). This is step 5 of the performance and continuity plan (`crates/web/src/lib.rs`, `no_delay`). Measured on 0.4.4, on one machine: the answers to four requests a Control Deck sent together took 41.8 ms, and 0.9 ms when the client acknowledged each piece at once. The station's system holds a small piece back until the piece before it is acknowledged, and a browser's system acknowledges after 40 ms when it has nothing of its own to send. Measured after: 0.7 ms. No Guarantee is changed; nothing but timing is.
+
+- **What a station writes to a connection is sent at once** (`TCP_NODELAY`): on every connection it accepts (a deck's socket, the calls and relays of other stations) and on the socket it opens to another station to show that station's pane or conversation. The calls a station makes to another were already sent so.
+- **The switch `nodelay`** (`[flags] nodelay = false`, or `station.flags`). Off: as before. It is read for each new connection, so setting it changes the connections made after that.
+- **Mixed versions.** Nothing is announced or asked of the other end. A 0.4.4 station still holds its own answers back, to its decks and to a station that shows its panes; each station stops doing so when it is updated.
+
 ## The conversation view (15 Nov 2026, the owner's request)
 
 "I like the Claude mobile app, simple, lets you focus on working with an agent, lets you talk to it. This is a single pane for focus ... I still can see a need though if you need to get back to terminal arrow etc ... make the functionality the same as Claude code but also keep the best of spandeck." Then: "execute ... the mobile plan". The plan's decisions were taken as it recommends; each is the owner's to overrule, and the ones that matter are marked **(default)**.

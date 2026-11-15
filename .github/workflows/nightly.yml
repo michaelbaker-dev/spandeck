@@ -31,8 +31,9 @@ jobs:
       - name: Holds (a stopped agent stays stopped, not reading, after a restart, the deck)
         run: cargo test -p spandeck --test holds -- --ignored
       # The deck's socket: a channel number from before a reconnect, at a
-      # station and through one.
-      - name: The deck's socket (a stale channel number reaches no pane)
+      # station and through one; and a timing: four answers together arrive
+      # within 10 ms (they took 42 ms while each waited to be acknowledged).
+      - name: The deck's socket (a stale channel number reaches no pane; answers are not held back)
         run: cargo test -p spandeck --test socket -- --ignored
   build:
     strategy:

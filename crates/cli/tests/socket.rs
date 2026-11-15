@@ -1,6 +1,7 @@
 //! The Control Deck's socket: channel numbers that name nothing on another
-//! connection, here through a second station. Scenario tests with real
-//! stations, in the merge tier (`--ignored`).
+//! connection, here through a second station (merge tier), and answers that
+//! are not held back (a timing, nightly). Scenario tests with real
+//! stations, run with `--ignored`.
 
 mod common;
 
@@ -22,7 +23,9 @@ struct Deck {
 
 impl Deck {
     async fn open(s: &Station, client: &str) -> Deck {
-        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/api/ws", s.port))
+        // As a browser does, it sends what it writes at once.
+        let url = format!("ws://127.0.0.1:{}/api/ws", s.port);
+        let (ws, _) = tokio_tungstenite::connect_async_with_config(url, None, true)
             .await
             .unwrap();
         let mut deck = Deck { ws, id: 0 };
@@ -110,7 +113,6 @@ fn shell(s: &Station, name: &str) -> String {
 /// reaches any pane, at this station or through it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "merge tier: starts two daemons"]
-#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 async fn a_channel_number_from_before_a_reconnect_reaches_no_pane() {
     let (a, b) = tokio::task::spawn_blocking(Station::pair).await.unwrap();
     let (a, b) = (std::sync::Arc::new(a), std::sync::Arc::new(b));
@@ -195,4 +197,66 @@ async fn a_channel_number_from_before_a_reconnect_reaches_no_pane() {
     drop(deck);
     // Stopping a station waits for it: not on the runtime's own threads.
     drop(tokio::task::spawn_blocking(move || drop((a, b))).await);
+}
+
+/// How long the answers to four things asked together take, right after an
+/// answer: the middle one of ten goes, in milliseconds.
+async fn four_together(s: &Station) -> f64 {
+    let mut deck = Deck::open(s, "bench-1").await;
+    let mut took = vec![];
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        deck.call("fleet.view", json!({})).await.unwrap();
+        let began = std::time::Instant::now();
+        let first = deck.id + 1;
+        for (method, params) in [
+            ("pane.list", json!({})),
+            ("project.list", json!({})),
+            ("task.list", json!({"active": true, "limit": 100})),
+            ("msg.recent", json!({"limit": 60})),
+        ] {
+            deck.id += 1;
+            deck.say(json!({"id": deck.id, "method": method, "params": params}))
+                .await;
+        }
+        let mut waiting: Vec<u64> = (first..=deck.id).collect();
+        while !waiting.is_empty() {
+            let v = deck.text().await;
+            waiting.retain(|id| v["id"] != json!(id));
+        }
+        took.push(began.elapsed().as_secs_f64() * 1000.0);
+    }
+    took.sort_by(f64::total_cmp);
+    (took[4] + took[5]) / 2.0
+}
+
+/// The plan's target for step 5, and the fault it was measured from: on
+/// 0.4.4 the answers to four requests a deck sent together took 42 ms,
+/// because the station's system held the second answer back until the
+/// browser's had acknowledged the first, which it does after 40 ms when it
+/// has nothing to send (`nagle.py` in the audit: 41.8 ms before, 0.7 ms
+/// after). Done when: with the switch as it comes, they take under 10 ms;
+/// and the switch is real: off, the old wait is back (on Linux, where the
+/// 40 ms was measured; other systems time their acknowledgements otherwise).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "nightly: a timing, of ten goes at two stations"]
+async fn four_answers_together_are_not_held_back() {
+    let (on, off) = tokio::task::spawn_blocking(|| {
+        (
+            Station::start("alpha"),
+            Station::start_with("bravo", "[flags]\nnodelay = false\n", &[]),
+        )
+    })
+    .await
+    .unwrap();
+    let (now, before) = (four_together(&on).await, four_together(&off).await);
+    println!("four answers together: {now:.2} ms; with nodelay = false: {before:.2} ms");
+    assert!(
+        now < 10.0,
+        "{now:.2} ms (with the switch off: {before:.2} ms)"
+    );
+    if cfg!(target_os = "linux") {
+        assert!(before > 20.0, "the switch changed nothing: {before:.2} ms");
+    }
+    drop(tokio::task::spawn_blocking(move || drop((on, off))).await);
 }

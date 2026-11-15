@@ -21,6 +21,7 @@ use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
+use axum::serve::ListenerExt;
 use axum::{Json, Router};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
@@ -118,6 +119,8 @@ impl Listening {
         *self.web.hosts.write().unwrap() = hosts;
         for (ip, addr, listener) in fresh {
             let app = self.app.clone();
+            let daemon = self.web.daemon.clone();
+            let listener = listener.tap_io(move |tcp| no_delay(&daemon, tcp));
             let task = tokio::spawn(async move {
                 let _ = axum::serve(
                     listener,
@@ -163,6 +166,26 @@ impl Listening {
             hosts.push(format!("{dns}:*"));
         }
         hosts
+    }
+}
+
+/// The switch for sending what is written at once (`[flags] nodelay`, on
+/// unless it is set to false).
+const NODELAY: &str = "nodelay";
+
+/// Send what is written to this connection at once (`TCP_NODELAY`), where
+/// the system's default is to hold a small piece back until the other end
+/// has acknowledged the piece before it. Measured on 0.4.4: four answers to
+/// a deck that asked four things together took 42 ms, because the second
+/// waited for an acknowledgement the browser's system gives only after
+/// 40 ms when it has nothing of its own to send; under 1 ms when it
+/// acknowledged at once. Every connection the station accepts: a deck's
+/// socket, another station's calls and its relays through this one.
+fn no_delay(daemon: &Daemon, tcp: &tokio::net::TcpStream) {
+    if daemon.flag_on(NODELAY, true) {
+        if let Err(e) = tcp.set_nodelay(true) {
+            tracing::debug!(error = %e, "could not set TCP_NODELAY on a connection");
+        }
     }
 }
 
@@ -1361,7 +1384,9 @@ async fn peer_socket(
     );
     let (ws, _) = tokio::time::timeout(
         std::time::Duration::from_secs(4),
-        tokio_tungstenite::connect_async(req),
+        // The same towards the other station: a key typed through this
+        // one is a small piece too.
+        tokio_tungstenite::connect_async_with_config(req, None, daemon.flag_on(NODELAY, true)),
     )
     .await
     .map_err(|_| format!("{station} did not answer"))?
