@@ -91,6 +91,19 @@ pub struct NewMessage {
     pub auth: Option<TaskAuth>,
 }
 
+/// The row of a request id (rids.rs) that a message's transaction writes.
+#[derive(Debug, Clone)]
+pub struct SendMark {
+    pub key: String,
+    pub method: String,
+    pub hash: String,
+}
+
+/// What the sender of a message is answered.
+pub fn sent_answer(env: &Envelope, remote: bool) -> Value {
+    json!({"id": env.id, "thread": env.thread, "status": if remote { "queued" } else { "delivered" }})
+}
+
 pub fn split_address(addr: &str) -> (&str, Option<&str>) {
     match addr.rsplit_once('@') {
         Some((name, station)) if !station.is_empty() => (name, Some(station)),
@@ -155,6 +168,20 @@ impl MessageStore {
 
     /// Store a message. One for another station also joins that station's queue.
     pub fn send(&self, new: NewMessage, now: u64) -> Result<Envelope, String> {
+        self.send_marked(new, now, None)
+    }
+
+    /// `send` for a request that carries an id: the id's row is written in
+    /// the same transaction as the message, so the two are stored together
+    /// or not at all, and a second try of the same request can never store
+    /// a second message (the row's key is the table's primary key: a
+    /// second insert fails the whole transaction).
+    pub fn send_marked(
+        &self,
+        new: NewMessage,
+        now: u64,
+        mark: Option<&SendMark>,
+    ) -> Result<Envelope, String> {
         if !KINDS.contains(&new.kind.as_str()) {
             return Err(format!("kind is one of {}", KINDS.join(", ")));
         }
@@ -194,6 +221,15 @@ impl MessageStore {
                     tx.execute(
                         "INSERT INTO outbox(msg,dest,ord) VALUES(?1,?2,(SELECT COALESCE(MAX(ord),0)+1 FROM outbox))",
                         params![env.id, dest],
+                    )?;
+                }
+                if let Some(mark) = mark {
+                    tx.execute(
+                        "INSERT INTO kv(k,v) VALUES(?1,?2)",
+                        params![
+                            mark.key,
+                            crate::rids::done_row(&mark.method, &mark.hash, &sent_answer(&env, !local), now)
+                        ],
                     )?;
                 }
                 Ok(env)

@@ -12,6 +12,8 @@ use spandeck_core::Paths;
 
 pub const SPANDECK: &str = env!("CARGO_BIN_EXE_spandeck");
 pub const FAKE: &str = env!("CARGO_BIN_EXE_spandeck-fake-agent");
+/// The program the Windows log-on task runs: it keeps a station running.
+pub const SPANDECKD: &str = env!("CARGO_BIN_EXE_spandeckd");
 /// Unix: an upgraded daemon is the same process. Windows: a new one.
 pub const UPGRADE_KEEPS_PID: bool = spandeck_terminal::sys::UPGRADE_KEEPS_PID;
 
@@ -20,6 +22,9 @@ pub struct Station {
     pub root: PathBuf,
     pub port: u16,
     pub child: Option<Child>,
+    /// `spandeckd`, for a station started as the log-on task starts one.
+    /// The daemon is then not this test's child.
+    pub supervisor: Option<Child>,
     pub env: Vec<(String, String)>,
     _dir: Option<tempfile::TempDir>,
     scripts: std::sync::atomic::AtomicU32,
@@ -76,6 +81,19 @@ pub fn wait_for<T>(what: &str, secs: u64, mut f: impl FnMut() -> Option<T>) -> T
 }
 
 impl Station {
+    /// A station of the test fleet on a port the test chose, with the
+    /// peer addresses the test chose (a proxy's, say). Nothing is waited
+    /// for.
+    pub fn in_fleet(name: &str, port: u16, peers: &[u16], extra: &str) -> Station {
+        let peers: Vec<String> = peers.iter().map(|p| format!("\"127.0.0.1:{p}\"")).collect();
+        Station::start_keyed(
+            name,
+            port,
+            &format!("peers = [{}]\n{extra}", peers.join(", ")),
+            Some(&"5a".repeat(32)),
+        )
+    }
+
     pub fn start(name: &str) -> Station {
         Station::start_with(name, "", &[])
     }
@@ -329,6 +347,7 @@ impl Station {
             root,
             port,
             child: None,
+            supervisor: None,
             env: vec![],
             _dir: dir,
             scripts: std::sync::atomic::AtomicU32::new(0),
@@ -336,9 +355,54 @@ impl Station {
     }
 
     pub fn launch(&mut self) {
-        let mut cmd = Command::new(SPANDECK);
-        cmd.arg("daemon")
-            .env("SPANDECK_STATE_DIR", self.root.join("state"))
+        let mut cmd = self.command(SPANDECK);
+        cmd.arg("daemon");
+        self.child = Some(cmd.spawn().unwrap());
+        self.wait_ready();
+    }
+
+    /// A station started the way the Windows log-on task starts one:
+    /// `spandeckd` starts the daemon and keeps it running.
+    pub fn start_supervised(name: &str, env: &[(&str, &str)]) -> Station {
+        Station::start_supervised_by(name, "", env, Path::new(SPANDECKD))
+    }
+
+    /// The same, by a copy of `spandeckd` somewhere else (an installed
+    /// one, with `spandeck` beside it), with `extra` added to config.toml.
+    pub fn start_supervised_by(
+        name: &str,
+        extra: &str,
+        env: &[(&str, &str)],
+        spandeckd: &Path,
+    ) -> Station {
+        let mut s = Station::prepare(name, free_port(), extra, env);
+        let program = spandeckd.to_string_lossy().to_string();
+        s.supervisor = Some(s.command(&program).spawn().unwrap());
+        s.wait_ready();
+        s
+    }
+
+    /// The pid of the daemon that answers now.
+    pub fn daemon_pid(&self) -> u32 {
+        self.call("station.info", json!({}))["pid"]
+            .as_u64()
+            .unwrap() as u32
+    }
+
+    /// End a process this station started, without warning (Windows).
+    pub fn end_process(pid: u32) {
+        let out = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "taskkill {pid}: {out:?}");
+    }
+
+    /// A program of this station's: its folders, and nothing of the
+    /// machine's own.
+    pub fn command(&self, program: &str) -> Command {
+        let mut cmd = Command::new(program);
+        cmd.env("SPANDECK_STATE_DIR", self.root.join("state"))
             .env("SPANDECK_CONFIG_DIR", self.root.join("config"))
             .env("SPANDECK_FAKE_DIR", self.root.join("fake"))
             .env("HOME", self.root.join("home"))
@@ -379,8 +443,7 @@ impl Station {
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
-        self.child = Some(cmd.spawn().unwrap());
-        self.wait_ready();
+        cmd
     }
 
     pub fn wait_ready(&self) {
@@ -651,6 +714,11 @@ impl Drop for Station {
                     eprintln!("{}", line.chars().take(400).collect::<String>());
                 }
             }
+        }
+        // First the program that would start an ended daemon again.
+        if let Some(mut c) = self.supervisor.take() {
+            let _ = c.kill();
+            let _ = c.wait();
         }
         // Windows: an upgrade in the test left a daemon that is not our child.
         if spandeck_terminal::sys::WINDOWS {

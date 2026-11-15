@@ -401,3 +401,169 @@ fn received_read_and_acted_on_are_separate() {
         "nothing unread is left"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A `send` tried again (rids.rs). The audit: an agent's tool call that got no
+// answer was a failure to the agent, and its second `send` a second message.
+// The second review ("Reply store"): the request id must be written in the
+// message's own transaction, or a crash between the two stores it twice.
+
+mod tried_again {
+    use super::*;
+    use spandeck_core::relay::{sent_answer, SendMark};
+    use spandeck_core::rids::{hash, new_rid, Begin, Kept, Mark, Retry, Rids};
+
+    type Plan = Arc<Mutex<Vec<&'static str>>>;
+
+    /// A station's daemon as far as `msg.send` goes, one request per
+    /// connection. Each start is a new process: nothing in memory, the
+    /// database as the last one left it. `plan` says where the next
+    /// request it carries out is cut short: the test crashes the host when
+    /// it is told that point was reached.
+    async fn daemon(
+        db: Arc<Db>,
+        plan: Plan,
+        reached: std::sync::mpsc::Sender<()>,
+    ) -> turmoil::Result {
+        let store = MessageStore::new(db.clone(), "alpha");
+        let rids = Rids::new(db);
+        rids.set_on(true);
+        let listener = TcpListener::bind("0.0.0.0:7001").await?;
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let (read, mut write) = stream.into_split();
+            let mut line = String::new();
+            if BufReader::new(read).read_line(&mut line).await.is_err() {
+                continue;
+            }
+            let Ok(req) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let params = json!({"to": "reviewer", "body": req["body"]});
+            let h = hash(&params);
+            let retry = Retry::parse(req.get("rid"), req.get("again_ms"))
+                .unwrap()
+                .unwrap();
+            let stop_here = |at: &str| {
+                let mut plan = plan.lock().unwrap();
+                let hit = plan.first() == Some(&at);
+                if hit {
+                    plan.remove(0);
+                    let _ = reached.send(());
+                }
+                hit
+            };
+            let answer = match rids.begin("pane:p-1", "msg.send", &h, &retry, Mark::InTx, 1) {
+                Begin::Run(run) => {
+                    if stop_here("before the message is stored") {
+                        tokio::time::sleep(Duration::from_secs(3600)).await;
+                    }
+                    let mark = SendMark {
+                        key: run.key.clone(),
+                        method: "msg.send".into(),
+                        hash: h.clone(),
+                    };
+                    let mut note = task("reviewer", req["body"].as_str().unwrap(), None, None);
+                    note.kind = "note".into();
+                    let sent = store
+                        .send_marked(note, 1, Some(&mark))
+                        .map(|env| sent_answer(&env, false));
+                    run.finish(sent.clone().map_err(|e| ("invalid".to_string(), e)), 1);
+                    if stop_here("after it is stored, before the answer") {
+                        tokio::time::sleep(Duration::from_secs(3600)).await;
+                    }
+                    json!({"result": sent.unwrap()})
+                }
+                Begin::Done(Kept::Answer(Ok(v))) => json!({"result": v}),
+                Begin::Unknown(_) => json!({"error": "outcome_unknown"}),
+                _ => json!({"error": "other"}),
+            };
+            let _ = write.write_all(format!("{answer}\n").as_bytes()).await;
+        }
+    }
+
+    /// The tool: one id per call, sent with every try until an answer
+    /// comes. A try that was written says so on the next (`again_ms`).
+    async fn send_tool(body: &str) -> serde_json::Value {
+        let rid = new_rid();
+        let mut written = false;
+        loop {
+            let attempt = async {
+                let stream = TcpStream::connect(("station", 7001)).await.ok()?;
+                let (read, mut write) = stream.into_split();
+                let mut req = json!({"rid": rid, "body": body});
+                if written {
+                    req["again_ms"] = json!(500);
+                }
+                write.write_all(format!("{req}\n").as_bytes()).await.ok()?;
+                written = true;
+                let mut line = String::new();
+                BufReader::new(read).read_line(&mut line).await.ok()?;
+                serde_json::from_str::<serde_json::Value>(&line).ok()
+            };
+            match tokio::time::timeout(Duration::from_secs(2), attempt).await {
+                Ok(Some(answer)) => return answer,
+                _ => tokio::time::sleep(Duration::from_millis(200)).await,
+            }
+        }
+    }
+
+    #[test]
+    fn a_send_tried_again_across_a_crash_is_stored_once_or_said_to_be_unknown() {
+        let db = Arc::new(Db::memory().unwrap());
+        let plan: Plan = Arc::new(Mutex::new(vec![
+            "after it is stored, before the answer",
+            "before the message is stored",
+        ]));
+        let (reached, crash_now) = std::sync::mpsc::channel::<()>();
+        let mut sim = sim(5, 0.0);
+        {
+            let (db, plan) = (db.clone(), plan.clone());
+            sim.host("station", move || {
+                daemon(db.clone(), plan.clone(), reached.clone())
+            });
+        }
+        let inbox = {
+            let store = MessageStore::new(db.clone(), "alpha");
+            move || store.inbox(&["reviewer".to_string()], false, false, 1)
+        };
+        let seen = inbox.clone();
+        sim.client("agent", async move {
+            // The daemon dies after the message is stored and before the
+            // answer is written. The second try gets the first answer.
+            let one = send_tool("one").await;
+            let stored = seen();
+            assert_eq!(stored.len(), 1, "stored once: {stored:?}");
+            assert_eq!(one["result"]["id"], stored[0]["id"], "{one}");
+            // It dies before the message is stored. The daemon that starts
+            // again has no record and has kept ids for no time: it cannot
+            // tell, says so, and stores nothing.
+            let two = send_tool("two").await;
+            assert_eq!(two["error"], json!("outcome_unknown"), "{two}");
+            assert_eq!(seen().len(), 1, "never carried out blind");
+            // The agent, having checked, sends it as a new call.
+            let again = send_tool("two").await;
+            assert!(again["result"]["id"].is_string(), "{again}");
+            Ok(())
+        });
+        let mut down: Option<u64> = None;
+        while !sim.step().unwrap() {
+            if crash_now.try_recv().is_ok() {
+                sim.crash("station");
+                down = Some(0);
+            }
+            if let Some(steps) = down.as_mut() {
+                *steps += 1;
+                if *steps == 300 {
+                    sim.bounce("station");
+                    down = None;
+                }
+            }
+        }
+        let bodies: Vec<String> = inbox()
+            .iter()
+            .map(|m| m["body"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(bodies, vec!["one", "two"]);
+    }
+}

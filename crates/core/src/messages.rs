@@ -8,7 +8,7 @@ use spandeck_agents::AgentState;
 use crate::daemon::{invalid, Authority, Caller, Daemon, Error, Result};
 use crate::hooks::truncate;
 use crate::paths::now_ms;
-use crate::relay::{split_address, MessageStore, NewMessage, TaskAuth, TASK_AUTH_MS};
+use crate::relay::{split_address, MessageStore, NewMessage, SendMark, TaskAuth, TASK_AUTH_MS};
 
 const ROUTE_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 
@@ -64,6 +64,24 @@ impl Daemon {
         refs: Value,
         thread: Option<String>,
         task: Option<String>,
+    ) -> Result<Value> {
+        self.msg_send_marked(caller, to, kind, body, refs, thread, task, None)
+            .await
+    }
+
+    /// `msg_send` for a request that carries an id: `mark` is written with
+    /// the message (relay.rs, `send_marked`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn msg_send_marked(
+        &self,
+        caller: &Caller,
+        to: &str,
+        kind: &str,
+        body: &str,
+        refs: Value,
+        thread: Option<String>,
+        task: Option<String>,
+        mark: Option<&SendMark>,
     ) -> Result<Value> {
         let (name, station) = split_address(to);
         let remote = station.is_some_and(|s| s != self.station);
@@ -126,7 +144,7 @@ impl Daemon {
         }
         let env = self
             .mail()
-            .send(
+            .send_marked(
                 NewMessage {
                     sender,
                     recipient: to.to_string(),
@@ -139,6 +157,7 @@ impl Daemon {
                     auth,
                 },
                 now_ms(),
+                mark,
             )
             .map_err(invalid)?;
         // The ship's log keeps who talked to whom, not what was said.
@@ -159,9 +178,7 @@ impl Daemon {
                 &truncate(body, 200),
             );
         }
-        Ok(
-            json!({"id": env.id, "thread": env.thread, "status": if remote { "queued" } else { "delivered" }}),
-        )
+        Ok(crate::relay::sent_answer(&env, remote))
     }
 
     async fn ensure_route(
@@ -241,6 +258,7 @@ impl Daemon {
         id: &str,
         body: &str,
         kind: Option<&str>,
+        mark: Option<&SendMark>,
     ) -> Result<Value> {
         let orig = self
             .mail()
@@ -252,7 +270,7 @@ impl Daemon {
             "note"
         });
         self.mail().ack(id, now_ms());
-        self.msg_send(
+        self.msg_send_marked(
             caller,
             &orig.sender,
             kind,
@@ -260,6 +278,7 @@ impl Daemon {
             json!([]),
             Some(orig.thread.clone()),
             orig.task.clone(),
+            mark,
         )
         .await
     }

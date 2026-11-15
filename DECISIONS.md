@@ -340,6 +340,30 @@ The owner's approval: "execute ... the updated performance plan" (15 Nov 2026). 
 - **The switch `nodelay`** (`[flags] nodelay = false`, or `station.flags`). Off: as before. It is read for each new connection, so setting it changes the connections made after that.
 - **Mixed versions.** Nothing is announced or asked of the other end. A 0.4.4 station still holds its own answers back, to its decks and to a station that shows its panes; each station stops doing so when it is updated.
 
+## A retried change is done once (15 Nov 2026)
+
+The owner's approval: "execute ... the updated performance plan" (15 Nov 2026). This is the agent-side part of step 4 of the performance and continuity plan (`crates/core/src/rids.rs`, `client.rs`, `rpc.rs`; `crates/cli/src/mcp.rs`). What was measured on 0.4.2: with the daemon away, an agent's tool call failed in under a millisecond with "spandeckd is not running", 9 of 9 during a 2 second outage and 240 of 240 during a minute, and a call already inside the daemon got "closed the connection"; nothing tried again, not even across the 20 ms of an upgrade. A call made through another station whose answer was lost read as "unreachable" although it had been carried out: a pane was started twice by the owner's second click, and an approval's answer was reported as failed. No Guarantee is changed, and no migration is added.
+
+- **A command and an agent's tool wait for spandeck instead of failing.** When nothing listens, there is no socket, or the connection ends before the answer, the call is made again after 25, 50, 100, 200, 400 and 800 ms and then every second: an agent's tool (`spandeck mcp`) for 15 seconds, a command for 5 (it says "waiting for spandeckd…" on standard error after one; `--no-wait` makes one try, as before). `wait` is asked again for the time it has left. A hook is unchanged here (it waits 3 seconds to connect, as since 15 Nov 2026; the hook that can block is the next unit).
+- **Every call carries a request id, made once by the process that makes the call:** 128 random bits from the operating system, sent beside the token as `rid` with every try. It is never worked out from anything an agent could predict.
+- **What is sent a second time, and what never is.** A request that was never written is simply sent when the daemon is back: nothing had been asked. For one that was written and not answered: a call that only reads, or sets something to what it already is, is sent again. A change is sent again only by its id, with how long ago the first try was written (`again_ms`), and only to a daemon that says on that same connection that it keeps ids (`caps` has `rid`). To a daemon that keeps none, a change is never sent twice.
+- **The station that carries a change out keeps the answer for two minutes**, in the `kv` table (no new table): the key is `rid:<who>:<id>`, the value the method, a SHA-256 of the parameters (the same whatever the order of their fields), the state, the answer and the time. A second try from the same caller, for the same method, with the same parameters is given the first one's answer, an error included, and nothing is done again; while the first is still being carried out the second waits for it. (The plan's key had the method in it. It is in the value instead, so that an id used again for another method is refused instead of run.)
+- **Who.** `owner` for every one of the owner's clients, whichever station passed the request on, so that a second try that arrives through another station finds the first; `pane:<id>` for an agent, worked out from its token and never from what the request says. A station's own calls keep no ids: message relay and stops have their own records.
+- **The same id for another method or other parameters is refused** (`rid_reused`), never answered from what is kept and never run. An id is 16 to 64 letters, digits, `-` or `_`; anything else is refused before the request is looked at. What a caller may call is checked before its id is.
+- **A message's id is written in the message's own transaction** (`msg.send`, `msg.reply`): the row and the message are stored together or not at all, and the row's key is the table's key, so a second try cannot store a second message even if everything else here were wrong. Delivery between stations is as it was: at least once, duplicates dropped by the message's id.
+- **For every other kept change, "being carried out" is written first and waited for**, a second at most (the wait every answer that says `saved` already has). The answer is written after, without being waited for.
+- **Done once, by id:** starting, renaming, setting, restarting or closing a pane, a file dropped on one; `msg.inbox` (it marks what it returns as read, so it is not "a read"), `msg.ack`; `delegate`, a task's result, cancel and continue, a sign-off, starting or cancelling a review, a note; a project added, opened, closed, removed, linked or unlinked, its layouts; the global layouts and pins, themes, the look, uploaded fonts, the owner's preferences; closing every pane, installing or removing an agent's integration, restoring an archived session, waking, starting or forgetting a station, updating or installing an agent program, and a command sent to agents. It is a list of what is kept, not of what is not: a method added later is not kept until someone has looked at what it answers with.
+- **Never kept, and never run a second time** (a second try is told `outcome_unknown` at once, and the first runs exactly as before): what is typed, pasted or sent into a pane and a resize; a hook and an agent's reports of its state; `pane.release`, and Pause being turned off (a late second try could undo a Stop or a Pause made after the first); every call whose answer or parameters carry a token, a key or a password (`fleet.remove` and `fleet.uninstall`, whose answer is the browser's new token and whose parameters can be a password; `fleet.add`, a password; `vault.call`, whose answer is a provider's, and the vault's connect, disconnect and rotation; `setup.set`, which can hold credentials for MCP servers); the calls that decide who is trusted (`trust.approve`, `trust.deny`, `fleet.join`, `device.revoke`); an upgrade, a restart, leaving the fleet, and the switches. An answer with a field called `token`, `secret`, `password`, `fleet_key` or `authorization` is not written either, whatever method gave it: a second try is then told only that the change was carried out.
+- **Stop, Kill, Pause and an answer to an approval never go through the store and never wait for it.** Kill and Pause being turned on are simply done again. A second try of a stop of one pane looks at the pane's own mark first: stopped since the first try was written means "stopped", with no second interrupt key; no mark (a shell, or holds switched off) means the key is sent again. A second try of an answer to an approval looks at the approval: already answered that way means "done"; answered the other way is refused, as any second answer is. **"Stop everything" with an id is one stop**: the stops it issued are kept under `stoprid:<who>:<id>`, written without being waited for, and a second try is given those rows. With no record of a first try (the daemon died before it was written) the stop is issued again: a stop errs on the side of stopping.
+- **Through another station.** The station the owner is using keeps nothing: it passes the id on (`rid` and `again_ms` in `rpc.forward`). When a change it sent may have arrived and no answer came back (not when no connection could be made), it asks that station again whether it keeps ids and sends the request once more with the same id, its own if the caller gave none. One pane, and the answer. If that fails too the owner is told "could not confirm whether pane.spawn was carried out there ... check before asking again" (`outcome_unknown`), not "unreachable". Only what a station answers for by id is ever sent twice; what is typed goes once.
+- **"Cannot tell" is said, and nothing is run blind.** `outcome_unknown` is the answer to a second try when: the row says "being carried out" and no try in this process is carrying it out (the daemon ended, or was replaced, in the middle); there is no row and this station has not kept ids, without a gap, since before the first try was written; the first try is said to be more than 30 seconds old; or the method is one that is never kept. "Without a gap" is this process's start, or further back when it took over in place from an image that also kept ids (an upgrade, a restart in place: that image says for how long, and hands over what it had not written). So after a crash or a kill, a second try whose first left no row is not carried out: the daemon that read the first may have died before its mark was written, or may have been one that kept no ids.
+- **What a crash at the worst moment does.** `send` and `reply`: the message and its id are one transaction, so a second try finds the row (one message, the same answer) or none (after a crash: "may or may not have been sent: read the thread before sending again"; after an upgrade: it is sent, once). Everything else that is kept: a daemon that dies between doing and storing the answer leaves "being carried out", and the second try is told it could not be confirmed: a pane may have been started, an inbox may have been marked read (the agent is told to call `inbox` with `all`). One that dies before its mark is written leaves nothing, and the second try is told the same. An image that is being replaced begins no change whose mark it could no longer write: the request waits, its connection ends with the image, and the next image carries the second try out.
+- **What an agent is told.** After 15 seconds with nothing sent: "spandeck did not answer for 15 s. Your message was NOT sent." (each tool in its own words; a tool that reads: "try again shortly"). When a change may have been carried out: "spandeck went away before it answered, and cannot confirm this: your message may or may not have been sent: read the thread before sending again."
+- **Bounded, and nothing is refused for it.** A caller has at most 1,024 rows and the station 8,192; when a caller's are full its oldest finished row that is over a minute old goes. With none that old the change still runs, with no row, and for as long as that could matter a second try of anything that caller asked is told `outcome_unknown` instead of being run on the strength of "no record": more than a thousand changes a minute from one caller costs it the second try, never the change, and never another caller's. (Found by the scenario test: a first version refused the 513th change in a minute.) An answer over 64 KB is not kept, nor one that would take the answers held in memory past 32 MB: a second try is then told only that the change was carried out. Rows go two minutes after the change was done (the longest any caller tries again is 15 seconds, and a second try that says it is older than 30 is not answered from "no record").
+- **The switch `request_ids`** (`[flags] request_ids = false`, or `station.flags`). Off: the station keeps no id and does not announce `rid`, so no change is tried again by its id there; a first try runs as before, and a second is told `outcome_unknown`. Commands and tools still wait for the daemon and still send again what was never written, and what only reads.
+- **Mixed versions.** A 0.4.4 station ignores `rid` (a field it does not know) and does not announce it. Towards it nothing changes: a change is sent once, a lost answer reads "unreachable" as before, and a caller's own second try by id is refused at the station the owner is using, never sent on. A command or a tool from this version against a 0.4.4 daemon on the same machine (the program was replaced, the daemon not yet restarted) waits for it, sends again what was never written and what only reads, and never sends a change twice. An upgrade in place from 0.4.4 hands over no record of ids: for the first seconds after it, a second try of a change that was in flight is told `outcome_unknown`. `PROTOCOL` is unchanged.
+- **Not in this unit:** the Control Deck's page sending a click again after its socket drops (it needs the web server's request loop, which is being rebuilt), and a blocking hook's id, which belongs on its approval because an approval can wait five minutes.
+
 ## The conversation view (15 Nov 2026, the owner's request)
 
 "I like the Claude mobile app, simple, lets you focus on working with an agent, lets you talk to it. This is a single pane for focus ... I still can see a need though if you need to get back to terminal arrow etc ... make the functionality the same as Claude code but also keep the best of spandeck." Then: "execute ... the mobile plan". The plan's decisions were taken as it recommends; each is the owner's to overrule, and the ones that matter are marked **(default)**.
@@ -483,6 +507,7 @@ The owner showed two pictures of the Claude app on a phone: a list of sessions w
 - Every message has a unique id. Delivery is at least once, duplicates dropped by id, so a reconnect cannot start the same task twice.
 - Ordering is guaranteed within a thread only.
 - Received and acted-on are separate acknowledgments.
+- A request that is tried again because its answer did not arrive carries the id it was first made with, and is carried out once: a `send` tried again is one message, its id written in the message's own transaction. What is typed or sent into a pane, a hook, and a call whose answer carries a token or a secret are never kept and never sent a second time; Stop, Kill, Pause and an answer to an approval are never held back by this, and are safe a second time by their own records. When a station cannot tell whether a change was carried out it says so, and does not carry it out again (15 Nov 2026; see A retried change is done once).
 
 ### Workspaces
 - The parent agent, or the user, integrates a helper's branch. A conflict goes back to the helper as a task.
@@ -577,7 +602,8 @@ not been tried on a real machine is said where it applies.
     and scrollback goes back as far as those 8 MB. This changes a recommended default
     ("processes do not survive a daemon crash") for Windows only; on Unix it stands. So that
     panes nobody can reach are not kept for ever, a host with no daemon ends its panes and
-    itself after ten minutes (the log-on task restarts a failed daemon within one or two).
+    itself after ten minutes (the supervisor starts a failed daemon again after a second; see
+    Start at login).
     Stopping the station on purpose ends the panes and the host at once.
   - **The host is not upgraded while it holds a pane**: it cannot be without ending them.
     Its protocol is versioned and only grows; a daemon speaks every host protocol back to 1
@@ -596,21 +622,82 @@ not been tried on a real machine is said where it applies.
   but can be renamed, so an update moves `spandeck.exe` to `spandeck.exe.old` and puts the new
   one in its place; the old file is removed at the next start. `state\bin\running` and
   `previous` are hard links as on Unix (same volume), else copies. The same goes for the
-  pane host's file while it runs.
+  pane host's file while it runs, and for `spandeckd.exe`, which runs for as long as the
+  station does. A program still running from `.old` at the next update keeps that name, and
+  the file moved aside then is `.old2` (up to `.old9`); each is removed at the first
+  replacement after nothing runs from it (15 Nov 2026: before, the second update while an
+  old copy ran could not replace the file).
 - **Start at login: a per-user Scheduled Task** ("spandeckd", at log on, restart on failure,
   no time limit, runs on battery), not a Windows Service: a service runs in session 0 without
   the user's profile, PATH or the agents' logins. The task runs `spandeckd.exe`, a windowless
-  program that starts `spandeck.exe daemon` with no console window and waits for it, so no
-  window opens at log on and the task's restart-on-failure sees the daemon's exit code.
+  program that starts `spandeck.exe daemon` with no console window, so no window opens at
+  log on.
   **Unlike Linux with linger, the daemon runs only while the owner is logged in** (a locked
   screen is fine; logged out is not). The owner accepted this (14 Nov 2026: the machine logs
   on by itself).
-  **Not yet checked on the real machine (asked for on 15 Nov 2026):** whether the task
-  restarts a daemon that crashes after an upgrade in place. On Windows the upgraded daemon is
-  a new process, which `spandeckd.exe` did not start and does not wait for, and the one it did
-  start has ended; as the code reads, the task then sees its program end and nothing watches
-  the daemon that is running. If the check on rtx6000 shows that, `spandeckd.exe` is to follow
-  the station's pid file instead of its own child. Nothing was changed without the check.
+- **`spandeckd.exe` supervises the station, not the process it started** (15 Nov 2026, after
+  a fault measured on rtx6000). Until then it waited for the one daemon it had started and
+  passed on its exit code for the task's restart-on-failure. An upgraded daemon is a new
+  process on Windows, so after the first upgrade the wrapper's child had ended with success,
+  the wrapper with it, and nothing watched the daemon that was running. Measured: the
+  station's daemon, upgraded many times, was ended with `taskkill /F`; nothing started it in
+  150 seconds; `schtasks /run /tn spandeckd` brought it back, with its three panes under the
+  same pane host. So a Windows station that crashed after its first upgrade stayed down until
+  the next log on, its agents running where no Stop and no hook reached them. The rule now:
+  - **It follows whichever daemon is current.** That is the process the station's pid file
+    names, believed only if that process was started before the file was written (Windows
+    gives a pid out again; only the daemon that wrote the file, or the one it was written
+    for, can be older than it); failing that, the pid the station gives when asked on its
+    pipe, which only a daemon of that state folder answers. A daemon that hands over (an
+    upgrade, a restart in place, going back to the previous binary) writes the next one's pid
+    in the pid file before it ends, so there is no moment when the file names nobody while
+    the new daemon waits for the old one (`SPANDECK_WAIT_PID`).
+  - **When that daemon ends:** another is already named: follow it, start nothing. It ended
+    with success and the clean-stop mark is set (`restore.stopped_clean`): it was stopped on
+    purpose; the supervisor ends too and nothing is started until the next log on or
+    `schtasks /Run /TN spandeckd`. It ended with success, no mark, nobody named: a hand-over
+    from a daemon older than this rule, so the next one is waited for, 30 seconds; if none
+    comes and the station's database says it was not stopped, one is started. Anything else
+    (a crash, a kill): a daemon is started after 1 second, then 2, 4, 8 and so on up to 5
+    minutes between tries, and from 1 again once a daemon has stayed up 10 minutes. Each such
+    start is an unclean one to the daemon, whose own guard still holds agents back at the
+    third in 10 minutes (After a restart); panes in the pane host are not affected.
+  - **Stopping on purpose is `spandeck service --stop`** (new with this): a daemon with no
+    console can be sent no signal, and one that is merely ended is now started again. The
+    daemon listens for a request named for its state folder and stops as it does for SIGTERM
+    on Unix: panes and pane host ended, the mark written. On macOS and Linux the command
+    prints the login service's own stop command. `station.leave` with stop, and the uninstall
+    that uses it, stop the same way. Any program of the same Windows user can make the
+    request, as any can end the process; no agent is given an RPC for it.
+  - **One supervisor per station.** Being it is holding a named object that goes when the
+    process does; a second copy (a second log on, the task run by hand) finds it held, ends
+    with success and starts nothing. A copy started with nothing running adopts a daemon that
+    is running instead of starting a second.
+  - **It is replaced at an update without a log on.** The update moves the running
+    `spandeckd.exe` aside and installs the new one (as above); the new daemon, once healthy,
+    starts the new one, told to take over: the old one leaves and the new one follows the
+    daemon. This is done for a station that has a supervisor, or that is the one started at
+    log on (the usual state folder, the task's script present): so a station installed before
+    this gets its supervisor at the update that brings this, with nothing to do by hand.
+    The supervisor so started is not the task's own process: Task Scheduler shows the task as
+    ready, not running, and running it then starts a copy that ends at once.
+  - It writes what it did, and why, to `spandeckd-supervisor.log` in the state folder.
+  - **Not covered:** a daemon that hangs without ending; a supervisor that is itself ended
+    (the daemon runs on, and is supervised again at the next update, log on or run of the
+    task); a stop whose mark the database did not take in the two seconds the daemon gives
+    it, which is then taken for a lost hand-over and started again after 30 seconds.
+  - **Tried on rtx6000** with stations under folders of their own and `spandeckd.exe` run
+    directly: a daemon ended after two upgrades comes back with its panes, twice; a stop on
+    purpose after an upgrade is not undone; an upgrade, and one that goes back, start
+    nothing; a second supervisor ends; an update from a local release (`station.update`)
+    replaces the file of a supervisor that is running, for the second time, and the daemon it
+    brings starts the new one, which takes over and then restarts an ended daemon. **Not
+    tried:** any of it under the Task Scheduler in the owner's desktop session (the tests ran
+    in an SSH session, where the objects named for every session and for one are the same),
+    and the update of a station that has the old wrapper, which is taken to be "the usual
+    state folder and the task's script" and not something a test station can be. macOS and
+    Linux are unchanged: systemd and launchd restart the daemon and follow it through an
+    upgrade, since it stays one process.
 - **Keep-awake** is `SetThreadExecutionState`, held by `spandeck keep-awake` (the same shape
   as `caffeinate` and `systemd-inhibit`: a helper that holds the machine awake while it runs).
   The helper ends when the daemon does. It does not stop a laptop sleeping when its lid shuts.

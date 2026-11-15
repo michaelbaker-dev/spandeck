@@ -34,6 +34,7 @@
 //!   http      the one outgoing HTTPS client builder, and what it trusts
 //!   restore   after a restart: what is put right and listed, the one notice, `[flags]`
 //!   holds     a stopped or restarted agent stays put: the marks, what they gate, release
+//!   rids      a change tried again is done once: request ids, the answers kept, who is given one
 
 pub mod add;
 pub mod agents;
@@ -66,6 +67,7 @@ pub mod recipes;
 pub mod relay;
 pub mod remove;
 pub mod restore;
+pub mod rids;
 pub mod rounds;
 pub mod rpc;
 pub mod server;

@@ -37,6 +37,16 @@ pub enum Error {
     /// A stop that could not reach its program: it is not reading input.
     #[error("{0}")]
     NotReading(String),
+    /// A second try of a change, at a station that cannot tell whether
+    /// the first was carried out (rids.rs). Nothing was done now.
+    #[error("{0}")]
+    OutcomeUnknown(String),
+    /// A request id used again for a different request.
+    #[error("{0}")]
+    RidReused(String),
+    /// The error first given to a request, given again to its second try.
+    #[error("{message}")]
+    Replayed { code: &'static str, message: String },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -52,6 +62,9 @@ impl Error {
             Error::Denied(_) => "denied",
             Error::Invalid(_) => "invalid",
             Error::NotReading(_) => "not_reading",
+            Error::OutcomeUnknown(_) => "outcome_unknown",
+            Error::RidReused(_) => "rid_reused",
+            Error::Replayed { code, .. } => code,
             _ => "internal",
         }
     }
@@ -393,6 +406,8 @@ pub struct Inner {
     pub rounds: Arc<crate::rounds::Rounds>,
     /// When each waiting message for another station may next be tried.
     pub(crate) relay_retries: crate::relay::Retries,
+    /// Requests that carry an id: done once, and answered again (rids.rs).
+    pub rids: Arc<crate::rids::Rids>,
 }
 
 #[derive(Clone)]
@@ -437,6 +452,12 @@ pub struct HandoffState {
     /// daemon from before this neither writes nor reads them.
     #[serde(default)]
     pub unwritten: crate::db::Unwritten,
+    /// For how long this image kept request ids (rids.rs), when it did:
+    /// with `unwritten`, its records of what was done are the next
+    /// image's. A daemon from before this neither writes nor reads it, so
+    /// an image that takes over from one starts counting from nothing.
+    #[serde(default)]
+    pub rids_kept_ms: Option<u64>,
 }
 
 impl Daemon {
@@ -489,6 +510,7 @@ impl Daemon {
             db_told: Default::default(),
             rounds: crate::rounds::Rounds::new(crate::fleet::ROUND_DEADLINE),
             relay_retries: Default::default(),
+            rids: crate::rids::Rids::new(db.clone()),
             trust,
             stops: crate::stops::StopsState::new(db.clone(), &cfg.station),
             paths,
@@ -779,6 +801,10 @@ impl Daemon {
         }
         if n % 1200 == 40 {
             self.prune_ended();
+        }
+        // Answers kept for a second try go after two minutes.
+        if n % 20 == 7 {
+            self.rids.prune(now_ms());
         }
     }
 
@@ -2449,10 +2475,16 @@ impl Daemon {
             prev_exe: self.exe.clone(),
             panes,
             trust_requests: self.trust.requests_for_handoff(),
+            rids_kept_ms: self.rids.kept_for().map(|d| d.as_millis() as u64),
             // Last: every pane is still now. The writer is given two
             // seconds, then stopped; what it could not write goes with the
             // panes, so nothing is written behind the next image's back.
-            unwritten: self.db.drain(Duration::from_secs(2)),
+            unwritten: {
+                // No request with an id is begun from here on: its mark
+                // would be written behind the next image's back.
+                self.rids.freeze(true);
+                self.db.drain(Duration::from_secs(2))
+            },
         }
     }
 
@@ -2479,6 +2511,10 @@ impl Daemon {
         // What the image before could not write is written by this one,
         // and before anything this one changes.
         self.db.restore(state.unwritten);
+        // And with them its records of the requests it carried out.
+        if let Some(ms) = state.rids_kept_ms {
+            self.rids.kept_before(Duration::from_millis(ms));
+        }
         // Whoever was waiting to be let in is still waiting.
         self.trust.adopt_requests(&state.trust_requests);
         let total = state.panes.len();
@@ -2548,6 +2584,7 @@ impl Daemon {
         // The writer was stopped for the image that did not come: it still
         // holds everything, and writes again.
         self.db.resume();
+        self.rids.freeze(false);
         for hp in state.panes {
             let id = hp.meta.id.clone();
             let (tx, _) = broadcast::channel(1024);
@@ -2576,6 +2613,10 @@ impl Daemon {
         }
         if self.flag_on(crate::stops::CAP, true) {
             caps.push(crate::stops::CAP);
+        }
+        // Request ids are kept: a change may be tried again by its id.
+        if self.flag_on(crate::rids::FLAG, true) {
+            caps.push(crate::rids::CAP);
         }
         caps
     }

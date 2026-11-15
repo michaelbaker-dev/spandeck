@@ -127,6 +127,24 @@ impl Recovery {
     }
 }
 
+/// For the program that keeps a Windows station running (`spandeckd`): did
+/// this station's daemon last end because it was asked to stop? Read from
+/// the station's database without the daemon, which has ended. None when
+/// that cannot be read, or the station has never said.
+pub fn stopped_clean(paths: &crate::paths::Paths) -> Option<bool> {
+    use rusqlite::OpenFlags;
+    let c = rusqlite::Connection::open_with_flags(
+        paths.db(),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    c.busy_timeout(std::time::Duration::from_secs(2)).ok()?;
+    let v: String = c
+        .query_row("SELECT v FROM kv WHERE k = ?1", [KV_CLEAN], |r| r.get(0))
+        .ok()?;
+    Some(v == "1")
+}
+
 /// The count of starts that followed no clean stop. Returns the times to
 /// keep and whether this start holds sessions back. A clean stop resets it.
 pub fn count_start(earlier: &[u64], clean: bool, now: u64) -> (Vec<u64>, bool) {
@@ -420,6 +438,9 @@ impl Daemon {
         // `db_writer = false`: the ship's log and pane records are written
         // by their callers again (db.rs says what that does not take back).
         self.db.set_queued(self.flag_on("db_writer", true));
+        // `request_ids = false`: no id is kept and none is announced, so
+        // no change is tried again by its id at this station (rids.rs).
+        self.rids.set_on(self.flag_on(crate::rids::FLAG, true));
     }
 
     /// A switch as it stands now, if the config or the owner set it.
