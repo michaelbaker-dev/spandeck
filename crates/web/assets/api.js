@@ -24,6 +24,8 @@ function clientId() {
 }
 
 // The localhost token arrives once in the URL fragment and is kept locally.
+// Only the station's own, from `spandeck cc` on that machine: a browser's
+// token for the fleet is never put in an address (see `hopOpen` in app.js).
 function takeToken() {
   const m = location.hash.match(/token=([0-9a-f]{32,})/);
   if (m) {

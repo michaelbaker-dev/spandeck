@@ -497,11 +497,13 @@ function trustPanel() {
       t.outgoing ? h('p', { class: t.outgoing.problem ? 'warn-text' : '' }, t.outgoing.problem
         ? `Joining ${t.outgoing.station}'s fleet did not finish: ${t.outgoing.problem}.`
         : `Waiting for an approval at ${t.outgoing.station}, or at any station of its fleet, of the request that shows the code ${t.outgoing.code}. ${(t.outgoing.with || []).length ? `This station${cameWith(t.outgoing.with)} then move into one fleet with ${t.outgoing.station}.` : `This station then joins ${t.outgoing.station}'s fleet.`}`) : null,
-      h('h3', {}, 'Browsers signed in here'),
+      h('h3', {}, 'Browsers signed in to this fleet'),
       (t.devices || []).length ? h('div', { class: 'list' }, t.devices.map(d => h('div', { class: 'note' },
-        h('div', { class: 'row' }, h('b', {}, d.name), h('span', { class: 'muted' }, ` · from ${d.from} · ${ago(d.approved_ms)} ago`), h('span', { class: 'grow' }),
-          h('button', { class: 'mini danger', onclick: () => rpc(api.station, 'device.revoke', { device: d.id }).then(close) }, 'Sign out')))))
+        h('div', { class: 'row' }, h('b', {}, d.name), h('span', { class: 'muted' }, [d.from ? `from ${d.from}` : '', d.approved_ms ? `approved${d.at ? ` at ${d.at}` : ''} ${ago(d.approved_ms)} ago` : d.at ? `first seen at ${d.at}` : ''].filter(Boolean).map(x => ' · ' + x).join('')), h('span', { class: 'grow' }),
+          h('button', { class: 'mini danger', title: 'Every station of the fleet refuses it from now on; a station that is off, as soon as it is back', onclick: () => rpc(api.station, 'device.revoke', { device: d.id }).then(close) }, 'Sign out')),
+        d.unconfirmed ? h('div', { class: 'muted small' }, `Listed since before this list was shared between stations. If it was approved before ${t.station} last changed fleets, it is no longer signed in.`) : null)))
         : h('p', { class: 'muted' }, 'None. A browser on another device asks to sign in the first time it opens the Control Deck.'),
+      h('p', { class: 'muted small' }, 'The same list on every station of the fleet: a browser approved at one is accepted by all, and signing one out here signs it out everywhere.'),
       h('p', { class: 'muted' }, `Fleet ${t.fleet || ''}. To add a station that is running, choose "Add … to this fleet" on its tile; to add a machine that has no spandeck yet, use Add a machine. Either way you approve its code here or at any station of this fleet. If it is in a fleet of its own, every station of that fleet joins with it: there is one fleet afterwards.`));
   });
 }
@@ -1062,6 +1064,90 @@ function stopRows() {
     `${s.station}: ${s.label}`, s.status === 'confirmed' ? ` (${s.result?.stopped?.length ?? 0} stopped)` : s.status === 'unreachable' ? ' — will be delivered when it is back' : '')));
 }
 
+// ---- from one station's Control Deck to another's, with no second approval
+// Each station's Control Deck is its own web address, and a browser keeps
+// its sign-in per address, so the same phone used to be approved again at
+// each station. This browser's token is already accepted by every station of
+// the fleet. So the deck it is signed in to (A) opens the other station's
+// deck (B) in a new window and hands it the token as a window message:
+//
+//   1. A opens B's plain address and keeps the window. No secret is in it.
+//   2. B's page, if it is not signed in and was opened by another window,
+//      tells its opener it is ready. That message holds nothing.
+//   3. A answers only the window it opened, only if the message came from
+//      B's origin, and tells the browser to deliver the token only to that
+//      origin. B's origin is the address B gave in an answer signed with the
+//      fleet key. A sends once, and only a browser's own token, never the
+//      station's.
+//   4. B takes a token only while it waits, only from its opener, asks its
+//      own station whether the token is good, and only then keeps it.
+//
+// The token is never in an address, so it is in no history, no log and no
+// address bar. A page that is not the window A opened, or is at another
+// origin, is sent nothing. A page that opens B and sends it a token can only
+// send one it already holds: B then shows the fleet to a browser whose owner
+// that sender could already act as, so it gains nothing.
+const HOP_READY = 'spandeck:hop-ready', HOP_TOKEN = 'spandeck:hop-token';
+const hops = [];
+const ownToken = () => { try { return localStorage.getItem('spandeck.token') || ''; } catch (e) { return ''; } };
+// The origin of a station's own Control Deck, or null when this browser
+// cannot be handed on to it.
+function hopOrigin(s) {
+  if (!ownToken().startsWith('dev.') || s.self || s.state !== 'online') return null;
+  const local = (a) => /^(127\.|\[::1\]|localhost)/.test(a);
+  const addrs = (s.web || []).filter(a => typeof a === 'string' && /^[0-9A-Za-z.:\[\]-]+$/.test(a));
+  // A loopback address is another machine's own, unless this page is local too.
+  const at = addrs.find(a => !local(a)) || (local(location.host) ? addrs.find(local) : null);
+  // A station serves its deck over plain HTTP at this address (Tailscale
+  // encrypts the link), whatever address this page was opened at.
+  return at ? new URL(`http://${at}`).origin : null;
+}
+// Called from the click itself, so the browser does not treat it as a popup.
+function hopOpen(s) {
+  const origin = hopOrigin(s);
+  if (!origin) return;
+  const opened = window.open(origin + '/#/fleet', '_blank');
+  if (!opened) return toast(`This browser did not let ${s.station}'s Control Deck open in a new window. Open ${origin} yourself and sign in there: the request shows on every station.`, 'error');
+  hops.push({ opened, origin, until: Date.now() + 120000 });
+}
+addEventListener('message', (e) => {
+  if (e.data !== HOP_READY) return;
+  const at = hops.findIndex(x => x.opened === e.source && x.origin === e.origin && x.until > Date.now());
+  if (at < 0) return;
+  // Once. A second "ready" from that window gets nothing.
+  const [hop] = hops.splice(at, 1);
+  const token = ownToken();
+  if (token.startsWith('dev.')) hop.opened.postMessage({ kind: HOP_TOKEN, token }, hop.origin);
+});
+
+// The other side: this page is not signed in, and another window opened it.
+// (A phone's home-screen app, or a link opened from elsewhere, has no
+// opener: then the usual request is made, which shows on every station.)
+let hopAsked = false;
+function hopAsk() {
+  if (hopAsked || !window.opener) return;
+  hopAsked = true;
+  let waiting = true;
+  setTimeout(() => { waiting = false; }, 30000);
+  addEventListener('message', async (e) => {
+    if (!waiting || e.source !== window.opener || !e.data || e.data.kind !== HOP_TOKEN) return;
+    waiting = false;
+    const token = e.data.token;
+    if (typeof token !== 'string' || !/^dev\.[A-Za-z0-9-]{1,64}\.[0-9a-f]{32,128}$/.test(token)) return;
+    // Kept only if this station says it is good.
+    let good = false;
+    try {
+      const res = await fetch('/api/rpc', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token }, body: JSON.stringify({ method: 'station.info', params: {} }) });
+      good = res.ok;
+    } catch (err) { /* not signed in */ }
+    if (!good) return;
+    try { localStorage.setItem('spandeck.token', token); } catch (err) { return; }
+    location.reload();
+  });
+  // Nothing in this message: any opener may be told that this page waits.
+  try { window.opener.postMessage(HOP_READY, '*'); } catch (e) { /* no opener after all */ }
+}
+
 const STATION_STATE = { unreachable: 'unreachable', not_linked: 'not in this fleet', update_needed: 'on a version this station cannot control' };
 
 function stationMenu(e, s) {
@@ -1073,6 +1159,7 @@ function stationMenu(e, s) {
     up && { label: 'New pane here…', action: () => newPaneDialog(s.station) },
     up && { label: 'New project here…', action: () => newProjectDialog(s.station) },
     up && { label: 'Check this station', action: () => doctorPanel(s.station) },
+    hopOrigin(s) && { label: `Open ${s.station}'s own Control Deck`, action: () => hopOpen(s) },
     { label: 'Agent programs and versions…', action: agentsPanel },
     { label: 'Usage: tokens and estimated cost…', action: fleetUsageDialog },
     s.state === 'not_linked' && { label: `Add ${s.station} to this fleet…`, action: () => addMachineDialog({ station: s.station, kind: 'join' }) },
@@ -2689,6 +2776,8 @@ function render() {
   if (!api.connected && api.authError) {
     if (S.signIn) return;
     const needsSignIn = /^sign in/.test(api.authError);
+    // The deck that opened this page may be about to sign it in.
+    if (needsSignIn) hopAsk();
     root.replaceChildren(h('main', { class: 'login' }, h('h1', {}, 'spandeck'),
       needsSignIn ? h('p', {}, 'This browser is not signed in to your fleet yet.') : h('p', {}, api.authError),
       needsSignIn ? h('button', { class: 'primary', onclick: signIn }, 'Sign in this browser') : null,

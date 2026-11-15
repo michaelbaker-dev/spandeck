@@ -64,6 +64,7 @@ const PEER_METHODS: &[&str] = &[
     "fleet.view",
     "trust.revoked",
     "trust.relay",
+    "trust.sync",
     "fleet.rekey",
     "project.link.record",
     "project.link.findings",
@@ -868,19 +869,12 @@ impl Daemon {
             "trust.relay" => self.trust_relayed(caller, &params)?,
             "fleet.join" => self.fleet_join(s(&params, "station")?, by).await?,
             "device.revoke" => {
-                let id = s(&params, "device")?;
-                let out = self.device_revoke(id, &caller.who)?;
-                // Tell the rest of the fleet; a station that is off learns later.
-                for peer in self.fleet.peers() {
-                    if peer.state == "online" {
-                        let _ = self
-                            .fleet
-                            .call(&peer.station, "trust.revoked", json!({"device": id}))
-                            .await;
-                    }
-                }
-                out
+                self.device_revoke(s(&params, "device")?, &caller.who)
+                    .await?
             }
+            // The fleet's one list of browsers signed in and signed out,
+            // exchanged between stations. A peer's signed call only.
+            "trust.sync" => self.trust_synced(caller, &params)?,
             "trust.revoked" => {
                 self.device_revoked_elsewhere(s(&params, "device")?);
                 json!({"ok": true})

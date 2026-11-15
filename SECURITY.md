@@ -56,8 +56,18 @@ days, not hours.
   already holds the key and can act as you on the others. The relay adds no power a
   station did not have.
 - A signed-in browser's token does not expire. Sign it out under Access in the Control
-  Deck (or `spandeck trust --revoke`); stations that are off at the time learn of it only
-  from a later sign-out. Joining another fleet replaces the key on the station that asked
+  Deck (or `spandeck trust --revoke`): every station that is on refuses it at once, and
+  a station that is off is told when it is next seen, by whichever station sees it
+  first. Until then, that station alone still accepts the token. A sign-out is kept for
+  as long as the key that made the token is in use.
+- "Open X's own Control Deck" hands this browser's token from one station's deck to
+  another's as a message between the two windows. The token is never put in an
+  address, so it is not in the browser's history. It is sent only to the window that
+  deck opened, and only while that window is at the address the other station gave in
+  an answer signed with the fleet key. The other deck keeps a token only after its own
+  station has accepted it. A page that opens a deck and sends it a token can only sign
+  that browser in with a token the page already holds.
+- Joining another fleet replaces the key on the station that asked
   and on every station of the fleet it was in, and signs out every browser that was
   signed in to those. The list of browsers you signed out travels with the key, so a
   station that arrives refuses them too; a station on an older version ignores the list,

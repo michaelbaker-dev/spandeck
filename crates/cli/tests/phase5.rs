@@ -2097,6 +2097,19 @@ fn a_station_that_joins_another_fleet_brings_its_fleet_mates_with_it() {
             s.name
         );
     }
+    // And each lists what charlie lists: the one browser still signed in
+    // to the fleet they joined, approved at charlie.
+    let devices = |s: &Station| s.call("trust.status", json!({}))["devices"].clone();
+    wait_for(
+        "the stations that arrived to list charlie's browser",
+        15,
+        || {
+            let at_c = devices(c);
+            (at_c.as_array().unwrap().len() == 1 && [a, b, d].iter().all(|s| devices(s) == at_c))
+                .then_some(())
+        },
+    );
+    assert_eq!(devices(d)[0]["at"], json!("charlie"));
     assert!(c.call("trust.status", json!({}))["requests"]
         .as_array()
         .unwrap()
@@ -2117,12 +2130,18 @@ fn a_station_that_joins_another_fleet_brings_its_fleet_mates_with_it() {
 #[test]
 fn a_request_is_seen_and_answered_at_any_station_of_the_fleet() {
     let key = "5a".repeat(32);
-    let all = Station::several(&[
+    let mut all = Station::several(&[
         ("alpha", Some(&key)),
         ("bravo", Some(&key)),
         ("charlie", None),
-    ]);
-    let (a, b, c) = (&all[0], &all[1], &all[2]);
+    ])
+    .into_iter();
+    let (sa, sb, mut sc) = (
+        all.next().unwrap(),
+        all.next().unwrap(),
+        all.next().unwrap(),
+    );
+    let (a, b, c) = (&sa, &sb, &sc);
     wait_for("the stations to find each other", 20, || {
         (a.sees("bravo").as_deref() == Some("online")
             && b.sees("alpha").as_deref() == Some("online")
@@ -2277,4 +2296,154 @@ fn a_request_is_seen_and_answered_at_any_station_of_the_fleet() {
         json!({"id": asked["id"], "collect": asked["collect"]}),
     );
     assert_eq!(answer["result"]["status"], json!("denied"), "{answer}");
+
+    // ---- The owner (15 Nov 2026): "no matter where I go, it's all the
+    // same view ... these must stay the same no matter which machine I'm
+    // on". Measured on the real fleet: one station listed six signed-in
+    // browsers and another station of the same fleet none. The browsers
+    // signed in are one list for the fleet, the same on every station.
+    let sign_in = |name: &str| -> (String, String) {
+        let asked = post("/api/device/request", json!({"name": name}))["result"].clone();
+        a.call("trust.approve", json!({"request": asked["id"]}));
+        let got = post(
+            "/api/device/collect",
+            json!({"id": asked["id"], "collect": asked["collect"]}),
+        );
+        (
+            asked["id"].as_str().unwrap().to_string(),
+            got["result"]["token"]
+                .as_str()
+                .expect("a token")
+                .to_string(),
+        )
+    };
+    let lets_in = |s: &Station, token: &str| -> u16 {
+        let url = s.url("/api/rpc");
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let req = reqwest::Client::new()
+                .post(url)
+                .bearer_auth(token)
+                .json(&json!({"method": "pane.list", "params": {}}));
+            req.send().await.unwrap().status().as_u16()
+        })
+    };
+    let devices = |s: &Station| s.call("trust.status", json!({}))["devices"].clone();
+    let (phone, phone_token) = sign_in("a phone");
+    let (_, laptop_token) = sign_in("a laptop");
+    let listed = wait_for("every station to list both browsers", 15, || {
+        let at_a = devices(a);
+        (at_a.as_array().unwrap().len() == 2 && devices(b) == at_a && devices(c) == at_a)
+            .then_some(at_a)
+    });
+    // Each says where it was approved.
+    assert_eq!(
+        (listed[0]["name"].clone(), listed[0]["at"].clone()),
+        (json!("a phone"), json!("alpha")),
+        "{listed}"
+    );
+    assert_eq!(lets_in(c, &phone_token), 200);
+
+    // A sign-out reaches every station, also one that was off when it was
+    // made. (Before, it was sent once to the stations that were on, so a
+    // station that was off kept accepting the token.)
+    sc.kill9();
+    b.call("device.revoke", json!({"device": phone}));
+    assert_eq!(
+        (lets_in(a, &phone_token), lets_in(b, &phone_token)),
+        (401, 401)
+    );
+    sc.launch();
+    let c = &sc;
+    wait_for(
+        "charlie to hear of the sign-out once it is back",
+        20,
+        || (lets_in(c, &phone_token) == 401).then_some(()),
+    );
+    let left = wait_for("every station to list one browser", 15, || {
+        let at_a = devices(a);
+        (at_a.as_array().unwrap().len() == 1 && devices(b) == at_a && devices(c) == at_a)
+            .then_some(at_a)
+    });
+    assert_eq!(left[0]["name"], json!("a laptop"), "{left}");
+    assert_eq!(lets_in(c, &laptop_token), 200);
+
+    // The owner goes from one station's Control Deck to another's without a
+    // second approval: the deck this browser is signed in to opens the
+    // other deck and hands it the browser's own token as a window message.
+    // The token is never in an address, so it is in no history.
+    // (This browser was at bravo's deck with bravo's own token: it is
+    // taken away, so that bravo's deck has no sign-in for this browser.)
+    page.js("(localStorage.removeItem('spandeck.token'), true)");
+    page.visit(a);
+    page.js(&format!(
+        "(localStorage.setItem('spandeck.token', {}), location.reload(), true)",
+        json!(laptop_token)
+    ));
+    page.wait(
+        "alpha's deck, signed in as the laptop",
+        &format!(
+            "localStorage.getItem('spandeck.token') === {} && !!document.querySelector('.topbar')",
+            json!(laptop_token)
+        ),
+    );
+    page.goto("/fleet");
+    page.js("(real => { window.open = (url, ...rest) => { window.__opened = url; return real.call(window, url, ...rest); }; return true; })(window.open)");
+    page.right_click(
+        "[...document.querySelectorAll('a.tile.station')].find(x => x.innerText.includes('bravo'))",
+    );
+    page.choose("Open bravo's own Control Deck");
+    assert_eq!(
+        page.js("window.__opened"),
+        json!(format!("http://127.0.0.1:{}/#/fleet", b.port))
+    );
+    let there = page.opened(&format!(":{}/", b.port));
+    there.wait(
+        "bravo's deck, signed in with no new approval",
+        &format!(
+            "location.port === '{}' && !!document.querySelector('.topbar') && localStorage.getItem('spandeck.token') === {}",
+            b.port,
+            json!(laptop_token)
+        ),
+    );
+    // Every address either window was at, or came from.
+    for window in [&page, &there] {
+        let visited = window
+            .js("[location.href, document.referrer, ...performance.getEntriesByType('navigation').map(e => e.name)].join(' ')")
+            .to_string();
+        assert!(
+            !visited.contains("dev.") && !visited.contains("token"),
+            "{visited}"
+        );
+    }
+    assert!(relayed(b).is_none());
+    assert_eq!(devices(b), left);
+    // A window that was not opened by the deck is told nothing, and the
+    // window that was is answered once.
+    assert_eq!(
+        page.js("new Promise(done => { let got = 0; addEventListener('message', e => { if (e.data && e.data.kind) got++; }); window.postMessage('spandeck:hop-ready', '*'); setTimeout(() => done(got), 300); })"),
+        json!(0)
+    );
+    assert_eq!(
+        there.js("new Promise(done => { let got = 0; addEventListener('message', e => { if (e.data && e.data.kind) got++; }); window.opener.postMessage('spandeck:hop-ready', '*'); setTimeout(() => done(got), 300); })"),
+        json!(0)
+    );
+    // The station's own token is never handed on: only a browser's.
+    page.js(&format!(
+        "(localStorage.setItem('spandeck.token', {}), location.reload(), true)",
+        json!(a.token())
+    ));
+    page.wait(
+        "alpha's deck, with alpha's own token",
+        &format!(
+            "localStorage.getItem('spandeck.token') === {} && !!document.querySelector('a.tile.station')",
+            json!(a.token())
+        ),
+    );
+    page.right_click(
+        "[...document.querySelectorAll('a.tile.station')].find(x => x.innerText.includes('bravo'))",
+    );
+    assert_eq!(
+        page.js("[...document.querySelectorAll('.menu-item')].some(i => i.innerText.includes('own Control Deck'))"),
+        json!(false)
+    );
 }

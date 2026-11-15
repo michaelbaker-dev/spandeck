@@ -313,7 +313,9 @@ impl Daemon {
             .into_iter()
             .filter(|p| p.station != removed)
             .collect();
-        let params = json!({"key": hex(&new), "removed": removed, "by": by, "revoked": self.revoked_devices()});
+        // No list of signed-out browsers goes with it: their tokens were
+        // made with the key that is being replaced.
+        let params = json!({"key": hex(&new), "removed": removed, "by": by});
         let calls = others.iter().map(|p| {
             let params = params.clone();
             async move {
