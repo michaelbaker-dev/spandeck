@@ -35,7 +35,8 @@ days, not hours.
   run side by side, so that typing and Stop never wait behind a station that does not
   answer. That decides only when a request runs: who may call what is checked exactly
   as before, for every request, and no caller gained a method. One connection may have
-  256 requests waiting or running, and fewer for any one other station; past that a
+  256 requests waiting or running for the station it is open at, and fewer, counted
+  apart, for each other station; past that a
   request is refused at once and nothing is done. What is sent to one pane, and the
   changes made to one station, keep the order they were sent in.
 - **What stations tell each other is data.** Stations of a fleet share which

@@ -67,7 +67,25 @@ pub struct FleetState {
     /// said at the last look at the fleet. The web server listens on what
     /// this says. `None` until a look has read them.
     pub own_addrs: tokio::sync::watch::Sender<Option<OwnAddrs>>,
+    /// Addresses whose last calls got no answer at all: see `not_answering`.
+    silent: Mutex<HashMap<String, Silent>>,
 }
+
+/// Calls in a row to one address that got no answer (no connection, or
+/// nothing within the call's five seconds).
+#[derive(Default, Clone, Copy)]
+struct Silent {
+    fails: u32,
+    since_ms: u64,
+    probe_ms: u64,
+}
+
+/// After this many calls in a row with no answer a station is taken to be
+/// not answering.
+pub const SILENT_AFTER: u32 = 2;
+/// While a station is not answering, one of a Control Deck's calls to it is
+/// let through this often, to find out whether it is back.
+pub const SILENT_PROBE_MS: u64 = 2000;
 
 /// See `FleetState::own_addrs`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -118,6 +136,59 @@ impl FleetState {
             station: cfg.station.clone(),
             perf,
             own_addrs: tokio::sync::watch::Sender::new(None),
+            silent: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// A call to this address was answered (whatever the answer), or was
+    /// not answered at all.
+    fn note_answer(&self, addr: &str, answered: bool) {
+        let mut silent = self.silent.lock().unwrap();
+        if answered {
+            silent.remove(addr);
+            return;
+        }
+        if silent.len() >= 256 && !silent.contains_key(addr) {
+            return;
+        }
+        let s = silent.entry(addr.to_string()).or_default();
+        if s.fails == 0 {
+            s.since_ms = now_ms();
+        }
+        s.fails = s.fails.saturating_add(1);
+    }
+
+    /// Is this station not answering: did its last calls, two or more in a
+    /// row, get no answer? Since when (this station's clock). It is so
+    /// from the second such call and until the first answer to any call,
+    /// the look at the fleet every ten seconds included. Nothing a station
+    /// does by itself reads this (a stop is always sent): it is for a
+    /// Control Deck's connection, which then refuses a call to that
+    /// station at once where each would wait out its five seconds.
+    pub fn not_answering(&self, station: &str) -> Option<u64> {
+        let addr = self.peer(station)?.addr;
+        let silent = self.silent.lock().unwrap();
+        silent
+            .get(&addr)
+            .filter(|s| s.fails >= SILENT_AFTER)
+            .map(|s| s.since_ms)
+    }
+
+    /// May one call be let through to a station that is not answering, to
+    /// find out whether it is back? Once every two seconds, for whoever
+    /// asks first.
+    pub fn probe(&self, station: &str) -> bool {
+        let Some(addr) = self.peer(station).map(|p| p.addr) else {
+            return true;
+        };
+        let mut silent = self.silent.lock().unwrap();
+        match silent.get_mut(&addr) {
+            Some(s) if now_ms().saturating_sub(s.probe_ms) < SILENT_PROBE_MS => false,
+            Some(s) => {
+                s.probe_ms = now_ms();
+                true
+            }
+            None => true,
         }
     }
 
@@ -339,8 +410,10 @@ impl FleetState {
                 "no answer"
             };
             self.perf.link_call(addr, began.elapsed(), Some(why));
+            self.note_answer(addr, false);
             format!("unreachable: {e}")
         })?;
+        self.note_answer(addr, true);
         let status = resp.status();
         let body: Value = resp.json().await.map_err(|e| {
             self.perf

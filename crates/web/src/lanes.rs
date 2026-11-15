@@ -39,8 +39,9 @@ pub const FLAG: &str = "ws_lanes";
 /// and `input_refused` on a channel.
 pub const CAP_BUSY: &str = "busy";
 
-/// Requests of one connection that are waiting or running, over which the
-/// next is refused at once.
+/// Requests of one connection for this station that are waiting or
+/// running, over which the next is refused at once. Each other station
+/// has limits of its own (`station_limit`), counted apart.
 pub const MAX_WAITING: usize = 256;
 /// Reads in flight per connection for this station, and for each other
 /// station. Each station has its own, so stations that do not answer hold
@@ -60,9 +61,14 @@ pub fn station_limit(lane: Lane) -> usize {
         Lane::Write => 16,
         Lane::Urgent => 16,
         Lane::Input => 64,
-        Lane::Attach | Lane::Held => MAX_WAITING,
+        Lane::Attach | Lane::Held => 16,
     }
 }
+
+/// A call to another station that is not answered within this is given up
+/// by the connection that made it, whatever the call underneath does (a
+/// station's calls have five seconds of their own).
+pub const STATION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// What a request in a line is addressed to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,17 +79,45 @@ pub enum Scope {
     /// Every pane of the station: "stop every agent", "Release all".
     AllPanes,
     /// A change to the station that is not for a pane's input or its marks.
-    Write,
+    /// For this station, of which kind (`shared`): a change that is offered
+    /// to, or made at, the other stations of the fleet waits for them, and
+    /// must not hold up one that is this station's alone.
+    Write(&'static str),
+}
+
+/// Changes made at this station that reach out: to the other stations of
+/// the fleet (a document every station keeps, the fleet's members and its
+/// key, a linked project, a search of other stations' history) or to a
+/// service outside (the vault, a download). By the first part of their
+/// name. Each kind keeps its own order, apart from the others and from
+/// the changes that are this station's alone, so a station that does not
+/// answer delays only what is itself for the fleet.
+const SHARED: &[&str] = &[
+    "deck", "look", "prefs", "setup", "agents", "fleet", "trust", "device", "vault", "msg",
+    "recall", "context", "tailnet", "notify",
+];
+
+/// The kind of a change to this station: "" for one that is this
+/// station's alone.
+fn shared(method: &str) -> &'static str {
+    let head = method.split('.').next().unwrap_or("");
+    if matches!(method, "project.link" | "project.unlink") {
+        return "project.link";
+    }
+    if method == "station.update" {
+        return "station.update";
+    }
+    SHARED.iter().find(|k| **k == head).copied().unwrap_or("")
 }
 
 impl Scope {
     /// Must one of two requests for the same station wait for the other?
     fn crosses(&self, other: &Scope) -> bool {
         match (self, other) {
-            (Scope::Write, Scope::Write) => true,
+            (Scope::Write(a), Scope::Write(b)) => a == b,
             // A Stop never waits behind a change to the station, however
             // long that takes, nor a change behind what is typed.
-            (Scope::Write, _) | (_, Scope::Write) => false,
+            (Scope::Write(_), _) | (_, Scope::Write(_)) => false,
             (Scope::AllPanes, _) | (_, Scope::AllPanes) => true,
             (Scope::Pane(a), Scope::Pane(b)) => a == b,
         }
@@ -238,24 +272,29 @@ impl Counts {
     /// no limit of its own.
     pub fn admit(&self, station: Option<&str>, lane: Lane) -> Result<Counted, Busy> {
         let mut held = self.held.lock().unwrap();
-        if held.all >= MAX_WAITING {
-            return Err(Busy {
-                station: None,
-                waiting: held.all,
-            });
-        }
         let key = station.map(|s| (s.to_string(), lane as u8));
-        if let Some(key) = &key {
-            let n = held.by.get(key).copied().unwrap_or(0);
-            if n >= station_limit(lane) {
-                return Err(Busy {
-                    station: Some(key.0.clone()),
-                    waiting: n,
-                });
+        match &key {
+            // Another station's requests are counted for that station and
+            // nowhere else: however many wait for it, none takes a place
+            // of this station's or of another's.
+            Some(key) => {
+                let n = held.by.get(key).copied().unwrap_or(0);
+                if n >= station_limit(lane) {
+                    return Err(Busy {
+                        station: Some(key.0.clone()),
+                        waiting: n,
+                    });
+                }
+                *held.by.entry(key.clone()).or_default() += 1;
             }
-            *held.by.entry(key.clone()).or_default() += 1;
+            None if held.all >= MAX_WAITING => {
+                return Err(Busy {
+                    station: None,
+                    waiting: held.all,
+                })
+            }
+            None => held.all += 1,
         }
-        held.all += 1;
         Ok(Counted {
             counts: self.clone(),
             key,
@@ -264,23 +303,66 @@ impl Counts {
 
     #[cfg(test)]
     fn waiting(&self) -> usize {
-        self.held.lock().unwrap().all
+        let held = self.held.lock().unwrap();
+        held.all + held.by.values().sum::<usize>()
     }
 }
 
 impl Drop for Counted {
     fn drop(&mut self) {
         let mut held = self.counts.held.lock().unwrap();
-        held.all -= 1;
-        if let Some(key) = &self.key {
-            if let Some(n) = held.by.get_mut(key) {
-                *n -= 1;
-                if *n == 0 {
-                    held.by.remove(key);
-                }
+        let Some(key) = &self.key else {
+            held.all -= 1;
+            return;
+        };
+        if let Some(n) = held.by.get_mut(key) {
+            *n -= 1;
+            if *n == 0 {
+                held.by.remove(key);
             }
         }
     }
+}
+
+/// A request for a station that is not answering, refused at once: the
+/// words, and the code for a page that knows it (a page from before gets
+/// the code any failed call had).
+pub fn not_answering(station: &str, for_ms: u64, page_knows: bool) -> Value {
+    serde_json::json!({
+        "code": if page_knows { "not_answering" } else { "internal" },
+        "message": format!(
+            "{station} is not answering (for {} s now), so this was not sent. Nothing was changed. It is tried again by itself",
+            for_ms / 1000
+        ),
+    })
+}
+
+/// How long a call for another station may wait behind others for that
+/// station (for one of its read places, or its turn in the station's
+/// line) before it is given up unsent.
+pub const STATION_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// A call for another station that waited its four seconds behind others
+/// for that station and was not sent.
+pub fn not_sent(station: &str, page_knows: bool) -> Value {
+    serde_json::json!({
+        "code": if page_knows { CAP_BUSY } else { "internal" },
+        "message": format!(
+            "{station} is slow: this waited {} s behind what was asked of it before, and was not sent. Nothing was changed",
+            STATION_WAIT.as_secs()
+        ),
+    })
+}
+
+/// A call to another station that got no answer within the deadline.
+pub fn no_answer(station: &str, page_knows: bool) -> Value {
+    serde_json::json!({
+        "code": if page_knows { "not_answering" } else { "internal" },
+        "message": format!(
+            "{station} did not answer within {} s. If this was a change, it is not known whether it was made",
+            STATION_DEADLINE.as_secs()
+        ),
+    })
 }
 
 /// Too much is already waiting: the request was not taken.
@@ -380,7 +462,11 @@ pub fn route(own: &str, method: &str, params: &Value) -> Route {
         // answer at another station. Nothing stands behind them.
         "wait" | "task.wait" | "hook.ingest" | "trust.approve" | "fleet.join" => (Lane::Held, None),
         m if spandeck_core::rpc::reads(m) => (Lane::Read, None),
-        _ => (Lane::Write, Some(Scope::Write)),
+        // Everything for another station is that station's: one order.
+        m => (
+            Lane::Write,
+            Some(Scope::Write(if station.is_some() { "" } else { shared(m) })),
+        ),
     };
     Route {
         lane,
@@ -530,6 +616,9 @@ mod tests {
         assert_eq!(deck.settle().await, ["key"], "typed in the read loop");
         deck.read("stop", "pane.stop", json!({"pane": "p1"}), false);
         deck.read("read here", "pane.list", json!({}), false);
+        // A change that is offered to the whole fleet waits for it; one
+        // that is this station's alone does not wait behind it.
+        deck.read("layout", "deck.layout.save", json!({}), true);
         deck.read("change here", "pane.rename", json!({"pane": "p1"}), false);
         let other = peer("far", "pane.list", json!({}));
         deck.read("read far", "peer.call", other, false);
@@ -546,7 +635,7 @@ mod tests {
         // The connection closes: the questions nobody will read the
         // answers to are ended, and their places are free again.
         deck.ending.shutdown().await;
-        assert_eq!(deck.counts.waiting(), 1, "only the Stop for gone is left");
+        assert_eq!(deck.counts.waiting(), 2, "the Stop for gone, the layout");
     }
 
     /// What is sent to one pane keeps the order it was read in, whatever
@@ -625,6 +714,10 @@ mod tests {
             let busy = deck.read(&format!("{i}"), "pane.rename", json!({}), true);
             assert!(busy.is_none(), "{i}");
         }
+        // However many wait for other stations, they take none of this
+        // station's places, and the other way about.
+        let far = peer("far", "pane.rename", json!({}));
+        assert!(deck.read("far", "peer.call", far, true).is_none());
         let busy = deck
             .read("one more", "pane.rename", json!({}), false)
             .expect("refused");
@@ -666,12 +759,19 @@ mod tests {
         let update = peer("far", "station.update", json!({}));
         assert_eq!(
             lane("peer.call", update),
-            (Lane::Write, Some("far".into()), Some(Scope::Write))
+            (Lane::Write, Some("far".into()), Some(Scope::Write("")))
         );
         let r = route("here", "wait", &json!({}));
         assert!(r.lane == Lane::Held && r.ends_with_connection);
         assert!(!route("here", "pane.rename", &json!({})).ends_with_connection);
         assert!(!route("here", "pane.stop", &json!({})).ends_with_connection);
+        // Two saves of one shared document keep their order; a save and
+        // a change that is this station's alone do not wait for each other.
+        let scope = |m: &str| route("here", m, &json!({})).scope.unwrap();
+        assert!(scope("look.set").crosses(&scope("look.theme.save")));
+        assert!(!scope("deck.layout.save").crosses(&scope("pane.rename")));
+        assert!(!scope("fleet.refresh").crosses(&scope("pane.spawn")));
+        assert!(scope("pane.spawn").crosses(&scope("pane.close")));
         let stop = route("here", "stop.all", &json!({"scope": "fleet"}));
         assert_eq!(stop.stop_scope.as_deref(), Some("fleet"));
     }

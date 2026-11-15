@@ -1157,6 +1157,7 @@ struct Running {
     reads: Arc<Semaphore>,
     reads_to: HashMap<String, Arc<Semaphore>>,
     attaches: Arc<Semaphore>,
+    attaches_to: HashMap<String, Arc<Semaphore>>,
     /// Ended with the connection: reads, attaches, waits.
     ending: JoinSet<()>,
     /// Run to their end whatever becomes of the connection: everything
@@ -1175,6 +1176,7 @@ impl Running {
             reads: Arc::new(Semaphore::new(lanes::READS)),
             reads_to: HashMap::new(),
             attaches: Arc::new(Semaphore::new(lanes::ATTACHES)),
+            attaches_to: HashMap::new(),
             ending: JoinSet::new(),
             lasting: JoinSet::new(),
             page_knows_busy,
@@ -1238,7 +1240,37 @@ impl Running {
                 .await;
             return conn.say(conn.done(&req, Some(lane), began, reply));
         }
-        let counted = match self.counts.admit(station.as_deref(), lane) {
+        // A station that has stopped answering: what is asked of it is
+        // refused at once, where each call would wait out its own five
+        // seconds, but for one call every two seconds that finds out
+        // whether it is back. A Stop, a Pause, a Kill or an answer for it
+        // is always sent.
+        let mut finds_out = false;
+        if let Some(to) = station.as_deref().filter(|_| lane != Lane::Urgent) {
+            let fleet = &conn.daemon().fleet;
+            if let Some(since) = fleet.not_answering(to) {
+                if !fleet.probe(to) {
+                    conn.daemon().perf.busy.add();
+                    let for_ms = spandeck_core::paths::now_ms().saturating_sub(since);
+                    let no = lanes::not_answering(to, for_ms, self.page_knows_busy);
+                    return conn.say(answer(&req.id, Err(no)));
+                }
+                finds_out = true;
+            }
+        }
+        // Attaching to a pane of another station is counted for that
+        // station and has that station's places: it waits for that station
+        // (four seconds to connect, five for its answer) and must hold up
+        // no attach here or anywhere else.
+        let attach_to = (lane == Lane::Attach)
+            .then(|| req.params.get("station").and_then(|s| s.as_str()))
+            .flatten()
+            .filter(|s| *s != conn.daemon().station)
+            .map(String::from);
+        let counted = match self
+            .counts
+            .admit(station.as_deref().or(attach_to.as_deref()), lane)
+        {
             Ok(c) => c,
             Err(busy) => return self.busy(&req, &busy),
         };
@@ -1308,22 +1340,72 @@ impl Running {
                     None => self.reads.clone(),
                 },
             ),
-            Lane::Attach => Some(self.attaches.clone()),
+            Lane::Attach => Some(
+                match attach_to.filter(|s| conn.daemon().fleet.peer(s).is_some()) {
+                    Some(s) => self
+                        .attaches_to
+                        .entry(s)
+                        .or_insert_with(|| Arc::new(Semaphore::new(lanes::READS_PER_STATION)))
+                        .clone(),
+                    None => self.attaches.clone(),
+                },
+            ),
             _ => None,
         };
+        let knows = self.page_knows_busy;
         let task = async move {
             let _counted = counted;
-            let _held = match places {
-                Some(places) => places.acquire_owned().await.ok(),
-                None => None,
+            // Its place among the reads, and its turn in its line. For
+            // another station that wait has an end: a call that has stood
+            // four seconds behind others for that station is not sent, and
+            // is told so (nothing was changed), so what it costs its caller
+            // is bounded whatever that station does.
+            let waits = async {
+                let held = match places {
+                    Some(places) => places.acquire_owned().await.ok(),
+                    None => None,
+                };
+                if let Some(place) = &place {
+                    place.turn().await;
+                }
+                held
             };
-            if let Some(place) = &place {
-                place.turn().await;
-            }
-            let began = std::time::Instant::now();
-            let reply = match lane {
-                Lane::Attach => conn.attach(&req.method, &req.params).await,
-                _ => conn.dispatch(&req.method, req.params.clone(), at).await,
+            let began;
+            let reply = match &station {
+                None => {
+                    let _held = waits.await;
+                    began = std::time::Instant::now();
+                    match lane {
+                        Lane::Attach => conn.attach(&req.method, &req.params).await,
+                        _ => conn.dispatch(&req.method, req.params.clone(), at).await,
+                    }
+                }
+                Some(to) => {
+                    let held = tokio::time::timeout(lanes::STATION_WAIT, waits).await;
+                    began = std::time::Instant::now();
+                    let fleet = &conn.daemon().fleet;
+                    // While it waited the station may have stopped
+                    // answering: then it is not sent either (a Stop is).
+                    let silent = fleet
+                        .not_answering(to)
+                        .filter(|_| lane != Lane::Urgent && !finds_out && !fleet.probe(to));
+                    match (held, silent) {
+                        (Err(_), _) => Err(lanes::not_sent(to, knows)),
+                        (Ok(_), Some(since)) => {
+                            let for_ms = spandeck_core::paths::now_ms().saturating_sub(since);
+                            Err(lanes::not_answering(to, for_ms, knows))
+                        }
+                        // Given up here after the deadline, whatever the
+                        // call underneath is doing.
+                        (Ok(_held), None) => {
+                            let call = conn.dispatch(&req.method, req.params.clone(), at);
+                            match tokio::time::timeout(lanes::STATION_DEADLINE, call).await {
+                                Ok(reply) => reply,
+                                Err(_) => Err(lanes::no_answer(to, knows)),
+                            }
+                        }
+                    }
+                }
             };
             drop(place);
             conn.finish(&req, lane, began, reply).await;
@@ -1409,9 +1491,17 @@ impl Running {
                 let place = self.lines.enter(&station, scope, true);
                 self.lasting.spawn(async move {
                     let _counted = counted;
-                    place.turn().await;
+                    // Not kept for later than the four seconds any call
+                    // for another station may wait its turn.
+                    let turn = tokio::time::timeout(lanes::STATION_WAIT, place.turn()).await;
                     let began = std::time::Instant::now();
-                    let reply = hand(&conn, &req);
+                    let reply = match turn {
+                        Ok(()) => hand(&conn, &req),
+                        Err(_) => {
+                            conn.input_refused(&req.params, &station);
+                            Err(lanes::not_sent(&station, knows))
+                        }
+                    };
                     drop(place);
                     conn.finish(&req, Lane::Input, began, reply).await;
                 });

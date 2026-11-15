@@ -30,15 +30,18 @@ struct Seen {
     output: HashMap<u64, Vec<u8>>,
     /// Messages on a channel that are not output.
     said: Vec<Value>,
+    /// When each request was sent and when it was answered.
+    sent: HashMap<u64, Instant>,
+    took: HashMap<u64, Duration>,
 }
 
 /// A signed-in Control Deck, as a browser tab is one: it sends without
 /// waiting, and takes answers in whatever order they come.
 struct Deck {
-    sink: futures_util::stream::SplitSink<Socket, Message>,
+    sink: tokio::sync::Mutex<futures_util::stream::SplitSink<Socket, Message>>,
     seen: Arc<Mutex<Seen>>,
     hello: Value,
-    id: u64,
+    id: std::sync::atomic::AtomicU64,
 }
 
 impl Deck {
@@ -77,6 +80,9 @@ impl Deck {
                                     Some(e) => Err(e.clone()),
                                     None => Ok(v["result"].clone()),
                                 };
+                                if let Some(sent) = seen.sent.get(&id).copied() {
+                                    seen.took.insert(id, sent.elapsed());
+                                }
                                 seen.answers.push((id, answer));
                             }
                             None if v.get("chan").is_some() => seen.said.push(v),
@@ -88,36 +94,42 @@ impl Deck {
             }
         });
         Deck {
-            sink,
+            sink: tokio::sync::Mutex::new(sink),
             seen,
             hello,
-            id: 0,
+            id: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     /// Send a request and do not wait: its id.
-    async fn ask(&mut self, method: &str, params: Value) -> u64 {
-        self.id += 1;
-        let req = json!({"id": self.id, "method": method, "params": params});
-        self.sink
-            .send(Message::Text(req.to_string().into()))
+    async fn ask(&self, method: &str, params: Value) -> u64 {
+        let id = 1 + self.id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let req = json!({"id": id, "method": method, "params": params});
+        let mut sink = self.sink.lock().await;
+        self.seen.lock().unwrap().sent.insert(id, Instant::now());
+        sink.send(Message::Text(req.to_string().into()))
             .await
             .unwrap();
-        self.id
+        id
+    }
+
+    /// How long the answer to a request took, if it has come.
+    fn took(&self, id: u64) -> Option<Duration> {
+        self.seen.lock().unwrap().took.get(&id).copied()
     }
 
     /// Through this station to another, as the page's `api.on` does.
-    async fn ask_at(&mut self, station: &str, method: &str, params: Value) -> u64 {
+    async fn ask_at(&self, station: &str, method: &str, params: Value) -> u64 {
         let call = json!({"station": station, "method": method, "params": params});
         self.ask("peer.call", call).await
     }
 
     /// Sent as a key is: no answer is asked for.
-    async fn key(&mut self, chan: u64, data: &str) {
+    async fn key(&self, chan: u64, data: &str) {
         let req =
             json!({"id": null, "method": "pane.input", "params": {"chan": chan, "data": data}});
-        self.sink
-            .send(Message::Text(req.to_string().into()))
+        let mut sink = self.sink.lock().await;
+        sink.send(Message::Text(req.to_string().into()))
             .await
             .unwrap();
     }
@@ -159,14 +171,14 @@ impl Deck {
         .await
     }
 
-    async fn call(&mut self, method: &str, params: Value) -> Value {
+    async fn call(&self, method: &str, params: Value) -> Value {
         let id = self.ask(method, params.clone()).await;
         self.answer(id)
             .await
             .unwrap_or_else(|e| panic!("{method} {params}: {e}"))
     }
 
-    async fn attach(&mut self, params: Value) -> u64 {
+    async fn attach(&self, params: Value) -> u64 {
         self.call("pane.attach", params).await["chan"]
             .as_u64()
             .unwrap()
@@ -240,7 +252,7 @@ async fn a_station_that_hangs_slows_only_itself() {
     })
     .await;
 
-    let mut deck = Deck::open(&a, "tab-1", json!(["busy"])).await;
+    let deck = Deck::open(&a, "tab-1", json!(["busy"])).await;
     assert_eq!(deck.hello["auth"]["lanes"], json!(true));
     deck.call("events.subscribe", json!({})).await;
     let at_here = deck.attach(json!({"pane": here})).await;
@@ -375,7 +387,7 @@ async fn what_is_sent_to_one_pane_keeps_its_order_by_every_road() {
         )
     })
     .await;
-    let mut deck = Deck::open(&a, "tab-1", json!(["busy"])).await;
+    let deck = Deck::open(&a, "tab-1", json!(["busy"])).await;
 
     // ---- through another station: a paste goes as a call of its own,
     // the Enter after it down the pane's channel.
@@ -486,7 +498,7 @@ async fn what_is_sent_to_one_pane_keeps_its_order_by_every_road() {
     // with.
     deck.call("station.flags", json!({"set": {"ws_lanes": false}}))
         .await;
-    let mut plain = Deck::open(&a, "tab-2", json!([])).await;
+    let plain = Deck::open(&a, "tab-2", json!([])).await;
     assert_eq!(plain.hello["auth"]["lanes"], json!(false));
     let at = plain.attach(json!({"pane": here})).await;
     plain.key(at, "echo plain-$((2+2))\r").await;
@@ -513,7 +525,7 @@ async fn a_local_key_is_echoed_at_once_while_a_station_is_frozen() {
     let (a, b) = (Arc::new(a), Arc::new(b));
     let sa = a.clone();
     let here = off(move || shell(&sa, "here")).await;
-    let mut deck = Deck::open(&a, "tab-1", json!(["busy"])).await;
+    let deck = Deck::open(&a, "tab-1", json!(["busy"])).await;
     let at = deck.attach(json!({"pane": here})).await;
     let sb = b.clone();
     off(move || {
@@ -547,4 +559,317 @@ async fn a_local_key_is_echoed_at_once_while_a_station_is_frozen() {
     b.signal(SIGCONT);
     drop(deck);
     off(move || drop((a, b))).await;
+}
+
+/// A road to a station that adds a delay each way, which the test sets
+/// while it runs: the port to reach the station at through it.
+async fn slow_road(to: u16, each_way_ms: Arc<std::sync::atomic::AtomicU64>) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn carry(
+        mut from: tokio::net::tcp::OwnedReadHalf,
+        mut to: tokio::net::tcp::OwnedWriteHalf,
+        each_way_ms: Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        // Each piece is passed on, in order, that long after it was read.
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<(tokio::time::Instant, Vec<u8>)>();
+        let writer = tokio::spawn(async move {
+            while let Some((due, piece)) = rx.recv().await {
+                tokio::time::sleep_until(due).await;
+                if to.write_all(&piece).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let mut buf = vec![0u8; 65536];
+        while let Ok(n) = from.read(&mut buf).await {
+            let wait = each_way_ms.load(std::sync::atomic::Ordering::SeqCst);
+            let due = tokio::time::Instant::now() + Duration::from_millis(wait);
+            if n == 0 || tx.send((due, buf[..n].to_vec())).is_err() {
+                break;
+            }
+        }
+        drop(tx);
+        let _ = writer.await;
+    }
+    let port = free_port();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        while let Ok((near, _)) = listener.accept().await {
+            let each_way_ms = each_way_ms.clone();
+            tokio::spawn(async move {
+                let Ok(far) = tokio::net::TcpStream::connect(("127.0.0.1", to)).await else {
+                    return;
+                };
+                let _ = (near.set_nodelay(true), far.set_nodelay(true));
+                let ((nr, nw), (fr, fw)) = (near.into_split(), far.into_split());
+                tokio::join!(
+                    carry(nr, fw, each_way_ms.clone()),
+                    carry(fr, nw, each_way_ms)
+                );
+            });
+        }
+    });
+    port
+}
+
+/// What one run of the proof measured: for each thing done at this station
+/// or at the healthy one, how long each go took.
+type Measured = Vec<(&'static str, Vec<Duration>)>;
+
+/// The flood's questions: for which station, the request, when it was sent.
+type Asked = Vec<(&'static str, u64, Instant)>;
+
+fn worst(took: &[Duration]) -> Duration {
+    took.iter().copied().max().unwrap_or_default()
+}
+
+/// The owner's rule for this unit (15 Nov 2026): "the slow or absent
+/// station has to be fixed with the right architecture for a system like
+/// this, never to slow everyone else down." Four stations: the one that
+/// serves the page, one frozen, one two seconds away (a second each way),
+/// one healthy. The page floods all three others with its refresh's
+/// questions, four times a second, on the same connection as everything
+/// else. Done when what is done at this station (a key echoed, Stop,
+/// Pause, an approval answered) and at the healthy station (a read, a key
+/// echoed) takes no longer than in the same run with every station healthy,
+/// give or take a small constant; every question to the two bad stations
+/// is answered, within the ten seconds a call for another station may take
+/// at most (four waiting, six in flight); and once the frozen station is
+/// known not to answer, a question to it is refused at once.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "nightly: timings, a minute, with a station frozen and one made slow"]
+async fn a_frozen_and_a_slow_station_cost_nobody_else_anything() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let ports = [free_port(), free_port(), free_port(), free_port()];
+    let delay = Arc::new(AtomicU64::new(0));
+    // Alpha reaches charlie by the slow road; everyone else directly.
+    let road = slow_road(ports[2], delay.clone()).await;
+    let stations = off(move || {
+        let names = ["alpha", "bravo", "charlie", "delta"];
+        let all: Vec<Station> = (0..4)
+            .map(|i| {
+                let peers: Vec<String> = (0..4)
+                    .filter(|j| *j != i)
+                    .map(|j| if i == 0 && j == 2 { road } else { ports[j] })
+                    .map(|port| format!("\"127.0.0.1:{port}\""))
+                    .collect();
+                let config = format!("peers = [{}]\n", peers.join(", "));
+                Station::keyed_on(names[i], ports[i], &config)
+            })
+            .collect();
+        wait_for("alpha to find the other three", 30, || {
+            let v = all[0].call("fleet.refresh", json!({}));
+            let online = |x: &&Value| x["state"] == json!("online");
+            (v["stations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(online)
+                .count()
+                == 4)
+                .then_some(())
+        });
+        all
+    })
+    .await;
+    let stations = Arc::new(stations);
+    let s = stations.clone();
+    let (here, stopme, pauseme, dee) = off(move || {
+        // An agent that asks the owner twice: once for each run.
+        s[0].fake(
+            json!({"steps": [
+                {"prompt": "write files"},
+                {"permission": {"name": "Write", "file": "/tmp/a.txt"}},
+                {"permission": {"name": "Write", "file": "/tmp/b.txt"}},
+                {"turn_end": "done"}
+            ]}),
+            json!({"name": "asker"}),
+        );
+        (
+            shell(&s[0], "here"),
+            shell(&s[0], "stopme"),
+            shell(&s[0], "pauseme"),
+            shell(&s[3], "dee"),
+        )
+    })
+    .await;
+
+    let deck = Arc::new(Deck::open(&stations[0], "tab-1", json!(["busy"])).await);
+    let at_here = deck.attach(json!({"pane": here})).await;
+    let at_dee = deck.attach(json!({"pane": dee, "station": "delta"})).await;
+
+    // One run: the flood on, and each thing done several times.
+    let run = |label: &'static str, settle: Duration| {
+        let (deck, stopme, pauseme) = (deck.clone(), stopme.clone(), pauseme.clone());
+        async move {
+            let flooding = Arc::new(AtomicBool::new(true));
+            let asked: Arc<Mutex<Asked>> = Arc::default();
+            let (d, on, log) = (deck.clone(), flooding.clone(), asked.clone());
+            let flood = tokio::spawn(async move {
+                while on.load(Ordering::SeqCst) {
+                    for station in ["bravo", "charlie", "delta"] {
+                        for method in REFRESH {
+                            let id = d.ask_at(station, method, json!({})).await;
+                            log.lock().unwrap().push((station, id, Instant::now()));
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            });
+            tokio::time::sleep(settle).await;
+            let began = Instant::now();
+            let mut got: Measured = vec![];
+            let mut took = vec![];
+            for n in 0..20 {
+                let word = format!("{label}k{n}");
+                let t = Instant::now();
+                deck.key(at_here, &format!("echo {word}-$((1+1))\r")).await;
+                deck.shows(at_here, &format!("{word}-2")).await;
+                took.push(t.elapsed());
+                tokio::time::sleep(Duration::from_millis(60)).await;
+            }
+            got.push(("a key echoed here", took));
+            let mut took = vec![];
+            for _ in 0..5 {
+                let t = Instant::now();
+                let out = deck.call("pane.stop", json!({"pane": stopme})).await;
+                assert_eq!(out["stopped"], json!(true), "{out}");
+                took.push(t.elapsed());
+            }
+            got.push(("Stop here", took));
+            let mut took = vec![];
+            for n in 0..6 {
+                let t = Instant::now();
+                let p = json!({"pane": pauseme, "paused": n % 2 == 0});
+                deck.call("pane.pause", p).await;
+                took.push(t.elapsed());
+            }
+            got.push(("Pause here", took));
+            let waiting = loop {
+                let list = deck.call("approval.list", json!({})).await;
+                if let Some(first) = list.as_array().and_then(|l| l.first()) {
+                    break first["id"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            };
+            let t = Instant::now();
+            deck.call("approval.answer", json!({"id": waiting, "allow": true}))
+                .await;
+            got.push(("an approval answered here", vec![t.elapsed()]));
+            let mut took = vec![];
+            for _ in 0..10 {
+                let t = Instant::now();
+                let id = deck.ask_at("delta", "pane.list", json!({})).await;
+                assert!(deck.answer(id).await.unwrap().is_array());
+                took.push(t.elapsed());
+                tokio::time::sleep(Duration::from_millis(60)).await;
+            }
+            got.push(("a read of the healthy station", took));
+            let mut took = vec![];
+            for n in 0..8 {
+                let word = format!("{label}d{n}");
+                let t = Instant::now();
+                deck.key(at_dee, &format!("echo {word}-$((1+1))\r")).await;
+                deck.shows(at_dee, &format!("{word}-2")).await;
+                took.push(t.elapsed());
+                tokio::time::sleep(Duration::from_millis(60)).await;
+            }
+            got.push(("a key echoed at the healthy station", took));
+            let measured_for = began.elapsed();
+            flooding.store(false, Ordering::SeqCst);
+            let _ = flood.await;
+            let asked = asked.lock().unwrap().clone();
+            (got, asked, measured_for)
+        }
+    };
+
+    // Every station healthy.
+    let (healthy, _, _) = run("h", Duration::from_millis(500)).await;
+
+    // Bravo frozen, charlie two seconds away. The flood runs for seven
+    // seconds before anything is measured, so that every limit is reached
+    // and bravo is known not to answer.
+    let s = stations.clone();
+    off(move || {
+        s[1].signal(SIGSTOP);
+        s[1].wait_frozen();
+    })
+    .await;
+    delay.store(1000, Ordering::SeqCst);
+    let (bad, asked, measured_for) = run("b", Duration::from_secs(7)).await;
+
+    eprintln!(
+        "with every station healthy / with bravo frozen and charlie 2 s away (worst of each):"
+    );
+    for ((what, was), (_, now)) in healthy.iter().zip(&bad) {
+        eprintln!(
+            "  {what}: {:?} / {:?} (n={})",
+            worst(was),
+            worst(now),
+            now.len()
+        );
+    }
+    for ((what, was), (_, now)) in healthy.iter().zip(&bad) {
+        assert!(
+            worst(now) <= worst(was) + Duration::from_millis(50),
+            "{what}: {:?} with every station healthy, {:?} with two bad ones",
+            worst(was),
+            worst(now)
+        );
+    }
+
+    // Every question to the bad stations is answered, in at most the ten
+    // seconds a call for another station may take (four waiting its turn,
+    // six in flight).
+    for station in ["bravo", "charlie"] {
+        let ids: Vec<(u64, Instant)> = asked
+            .iter()
+            .filter(|(st, _, _)| *st == station)
+            .map(|(_, id, at)| (*id, *at))
+            .collect();
+        for (id, _) in &ids {
+            let _ = deck.answer(*id).await;
+        }
+        let took: Vec<Duration> = ids.iter().map(|(id, _)| deck.took(*id).unwrap()).collect();
+        let refused = ids
+            .iter()
+            .filter(|(id, _)| deck.answered(*id).is_some_and(|a| a.is_err()))
+            .count();
+        eprintln!(
+            "  {station}: {} questions in {measured_for:?}, {refused} refused or failed, the slowest answer after {:?}",
+            ids.len(),
+            worst(&took)
+        );
+        assert!(worst(&took) <= Duration::from_millis(10_500), "{station}");
+        if station == "bravo" {
+            // Asked after bravo was known not to answer: refused at once,
+            // but for the one call every two seconds that finds out.
+            let first = ids[0].1;
+            let mut late: Vec<Duration> = ids
+                .iter()
+                .filter(|(_, at)| at.duration_since(first) > Duration::from_secs(7))
+                .map(|(id, _)| deck.took(*id).unwrap())
+                .collect();
+            late.sort();
+            let half = late[late.len() / 2];
+            eprintln!("  bravo, once known not to answer: half its questions were refused within {half:?} (n={})", late.len());
+            assert!(half <= Duration::from_millis(100), "{half:?}");
+            let one = ids.last().unwrap().0;
+            let said = deck.answered(one).unwrap().unwrap_err();
+            assert!(
+                said["code"] == json!("not_answering") || said["code"] == json!("busy"),
+                "{said}"
+            );
+        } else {
+            // Charlie answers, two seconds late: some questions got through.
+            assert!(refused < ids.len(), "nothing reached charlie");
+        }
+    }
+
+    stations[1].signal(SIGCONT);
+    drop(deck);
+    off(move || drop(stations)).await;
 }

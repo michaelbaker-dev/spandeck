@@ -98,7 +98,7 @@ async function refreshStation(st) {
     // Unreachable: the fleet view says so. `busy`: the serving station still
     // waits for this station's answers to earlier questions and took no more
     // (it answers so at once); what is shown of it is from before.
-    if (e.code === 'busy') S.busy.set(st, S.busy.get(st) || Date.now()); else S.busy.delete(st);
+    if (e.code === 'busy' || e.code === 'not_answering') S.busy.set(st, S.busy.get(st) || Date.now()); else S.busy.delete(st);
   }
 }
 
