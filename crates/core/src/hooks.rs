@@ -14,6 +14,7 @@ use spandeck_agents::{
 use tokio::sync::oneshot;
 
 use crate::daemon::{invalid, ApprovalAnswer, Daemon, PaneEntry, PaneMeta, Result, TurnStats};
+use crate::db::Op;
 use crate::paths::{new_id, now_ms};
 
 impl Daemon {
@@ -403,11 +404,16 @@ impl Daemon {
         let id = new_id("a");
         let (tx, rx) = oneshot::channel();
         self.approvals.lock().unwrap().insert(id.clone(), tx);
-        let _ = self.db.with(|c| {
-            c.execute(
-                "INSERT INTO approvals(id,ts,pane,project,kind,summary,detail) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                rusqlite::params![id, now_ms() as i64, p.id, meta.project, kind, summary, detail.to_string()],
-            )
+        // The hook does not wait for the database: the request is listed
+        // from memory until its row is written (db.rs).
+        self.db.put(Op::ApprovalNew {
+            id: id.clone(),
+            ts: now_ms() as i64,
+            pane: p.id.clone(),
+            project: meta.project.clone(),
+            kind: kind.to_string(),
+            summary: summary.to_string(),
+            detail: detail.to_string(),
         });
         self.record(
             "approval.requested",
@@ -437,11 +443,13 @@ impl Daemon {
         match answer {
             Ok(Ok(a)) => Some(a),
             _ => {
-                let _ = self.db.with(|c| {
-                    c.execute(
-                        "UPDATE approvals SET status='expired', answered=?2 WHERE id=?1 AND status='pending'",
-                        rusqlite::params![id, now_ms() as i64],
-                    )
+                self.db.put(Op::ApprovalStatus {
+                    id: id.clone(),
+                    status: "expired".into(),
+                    at: now_ms() as i64,
+                    by: None,
+                    reason: None,
+                    only_pending: true,
                 });
                 self.emit(
                     "approval.resolved",
@@ -454,13 +462,16 @@ impl Daemon {
         }
     }
 
+    /// Returns whether the answer is saved: false when the database could
+    /// not be written within a second (the agent has its answer all the
+    /// same, and the row is written when it can be).
     pub fn answer_approval(
         &self,
         id: &str,
         allow: bool,
         reason: Option<String>,
         by: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let tx = self.approvals.lock().unwrap().remove(id);
         let Some(tx) = tx else {
             // Still listed as waiting with nobody waiting for it: it leaves
@@ -471,19 +482,22 @@ impl Daemon {
             ));
         };
         let status = if allow { "allowed" } else { "denied" };
-        let pane: Option<String> = self
-            .db
-            .with(|c| {
-                c.execute(
-                    "UPDATE approvals SET status=?2, answered=?3, answered_by=?4, reason=?5 WHERE id=?1",
-                    rusqlite::params![id, status, now_ms() as i64, by, reason],
-                )?;
-                c.query_row("SELECT pane FROM approvals WHERE id=?1", [id], |r| r.get(0))
-            })
-            .ok();
+        let pane = self.approval_pane(id);
+        // The agent is answered first, and at once: it never waits for the
+        // database, and neither does a second answer find it still waiting.
         let _ = tx.send(ApprovalAnswer {
             allow,
             reason: reason.clone(),
+        });
+        // Who answered, and what: kept until it is written, and listed from
+        // memory meanwhile. The owner is told when it is not saved yet.
+        let saved = self.db.write_ack(Op::ApprovalStatus {
+            id: id.to_string(),
+            status: status.to_string(),
+            at: now_ms() as i64,
+            by: Some(by.to_string()),
+            reason: reason.clone(),
+            only_pending: false,
         });
         self.record(
             "approval.resolved",
@@ -491,29 +505,47 @@ impl Daemon {
             None,
             None,
             Some(by),
-            json!({"id": id, "status": status, "reason": reason}),
+            json!({"id": id, "status": status, "reason": reason, "saved": saved}),
         );
-        Ok(())
+        Ok(saved)
+    }
+
+    /// The pane an approval is for: from its row, or from the request that
+    /// is not written yet.
+    fn approval_pane(&self, id: &str) -> Option<String> {
+        self.db
+            .pending()
+            .into_iter()
+            .find_map(|op| match op {
+                Op::ApprovalNew { id: new, pane, .. } if new == id => Some(pane),
+                _ => None,
+            })
+            .or_else(|| {
+                self.db
+                    .read(|c| {
+                        c.query_row("SELECT pane FROM approvals WHERE id=?1", [id], |r| r.get(0))
+                    })
+                    .ok()
+            })
     }
 
     pub(crate) fn cancel_pane_approvals(&self, pane: &str) {
         let ids: Vec<String> = self
-            .db
-            .with(|c| {
-                let mut stmt =
-                    c.prepare("SELECT id FROM approvals WHERE pane=?1 AND status='pending'")?;
-                let rows = stmt.query_map([pane], |r| r.get(0))?;
-                rows.collect()
-            })
-            .unwrap_or_default();
+            .approvals(true)
+            .iter()
+            .filter(|a| a["pane"] == pane)
+            .filter_map(|a| a["id"].as_str().map(String::from))
+            .collect();
         for id in ids {
             // Dropping the sender makes the waiting hook fall through.
             self.approvals.lock().unwrap().remove(&id);
-            let _ = self.db.with(|c| {
-                c.execute(
-                    "UPDATE approvals SET status='cancelled', answered=?2 WHERE id=?1",
-                    rusqlite::params![id, now_ms() as i64],
-                )
+            self.db.put(Op::ApprovalStatus {
+                id: id.clone(),
+                status: "cancelled".into(),
+                at: now_ms() as i64,
+                by: None,
+                reason: None,
+                only_pending: true,
             });
             self.emit(
                 "approval.resolved",
@@ -524,14 +556,80 @@ impl Daemon {
         }
     }
 
+    /// What the database does not have yet is laid over what it gave, so
+    /// an approval just asked for is listed and one just answered never
+    /// shows as waiting again (db.rs).
+    pub(crate) fn approvals_overlaid(
+        &self,
+        mut rows: Vec<Value>,
+        pending_only: bool,
+    ) -> Vec<Value> {
+        for op in self.db.pending() {
+            match op {
+                Op::ApprovalNew {
+                    id,
+                    ts,
+                    pane,
+                    project,
+                    kind,
+                    summary,
+                    detail,
+                } => {
+                    if !rows.iter().any(|r| r["id"] == id.as_str()) {
+                        rows.insert(
+                            0,
+                            json!({
+                                "id": id, "ts": ts, "pane": pane, "project": project,
+                                "kind": kind, "summary": summary,
+                                "detail": serde_json::from_str::<Value>(&detail).unwrap_or(Value::Null),
+                                "status": "pending", "answered_by": null, "reason": null,
+                                "station": self.station,
+                            }),
+                        );
+                    }
+                }
+                Op::ApprovalStatus {
+                    id,
+                    status,
+                    by,
+                    reason,
+                    only_pending,
+                    ..
+                } => {
+                    if let Some(r) = rows.iter_mut().find(|r| r["id"] == id.as_str()) {
+                        if !only_pending || r["status"] == "pending" {
+                            r["status"] = json!(status);
+                            r["answered_by"] = json!(by);
+                            r["reason"] = json!(reason);
+                            // Held in memory: lost if this station ends
+                            // before it is written.
+                            r["saved"] = json!(false);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if pending_only {
+            rows.retain(|r| r["status"] == "pending");
+        }
+        rows.sort_by_key(|r| std::cmp::Reverse(r["ts"].as_i64().unwrap_or(0)));
+        rows
+    }
+
     pub fn approvals(&self, pending_only: bool) -> Vec<Value> {
-        self.db
-            .with(|c| {
+        // An answer that is not written yet may be for a row that still
+        // reads as waiting: every row is read then, and the waiting ones
+        // are picked after what is unwritten is laid over them.
+        let unwritten = self.db.stats().waiting > 0;
+        let rows = self
+            .db
+            .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT id,ts,pane,project,kind,summary,detail,status,answered_by,reason FROM approvals
                      WHERE (?1=0 OR status='pending') ORDER BY ts DESC LIMIT 200",
                 )?;
-                let rows = stmt.query_map([pending_only as i64], |r| {
+                let rows = stmt.query_map([(pending_only && !unwritten) as i64], |r| {
                     let detail: String = r.get(6)?;
                     Ok(json!({
                         "id": r.get::<_, String>(0)?, "ts": r.get::<_, i64>(1)?,
@@ -542,9 +640,10 @@ impl Daemon {
                         "reason": r.get::<_, Option<String>>(9)?, "station": self.station,
                     }))
                 })?;
-                rows.collect()
+                rows.collect::<rusqlite::Result<Vec<Value>>>()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.approvals_overlaid(rows, pending_only)
     }
 }
 

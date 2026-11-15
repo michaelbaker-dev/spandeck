@@ -406,6 +406,9 @@ impl Daemon {
         let mut flags = flags_of_config(&self.cfg.flags);
         flags.extend(self.flags_set_by_owner());
         *self.restore.flags.write().unwrap() = flags;
+        // `db_writer = false`: the ship's log and pane records are written
+        // by their callers again (db.rs says what that does not take back).
+        self.db.set_queued(self.flag_on("db_writer", true));
     }
 
     /// A switch as it stands now, if the config or the owner set it.
@@ -508,7 +511,7 @@ impl Daemon {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         let (starts, hold) = count_start(&earlier, clean, now);
-        self.db.kv_set(KV_STARTS, &json!(starts).to_string());
+        self.db.kv_put(KV_STARTS, &json!(starts).to_string());
         StartInfo {
             at_ms: now,
             clean,
@@ -522,7 +525,7 @@ impl Daemon {
     /// The station is in service. From here on, ending without a stop is
     /// what the next start finds.
     pub(crate) fn restore_started(&self, adopted: bool) {
-        self.db.kv_set(KV_CLEAN, "0");
+        self.db.kv_put(KV_CLEAN, "0");
         self.restore_alive();
         self.load_ended();
         if adopted {
@@ -536,13 +539,13 @@ impl Daemon {
     /// Written every ten seconds: when this daemon was last running, which
     /// is what "away" is counted from at the next start.
     pub(crate) fn restore_alive(&self) {
-        self.db.kv_set(KV_ALIVE, &now_ms().to_string());
+        self.db.kv_put(KV_ALIVE, &now_ms().to_string());
     }
 
     /// The station was asked to stop: the next start follows a clean stop.
     pub(crate) fn restore_stopping(&self) {
         self.restore_alive();
-        self.db.kv_set(KV_CLEAN, "1");
+        self.db.kv_put(KV_CLEAN, "1");
     }
 
     fn backfill_proc_starts(&self) {
@@ -641,7 +644,7 @@ impl Daemon {
         let cutoff = now_ms().saturating_sub(ENDED_LISTED_MS) as i64;
         let rows: Vec<(String, String, String, Option<i64>)> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT id, meta, token, closed FROM panes WHERE closed IS NULL OR closed > ?1",
                 )?;
@@ -700,15 +703,10 @@ impl Daemon {
         let mut meta = meta.clone();
         meta.ended_by = None;
         meta.held_back = false;
-        let _ = self.db.with(|c| {
-            c.execute(
-                "UPDATE panes SET meta=?2, closed=COALESCE(closed, ?3) WHERE id=?1",
-                rusqlite::params![
-                    meta.id,
-                    serde_json::to_string(&meta).unwrap_or_default(),
-                    now_ms() as i64
-                ],
-            )
+        self.db.put(crate::db::Op::PaneUnlisted {
+            id: meta.id.clone(),
+            meta: serde_json::to_string(&meta).unwrap_or_default(),
+            at: now_ms() as i64,
         });
     }
 
@@ -826,7 +824,7 @@ impl Daemon {
     pub(crate) fn expire_ghost_approvals(&self, kept: &[String]) -> usize {
         let waiting: Vec<(String, String)> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt =
                     c.prepare("SELECT id, pane FROM approvals WHERE status='pending'")?;
                 let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -845,11 +843,13 @@ impl Daemon {
     }
 
     fn expire_approval(&self, id: &str, pane: &str) {
-        let _ = self.db.with(|c| {
-            c.execute(
-                "UPDATE approvals SET status='expired', answered=?2 WHERE id=?1 AND status='pending'",
-                rusqlite::params![id, now_ms() as i64],
-            )
+        self.db.put(crate::db::Op::ApprovalStatus {
+            id: id.to_string(),
+            status: "expired".into(),
+            at: now_ms() as i64,
+            by: None,
+            reason: None,
+            only_pending: true,
         });
         self.emit(
             "approval.resolved",
@@ -867,7 +867,7 @@ impl Daemon {
     pub(crate) fn expire_unanswerable(&self, id: &str) {
         let pane: Option<String> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 c.query_row(
                     "SELECT pane FROM approvals WHERE id=?1 AND status='pending'",
                     [id],

@@ -101,11 +101,18 @@ impl Daemon {
         let id = new_id("n");
         let url = pane.map(|p| format!("/#/s/{}/p/{}", self.station, p));
         let pushed = if push { 0 } else { 3 };
-        let _ = self.db.with(|c| {
-            c.execute(
-                "INSERT INTO notifications(id,ts,kind,pane,project,title,body,url,pushed) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                rusqlite::params![id, now_ms() as i64, kind, pane, project, title, body, url, pushed],
-            )
+        // Raised from hooks and from the stop path: never waited for, kept
+        // until it is written (db.rs). Decks are told at once, below.
+        self.db.put(crate::db::Op::Notice {
+            id: id.clone(),
+            ts: now_ms() as i64,
+            kind: kind.to_string(),
+            pane: pane.map(String::from),
+            project: project.map(String::from),
+            title: title.to_string(),
+            body: body.to_string(),
+            url: url.clone(),
+            pushed,
         });
         self.emit(
             "notify.new",
@@ -175,8 +182,9 @@ impl Daemon {
     }
 
     pub fn notifications(&self, unread_only: bool, limit: u32) -> Vec<Value> {
-        self.db
-            .with(|c| {
+        let mut list: Vec<Value> = self
+            .db
+            .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT id,ts,kind,pane,project,title,body,url,read,pushed FROM notifications
                      WHERE (?1=0 OR read=0) ORDER BY ts DESC LIMIT ?2",
@@ -194,7 +202,36 @@ impl Daemon {
                 })?;
                 rows.collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // A notice the database has not taken yet is listed all the same:
+        // the one that says the database cannot be written is among them.
+        for op in self.db.pending() {
+            if let crate::db::Op::Notice {
+                id,
+                ts,
+                kind,
+                pane,
+                project,
+                title,
+                body,
+                url,
+                pushed,
+            } = op
+            {
+                if !list.iter().any(|n| n["id"] == id.as_str()) {
+                    list.insert(
+                        0,
+                        json!({
+                            "id": id, "ts": ts, "kind": kind, "pane": pane, "project": project,
+                            "title": title, "body": body, "url": url, "read": false,
+                            "pushed": pushed, "station": self.station,
+                        }),
+                    );
+                }
+            }
+        }
+        list.truncate(limit as usize);
+        list
     }
 
     pub fn notifications_read(&self, id: Option<&str>) {
@@ -229,7 +266,7 @@ impl Daemon {
     pub(crate) async fn pump_notifications(&self) {
         let pending: Vec<(String, String, String, String, Option<String>)> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare("SELECT id,kind,title,body,url FROM notifications WHERE pushed=0 ORDER BY ts LIMIT 20")?;
                 let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
                 rows.collect()

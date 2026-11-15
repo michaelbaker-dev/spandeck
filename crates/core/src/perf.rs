@@ -675,7 +675,7 @@ impl Daemon {
     fn messages_waiting(&self) -> Vec<Value> {
         let now = now_ms();
         self.db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT o.dest, COUNT(*), MIN(m.ts) FROM outbox o JOIN messages m ON m.id=o.msg
                      WHERE o.state='pending' GROUP BY o.dest ORDER BY o.dest LIMIT 64",
@@ -706,6 +706,9 @@ impl Daemon {
         // ended, held back. And the switches in force on this station.
         v["recovered"] = self.last_recovered();
         v["flags"] = self.flags_view()["flags"].clone();
+        // The database's writer: what waits, what was dropped, whether it
+        // can write (db.rs).
+        v["database"] = json!(self.db.stats());
         v["messages"]["waiting"] = json!(self.messages_waiting());
         v["panes"] = json!(self
             .list_panes()

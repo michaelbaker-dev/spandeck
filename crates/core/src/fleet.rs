@@ -877,8 +877,8 @@ impl Daemon {
                 .iter()
                 .map(|(id, _)| stops::send(book, self, id, cutoff)),
         );
-        let (_, _, _) = tokio::join!(
-            self.stops_sync(false),
+        let (wrote, _, _) = tokio::join!(
+            self.stops_sync(false, Duration::from_secs(1)),
             async {
                 if let Some(local) = local {
                     let _ = local.await;
@@ -886,8 +886,15 @@ impl Daemon {
             },
             sends
         );
-        // What came of each, written too.
-        self.stops_sync(false).await;
+        // What came of each, written too. A database that did not take the
+        // rows in its second is not given another: the writer has them,
+        // and the answer says "not yet saved".
+        let again = if wrote {
+            Duration::from_secs(1)
+        } else {
+            Duration::ZERO
+        };
+        self.stops_sync(false, again).await;
         self.emit("stop.updated", None, None, json!({"ids": ids}));
         Ok(
             json!({"issued_ms": issued, "stops": self.stops(50).into_iter().filter(|s| ids.iter().any(|r| s["id"] == json!(r))).collect::<Vec<_>>()}),
@@ -898,16 +905,16 @@ impl Daemon {
     /// second: a database that is locked or full delays no stop. `load`:
     /// first take in the rows that wait in the database (after a restart).
     /// True when every row is written.
-    async fn stops_sync(&self, load: bool) -> bool {
+    async fn stops_sync(&self, load: bool, wait: Duration) -> bool {
         let book = self.stops.book.clone();
         let job = tokio::task::spawn_blocking(move || {
             if load {
                 book.load_waiting();
             }
-            book.save()
+            book.save_within(wait)
         });
         matches!(
-            tokio::time::timeout(Duration::from_secs(1), job).await,
+            tokio::time::timeout(wait + Duration::from_millis(500), job).await,
             Ok(Ok(true))
         )
     }
@@ -918,7 +925,7 @@ impl Daemon {
     pub(crate) async fn pump_stops(&self) {
         let book = &self.stops.book;
         let unsaved = book.unsaved();
-        let saved = self.stops_sync(true).await;
+        let saved = self.stops_sync(true, Duration::from_secs(1)).await;
         let round = stops::deliver_waiting(book, self, self.flag_on(stops::CAP, true)).await;
         for (id, station) in &round.dropped {
             self.record(
@@ -933,7 +940,7 @@ impl Daemon {
         let mut ids: Vec<&String> = round.tried.iter().collect();
         ids.extend(round.dropped.iter().map(|(id, _)| id));
         if !round.tried.is_empty() {
-            self.stops_sync(false).await;
+            self.stops_sync(false, Duration::from_secs(1)).await;
         }
         if !ids.is_empty() || (unsaved > 0 && saved) {
             self.emit("stop.updated", None, None, json!({"ids": ids}));

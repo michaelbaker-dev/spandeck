@@ -81,7 +81,7 @@ impl Daemon {
 
     pub fn recipes(&self, project: Option<&str>) -> Vec<Value> {
         self.db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare("SELECT id,kind,created,updated,state,data FROM recipes WHERE (?1 IS NULL OR project=?1) ORDER BY created DESC LIMIT 50")?;
                 let rows = stmt.query_map([project], |r| {
                     let data: String = r.get(5)?;
@@ -98,7 +98,7 @@ impl Daemon {
 
     pub(crate) fn active_recipe(&self, project: &str) -> Option<String> {
         self.db
-            .with(|c| {
+            .read(|c| {
                 c.query_row(
                     "SELECT id FROM recipes WHERE project=?1 AND state='active' LIMIT 1",
                     [project],
@@ -215,7 +215,7 @@ impl Daemon {
     fn recipe_load(&self, id: &str) -> Result<ReviewLoop> {
         let data: String = self
             .db
-            .with(|c| c.query_row("SELECT data FROM recipes WHERE id=?1", [id], |r| r.get(0)))
+            .read(|c| c.query_row("SELECT data FROM recipes WHERE id=?1", [id], |r| r.get(0)))
             .map_err(|_| Error::NotFound(format!("recipe {id}")))?;
         serde_json::from_str(&data).map_err(|e| invalid(e.to_string()))
     }
@@ -245,7 +245,7 @@ impl Daemon {
     pub(crate) async fn pump_recipes(&self) {
         let active: Vec<String> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare("SELECT id FROM recipes WHERE state='active'")?;
                 let rows = stmt.query_map([], |r| r.get(0))?;
                 rows.collect()

@@ -232,7 +232,7 @@ impl Daemon {
             return Some(p.meta.lock().unwrap().name.clone());
         }
         self.db
-            .with(|c| {
+            .read(|c| {
                 c.query_row(
                     "SELECT json_extract(meta, '$.name') FROM panes WHERE id=?1",
                     [id],

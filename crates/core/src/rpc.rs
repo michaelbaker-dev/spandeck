@@ -160,6 +160,34 @@ const READ_METHODS: &[&str] = &[
     "trust.status",
 ];
 
+/// Changes that are only worth making if they are stored: refused while
+/// this station cannot write its database (`Db::healthy`), so that nobody
+/// is told a message was sent, a task taken or a pane started that a
+/// restart would forget. Stop, Pause, Kill, typing, approvals, hooks, the
+/// switches and an upgrade are not on it, and never refused for this.
+const NEEDS_DATABASE: &[&str] = &[
+    "pane.spawn",
+    "project.new",
+    "project.open",
+    "project.close",
+    "project.remove",
+    "project.link",
+    "project.unlink",
+    "project.link.record",
+    "msg.send",
+    "msg.reply",
+    "msg.ack",
+    "relay.accept",
+    "delegate",
+    "task.result",
+    "task.cancel",
+    "task.continue",
+    "signoff.give",
+    "recipe.review",
+    "recipe.cancel",
+    "note.add",
+];
+
 fn p<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T> {
     serde_json::from_value(params.clone()).map_err(|e| invalid(format!("bad parameters: {e}")))
 }
@@ -248,6 +276,11 @@ impl Daemon {
         {
             self.touch_presence(&caller.client);
         }
+        if NEEDS_DATABASE.contains(&method) && !self.db.healthy() {
+            return Err(Error::Other(anyhow::anyhow!(
+                "this station cannot write its database; nothing was changed"
+            )));
+        }
         if caller.authority == Authority::Owner && SYNCED_CHANGES.contains(&method) {
             self.sync_catch_up().await;
         }
@@ -309,7 +342,12 @@ impl Daemon {
                 opts.cwd = opts.cwd.map(|c| self.expand_path(&c));
                 let pane = self.spawn_pane(opts)?;
                 self.write_instructions(&pane.meta());
-                self.pane_view(&pane)
+                let mut view = self.pane_view(&pane);
+                // `saved: false`: the pane runs; its record is held in
+                // memory until the database can be written, and a pane
+                // with no record is not started again after a crash.
+                view["saved"] = json!(self.pane_saved(&pane.id));
+                view
             }
             // What a new pane asked to continue the last conversation
             // (`pane.spawn` with `resume_last`) would go back to. Reads only;
@@ -440,11 +478,14 @@ impl Daemon {
                     }
                 }
                 self.save_pane(&pane);
+                // What the owner set is waited for, like a pause: a station
+                // killed a moment later came back without it.
+                self.pane_saved(&pane.id);
                 self.emit("pane.updated", Some(&pane.id), None, json!({}));
                 self.pane_view(&pane)
             }
             "pane.pause" => {
-                self.pause(
+                let saved = self.pause(
                     s(&params, "pane")?,
                     params
                         .get("paused")
@@ -452,7 +493,9 @@ impl Daemon {
                         .unwrap_or(true),
                     by,
                 )?;
-                json!({"ok": true})
+                // `saved: false`: the pause holds now; its record is held
+                // in memory until the database can be written.
+                json!({"ok": true, "saved": saved})
             }
             "pane.stop" => {
                 self.stop(s(&params, "pane")?, by)?;
@@ -467,8 +510,9 @@ impl Daemon {
                 self.pane_view(&pane)
             }
             "pane.close" => {
-                self.close(s(&params, "pane")?, by)?;
-                json!({"ok": true})
+                let id = self.pane(s(&params, "pane")?)?.id.clone();
+                self.close(&id, by)?;
+                json!({"ok": true, "saved": self.pane_saved(&id)})
             }
             "pane.drop_file" => {
                 let data = base64::engine::general_purpose::STANDARD
@@ -540,7 +584,7 @@ impl Daemon {
             }
             "approval.list" => json!(self.approvals(!flag(&params, "all"))),
             "approval.answer" => {
-                self.answer_approval(
+                let saved = self.answer_approval(
                     s(&params, "id")?,
                     params
                         .get("allow")
@@ -549,7 +593,9 @@ impl Daemon {
                     opt(&params, "reason").map(String::from),
                     by,
                 )?;
-                json!({"ok": true})
+                // `saved: false`: the agent has its answer; who gave it is
+                // held in memory until the database can be written.
+                json!({"ok": true, "saved": saved})
             }
             "integration.status" => json!([AgentKind::Claude, AgentKind::Codex]
                 .iter()

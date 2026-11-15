@@ -113,7 +113,7 @@ impl Daemon {
             .unwrap_or(end)
             .min(end)
             .max(self.read_line(&p.id, &session));
-        self.db.kv_set(
+        self.db.kv_put(
             &read_key(&p.id),
             &json!({"session": session, "line": line, "ts": now_ms()}).to_string(),
         );
@@ -154,9 +154,7 @@ impl Daemon {
     /// A closed pane's read mark is of no more use.
     pub(crate) fn conversation_forget(&self, pane: &str) {
         self.read_marks.lock().unwrap().remove(pane);
-        let _ = self
-            .db
-            .with(|c| c.execute("DELETE FROM kv WHERE k=?1", [read_key(pane)]));
+        self.db.put(crate::db::Op::KvDel { k: read_key(pane) });
     }
 
     /// What the view needs beside the items, all of it already known to the
@@ -164,24 +162,21 @@ impl Daemon {
     /// for the owner. Times are this station's; `now_ms` is its clock, so
     /// the view never compares the browser's clock with a station's.
     fn conversation_live(&self, p: &PaneEntry, session: Option<&str>) -> Value {
-        let pending: Vec<Value> = self
-            .db
-            .with(|c| {
-                let mut stmt = c.prepare(
-                    "SELECT id,ts,kind,summary,detail FROM approvals
-                     WHERE pane=?1 AND status='pending' ORDER BY ts LIMIT 20",
-                )?;
-                let rows = stmt.query_map([&p.id], |r| {
-                    let detail: String = r.get(4)?;
-                    Ok(json!({
-                        "id": r.get::<_, String>(0)?, "ts": r.get::<_, i64>(1)?,
-                        "kind": r.get::<_, String>(2)?, "summary": r.get::<_, String>(3)?,
-                        "detail": serde_json::from_str::<Value>(&detail).unwrap_or(Value::Null),
-                    }))
-                })?;
-                rows.collect()
+        // With what is not written yet laid over the rows (hooks.rs): a
+        // request just made is here, one just answered is not.
+        let mut pending: Vec<Value> = self
+            .approvals(true)
+            .into_iter()
+            .filter(|a| a["pane"] == p.id.as_str())
+            .map(|a| {
+                json!({
+                    "id": a["id"], "ts": a["ts"], "kind": a["kind"],
+                    "summary": a["summary"], "detail": a["detail"],
+                })
             })
-            .unwrap_or_default();
+            .collect();
+        pending.sort_by_key(|a| a["ts"].as_i64().unwrap_or(0));
+        pending.truncate(20);
         // The pane's state is read after the requests, never before: a pane
         // is marked as needing the owner before its request is stored, so
         // an answer that shows a request also shows the state that goes

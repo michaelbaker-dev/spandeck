@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::db::Db;
+use crate::db::{Db, Op};
 use crate::perf::ClockSample;
 use crate::relay::BoxFuture;
 
@@ -177,7 +177,9 @@ impl StopApplier {
         }
         let answer = stop();
         applied.put(id, answer.clone());
-        self.db.kv_set(&key, &answer.to_string());
+        // Kept until it is written, and read back from memory meanwhile:
+        // the stop's answer does not wait for the database.
+        self.db.kv_put(&key, &answer.to_string());
         (answer, true)
     }
 }
@@ -300,35 +302,33 @@ impl StopBook {
     /// Write what the database does not have yet. True when nothing is left
     /// unwritten. Blocking: the daemon calls it off its request threads.
     pub fn save(&self) -> bool {
+        self.save_within(crate::db::ACK_WAIT)
+    }
+
+    /// `save`, waiting at most `wait` to be told the rows are written.
+    pub fn save_within(&self, wait: Duration) -> bool {
         let dirty: Vec<StopRow> = {
             let rows = self.rows.lock().unwrap();
             rows.iter().filter(|r| r.dirty).cloned().collect()
         };
         if !dirty.is_empty() {
-            let wrote = self.db.with_tx(|tx| {
-                for r in &dirty {
-                    tx.execute(
-                        &format!(
-                            "INSERT INTO stops({COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
-                             ON CONFLICT(id) DO UPDATE SET status=excluded.status,
-                               updated=excluded.updated, result=excluded.result
-                             WHERE stops.status != 'confirmed'"
-                        ),
-                        rusqlite::params![
-                            r.id,
-                            r.station,
-                            r.scope,
-                            r.issued_ms as i64,
-                            r.by,
-                            r.status,
-                            r.updated_ms as i64,
-                            r.result.to_string()
-                        ],
-                    )?;
-                }
-                Ok(())
-            });
-            if wrote.is_err() {
+            // The writer keeps each row until it is written, whatever
+            // happens to this call, and hands what is left to the next
+            // image at an upgrade. Here it is given a second to say so.
+            let ops = dirty
+                .iter()
+                .map(|r| Op::Stop {
+                    id: r.id.clone(),
+                    station: r.station.clone(),
+                    scope: r.scope.clone(),
+                    issued: r.issued_ms as i64,
+                    by: r.by.clone(),
+                    status: r.status.clone(),
+                    updated: r.updated_ms as i64,
+                    result: r.result.to_string(),
+                })
+                .collect();
+            if !self.db.write_ack_within(ops, wait) {
                 return false;
             }
         }
@@ -350,7 +350,7 @@ impl StopBook {
     pub fn load_waiting(&self) {
         let waiting: Vec<StopRow> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare(&format!(
                     "SELECT {COLUMNS} FROM stops WHERE status IN ('requested','unreachable') AND station != ?1"
                 ))?;
@@ -384,9 +384,7 @@ impl StopBook {
     /// taken out, not left saying it will be.
     pub fn drop_row(&self, id: &str) {
         self.rows.lock().unwrap().retain(|r| r.id != id);
-        let _ = self
-            .db
-            .with(|c| c.execute("DELETE FROM stops WHERE id=?1", [id]));
+        self.db.put(Op::StopDel { id: id.to_string() });
     }
 
     /// A station was removed from the fleet: what waited for it in memory
@@ -412,7 +410,7 @@ impl StopBook {
     pub fn list(&self, limit: u32, now_ms: u64) -> Vec<Value> {
         let mut all: Vec<StopRow> = self
             .db
-            .with(|c| {
+            .read(|c| {
                 let mut stmt = c.prepare(&format!(
                     "SELECT {COLUMNS} FROM stops ORDER BY issued DESC, rowid DESC LIMIT ?1"
                 ))?;
