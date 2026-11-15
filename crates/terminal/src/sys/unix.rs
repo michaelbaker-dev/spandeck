@@ -484,18 +484,23 @@ pub fn random_bytes(buf: &mut [u8]) -> io::Result<()> {
     File::open("/dev/urandom")?.read_exact(buf)
 }
 
-/// The command that holds the machine awake while it runs.
+/// The command that holds the machine awake while it runs. It ends by itself
+/// when this daemon is gone, so one that the daemon could not end (a crash)
+/// does not hold the machine awake for ever.
 pub fn keep_awake_cmd(_exe: &Path) -> Vec<String> {
-    let v: &[&str] = if cfg!(target_os = "macos") {
-        &["caffeinate", "-i"]
+    let pid = std::process::id().to_string();
+    let v: Vec<&str> = if cfg!(target_os = "macos") {
+        vec!["caffeinate", "-i", "-w", &pid]
     } else {
-        &[
+        vec![
             "systemd-inhibit",
             "--what=sleep:idle",
             "--who=spandeck",
             "--why=agents are working",
-            "sleep",
-            "infinity",
+            "sh",
+            "-c",
+            "while kill -0 \"$0\" 2>/dev/null; do sleep 5; done",
+            &pid,
         ]
     };
     v.iter().map(|s| s.to_string()).collect()
