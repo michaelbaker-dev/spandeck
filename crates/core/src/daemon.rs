@@ -2059,6 +2059,10 @@ impl Daemon {
             "web": self.web_addrs.lock().unwrap().clone(),
             "load": load_average(),
             "macs": crate::manage::mac_addresses(),
+            // The fleet's members as this station knows them, and the ones
+            // the owner said to forget: every station tells the others, so
+            // the list is the same wherever the deck is opened.
+            "roster": self.roster(),
             // Where spandeck is on this machine: said before the owner
             // removes a station, since those stay on its disk.
             "dirs": {

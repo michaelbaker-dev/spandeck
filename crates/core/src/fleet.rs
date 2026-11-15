@@ -54,6 +54,9 @@ pub struct FleetState {
     peers: Mutex<BTreeMap<String, Peer>>,
     whois: Mutex<HashMap<IpAddr, (u64, Remote)>>,
     me: Mutex<Option<(u64, Option<TailnetSelf>)>>,
+    /// Stations dropped from this station's list since it last looked at
+    /// the fleet: the next look says so to the roster (manage.rs).
+    dropped: Mutex<Vec<String>>,
     /// Signs calls to other stations with the fleet key.
     pub trust: Arc<crate::trust::TrustState>,
     pub station: String,
@@ -71,6 +74,7 @@ impl FleetState {
             peers: Mutex::new(BTreeMap::new()),
             whois: Mutex::new(HashMap::new()),
             me: Mutex::new(None),
+            dropped: Mutex::new(vec![]),
             trust,
             station: cfg.station.clone(),
         }
@@ -82,10 +86,37 @@ impl FleetState {
 
     pub(crate) fn forget(&self, station: &str) {
         self.peers.lock().unwrap().remove(station);
+        self.dropped.lock().unwrap().push(station.to_string());
     }
 
+    /// This station left its fleet: it has no list, and nothing to say to
+    /// a roster about the stations it was with.
     pub(crate) fn forget_all(&self) {
         self.peers.lock().unwrap().clear();
+        self.dropped.lock().unwrap().clear();
+    }
+
+    pub(crate) fn take_dropped(&self) -> Vec<String> {
+        std::mem::take(&mut *self.dropped.lock().unwrap())
+    }
+
+    /// Bring the list in line with the roster: a member that is not on it is
+    /// listed as unreachable, and one the fleet forgot leaves it unless it
+    /// answers.
+    pub(crate) fn follow_roster(&self, known: &[Peer], gone: impl Fn(&Peer) -> bool) -> bool {
+        let mut peers = self.peers.lock().unwrap();
+        let before = peers.len();
+        peers.retain(|_, p| p.state != "unreachable" || !gone(p));
+        let mut changed = peers.len() != before;
+        for k in known {
+            if !peers.contains_key(&k.station) {
+                let mut p = k.clone();
+                p.state = "unreachable".into();
+                peers.insert(k.station.clone(), p);
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn peers(&self) -> Vec<Peer> {
@@ -372,6 +403,11 @@ impl Daemon {
 
     async fn discover_once(&self) {
         let mut candidates: Vec<String> = self.cfg.peers.clone();
+        // Where a station of this fleet can be: the addresses in this
+        // station's config, and the owner's own devices, on or off. An
+        // address another station names for a member is taken only if it
+        // is one of these (manage.rs, the roster).
+        let mut places: Vec<String> = self.cfg.peers.clone();
         if self.cfg.discovery {
             let fleet = &self.fleet;
             let me = tokio::task::block_in_place(|| fleet.tailnet_self());
@@ -392,7 +428,7 @@ impl Daemon {
                         .and_then(|t| t.as_array())
                         .is_some_and(|t| !t.is_empty());
                     let os = peer.get("OS").and_then(|o| o.as_str()).unwrap_or("");
-                    if !same_user || !online || tagged || matches!(os, "iOS" | "tvOS" | "android") {
+                    if !same_user || tagged || matches!(os, "iOS" | "tvOS" | "android") {
                         continue;
                     }
                     if let Some(ip) = peer
@@ -401,7 +437,10 @@ impl Daemon {
                         .and_then(|a| a.first())
                         .and_then(|i| i.as_str())
                     {
-                        candidates.push(format!("{ip}:{}", self.cfg.web_port));
+                        places.push(format!("{ip}:{}", self.cfg.web_port));
+                        if online {
+                            candidates.push(format!("{ip}:{}", self.cfg.web_port));
+                        }
                     }
                 }
             }
@@ -519,6 +558,8 @@ impl Daemon {
             .filter(|p| p.state == "online")
             .collect();
         self.remember_stations(&online);
+        // The roster of the fleet's members is the same on every station.
+        changed |= self.roster_merge(&online, &places);
         if changed {
             self.emit("fleet.updated", None, None, json!({}));
         }

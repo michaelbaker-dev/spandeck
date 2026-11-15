@@ -205,15 +205,31 @@ fn every_station_of_a_fleet_shows_the_same() {
     });
     // Charlie is off while the owner works at alpha.
     c.kill9();
+
+    // ---- Fault 5: each station listed the members it had seen itself,
+    // and "Forget" was that station's alone. Forgotten at bravo, charlie
+    // leaves alpha's list too.
+    wait_for("alpha to list charlie as off", 20, || {
+        (a.sees("charlie").as_deref() == Some("unreachable")).then_some(())
+    });
+    b.call("fleet.forget", json!({"station": "charlie"}));
+    wait_for("charlie to leave alpha's list as well", 20, || {
+        a.sees("charlie").is_none().then_some(())
+    });
+
     a.call("deck.layout.save", json!({"layout": {"name": "two"}}));
     a.call("look.theme.save", json!({"theme": {"name": "Later"}}));
     a.call(
         "setup.set",
         json!({"setup": {"defaults": {"claude": {"model": "opus"}}}}),
     );
-    // It is back, and at once: a pane is closed there, which changes its
-    // copy of the looks without the owner asking (3b), and the owner pins
-    // something and saves a theme there (3a).
+    wait_for("bravo to have what was changed at alpha", 10, || {
+        (layouts(&b) == ["one", "two"] && themes(&b) == ["Later"]).then_some(())
+    });
+    // Alpha goes off too. Charlie is back, and at once: a pane is closed
+    // there, which changes its copy of the looks without the owner asking
+    // (3b), and the owner pins something and saves a theme there (3a).
+    a.kill9();
     c.launch();
     c.call("pane.close", json!({"pane": scratch}));
     assert!(
@@ -225,6 +241,20 @@ fn every_station_of_a_fleet_shows_the_same() {
         json!({"pin": {"kind": "layout", "name": "one"}}),
     );
     c.call("look.theme.save", json!({"theme": {"name": "Mine"}}));
+    // Fault 5 again: a station that comes back is a member again, for every
+    // station. Alpha was off while charlie was on, and lists it all the
+    // same, because bravo saw it.
+    wait_for("bravo to see charlie again", 20, || {
+        (b.sees("charlie").as_deref() == Some("online")).then_some(())
+    });
+    c.kill9();
+    a.launch();
+    wait_for(
+        "alpha to list a member it did not see come back",
+        20,
+        || (a.sees("charlie").as_deref() == Some("unreachable")).then_some(()),
+    );
+    c.launch();
     for s in [&a, &b, &c] {
         wait_for_or(
             "every station to hold what was changed at alpha and at charlie",

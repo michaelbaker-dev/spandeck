@@ -9,8 +9,12 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use std::collections::BTreeMap;
+
 use crate::daemon::{invalid, Daemon, Error, Result, VERSION};
 use crate::fleet::Peer;
+use crate::paths::now_ms;
+use crate::project::valid_name;
 
 /// Where releases are published. `[update] url` in the config replaces it.
 pub const RELEASES: &str = "https://github.com/michaelbaker-dev/spandeck/releases";
@@ -121,17 +125,142 @@ impl Daemon {
         }
     }
 
-    /// Forget a station that is gone for good.
+    /// Forget a station that is gone for good, on every station of the
+    /// fleet: this one says so in its roster, the others read it at their
+    /// next look (ten seconds at most) and drop it too. A station that was
+    /// off hears of it when it is back. If the station itself comes back it
+    /// is listed again, everywhere.
     pub fn forget_station(&self, station: &str) -> Result<Value> {
+        self.roster_forget(&[station.to_string()]);
+        self.fleet.forget(station);
+        self.fleet.take_dropped();
+        self.emit("fleet.updated", None, None, json!({}));
+        Ok(json!({"forgotten": station}))
+    }
+
+    /// When the owner said to forget a station, by station. One that is
+    /// seen after that time is a member again.
+    fn forgotten_stations(&self) -> BTreeMap<String, u64> {
+        self.db
+            .kv_get("fleet.forgotten")
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default()
+    }
+
+    /// Take stations off the roster, as of now. "Now" is later than the
+    /// last time anyone this station has heard from saw them, whatever the
+    /// clocks say, so a copy of the roster that still has one does not
+    /// bring it back.
+    fn roster_forget(&self, stations: &[String]) {
+        if stations.is_empty() {
+            return;
+        }
         let mut known = self.known_stations();
-        known.retain(|k| k.station != station);
+        let mut forgotten = self.forgotten_stations();
+        for station in stations {
+            let seen = known.iter().find(|k| &k.station == station);
+            let at = now_ms().max(seen.map_or(0, |k| k.last_seen_ms + 1));
+            forgotten.insert(station.clone(), at);
+        }
+        known.retain(|k| !stations.contains(&k.station));
         self.db.kv_set(
             "fleet.known",
             &serde_json::to_string(&known).unwrap_or_default(),
         );
-        self.fleet.forget(station);
-        self.emit("fleet.updated", None, None, json!({}));
-        Ok(json!({"forgotten": station}))
+        self.db.kv_set(
+            "fleet.forgotten",
+            &serde_json::to_string(&forgotten).unwrap_or_default(),
+        );
+    }
+
+    /// What this station tells the others about the fleet (`station.info`).
+    pub(crate) fn roster(&self) -> Value {
+        let known: Vec<Value> = self
+            .known_stations()
+            .iter()
+            .map(|k| json!({"station": k.station, "addr": k.addr, "version": k.version, "protocol": k.protocol, "last_seen_ms": k.last_seen_ms, "info": k.info}))
+            .collect();
+        json!({"known": known, "forgotten": self.forgotten_stations()})
+    }
+
+    /// After a look at the fleet: make this station's roster the union of
+    /// its own and what each station of the fleet that answered says. A
+    /// member another station saw more recently is taken from it; a member
+    /// the owner said to forget, at any station, and nobody has seen since,
+    /// goes. What a station says is data: names and sizes are checked, only
+    /// the three things kept about a station are kept, and an address is
+    /// taken only if it is one this station would look at by itself
+    /// (`places`), so no station can have another send a call anywhere
+    /// else. Says whether the list on screen changed.
+    pub(crate) fn roster_merge(&self, online: &[Peer], places: &[String]) -> bool {
+        // Dropped here since the last look: by a removal from the fleet.
+        self.roster_forget(&self.fleet.take_dropped());
+        let mut known = self.known_stations();
+        let mut forgotten = self.forgotten_stations();
+        let before = (
+            serde_json::to_string(&known).unwrap_or_default(),
+            serde_json::to_string(&forgotten).unwrap_or_default(),
+        );
+        for peer in online {
+            let Some(roster) = peer.info.get("roster") else {
+                continue;
+            };
+            let said = roster.get("forgotten").and_then(|f| f.as_object());
+            for (station, at) in said.into_iter().flatten().take(256) {
+                if let (true, Some(at)) = (valid_name(station), at.as_u64()) {
+                    let mine = forgotten.entry(station.clone()).or_insert(0);
+                    *mine = (*mine).max(at);
+                }
+            }
+            let said = roster.get("known").and_then(|k| k.as_array());
+            for k in said.into_iter().flatten().take(64) {
+                let text = |key: &str| k.get(key).and_then(|v| v.as_str()).unwrap_or_default();
+                let (station, addr) = (text("station"), text("addr"));
+                let seen = k.get("last_seen_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mine = known.iter().position(|m| m.station == station);
+                let placed =
+                    places.iter().any(|p| p == addr) || mine.is_some_and(|i| known[i].addr == addr);
+                if !valid_name(station) || station == self.station || !placed {
+                    continue;
+                }
+                if mine.is_some_and(|i| known[i].last_seen_ms >= seen) {
+                    continue;
+                }
+                let learned = Peer {
+                    station: station.to_string(),
+                    addr: addr.to_string(),
+                    version: text("version").chars().take(32).collect(),
+                    protocol: k.get("protocol").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    state: "unreachable".into(),
+                    last_seen_ms: seen,
+                    info: json!({
+                        "macs": k.pointer("/info/macs").filter(|m| m.to_string().len() <= 1024),
+                        "os": k.pointer("/info/os").and_then(|v| v.as_str()).filter(|o| o.len() <= 32),
+                        "service": k.pointer("/info/service").and_then(|v| v.as_bool()),
+                    }),
+                };
+                match mine {
+                    Some(i) => known[i] = learned,
+                    None => known.push(learned),
+                }
+            }
+        }
+        // A station forgotten three months ago is not remembered as such.
+        let now = now_ms();
+        forgotten.retain(|_, at| now.saturating_sub(*at) < 90 * 24 * 3_600_000);
+        let gone = |station: &str, seen: u64| forgotten.get(station).is_some_and(|at| *at >= seen);
+        known.retain(|k| !gone(&k.station, k.last_seen_ms));
+        known.sort_by(|a, b| a.station.cmp(&b.station));
+        let after = (
+            serde_json::to_string(&known).unwrap_or_default(),
+            serde_json::to_string(&forgotten).unwrap_or_default(),
+        );
+        if after != before {
+            self.db.kv_set("fleet.known", &after.0);
+            self.db.kv_set("fleet.forgotten", &after.1);
+        }
+        self.fleet
+            .follow_roster(&known, |p| gone(&p.station, p.last_seen_ms))
     }
 
     fn known(&self, station: &str) -> Result<Peer> {
