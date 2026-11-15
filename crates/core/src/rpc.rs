@@ -1441,6 +1441,7 @@ impl Daemon {
             ) {
                 tracing::error!(error = %e, "could not write handoff state; staying on the current binary");
                 d.readopt(state);
+                d.resume_keep_awake();
                 return;
             }
             // Unix: this process becomes the new binary and keeps every
@@ -1464,6 +1465,7 @@ impl Daemon {
             );
             // It returned: the old image is still running. Take the panes back.
             tracing::error!(error = %err, "starting the new binary failed; staying on the current binary");
+            d.resume_keep_awake();
             let _ = std::fs::remove_file(&file);
             d.readopt(state);
         });

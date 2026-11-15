@@ -297,6 +297,8 @@ pub struct Inner {
     /// When each client last had its typing into a pane written to the log.
     pub(crate) typed: Mutex<HashMap<String, u64>>,
     pub(crate) keep_awake: Mutex<Option<std::process::Child>>,
+    /// Set while this image is being replaced: no helper is started then.
+    pub(crate) keep_awake_held: std::sync::atomic::AtomicBool,
     /// The pane host this daemon's panes live in, where one is used.
     pub(crate) host: Mutex<Option<Arc<spandeck_terminal::HostClient>>>,
     pub(crate) seq: AtomicU64,
@@ -426,6 +428,7 @@ impl Daemon {
             presence: Mutex::new(HashMap::new()),
             typed: Mutex::new(HashMap::new()),
             keep_awake: Mutex::new(None),
+            keep_awake_held: std::sync::atomic::AtomicBool::new(false),
             host: Mutex::new(None),
             seq: AtomicU64::new(0),
             web_addrs: Mutex::new(vec![]),
@@ -1618,7 +1621,7 @@ impl Daemon {
     // --------------------------------------------------------------- keep-awake
 
     fn update_keep_awake(&self) {
-        if !self.cfg.keep_awake {
+        if !self.cfg.keep_awake || self.keep_awake_held.load(Ordering::SeqCst) {
             return;
         }
         let working = self.cfg.stay_awake
@@ -1671,10 +1674,19 @@ impl Daemon {
     /// one running (39 on one station after a day of upgrades). The next
     /// image, or this one if the swap fails, starts its own when needed.
     pub fn stop_keep_awake(&self) {
+        // The periodic check must not start another one before the swap: on
+        // a slow machine it did, and that one was left behind as before.
+        self.keep_awake_held.store(true, Ordering::SeqCst);
         if let Some(mut child) = self.keep_awake.lock().unwrap().take() {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    /// The swap did not happen: this image carries on and may hold the
+    /// machine awake again.
+    pub fn resume_keep_awake(&self) {
+        self.keep_awake_held.store(false, Ordering::SeqCst);
     }
 
     pub fn keep_awake_active(&self) -> bool {
