@@ -846,6 +846,7 @@ impl Daemon {
                     .and_then(|v| v.as_u64())
                     .ok_or_else(|| invalid("missing issued_ms"))?,
                 params.get("age_ms").and_then(|v| v.as_u64()),
+                params.get("cutoff_ms").and_then(|v| v.as_u64()),
                 opt(&params, "by").unwrap_or("another station"),
             ),
             "stop.list" => json!(self.stops(50)),

@@ -549,6 +549,30 @@ impl Station {
         kill_pid(self.pid() as i32, sig);
     }
 
+    /// After a freezing signal: wait until the daemon really does not
+    /// answer. The signal takes hold a moment after `kill` returns, and a
+    /// call made in that moment is still answered (a stop was, once, on a
+    /// busy machine).
+    pub fn wait_frozen(&self) {
+        use std::io::{Read, Write};
+        wait_for("the frozen station to stop answering", 20, || {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", self.port)).ok()?;
+            s.set_read_timeout(Some(std::time::Duration::from_millis(500)))
+                .ok()?;
+            let body = r#"{"method":"station.hello","params":{}}"#;
+            write!(
+                s,
+                "POST /api/peer/rpc HTTP/1.1\r\nhost: station\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .ok()?;
+            match s.read(&mut [0u8; 16]) {
+                Ok(n) if n > 0 => None,
+                _ => Some(()),
+            }
+        });
+    }
+
     pub fn kill9(&mut self) {
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();

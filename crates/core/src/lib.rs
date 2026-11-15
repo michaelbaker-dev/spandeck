@@ -14,6 +14,7 @@
 //!   links     project links: two projects whose agents message each other and share findings
 //!   orders    standing orders at five layers
 //!   fleet     discovery over Tailscale, trust, peer calls, stop-all
+//!   stops     stop-all apart from the daemon: rows, sending, the cut-off, applying once
 //!   add       add a machine from the Control Deck: SSH in, install, start, ask to join
 //!   notify    the inbox and push rules
 //!   agents    agent programs here: found, versioned, installed when missing, updated
@@ -62,6 +63,7 @@ pub mod restore;
 pub mod rpc;
 pub mod server;
 pub mod setup;
+pub mod stops;
 pub mod sync;
 pub mod tailnet;
 pub mod tasks;

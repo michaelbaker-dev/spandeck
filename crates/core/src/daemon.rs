@@ -99,6 +99,11 @@ pub struct PaneMeta {
     pub created_ms: u64,
     pub state: AgentState,
     pub state_since_ms: u64,
+    /// When the pane last went from not busy to working or waiting for
+    /// the owner: what a stop's cut-off is compared with for an agent that
+    /// has no prompt hook (stops.rs). 0 in a record from before it was kept.
+    #[serde(default)]
+    pub busy_since_ms: u64,
     /// Why the pane needs you, in plain words.
     #[serde(default)]
     pub needs_reason: Option<String>,
@@ -305,6 +310,8 @@ pub struct Inner {
     pub bus: broadcast::Sender<BusEvent>,
     pub panes: RwLock<BTreeMap<String, Arc<PaneEntry>>>,
     pub started_ms: u64,
+    /// The stops this station issued, and the ones it applied (stops.rs).
+    pub stops: crate::stops::StopsState,
     /// The binary panes call back into (`spandeck hook`, `spandeck mcp`).
     pub exe: PathBuf,
     pub home: PathBuf,
@@ -439,6 +446,7 @@ impl Daemon {
             tailnet: Default::default(),
             restore: Default::default(),
             trust,
+            stops: crate::stops::StopsState::new(db.clone(), &cfg.station),
             paths,
             cfg,
             db,
@@ -554,6 +562,26 @@ impl Daemon {
                 d.perf.tick_work.record(began.elapsed());
             }
         });
+        // Stops that wait for a station: a task of their own, so a slow
+        // tick cannot hold one up. Every two seconds, and at once when the
+        // list of stations changes (a station that was away is back).
+        let d = self.clone();
+        tokio::spawn(async move {
+            let mut events = d.bus.subscribe();
+            let mut every = tokio::time::interval(Duration::from_secs(2));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = every.tick() => {}
+                    ev = events.recv() => match ev {
+                        Ok(ev) if ev.kind != "fleet.updated" => continue,
+                        Err(broadcast::error::RecvError::Closed) => return,
+                        _ => {}
+                    },
+                }
+                d.pump_stops().await;
+            }
+        });
     }
 
     async fn tick(&self, n: u64) {
@@ -591,9 +619,6 @@ impl Daemon {
             // address, the lock and the token every ten seconds.
             self.vault_check(n == 1).await;
             self.vault_report_archive().await;
-        }
-        if n % 4 == 2 {
-            self.pump_stops().await;
         }
         // For the next start: when this one was last running.
         if n % 20 == 3 {
@@ -944,6 +969,7 @@ impl Daemon {
             created_ms: now,
             state: AgentState::Idle,
             state_since_ms: now,
+            busy_since_ms: 0,
             needs_reason: None,
             tool: None,
             tool_since_ms: 0,
@@ -1167,6 +1193,10 @@ impl Daemon {
             m.needs_reason = reason.clone();
             if old != state {
                 m.state_since_ms = now_ms();
+                let busy = |s| matches!(s, AgentState::Working | AgentState::NeedsYou);
+                if busy(state) && !busy(old) {
+                    m.busy_since_ms = m.state_since_ms;
+                }
             }
             (old, m.clone())
         };
@@ -2208,6 +2238,17 @@ impl Daemon {
         }
     }
 
+    /// What this station can do that a station one version behind cannot,
+    /// said in `station.hello` and `station.info`. Another station uses an
+    /// ability only towards a station that announces it.
+    pub fn caps(&self) -> Vec<&'static str> {
+        let mut caps = vec!["task_continue", "station_flags"];
+        if self.flag_on(crate::stops::CAP, true) {
+            caps.push(crate::stops::CAP);
+        }
+        caps
+    }
+
     pub fn info(&self) -> Value {
         let panes = self.list_panes();
         let count = |s: AgentState| {
@@ -2237,11 +2278,7 @@ impl Daemon {
             // It lists requests that wait at other stations (`trust.relay`).
             "trust_relay": true,
             // What this station can be asked for that an older one cannot.
-            // One line each, so that additions do not collide.
-            "caps": [
-                "task_continue",
-                "station_flags",
-            ],
+            "caps": self.caps(),
             "pane_host": self.pane_host_info(),
             "arch": std::env::consts::ARCH,
             "panes": panes.iter().filter(|p| p.meta.lock().unwrap().exit.is_none()).count(),

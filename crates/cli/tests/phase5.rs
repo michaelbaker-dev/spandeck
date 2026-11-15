@@ -445,6 +445,7 @@ fn a_stop_for_an_unreachable_station_is_shown_honestly_and_delivered_on_reconnec
 
     // Bravo drops off the network. Its work keeps running.
     b.signal(SIGSTOP);
+    b.wait_frozen();
     let out = a.call("stop.all", json!({"scope": "fleet"}));
     assert_eq!(out["stops"].as_array().unwrap().len(), 2);
     a.wait_text(&on_a, "[fake] interrupted");
@@ -485,6 +486,138 @@ fn a_stop_for_an_unreachable_station_is_shown_honestly_and_delivered_on_reconnec
         "only work running when the stop was issued is stopped"
     );
     assert!(!b.text(&later).contains("interrupted"));
+    // It was aimed at the moment it was issued, converted to bravo's clock,
+    // not counted back from when it arrived; and applied once.
+    let applied = b.log("station.stop_all");
+    assert_eq!(applied.len(), 1, "{applied:?}");
+    assert_eq!(applied[0]["data"]["aimed_by"], json!("cutoff"));
+}
+
+/// Merge tier. Measured (plans/FAILURES.md §7): in a fleet stop a station
+/// that answered waited 5.01 s behind one that did not. Done when: with one
+/// of three stations frozen, the one that answers is confirmed in under a
+/// second (a generous bound: the exact figure is the nightly benchmark's),
+/// while the frozen one's row still says only that the stop was requested;
+/// that row then says unreachable, never stopped; and the stop reaches the
+/// frozen station when it is back, once. The other two stations' clocks are
+/// 45 and 60 seconds ahead of the issuing one's, so the moment the stop was
+/// issued has to be converted to each: counted the wrong way, the work that
+/// was running would be taken for work started after the stop.
+#[test]
+#[ignore = "merge tier: three daemons, and it waits out the five-second limit of a station that does not answer"]
+fn a_fleet_stop_reaches_the_station_that_answers_while_another_is_frozen() {
+    let fleet = Station::fleet(&["alpha", "bravo", "charlie"], |name, _| {
+        let ahead = match name {
+            "bravo" => "45000",
+            "charlie" => "60000",
+            _ => "0",
+        };
+        (
+            String::new(),
+            vec![("SPANDECK_TEST_CLOCK_MS".to_string(), ahead.to_string())],
+        )
+    });
+    let (a, b, c) = (&fleet[0], &fleet[1], &fleet[2]);
+    wait_for("the three stations to find each other", 30, || {
+        fleet
+            .iter()
+            .all(|s| {
+                s.call("fleet.refresh", json!({}))["stations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|x| x["state"] == json!("online"))
+                    .count()
+                    == 3
+            })
+            .then_some(())
+    });
+    let long_job = json!({"steps": [{"prompt": "long job"}, {"work": 120000}]});
+    let on_a = a.fake(long_job.clone(), json!({}));
+    let on_b = b.fake(long_job.clone(), json!({}));
+    let on_c = c.fake(long_job.clone(), json!({}));
+    a.wait_state(&on_a, "working");
+    b.wait_state(&on_b, "working");
+    c.wait_state(&on_c, "working");
+    c.signal(SIGSTOP);
+    c.wait_frozen();
+
+    let began = std::time::Instant::now();
+    std::thread::scope(|scope| {
+        let all = scope.spawn(|| a.call("stop.all", json!({"scope": "fleet"})));
+        let took = wait_for("bravo's stop to be confirmed", 20, || {
+            (stop_row(a, "bravo")["status"] == json!("confirmed")).then(|| began.elapsed())
+        });
+        let charlie = stop_row(a, "charlie");
+        assert!(
+            took < Duration::from_secs(1),
+            "bravo was confirmed after {took:?}"
+        );
+        assert_eq!(charlie["status"], json!("requested"), "{charlie}");
+        a.wait_text(&on_a, "[fake] interrupted");
+        b.wait_text(&on_b, "[fake] interrupted");
+        let out = all.join().unwrap();
+        assert_eq!(out["stops"].as_array().unwrap().len(), 3, "{out}");
+        assert!(
+            out["stops"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["saved"] == json!(true)),
+            "{out}"
+        );
+    });
+    let row = stop_row(a, "charlie");
+    assert_eq!(
+        (&row["status"], &row["label"]),
+        (&json!("unreachable"), &json!("station unreachable")),
+        "{row}"
+    );
+    assert_eq!(stop_row(a, "bravo")["result"]["stopped"], json!([on_b]));
+    assert_eq!(
+        b.log("station.stop_all")[0]["data"]["aimed_by"],
+        json!("cutoff")
+    );
+
+    // Charlie is back. Work started there since is left alone.
+    c.signal(SIGCONT);
+    let later = c.fake(long_job, json!({}));
+    c.wait_state(&later, "working");
+    wait_for("the waiting stop to be delivered", 30, || {
+        a.call("fleet.refresh", json!({}));
+        (stop_row(a, "charlie")["status"] == json!("confirmed")).then_some(())
+    });
+    c.wait_text(&on_c, "[fake] interrupted");
+    assert_eq!(stop_row(a, "charlie")["result"]["stopped"], json!([on_c]));
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(c.pane(&later)["state"], json!("working"));
+    let applied = c.log("station.stop_all");
+    assert_eq!(applied.len(), 1, "applied once, however often it arrived");
+    assert_eq!(applied[0]["data"]["aimed_by"], json!("cutoff"));
+}
+
+/// Merge tier. One station of the fleet stays a version behind. A station
+/// with the switch off stands in for it here: like 0.4.3 it announces no
+/// `stop_cutoff`, sends none and reads none. Done when: a stop either way is
+/// applied by its age, as before, and confirmed.
+#[test]
+#[ignore = "merge tier: starts two daemons"]
+fn a_station_that_reads_no_cut_off_is_stopped_as_before() {
+    let (a, b) = Station::pair_with("[flags]\nstop_cutoff = false\n");
+    let long_job = json!({"steps": [{"prompt": "long job"}, {"work": 120000}]});
+    for (from, to) in [(&a, &b), (&b, &a)] {
+        let pane = to.fake(long_job.clone(), json!({}));
+        to.wait_state(&pane, "working");
+        let out = from.call("stop.all", json!({"scope": to.name}));
+        assert_eq!(out["stops"][0]["status"], json!("confirmed"), "{out}");
+        assert_eq!(out["stops"][0]["result"]["stopped"], json!([pane]));
+        to.wait_text(&pane, "[fake] interrupted");
+        let applied = to.log("station.stop_all");
+        assert_eq!(applied.len(), 1, "{applied:?}");
+        assert_eq!(applied[0]["data"]["aimed_by"], json!("age"));
+    }
+    let info = |s: &Station| s.call("station.info", json!({}))["caps"].clone();
+    assert_eq!((info(&a), info(&b)), (json!([]), json!(["stop_cutoff"])));
 }
 
 /// A tiny webhook sink: counts the POSTs it receives.

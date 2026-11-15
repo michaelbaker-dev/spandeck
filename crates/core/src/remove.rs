@@ -132,6 +132,7 @@ impl Daemon {
             &serde_json::to_string(&known).unwrap_or_default(),
         );
         self.fleet.forget(station);
+        self.stops.book.forget_station(station);
         let _ = self.db.with(|c| {
             c.execute("DELETE FROM project_links WHERE station=?1", [station])?;
             c.execute(

@@ -511,6 +511,7 @@ async fn peer_rpc(
             // This station's clock, so that two stations whose clocks are
             // too far apart for signed calls can say that is why.
             "now_ms": spandeck_core::paths::now_ms(),
+            "caps": web.daemon.caps(),
             // What it runs, for a station that is asked to connect to it.
             "os": std::env::consts::OS,
             // When it joins a fleet it brings the stations of its own.

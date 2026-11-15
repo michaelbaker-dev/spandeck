@@ -1283,8 +1283,12 @@ function stopRows() {
   const recent = (S.stops || S.fleet.stops || []).filter(s => age(s) < 10 * 60 * 1000 || s.status !== 'confirmed').slice(0, 6);
   const away = S.notesAway || [];
   if (!recent.length) return null;
-  return h('div', { class: 'stops' }, h('b', {}, 'Stop requests'), recent.map(s => h('span', { class: 'stop ' + s.status, title: `issued ${ago(Date.now() - age(s))} ago${s.from ? ' at ' + s.from : ''}` },
-    `${s.station}: ${s.label}`, s.status === 'confirmed' ? ` (${s.result?.stopped?.length ?? 0} stopped)` : s.status === 'unreachable' ? ` — will be delivered when it is back${s.from && !online(s.from) ? `, once ${s.from} is on too` : ''}` : '')),
+  // `saved: false`: the issuing station holds the stop in memory only (its
+  // database did not take it). Said for a stop that is still to be delivered:
+  // if that station's daemon ends first, the stop is not delivered.
+  const unsaved = (s) => s.saved === false && s.status !== 'confirmed';
+  return h('div', { class: 'stops' }, h('b', {}, 'Stop requests'), recent.map(s => h('span', { class: 'stop ' + s.status, title: `issued ${ago(Date.now() - age(s))} ago${s.from ? ' at ' + s.from : ''}${unsaved(s) ? `. ${s.from} has not been able to write this stop to its database yet; it keeps trying. If spandeck on ${s.from} restarts before it is written, the stop is not delivered to ${s.station}.` : ''}` },
+    `${s.station}: ${s.label}`, s.status === 'confirmed' ? ` (${s.result?.stopped?.length ?? 0} stopped)` : unsaved(s) ? ` — waiting for ${s.station} · not yet saved on ${s.from}` : s.status === 'unreachable' ?` — will be delivered when it is back${s.from && !online(s.from) ? `, once ${s.from} is on too` : ''}` : '')),
     away.length ? h('span', { class: 'muted small' }, `Stops issued at ${away.join(', ')} are not shown: not reachable.`) : null);
 }
 
