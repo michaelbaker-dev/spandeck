@@ -507,7 +507,7 @@ impl Perf {
         let mut slow: Vec<&Slow> = vec![];
         let held = self.slow.lock().unwrap();
         slow.extend(held.iter().filter(|s| now.saturating_sub(s.at_sec) <= 300));
-        slow.sort_by(|a, b| b.micros.cmp(&a.micros));
+        slow.sort_by_key(|a| std::cmp::Reverse(a.micros));
         let slowest: Vec<Value> = slow
             .iter()
             .take(5)
@@ -813,7 +813,7 @@ mod tests {
         }
         let clocked = began.elapsed();
         println!("1,000,000 samples: {fixed:?} with the time given, {clocked:?} reading the clock each time");
-        assert_eq!(h.summary(FIVE_MIN).count > 0, true);
+        assert!(h.summary(FIVE_MIN).count > 0);
         assert!(clocked < Duration::from_millis(500), "{clocked:?}");
     }
 }

@@ -86,7 +86,14 @@ days, not hours.
   it was trusted.
 - Signed station calls are accepted for two minutes, so stations' clocks must roughly
   agree, and a captured call could be replayed within that time by someone who can
-  already read your Tailscale traffic.
+  already read your Tailscale traffic. A call refused only for its time is told so
+  ("clock"), and only when its signature was made with the fleet key; a station also
+  says its clock in the unsigned `station.hello`, to any device under your login.
+- Counters for the Performance page and the list of your Tailscale devices with their
+  key expiry dates (`perf.get`, `tailnet.view`, `tailnet.report`) are for you and for a
+  station's signed call. No agent has them, and `station.info`, which an agent can
+  read, holds none of it. The counters hold method names, station names, times and
+  counts; never a parameter, a message, a path or a pane's contents.
 - `remote_start = true` lets a station run a start command on your other machines over
   Tailscale SSH. It is off by default; what it may do there is governed by your
   Tailscale SSH rules, not by spandeck.
