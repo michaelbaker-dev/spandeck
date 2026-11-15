@@ -65,6 +65,10 @@ export const watchIcon = () => frame('watch',
   line('M8 4.5L4 11.5M8 4.5l4 7', '#8b98a7', 1.2),
   el('circle', { cx: 8, cy: 4, r: 2.2, fill: '#57d38c' }), el('circle', { cx: 3.8, cy: 12, r: 2, fill: '#6cb6ff' }), el('circle', { cx: 12.2, cy: 12, r: 2, fill: '#6cb6ff' }));
 
+// Hide a pane of a layout: put it away, as a window is. Drawn in the colour
+// of the text around it.
+export const hideIcon = () => frame('hide', line('M3.5 12h9', 'currentColor', 1.6));
+
 export const stationIcon = () => frame('station',
   el('rect', { x: 1.5, y: 2.5, width: 13, height: 8.5, rx: 1.5, fill: 'none', stroke: '#8b98a7', 'stroke-width': 1.3 }),
   line('M5.5 13.5h5M8 11v2.5', '#8b98a7', 1.3));

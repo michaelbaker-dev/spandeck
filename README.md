@@ -87,6 +87,11 @@ arranged. They are saved in the project file, so they are the same on every devi
 - **Move panes:** press **Arrange**, then drag a pane onto another. Dropping on an edge
   puts it on that side; dropping in the middle swaps the two. Drag panes in from the
   list on the left, or pick a shape (side by side, two over one, one + stack, grid).
+- **Hide a pane:** the `▁` button on its title bar, or **Hide** in its menu. The other
+  panes take its room, and it stays as a chip beside the layout's name, showing its
+  state (amber when it needs you). Click the chip to put it back where it was, at the
+  size it had. It keeps running while hidden. **Show only this** hides all the others;
+  **Show all** brings them back. What is hidden is saved with the layout.
 - A pane in a layout that is not running shows a button to start the project's panes.
 
 Workspaces, the other kind of tab, are kept in the browser only and can hold any pane.

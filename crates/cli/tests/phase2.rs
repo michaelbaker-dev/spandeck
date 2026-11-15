@@ -577,6 +577,41 @@ fn screenshots_of_every_view() {
         page.js(
             "document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))",
         );
+        // Hidden panes: two over one with the bottom one hidden, then with
+        // the pane that needs the owner hidden, its menu, and all but one.
+        let two_over_one = |hidden: Value| {
+            s.call("project.layout.save", json!({"project": "api", "layout": {"name": "hide", "tree": {"dir": "col", "ratio": 600,
+                "a": {"dir": "row", "ratio": 500, "a": {"pane": "dev"}, "b": {"pane": "reviewer"}}, "b": {"pane": "term"}}, "hidden": hidden}}));
+        };
+        two_over_one(json!([{"pane": "term"}]));
+        page.wait("hide layout row", &layout("hide"));
+        page.wait(
+            "one hidden",
+            "document.querySelectorAll('.workspace .pane').length === 2 && document.querySelectorAll('.hid-chip').length === 1",
+        );
+        shoot(&page, "17-hidden-bottom-pane");
+        two_over_one(json!([{"pane": "reviewer"}]));
+        page.wait(
+            "the chip that needs you",
+            "!!document.querySelector('.hid-chip.needs_you') && document.querySelectorAll('.workspace .pane').length === 2",
+        );
+        shoot(&page, "18-hidden-chip-needs-you");
+        page.js("document.querySelector('.hid-menu').click()");
+        shoot(&page, "19-hidden-chip-menu");
+        page.js(
+            "document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))",
+        );
+        two_over_one(json!([{"pane": "reviewer"}, {"pane": "term"}]));
+        page.wait(
+            "two chips",
+            "document.querySelectorAll('.hid-chip').length === 2 && document.querySelectorAll('.workspace .pane').length === 1",
+        );
+        shoot(&page, "20-hidden-all-but-one");
+        two_over_one(json!([{"pane": "reviewer"}]));
+        page.wait(
+            "one chip again",
+            "document.querySelectorAll('.hid-chip').length === 1",
+        );
     }
     page.goto(&format!("/s/spark2/p/{dev}"));
     page.wait("pane", "!!document.querySelector('.pane .xterm-rows')");
@@ -638,6 +673,20 @@ fn screenshots_of_every_view() {
         "document.querySelectorAll('.lay-map button').length === 3 && !!document.querySelector('.phone-layout .xterm-rows')",
     );
     shoot(&phone, "8d-phone-global-layout");
+    if names.len() >= 3 {
+        phone.goto("/s/spark2/l/api/hide");
+        phone.wait(
+            "phone layout with a hidden pane",
+            "!!document.querySelector('.lay-map .map-box.hid') && !!document.querySelector('.phone-layout .xterm-rows')",
+        );
+        shoot(&phone, "21-phone-layout-hidden");
+        phone.js("document.querySelector('.lay-map .map-box.hid').click()");
+        phone.wait(
+            "the hidden pane looked at",
+            "document.querySelector('.lay-showing').innerText.includes('hidden')",
+        );
+        shoot(&phone, "22-phone-looking-at-hidden");
+    }
     phone.goto("/s/spark2/w/api");
     phone.wait(
         "phone watch",
@@ -1015,4 +1064,150 @@ fn a_saved_theme_is_used_again_and_a_panes_own_look_wins() {
     // A pane that is closed takes its look with it.
     s.call("pane.close", json!({"pane": two}));
     assert_eq!(s.call("look.get", json!({}))["panes"], json!({}));
+}
+
+/// Hide and show (the owner's request, 15 Nov 2026): "if you have a layout of
+/// 2 over 1, if you hide the bottom one the 2 top ones would resize to take
+/// all the space, if you [unhide] it it will go back to its original size."
+/// Hiding changes only what is seen: the hidden pane keeps running at the
+/// size it had, stays in sight as a chip, is still hidden after a reload, and
+/// comes back where it was with its screen as its program left it.
+#[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
+fn a_hidden_pane_gives_its_room_to_the_others_and_comes_back_as_it_was() {
+    use common::browser::Page;
+    let s = Station::start("alpha");
+    let spawn = |name: &str| {
+        s.call(
+            "pane.spawn",
+            json!({"program": "/bin/sh", "name": name, "cwd": s.root.join("home")}),
+        )["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (one, two, three) = (spawn("one"), spawn("two"), spawn("three"));
+    s.call(
+        "deck.layout.save",
+        json!({"layout": {"name": "trio", "tree": {"dir": "col", "ratio": 600,
+            "a": {"dir": "row", "ratio": 500, "a": {"id": one}, "b": {"id": two}}, "b": {"id": three}}}}),
+    );
+    s.call(
+        "pane.send_text",
+        json!({"pane": three, "text": "echo keep-$((40+2))"}),
+    );
+    s.wait_text(&three, "keep-42");
+    let page = Page::open(&s, 1400, 900);
+    page.goto("#/l/trio");
+
+    // What is on screen: each pane's name, its height in the layout and its
+    // terminal's rows, top to bottom and left to right; and the chips.
+    let seen = "[...document.querySelectorAll('.workspace .pane')].map(p => [p.paneTerm.pane.name, Math.round(p.getBoundingClientRect().height), p.paneTerm.term.rows])";
+    let chips =
+        "[...document.querySelectorAll('.lay-hidden .hid-chip .hid-name')].map(c => c.innerText)";
+    let rows_of = |id: &str| s.pane(id)["rows"].as_u64().unwrap();
+    // The layout as the browser fitted it, once the station has each size.
+    let settled = |what: &str, panes: usize| {
+        wait_for(what, 20, || {
+            let v = page.js(seen);
+            let list = v.as_array()?;
+            (list.len() == panes
+                && list.iter().all(|p| {
+                    let id = match p[0].as_str() {
+                        Some("one") => &one,
+                        Some("two") => &two,
+                        _ => &three,
+                    };
+                    Some(rows_of(id)) == p[2].as_u64()
+                }))
+            .then_some(v)
+        })
+    };
+    let before = settled("two over one", 3);
+    let (top, bottom) = (
+        before[0][1].as_u64().unwrap(),
+        before[2][1].as_u64().unwrap(),
+    );
+    assert_eq!(before[2][0], json!("three"), "{before}");
+    assert!(top > bottom && bottom > 200, "{before}");
+    let hidden_rows = rows_of(&three);
+
+    // Hide the bottom pane from its title bar.
+    page.wait(
+        "the Hide button on the bottom pane",
+        "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.workspace .pane')].find(p => p.paneTerm.pane.name === 'three')?.querySelector('.strip-hide'))",
+    );
+    let hidden = settled("the top two to take the room", 2);
+    for p in hidden.as_array().unwrap() {
+        // The whole height (the line between the parts went with the pane),
+        // and more rows in the terminal, which the station was told of.
+        assert!(
+            p[1].as_u64().unwrap() >= top + bottom && p[2].as_u64() > before[0][2].as_u64(),
+            "{hidden} after {before}"
+        );
+    }
+    assert_eq!(page.js(chips), json!(["three"]));
+    assert_eq!(
+        page.js("document.querySelector('.hid-show').getAttribute('aria-label')"),
+        json!("Show three, Shell, idle. Hidden.")
+    );
+    // Saved with the layout, and nothing of it reached the pane: it runs on
+    // at the size it had, and its screen is not on this page.
+    wait_for("the layout to be saved with its hidden pane", 10, || {
+        (s.call("deck.get", json!({}))["layouts"][0]["hidden"] == json!([{"id": three}]))
+            .then_some(())
+    });
+    s.call(
+        "pane.send_text",
+        json!({"pane": three, "text": "echo while-hidden-$((1+1))"}),
+    );
+    s.wait_text(&three, "while-hidden-2");
+    assert_eq!(rows_of(&three), hidden_rows);
+    assert!(!page.term_text().contains("keep-42"));
+
+    // Still hidden after a reload.
+    page.js("location.reload()");
+    page.wait(
+        "the layout after a reload",
+        &format!("JSON.stringify({chips}) === '[\"three\"]' && document.querySelectorAll('.workspace .pane .xterm-rows').length === 2"),
+    );
+
+    // The chip shows it again: the three are where they were, at the sizes
+    // they had, and the pane's screen has what was printed, hidden or not.
+    page.js("document.querySelector('.hid-show').click()");
+    let after = settled("the three back", 3);
+    assert_eq!(after, before);
+    assert_eq!(page.js(chips), json!([]));
+    wait_for("the shown pane's screen", 10, || {
+        let text = page.term_text();
+        (text.contains("keep-42") && text.contains("while-hidden-2")).then_some(())
+    });
+    wait_for("the layout to be saved with nothing hidden", 10, || {
+        s.call("deck.get", json!({}))["layouts"][0]
+            .get("hidden")
+            .is_none()
+            .then_some(())
+    });
+
+    // "Show only this" hides the others in one step; the one left showing
+    // cannot be hidden; "Show all" brings them back.
+    page.right_click(
+        "[...document.querySelectorAll('.workspace .pane')].find(p => p.paneTerm.pane.name === 'two')?.querySelector('.strip')",
+    );
+    page.choose("Show only this");
+    page.wait(
+        "one pane and two chips",
+        &format!("JSON.stringify({chips}) === '[\"one\",\"three\"]' && JSON.stringify({seen}.map(p => p[0])) === '[\"two\"]' && !document.querySelector('.strip-hide')"),
+    );
+    page.right_click("document.querySelector('.workspace .pane .strip')");
+    assert_eq!(
+        page.js("[...document.querySelectorAll('.menu-item')].filter(i => i.innerText.startsWith('Hide')).map(i => i.disabled)"),
+        json!([true])
+    );
+    page.js("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}))");
+    page.wait(
+        "Show all",
+        "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.lay-hidden button')].find(b => b.innerText === 'Show all'))",
+    );
+    assert_eq!(settled("all three again", 3), before);
 }
