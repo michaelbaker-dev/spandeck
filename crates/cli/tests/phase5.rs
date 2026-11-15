@@ -1356,6 +1356,12 @@ fn a_removed_station_loses_its_panes_and_the_rest_of_the_fleet_gets_a_new_key() 
         json!({"program": "/bin/sh", "name": "sh", "cwd": c.root.join("home")}),
     );
     let shell = shell["id"].as_str().unwrap().to_string();
+    // Typed only once the shell is at its prompt: on the Mac CI runner the
+    // line arrived while the shell was still starting, and was lost.
+    wait_for("the shell's prompt", 10, || {
+        let text = c.text(&shell);
+        (text.contains('$') || text.contains('#')).then_some(())
+    });
     c.call(
         "pane.send_text",
         json!({"pane": shell, "text": "sleep 300 & echo job-is-$!-"}),
