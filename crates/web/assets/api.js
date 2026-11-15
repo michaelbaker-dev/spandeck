@@ -100,6 +100,9 @@ export class Api {
           if (c && msg.unreachable) c.onUnreachable && c.onUnreachable();
           // A pane on another station was resized there: who did it, and to what.
           if (c && msg.resized) c.onResized && c.onResized(msg.resized);
+          // A watched conversation (chat.js): what is new, or that it ended.
+          if (c && msg.conversation) c.onConversation && c.onConversation(msg.conversation);
+          if (c && msg.conversation_end) c.onEnd && c.onEnd(msg.conversation_end);
           return;
         }
         const p = this.pending.get(msg.id);

@@ -275,11 +275,21 @@ dollars per million tokens, which replace the list's:
 Open any station from a phone on your Tailscale account: `spandeck cc --qr` shows a QR
 code for it. Approve the phone once, as above. Then you can:
 
-- see every station and agent, answer approval requests, and stop a turn or the fleet;
-- open any pane and talk to it: type or dictate a message and press Send, with keys a
-  phone keyboard lacks (Esc, Tab, arrows, Enter, Ctrl-C);
-- press **Fit to screen** to resize the pane to the phone so the text is readable;
-- start a new agent or shell on any station with **New**.
+- see what needs you first (approval requests with Allow and Deny, agents that wait), then
+  your sessions, the one that changed last first, with a dot on those that have said
+  something you have not read; **By station** shows every station with all its controls;
+- open an agent and read its conversation: what was said as text, the tool calls folded
+  into one line you can open, an approval as a card, and a message box (**+** sends a
+  photo or a file). Claude Code and Codex have a conversation; other agents and shells
+  open as their terminal;
+- switch to **Terminal** for the pane itself: type or dictate a message and press Send,
+  with keys a phone keyboard lacks (Esc, Tab, arrows, Enter, Ctrl-C), and **Fit to
+  screen** to resize the pane to the phone so the text is readable;
+- start an agent or a shell on any station with **+ New session**; stop a turn or the
+  fleet.
+
+On a computer a pane's title bar has **Chat**, which shows the same conversation in place
+of the terminal.
 
 Dictation: the message box is an ordinary text field, so the microphone on the phone's
 keyboard works everywhere. The 🎤 button uses the browser's own speech recognition; it

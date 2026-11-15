@@ -648,7 +648,7 @@ fn screenshots_of_every_view() {
     phone.goto(&format!("/s/spark2/p/{dev}"));
     phone.wait(
         "phone pane",
-        "!!document.querySelector('.phone-pane .composer-box')",
+        "(t => (t && t.click(), !!document.querySelector('.phone-pane .composer-box')))([...document.querySelectorAll('.phone-chat .chat-switch button')].find(b => b.innerText === 'Terminal'))",
     );
     phone.js("(document.querySelector('.composer-box').value = 'run the tests and tell me what fails', true)");
     shoot(&phone, "8-phone-pane");
@@ -696,7 +696,7 @@ fn screenshots_of_every_view() {
     phone.goto("/fleet");
     phone.wait(
         "phone list",
-        "!!document.querySelector('main.phone .phone-station')",
+        "(b => (b && b.getAttribute('aria-pressed') !== 'true' && b.click(), !!document.querySelector('main.phone .phone-station')))([...document.querySelectorAll('.home-switch button')].find(b => b.innerText === 'By station'))",
     );
     phone.js("(document.querySelector('main.phone').scrollTop = 330, true)");
     shoot(&phone, "7b-phone-list-stations");

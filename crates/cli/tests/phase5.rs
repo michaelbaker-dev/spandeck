@@ -499,8 +499,14 @@ async fn a_pane_on_another_station_is_attached_through_the_gateway() {
     assert_eq!(back["items"], json!([items[3], items[4]]), "{back}");
     assert_eq!(back["updated"], json!([]));
 
-    // An agent is refused all of it, its own pane included.
-    for method in ["pane.conversation", "pane.conversation.detail", "pane.read"] {
+    // An agent is refused all of it, its own pane included; and the titles
+    // of sessions, which are made from what was said.
+    for method in [
+        "pane.conversation",
+        "pane.conversation.detail",
+        "pane.read",
+        "pane.titles",
+    ] {
         let err = tokio::task::block_in_place(|| {
             b.call_as_pane(&worker, method, json!({"pane": worker, "item": "1.0"}))
         })
@@ -939,7 +945,9 @@ fn a_push_is_sent_when_you_are_away_and_muted_panes_stay_quiet() {
 }
 
 /// The phone checklist: status, blockers, an approval and a stop all work,
-/// and attaching from the phone is read-only.
+/// and attaching from the phone is read-only. An agent's pane opens as its
+/// conversation (below, `the_conversation_view`), with the terminal one tap
+/// away; a shell is its terminal.
 #[test]
 #[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
@@ -988,17 +996,26 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     page.js("[...document.querySelectorAll('.approval button')].find(b => b.innerText === 'Allow').click()");
     s.wait_text(&asking, "[fake] permission: allow");
 
-    // Open the busy agent: the terminal, and a stop control.
+    // The list a computer shows on its left is one tap away, with every
+    // control it had: what follows uses it.
+    page.goto("#/fleet");
+    page.wait(
+        "the list by station",
+        "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.home-switch button')].find(b => b.innerText === 'By station')) && !!document.querySelector('main.phone .phone-station')",
+    );
+    // Open the busy agent: the terminal, and a stop control. An agent's pane
+    // opens as its conversation; its terminal is one tap from there, and the
+    // phone remembers which was chosen.
     let open = |name: &str| {
         page.goto("#/fleet");
         // The list is redrawn every few seconds: wait for this pane's row.
         page.wait(
             "the pane's row in the list",
-            &format!("(r => r ? (r.click(), true) : false)([...document.querySelectorAll('main.phone .phone-row')].find(r => r.innerText.includes('{name}')))"),
+            &format!("(r => r ? (r.click(), true) : false)([...document.querySelectorAll('main.phone .phone-station .phone-row')].find(r => r.innerText.includes('{name}')))"),
         );
         page.wait(
             "the pane on the phone",
-            "!!document.querySelector('.phone-pane .xterm-rows') && !!document.querySelector('.phone-pane .composer-box')",
+            "(t => (t && t.click(), !!document.querySelector('.phone-pane .xterm-rows') && !!document.querySelector('.phone-pane .composer-box')))([...document.querySelectorAll('.phone-chat .chat-switch button')].find(b => b.innerText === 'Terminal'))",
         );
     };
     open("worker");
@@ -1054,6 +1071,12 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
         .unwrap()
         .to_string();
     open("phone-sh");
+    // A shell has no conversation: it is its terminal, and the bar says why
+    // where the choice of Chat or Terminal would be.
+    assert_eq!(
+        page.js("[document.querySelector('.phone-pane .chat-why')?.innerText, !!document.querySelector('.chat-switch')]"),
+        json!(["Terminal only: it runs a shell, not an agent", false])
+    );
     set("sleep 300");
     page.js("document.querySelector('.composer-row button[type=submit]').click()");
     page.wait(
@@ -1175,6 +1198,234 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     page.wait(
         "the new pane dialog",
         "!!document.querySelector('dialog select, .dialog select')",
+    );
+}
+
+/// What an agent says is data (AGENTS.md rule 6). For text written to
+/// attack the page, what the markdown renderer builds holds only elements on
+/// its list, no attribute but `class` and a link's `href`, and no address
+/// that is not http or https; and nothing in it ran.
+const HOSTILE: &[&str] = &[
+    "<script>window.__hit = 1</script><img src=x onerror=\"window.__hit = 1\"> <a href=\"javascript:window.__hit=1\">x</a>",
+    "[click](javascript:window.__hit=1) [d](data:text/html,<script>window.__hit=1</script>) [v](vbscript:x) [j](JaVaScRiPt:window.__hit=1) [t](\tjavascript:window.__hit=1)",
+    "![x](javascript:window.__hit=1) ![y](data:image/svg+xml;base64,AAAA) ![z](https://ok.test/pixel.png) <javascript:window.__hit=1> <data:text/html,hi>",
+    "[a](https://ok.test/\"onmouseover=\"window.__hit=1) [b](https://ok.test/ 'x' onclick=window.__hit=1) [c](https://ok.test/#\"><svg/onload=window.__hit=1>)",
+    "```html\n<iframe src=javascript:window.__hit=1></iframe>\n```\n<style>*{display:none}</style>\n\n```\"><img src=x onerror=window.__hit=1>\ncode\n```",
+    "| <svg onload=window.__hit=1> | [x](javascript:1) |\n|---|---|\n| <form action=javascript:window.__hit=1><input type=submit> | &lt;script&gt; |",
+    "# <img src=x onerror=window.__hit=1>\n\n> <details open ontoggle=window.__hit=1>\n\n- [ ] <input onfocus=window.__hit=1 autofocus>\n1. <body onload=window.__hit=1>",
+    "<https://ok.test/?q=javascript:alert(1)> https://ok.test/a_(b) http://ok.test/<script> HTTPS://OK.TEST/x **[bold link](https://ok.test/**)**",
+    "[x]: javascript:window.__hit=1\n[x][x] [x]\n\n<a href='data:text/html;base64,PHNjcmlwdD4='>d</a> `<b onmouseover=window.__hit=1>`",
+];
+
+fn the_markdown_of_an_agent_is_drawn_as_text(page: &common::browser::Page) {
+    let found = page.js(&format!(
+        "(async () => {{ const m = await import('./md.js'); const bad = [];
+           for (const src of {cases}) {{
+             const el = m.renderMarkdown(src, {{ openLink() {{}}, copy() {{}} }});
+             document.getElementById('overlays').append(el);
+             for (const e of [el, ...el.querySelectorAll('*')]) {{
+               if (!m.ALLOWED.includes(e.tagName)) bad.push('element ' + e.tagName);
+               for (const a of e.attributes) {{
+                 if (a.name !== 'class' && a.name !== 'href' && !a.name.startsWith('data-')) bad.push(e.tagName + ' has ' + a.name);
+                 if (a.name === 'href' ? !/^https?:\\/\\/ok\\.test\\//.test(a.value) : /javascript:|data:/i.test(a.value)) bad.push(a.name + '=' + a.value);
+               }}
+             }}
+             if (el.textContent.length < src.replace(/\\s/g, '').length / 2) bad.push('text lost: ' + src.slice(0, 40));
+             el.remove();
+           }}
+           await new Promise(r => setTimeout(r, 50));
+           if (window.__hit) bad.push('something ran');
+           const links = m.renderMarkdown({cases}[7]).querySelectorAll('a').length;
+           return {{ bad, links }}; }})()",
+        cases = json!(HOSTILE)
+    ));
+    assert_eq!(found, json!({"bad": [], "links": 5}), "{found}");
+}
+
+/// Mobile plan, phase M2, on a phone: an agent's pane opens as what was
+/// said, with the tool calls folded; an approval is answered from its card
+/// and the reply arrives once; the terminal is one tap away and the draft
+/// goes along; showing a conversation never resizes the pane; the unread dot
+/// is set and cleared; and "Next" leads to what else waits.
+fn the_conversation_view(s: &Station, page: &common::browser::Page) {
+    the_markdown_of_an_agent_is_drawn_as_text(page);
+    // An agent that has finished and said something the owner has not read.
+    let finished = &s.fake(
+        json!({"steps": [{"prompt": "x"}, {"turn_end": "ok"}]}),
+        json!({"name": "asker"}),
+    );
+    let line = |v: Value| json!({"transcript": v});
+    let said = |blocks: Value| json!({"type": "assistant", "message": {"role": "assistant", "content": blocks}});
+    let result = |id: &str, out: &str| {
+        line(
+            json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": out}]}, "toolUseResult": {"stdout": out, "stderr": "", "interrupted": false}}),
+        )
+    };
+    let counter = s.fake(
+        json!({"steps": [
+            line(json!({"type": "ai-title", "aiTitle": "Otter counts"})),
+            line(json!({"type": "hologram-state", "note": "a record of a kind nobody knows"})),
+            {"prompt": "count the otters"},
+            line(said(json!([{"type": "text", "text": "I'll **count** them:\n\n- the file first\n- then the tally\n\n<img src=x onerror=\"window.__hit = 1\">"}]))),
+            line(said(json!([{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "wc -l otters.csv"}}]))),
+            result("toolu_1", "12 otters.csv"),
+            line(said(json!([{"type": "tool_use", "id": "toolu_2", "name": "Read", "input": {"file_path": "/tmp/otters.csv"}}]))),
+            result("toolu_2", "name,river"),
+            line(said(json!([{"type": "tool_use", "id": "toolu_3", "name": "Bash", "input": {"command": "rm otters.csv"}}]))),
+            {"permission": {"name": "Bash", "command": "rm otters.csv"}},
+            result("toolu_3", ""),
+            {"turn_end": "twelve otters, and the file is gone"}
+        ]}),
+        json!({"name": "counter"}),
+    );
+    s.wait_state(&counter, "needs_you");
+    let click = |what: &str, el: &str| {
+        page.wait(what, &format!("(e => e ? (e.click(), true) : false)({el})"));
+    };
+    let row = |name: &str| {
+        format!("[...document.querySelectorAll('main.phone .session-row')].find(r => r.innerText.includes('{name}'))")
+    };
+
+    // The list of sessions: the agent's own title for the session, and a dot
+    // on the one that finished and has not been read.
+    page.goto("#/fleet");
+    click(
+        "Recent",
+        "[...document.querySelectorAll('.home-switch button')].find(b => b.innerText === 'Recent')",
+    );
+    page.wait("the session under its title", &row("Otter counts"));
+    page.wait(
+        "the dot on the agent that finished",
+        &format!(
+            "(r => r && !!r.querySelector('.unread-dot'))({})",
+            row("asker")
+        ),
+    );
+    assert_eq!(s.pane(finished)["unread"], json!(true));
+
+    // Its conversation: the reply as text (what looks like HTML is the
+    // characters typed), the tool calls folded into one line, and a record
+    // the station did not understand said to be missing, not passed over.
+    click("the session's row", &row("Otter counts"));
+    page.wait(
+        "the reply and the folded tools",
+        "!!document.querySelector('.phone-chat .chat-text strong') && !!document.querySelector('.phone-chat .chat-fold') && !!document.querySelector('.chat-cards .approval')",
+    );
+    let seen = page.js(
+        "[document.querySelector('.chat-text').innerText, document.querySelector('.chat-text strong').innerText, document.querySelectorAll('.chat-text li').length,
+          document.querySelector('.chat-fold').innerText.replace(/\\s+/g, ' ').trim(), document.querySelectorAll('.chat-log img, .chat-log script').length, !!window.__hit,
+          document.querySelector('.chat-title b').innerText, document.querySelector('.chat-bubble').innerText, document.querySelectorAll('.phone-chat .xterm').length,
+          document.querySelector('.chat-quiet.warn')?.innerText.replace(/\\s+/g, ' ')]",
+    );
+    assert!(
+        seen[0].as_str().unwrap().contains("<img src=x onerror="),
+        "{seen}"
+    );
+    assert_eq!(
+        seen.as_array().unwrap()[1..],
+        json!([
+            "count",
+            2,
+            "Working: 3 tools so far ›",
+            0,
+            false,
+            "Otter counts",
+            "count the otters",
+            0,
+            "1 record not shown: open the terminal to see everything. Open terminal"
+        ])
+        .as_array()
+        .unwrap()[..],
+        "{seen}"
+    );
+    // One folded line opens to a row for each call, and a row to its detail.
+    click("the folded tools", "document.querySelector('.chat-fold')");
+    click("the first call", "document.querySelectorAll('.chat-tool-row').length === 3 && document.querySelector('.chat-tool-row')");
+    page.wait(
+        "what the call printed",
+        "[...document.querySelectorAll('.chat-detail .chat-out')].some(o => o.innerText.includes('12 otters.csv'))",
+    );
+
+    // The request its hook holds is a card above the message box. Allowed
+    // there, the call finishes and the reply arrives, each thing once.
+    assert_eq!(
+        page.js("document.querySelector('.chat-cards .approval .mono').innerText"),
+        json!("Bash: rm otters.csv")
+    );
+    page.js("[...document.querySelectorAll('.chat-cards .approval button')].find(b => b.innerText === 'Allow').click()");
+    s.wait_text(&counter, "[fake] permission: allow");
+    page.wait(
+        "the reply",
+        "[...document.querySelectorAll('.chat-text')].some(t => t.innerText.includes('twelve otters')) && !document.querySelector('.chat-cards .approval') && !!document.querySelector('.chat-acts button')",
+    );
+    assert_eq!(
+        page.js("[document.querySelectorAll('.chat-text').length, document.querySelectorAll('.chat-user').length, document.querySelectorAll('.chat-tool-row').length,
+                  document.querySelector('.chat-fold').innerText.replace(/\\s+/g, ' ').trim().replace(/ · .* s /, ' '), [...document.querySelectorAll('.chat-acts button')].map(b => b.innerText)[0]]"),
+        json!([2, 1, 3, "Ran 3 tools ▾", "Copy"])
+    );
+    // Showing a conversation never takes the pane's size.
+    let pane = s.pane(&counter);
+    assert_eq!(
+        (pane["cols"].as_u64(), pane["controller"].is_null()),
+        (Some(120), true),
+        "the conversation did not resize the pane"
+    );
+    // It was on screen, so it is read: the station is told, and the dot goes.
+    wait_for("the conversation to be marked read", 10, || {
+        (s.pane(&counter)["unread"] == json!(false)).then_some(())
+    });
+
+    // The terminal is one tap away, and what was being written goes along.
+    page.js("(document.querySelector('.chat-box').value = 'half a thought', document.querySelector('.chat-box').focus(), window.__box = document.querySelector('.chat-box'), true)");
+    page.redraw(s, &counter);
+    assert_eq!(
+        page.js("[document.activeElement === window.__box, document.contains(window.__box), window.__box.value]"),
+        json!([true, true, "half a thought"]),
+        "the message box keeps the keyboard and the draft through a redraw"
+    );
+    click("Terminal", "[...document.querySelectorAll('.chat-switch button')].find(b => b.innerText === 'Terminal')");
+    page.wait(
+        "the terminal, with the draft",
+        "!!document.querySelector('.phone-pane .xterm-rows') && document.querySelector('.phone-pane .composer-box')?.value === 'half a thought'",
+    );
+    page.js("(document.querySelector('.composer-box').value = 'half a thought, and more', true)");
+    click(
+        "Chat",
+        "[...document.querySelectorAll('.chat-switch button')].find(b => b.innerText === 'Chat')",
+    );
+    page.wait(
+        "the conversation again, with the draft",
+        "document.querySelector('.phone-chat .chat-box')?.value === 'half a thought, and more' && document.querySelectorAll('.chat-text').length === 2",
+    );
+    // Sent the way the phone's message box sends.
+    page.js("document.querySelector('.chat-send').click()");
+    s.wait_text(&counter, "[fake] got: half a thought, and more");
+    page.wait(
+        "the message as a bubble, and the box empty",
+        "document.querySelectorAll('.chat-user').length === 2 && document.querySelector('.chat-box').value === ''",
+    );
+
+    // "Next" leads to what else waits for the owner: here, the agent that
+    // finished and has not been read. Opened, it is read, and its dot is gone
+    // from the list.
+    click(
+        "Next",
+        "(n => n && n.innerText.replace(/\\s+/g, ' ').trim() === 'Next › 1' && n)(document.querySelector('.chat-next'))",
+    );
+    page.wait(
+        "the finished agent's conversation",
+        &format!("location.hash.endsWith('/p/{finished}') && !!document.querySelector('.phone-chat .chat-text')"),
+    );
+    wait_for("that conversation to be marked read", 10, || {
+        (s.pane(finished)["unread"] == json!(false)).then_some(())
+    });
+    page.goto("#/fleet");
+    page.wait(
+        "the dot to go",
+        &format!(
+            "(r => r && !r.querySelector('.unread-dot'))({})",
+            row("asker")
+        ),
     );
 }
 
@@ -1308,6 +1559,10 @@ fn a_phone_steps_through_a_layout_from_its_map() {
     );
 
     let page = Page::open(&s, 390, 844);
+    page.wait(
+        "the list by station",
+        "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.home-switch button')].find(b => b.innerText === 'By station'))",
+    );
     // The list follows a computer's: under the station its project, with the
     // project's layout, Watch, then its panes; then the global layouts.
     let list = page.wait(
@@ -1412,6 +1667,9 @@ fn a_phone_steps_through_a_layout_from_its_map() {
         "the third pane after a swipe",
         &format!("{showing} === 'Showing lead · 3 of 3'"),
     );
+
+    // The same station and the same phone, for the conversation view.
+    the_conversation_view(&s, &page);
 }
 
 /// Kills a daemon the harness did not start (the one "installed" by an add).
@@ -3313,7 +3571,7 @@ fn pictures_of_the_performance_page() {
     );
     let tiles = "document.querySelectorAll('a.tile.station').length === 5 && document.body.innerText.includes('Tailscale key')";
     shoot(a, "trouble-fleet-desktop", "#/fleet", tiles, WIDE);
-    shoot(a, "trouble-fleet-phone", "#/fleet", "document.querySelectorAll('.phone-station').length === 5 && document.body.innerText.includes('Tailscale key')", PHONE);
+    shoot(a, "trouble-fleet-phone", "#/fleet", "(b => (b && b.getAttribute('aria-pressed') !== 'true' && b.click(), document.querySelectorAll('.phone-station').length === 5 && document.body.innerText.includes('Tailscale key')))([...document.querySelectorAll('.home-switch button')].find(b => b.innerText === 'By station'))", PHONE);
     // The steps for the expired machine, as the owner would open them.
     let page = Page::open(a, WIDE.0, WIDE.1);
     page.goto("#/fleet");
@@ -3336,4 +3594,472 @@ fn pictures_of_the_performance_page() {
         page.tab.capture_screenshot(Png, None, None, true).unwrap(),
     )
     .unwrap();
+}
+
+/// Not a test of behaviour: pictures of the conversation view for a person to
+/// look at, on a phone and on a computer, in a dark and a light theme.
+/// `SPANDECK_SHOTS=<folder> cargo test -p spandeck --test phase5 pictures_of_the_conversation -- --ignored`
+#[test]
+#[ignore = "takes pictures for a person to look at; needs Chrome"]
+fn pictures_of_the_conversation_view() {
+    use common::browser::Page;
+    use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png;
+    let out = std::path::PathBuf::from(std::env::var("SPANDECK_SHOTS").expect("SPANDECK_SHOTS"));
+    std::fs::create_dir_all(&out).unwrap();
+    let s = Station::start("spark2");
+    let at = std::cell::Cell::new(0u64);
+    // A line of the session file, a few seconds after the one before.
+    let line = |mut v: Value, secs: u64| {
+        at.set(at.get() + secs);
+        v["timestamp"] = json!(format!(
+            "2026-11-15T10:{:02}:{:02}.000Z",
+            at.get() / 60,
+            at.get() % 60
+        ));
+        json!({"transcript": v})
+    };
+    let said = |blocks: Value| json!({"type": "assistant", "message": {"role": "assistant", "content": blocks}});
+    let call = |id: &str, name: &str, input: Value| {
+        said(json!([{"type": "tool_use", "id": id, "name": name, "input": input}]))
+    };
+    let result = |id: &str, out: &str, more: Value| {
+        let mut r = json!({"stdout": out, "stderr": "", "interrupted": false});
+        for (k, v) in more.as_object().into_iter().flatten() {
+            r[k] = v.clone();
+        }
+        json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": out}]}, "toolUseResult": r})
+    };
+    let answer = "**Done: the tally now counts herons only.**\n\n**What I changed**\n- `tally.py` filters the rows to the heron family before it counts\n- the test for mixed rows passes again (3 of 3)\n\n**What I found**\n1. 412 rows in `survey.csv`, 37 of them herons\n2. Two rows spell the species `Heron ` with a space, which the old count missed\n\n```python\nherons = [r for r in rows if r.species.strip() == 'heron']\nreturn len(herons)\n```\n\n| Species | Rows |\n|:--|--:|\n| heron | 37 |\n| egret | 112 |\n\nThe survey's method is described at https://example.org/marsh/method. Raw HTML stays text: <b>not bold</b>.\n\n- [x] count the rows\n- [ ] ask about the egrets";
+    let heron = s.fake(
+        json!({"steps": [
+            line(json!({"type": "ai-title", "aiTitle": "Heron counts for the marsh survey"}), 0),
+            {"prompt": "Count the herons in survey.csv and fix the tally script."},
+            line(said(json!([{"type": "thinking", "thinking": "…"}])), 4),
+            line(said(json!([{"type": "text", "text": "I'll count the rows first, then fix `tally.py`."}])), 1),
+            line(call("t1", "Bash", json!({"command": "wc -l survey.csv"})), 1), line(result("t1", "412 survey.csv", json!({})), 2),
+            line(call("t2", "Read", json!({"file_path": "/home/ada/marsh/tally.py"})), 1), line(result("t2", "def tally(rows):\n    return len(rows)", json!({})), 1),
+            line(call("t3", "Edit", json!({"file_path": "/home/ada/marsh/tally.py", "old_string": "    return len(rows)", "new_string": "    herons = [r for r in rows if r.species.strip() == 'heron']\n    return len(herons)"})), 3),
+            line(result("t3", "The file /home/ada/marsh/tally.py has been updated.", json!({"filePath": "/home/ada/marsh/tally.py", "structuredPatch": [{"oldStart": 10, "oldLines": 2, "newStart": 10, "newLines": 3,
+                "lines": [" def tally(rows):", "-    return len(rows)", "+    herons = [r for r in rows if r.species.strip() == 'heron']", "+    return len(herons)"]}]})), 1),
+            line(call("t4", "Bash", json!({"command": "python -m pytest -q tests/test_tally.py"})), 2), line(result("t4", "...                                                                      [100%]\n3 passed in 0.41s", json!({})), 31),
+            line(call("t5", "Grep", json!({"pattern": "len\\(rows\\)", "path": "."})), 1), line(result("t5", "No matches found", json!({})), 1),
+            line(call("t6", "Bash", json!({"command": "git diff --stat"})), 1), line(result("t6", " tally.py | 3 ++-\n 1 file changed, 2 insertions(+), 1 deletion(-)", json!({})), 2),
+            {"turn_end": answer}
+        ]}),
+        json!({"name": "heron"}),
+    );
+    let asker = s.fake(
+        json!({"steps": [
+            line(json!({"type": "ai-title", "aiTitle": "Clean the build folder"}), 0),
+            {"prompt": "Clear out the old build and rebuild."},
+            line(said(json!([{"type": "text", "text": "I'll remove `build/` and run the build again."}])), 2),
+            line(call("t1", "Bash", json!({"command": "rm -rf build"})), 1),
+            {"permission": {"name": "Bash", "command": "rm -rf build"}}, {"sleep": 600000}
+        ]}),
+        json!({"name": "builder"}),
+    );
+    let worker = s.fake(
+        json!({"steps": [
+            {"prompt": "Run the whole test suite and tell me what fails."},
+            line(said(json!([{"type": "text", "text": "Running the tests now."}])), 2),
+            line(call("t1", "Bash", json!({"command": "cargo test --workspace"})), 1),
+            {"subagent": {"type": "Explore"}}, {"subagent": {"type": "Explore"}}, {"subagent": {"type": "general-purpose"}},
+            {"say": "running 214 tests\ntest archive::follows_a_file ... ok\ntest archive::search ... ok\ntest fleet::join ... ok\ntest fleet::merge ... ok"},
+            {"work": 600000}
+        ]}),
+        json!({"name": "tester"}),
+    );
+    let planner = s.fake(
+        json!({"steps": [
+            line(json!({"type": "ai-title", "aiTitle": "Which herons to count"}), 0),
+            {"prompt": "Tally the survey."},
+            line(call("t1", "AskUserQuestion", json!({"questions": [{"header": "Species", "question": "Which herons count?", "multiSelect": false,
+                "options": [{"label": "Grey herons only", "description": "Skip egrets and bitterns"}, {"label": "All herons", "description": "Count every bird in the heron family"}]}]})), 3),
+            {"say": "Which herons count?\n❯ 1. Grey herons only\n  2. All herons\n  3. Type something."},
+            {"sleep": 600000}
+        ]}),
+        json!({"name": "planner"}),
+    );
+    let stuck = s.fake(
+        json!({"steps": [
+            {"prompt": "Build it."}, {"sleep": 2500},
+            {"repeat": 3, "steps": [{"tool": {"name": "Bash", "command": "make", "ok": false}}]},
+            {"say": "Do you want to keep trying?\n❯ 1. Yes\n  2. No, stop here"},
+            {"sleep": 600000}
+        ]}),
+        json!({"name": "maker"}),
+    );
+    let sh = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "scratch", "cwd": s.root.join("home")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.wait_state(&asker, "needs_you");
+    s.wait_state(&worker, "working");
+    s.wait_state(&stuck, "needs_you");
+    s.wait_state(&heron, "done");
+    s.call(
+        "deck.pin",
+        json!({"pin": {"kind": "pane", "station": "spark2", "id": worker}}),
+    );
+    s.call(
+        "deck.layout.save",
+        json!({"layout": {"name": "survey", "tree": {"dir": "row", "ratio": 500, "a": {"id": heron, "station": "spark2"}, "b": {"id": worker, "station": "spark2"}}}}),
+    );
+
+    let shot = |page: &Page, name: &str| {
+        std::thread::sleep(Duration::from_millis(700));
+        let png = page.tab.capture_screenshot(Png, None, None, true).unwrap();
+        std::fs::write(out.join(format!("{name}.png")), png).unwrap();
+    };
+    let pane = |id: &str| format!("#/s/spark2/p/{id}");
+    let click = |page: &Page, what: &str, el: &str| {
+        page.wait(what, &format!("(e => e ? (e.click(), true) : false)({el})"));
+    };
+    let button = |text: &str| {
+        format!("[...document.querySelectorAll('button')].find(b => b.innerText.trim().startsWith('{text}'))")
+    };
+    for theme in ["dark", "light"] {
+        s.call(
+            "look.set",
+            json!({"level": "deck", "choice": {"theme": format!("spandeck-{theme}")}}),
+        );
+        let phone = Page::open(&s, 390, 844);
+        phone.wait("the list", "document.querySelectorAll('.session-row').length >= 5 && document.body.innerText.includes('Heron counts')");
+        shot(&phone, &format!("phone-{theme}-1-list"));
+        phone.goto(&pane(&heron));
+        phone.wait("heron", "!!document.querySelector('.chat-acts')");
+        shot(&phone, &format!("phone-{theme}-2-conversation"));
+        phone.js("(document.querySelector('.chat-log').scrollTop = 0, true)");
+        click(&phone, "the fold", "document.querySelector('.chat-fold')");
+        click(&phone, "the edit", "[...document.querySelectorAll('.chat-tool-row')].find(r => r.innerText.includes('Edit'))");
+        phone.wait("the diff", "!!document.querySelector('.diff-add')");
+        phone.js("(document.querySelector('.chat-run').scrollIntoView(), true)");
+        shot(&phone, &format!("phone-{theme}-3-tools-open"));
+        phone.goto(&pane(&asker));
+        phone.wait(
+            "approval",
+            "!!document.querySelector('.chat-cards .approval')",
+        );
+        shot(&phone, &format!("phone-{theme}-4-approval"));
+        phone.goto(&pane(&worker));
+        click(&phone, "peek", "document.querySelector('.act-peek')");
+        phone.wait(
+            "peek",
+            "document.querySelector('.chat-peek')?.innerText.includes('running')",
+        );
+        shot(&phone, &format!("phone-{theme}-5-working"));
+        if theme == "dark" {
+            click(&phone, "tasks", "document.querySelector('.chat-tasks')");
+            shot(&phone, "phone-dark-5b-running-tasks");
+            click(
+                &phone,
+                "close",
+                "document.querySelector('.dialog-head .icon-btn')",
+            );
+        }
+        phone.goto(&pane(&planner));
+        phone.wait("question", "!!document.querySelector('.chat-card.ask')");
+        shot(&phone, &format!("phone-{theme}-6-question"));
+        phone.goto(&pane(&stuck));
+        phone.wait("banner", "!!document.querySelector('.chat-card.wait') && document.querySelector('.chat-peek')?.innerText.length > 5");
+        shot(&phone, &format!("phone-{theme}-7-waiting-in-terminal"));
+        phone.goto(&pane(&sh));
+        phone.wait("shell", "!!document.querySelector('.phone-pane .xterm-rows') && !!document.querySelector('.chat-why')");
+        shot(&phone, &format!("phone-{theme}-8-shell"));
+        if theme == "dark" {
+            phone.goto(&pane(&heron));
+            click(&phone, "Terminal", &button("Terminal"));
+            phone.wait(
+                "terminal",
+                "!!document.querySelector('.phone-pane .xterm-rows')",
+            );
+            shot(&phone, "phone-dark-9-terminal-face");
+            click(&phone, "Chat", &button("Chat"));
+            phone.goto("#/fleet");
+            click(
+                &phone,
+                "new session",
+                "document.querySelector('.new-session')",
+            );
+            phone.wait("sheet", "!!document.querySelector('.dialog.sheet')");
+            shot(&phone, "phone-dark-10-new-session");
+            click(
+                &phone,
+                "close",
+                "document.querySelector('.dialog-head .icon-btn')",
+            );
+            click(&phone, "by station", &button("By station"));
+            phone.wait("stations", "!!document.querySelector('.phone-station')");
+            shot(&phone, "phone-dark-11-by-station");
+        }
+        drop(phone);
+
+        let wide = Page::open(&s, 1400, 900);
+        wide.goto(&pane(&heron));
+        click(&wide, "Chat", "document.querySelector('.strip .face-btn')");
+        wide.wait("heron", "!!document.querySelector('.chat-pane .chat-acts')");
+        click(&wide, "the fold", "document.querySelector('.chat-fold')");
+        shot(&wide, &format!("desktop-{theme}-1-pane-as-conversation"));
+        wide.goto("#/l/survey");
+        wide.wait("the layout", "!!document.querySelector('.workspace .chat-pane') && !!document.querySelector('.workspace .xterm-rows')");
+        shot(&wide, &format!("desktop-{theme}-2-layout-one-of-each"));
+        wide.goto(&pane(&asker));
+        wide.wait("terminal", "!!document.querySelector('.strip .face-btn')");
+        click(&wide, "Chat", "document.querySelector('.strip .face-btn')");
+        wide.wait(
+            "approval",
+            "!!document.querySelector('.chat-cards .approval')",
+        );
+        shot(&wide, &format!("desktop-{theme}-3-approval"));
+        click(&wide, "Terminal", &button("Terminal"));
+        wide.wait("terminal", "!!document.querySelector('.strip .face-btn')");
+        shot(
+            &wide,
+            &format!("desktop-{theme}-4-terminal-with-chat-button"),
+        );
+    }
+}
+
+/// More of the conversation view (mobile plan, phase M2), in a browser: the
+/// rest of what the phase asks for, which the every-change tier has no room
+/// for. `cargo test -p spandeck --test phase5 the_rest_of_the_conversation_view -- --ignored`
+#[test]
+#[ignore = "merge tier: the rest of the conversation view, in a browser"]
+fn the_rest_of_the_conversation_view() {
+    use common::browser::Page;
+    let s = Station::start("alpha");
+    let line = |v: Value| json!({"transcript": v});
+    let said = |text: &str| {
+        line(
+            json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}),
+        )
+    };
+    let click = |page: &Page, what: &str, el: &str| {
+        page.wait(what, &format!("(e => e ? (e.click(), true) : false)({el})"));
+    };
+    let button = |text: &str| {
+        format!(
+            "[...document.querySelectorAll('button')].find(b => b.innerText.trim() === '{text}')"
+        )
+    };
+    let pane = |id: &str| format!("#/s/alpha/p/{id}");
+
+    // A long conversation: the newest page first, the page above when the
+    // top is reached, and what was being read stays where it was.
+    let long = s.fake(
+        json!({"steps": [{"prompt": "talk"}, {"repeat": 140, "steps": [said("A line of talk, with a link: https://example.org/a?b=1")]}, {"turn_end": "the end"}]}),
+        json!({"name": "long"}),
+    );
+    s.wait_state(&long, "done");
+    let phone = Page::open(&s, 390, 844);
+    phone.goto(&pane(&long));
+    phone.wait("the newest page", "document.querySelectorAll('.chat-text').length >= 50 && !!document.querySelector('.chat-acts')");
+    let texts = "document.querySelectorAll('.chat-text').length";
+    let first = phone.js(texts).as_u64().unwrap();
+    assert!(first < 142, "one page, not the whole conversation: {first}");
+    let log = "document.querySelector('.chat-log')";
+    assert_eq!(
+        phone.js(&format!(
+            "{log}.scrollHeight - {log}.scrollTop - {log}.clientHeight < 4"
+        )),
+        json!(true),
+        "it opens at the end"
+    );
+    phone.js(&format!("({log}.scrollTop = 0, true)"));
+    phone.wait("the page above", &format!("{texts} > {first}"));
+    assert!(
+        phone.js(&format!("{log}.scrollTop")).as_f64().unwrap() > 500.0,
+        "what was at the top is still in sight: the page grew above it"
+    );
+    // A redraw leaves the log where it was, and new items do not pull it down.
+    let top = phone.js(&format!("{log}.scrollTop"));
+    phone.redraw(&s, &long);
+    assert_eq!(phone.js(&format!("{log}.scrollTop")), top);
+    phone.wait(
+        "every page",
+        &format!("({log}.scrollTop = 0, {texts} === 141)"),
+    );
+
+    // The page loses its connection and makes another: the conversation is
+    // asked for from where it had got to, so nothing is there twice and what
+    // was said meanwhile is there once.
+    phone.js("(() => { const send = WebSocket.prototype.send; WebSocket.prototype.send = function (...a) { window.__ws = this; return send.apply(this, a); }; return true; })()");
+    phone.wait("the page's connection", "!!window.__ws");
+    phone.js("(window.__was = window.__ws, window.__ws.close(), true)");
+    s.call(
+        "pane.send_text",
+        json!({"pane": long, "text": "after the break"}),
+    );
+    s.wait_text(&long, "[fake] got: after the break");
+    phone.wait(
+        "a new connection",
+        "window.__ws !== window.__was && window.__ws.readyState === 1",
+    );
+    phone.wait(
+        "what was said meanwhile, once",
+        &format!("{texts} === 142 && document.querySelectorAll('.chat-user').length === 2"),
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(
+        phone.js(&format!("[{texts}, document.querySelectorAll('.chat-user').length, [...document.querySelectorAll('.chat-bubble')].pop().innerText]")),
+        json!([142, 2, "after the break"])
+    );
+
+    // A link is shown before it is opened, and touching it goes nowhere.
+    let at = phone.js("location.href");
+    phone.js("(document.querySelector('.chat-text a.md-link').click(), true)");
+    phone.wait(
+        "where the link leads",
+        "document.querySelector('.dialog .link-dest')?.innerText === 'https://example.org/a?b=1'",
+    );
+    assert_eq!(phone.js("location.href"), at);
+    click(&phone, "Cancel", &button("Cancel"));
+
+    // Read aloud. A browser with no screen has no voice (it ends at once),
+    // so the page's speaker is stood in for: what is tested is what it is
+    // given to say, and that the button starts and stops it.
+    if phone.js("'speechSynthesis' in window") == json!(true) {
+        phone.js(&format!("(Object.defineProperty(speechSynthesis, 'speak', {{value: (u) => {{ window.__spoken = u.text; }}, configurable: true}}), Object.defineProperty(speechSynthesis, 'cancel', {{value: () => {{}}, configurable: true}}), {log}.scrollTop = {log}.scrollHeight, true)"));
+        click(&phone, "Read aloud", &button("Read aloud"));
+        phone.wait(
+            "reading",
+            &format!(
+                "!!{} && window.__spoken === 'the end'",
+                button("Stop reading")
+            ),
+        );
+        click(&phone, "Stop reading", &button("Stop reading"));
+        phone.wait("stopped", &format!("!!{}", button("Read aloud")));
+    }
+
+    // "/" offers the agent's text commands; one fills the box.
+    phone.js("(b => { b.value = '/c'; b.dispatchEvent(new Event('input')); return true; })(document.querySelector('.chat-box'))");
+    assert_eq!(
+        phone.js("[...document.querySelectorAll('.chat-slash button')].map(b => b.innerText)"),
+        json!(["/compact", "/clear", "/context"])
+    );
+    phone.js("(document.querySelector('.chat-slash button').click(), true)");
+    assert_eq!(
+        phone.js("document.querySelector('.chat-box').value"),
+        json!("/compact")
+    );
+    phone.js("(b => { b.value = ''; b.dispatchEvent(new Event('input')); return true; })(document.querySelector('.chat-box'))");
+
+    // "+" sends a file: the station writes it and types its path for the agent.
+    click(&phone, "+", "document.querySelector('.chat-plus')");
+    click(&phone, "a file", "[...document.querySelectorAll('.menu-item')].find(i => i.innerText.startsWith('A photo or a file'))");
+    phone.js("(i => { const d = new DataTransfer(); d.items.add(new File(['heron,37'], 'tally.csv')); i.files = d.files; i.dispatchEvent(new Event('change')); return true; })(document.querySelector('#overlays input[type=file]'))");
+    s.wait_text(&long, "tally.csv");
+
+    // While the agent works and nothing is written, Send is Stop.
+    let busy = s.fake(
+        json!({"steps": [{"prompt": "x"}, {"work": 120000}]}),
+        json!({"name": "busy"}),
+    );
+    s.wait_state(&busy, "working");
+    phone.goto(&pane(&busy));
+    phone.wait("the working line", "document.querySelector('.chat-activity')?.innerText.includes('Working · Bash') && document.querySelector('.chat-send').innerText === 'Stop'");
+    click(&phone, "Peek", "document.querySelector('.act-peek')");
+    phone.wait(
+        "the terminal's last lines",
+        "document.querySelector('.chat-peek')?.innerText.includes('[fake] working')",
+    );
+    phone.js("(b => { b.value = 'wait'; b.dispatchEvent(new Event('input')); return true; })(document.querySelector('.chat-box'))");
+    assert_eq!(
+        phone.js("document.querySelector('.chat-send').innerText"),
+        json!("Send")
+    );
+    phone.js("(b => { b.value = ''; b.dispatchEvent(new Event('input')); return true; })(document.querySelector('.chat-box'))");
+    phone.js("(document.querySelector('.chat-send').click(), true)");
+    s.wait_text(&busy, "[fake] interrupted");
+
+    // An agent that needs the owner where no card can answer: the banner,
+    // the terminal's last lines, and keys that reach the terminal.
+    let stuck = s.fake(
+        json!({"steps": [{"prompt": "go"}, {"repeat": 3, "steps": [{"tool": {"name": "Bash", "command": "make", "ok": false}}]}]}),
+        json!({"name": "stuck"}),
+    );
+    s.wait_state(&stuck, "needs_you");
+    phone.goto(&pane(&stuck));
+    phone.wait("the banner", "document.querySelector('.chat-card.wait')?.innerText.startsWith('Waiting in the terminal: ') && document.querySelector('.chat-peek')?.innerText.includes('[fake] ran Bash (failed)')");
+    for key in ["2", "Enter"] {
+        phone.js(&format!("[...document.querySelectorAll('.wait-keys .key')].find(b => b.innerText === '{key}').click()"));
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    s.wait_text(&stuck, "[fake] got: 2");
+
+    // A question that waits is shown, and is answered in the terminal.
+    let asks = s.fake(
+        json!({"steps": [{"prompt": "tally"}, line(json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "q1", "name": "AskUserQuestion",
+            "input": {"questions": [{"header": "Species", "question": "Which herons count?", "multiSelect": false, "options": [{"label": "Grey herons only"}, {"label": "All herons"}]}]}}]}})), {"sleep": 600000}]}),
+        json!({"name": "asks"}),
+    );
+    phone.goto(&pane(&asks));
+    phone.wait("the question", "document.querySelector('.chat-card.ask')?.innerText.includes('Which herons count?') && document.querySelectorAll('.chat-card.ask button').length === 1");
+    click(
+        &phone,
+        "Answer in the terminal",
+        &button("Answer in the terminal"),
+    );
+    phone.wait(
+        "the terminal",
+        "!!document.querySelector('.phone-pane .xterm-rows')",
+    );
+
+    // A new session from the sheet lands in the new pane.
+    phone.goto("#/fleet");
+    click(
+        &phone,
+        "+ New session",
+        "document.querySelector('.new-session')",
+    );
+    click(&phone, "Shell", "[...document.querySelectorAll('.dialog.sheet .tile-pick')].find(b => b.innerText.trim() === 'Shell')");
+    click(&phone, "Start", &button("Start"));
+    phone.wait("the new pane", "/#\\/s\\/alpha\\/p\\//.test(location.hash) && !!document.querySelector('.phone-pane .xterm-rows') && document.querySelector('.chat-why')?.innerText.includes('it runs a shell')");
+    drop(phone);
+
+    // On a computer: Chat on a terminal's title bar, in a pane at full size
+    // and in a layout. The conversation holds no size: the terminal beside
+    // it keeps control of its own pane, and the pane shown as a conversation
+    // keeps the size it had.
+    s.call(
+        "deck.layout.save",
+        json!({"layout": {"name": "two", "tree": {"dir": "row", "ratio": 500, "a": {"id": long, "station": "alpha"}, "b": {"id": busy, "station": "alpha"}}}}),
+    );
+    let wide = Page::open(&s, 1400, 900);
+    wide.goto("#/l/two");
+    wide.wait(
+        "two terminals",
+        "document.querySelectorAll('.workspace .pane .xterm-rows').length === 2",
+    );
+    let fitted = wait_for("the layout to fit its panes", 10, || {
+        let p = s.pane(&long);
+        (!p["controller"].is_null()).then(|| p["cols"].clone())
+    });
+    click(
+        &wide,
+        "Chat",
+        &format!("document.querySelector('.pane[data-pane=\"{long}\"] .face-btn')"),
+    );
+    wide.wait("one of each", "document.querySelectorAll('.workspace .chat-pane .chat-text').length >= 40 && document.querySelectorAll('.workspace .pane .xterm-rows').length === 1");
+    wide.redraw(&s, &busy);
+    assert_eq!(
+        s.pane(&long)["cols"],
+        fitted,
+        "showing the conversation did not resize the pane"
+    );
+    wide.goto(&pane(&long));
+    wide.wait("the same face at full size", "!!document.querySelector('.station-main.zoomed .chat-pane .chat-text') && !document.querySelector('.station-main .xterm')");
+    // Enter sends, on a computer. The path of the file sent from the phone
+    // was typed for the agent and waits in its prompt: it goes with the
+    // message.
+    wide.js("(document.querySelector('.chat-box').focus(), true)");
+    wide.tab.type_str("from a computer").unwrap();
+    wide.tab.press_key("Enter").unwrap();
+    s.wait_text(&long, "tally.csv from a computer");
+    click(&wide, "Terminal", &button("Terminal"));
+    wide.wait("the terminal again", "!!document.querySelector('.station-main.zoomed .pane .xterm-rows') && !document.querySelector('.chat-pane')");
 }

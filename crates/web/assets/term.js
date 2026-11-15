@@ -394,6 +394,8 @@ export class PaneTerm {
       this._lostControl ? h('button', { class: 'mini', title: 'Another client set this pane\'s size', onclick: () => this.takeControl() }, 'Take control') : null,
       agents.length || this.agentsOpen ? h('button', { class: 'mini' + (this.agentsOpen ? ' on' : ''), 'aria-pressed': String(this.agentsOpen), title: 'The agents working under this one',
         onclick: () => { this.agentsOpen = !this.agentsOpen; this.renderStrip(); } }, this.agentsOpen ? 'Agents ›' : `‹ Agents ${agents.length}`) : null,
+      // The pane's other face, its conversation (chat.js), where it has one.
+      this.opts.face ? this.opts.face(this) : null,
       p.agent !== 'shell' && !p.exited && (s === 'working' || s === 'needs_you')
         ? h('button', { class: 'mini danger', title: 'Stop: interrupt this turn. The process stays.', onclick: () => rpc('pane.stop') }, 'Stop') : null,
       this.onHide ? h('button', { class: 'icon-btn strip-hide', title: 'Hide this pane. It keeps running, and stays as a chip beside the layout\'s name.', 'aria-label': `Hide ${p.name}`, onclick: () => this.onHide && this.onHide() }, hideIcon()) : null,

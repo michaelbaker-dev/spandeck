@@ -6,8 +6,10 @@
 //   #/s/<station>/l/<project>/<layout>   a project's layout
 //   #/s/<station>/w/<project>    Watch: a project's agents and who is talking
 //   #/l/<layout>                 a global layout (kept by the whole fleet)
-// On a phone the same URLs show a small view: status, blockers, approvals,
-// stop, one pane to talk to, and a layout stepped through a pane at a time.
+// On a phone the same URLs show a small view: what needs you, the sessions,
+// one pane to talk to, and a layout stepped through a pane at a time.
+// A pane has two faces, its terminal and its conversation (chat.js): on a
+// phone an agent's pane opens as its conversation.
 
 import { Api } from './api.js';
 import { PaneTerm } from './term.js';
@@ -16,6 +18,7 @@ import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from 
 import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners } from './look.js';
 import { lookEditor } from './lookedit.js';
 import { perfPage, gather, anyTrouble, keyInfo, keySteps, clockWords, refreshTook } from './perf.js';
+import { initChat, conversation, faceOf, chatToggle, termBox, chatBeforeRender, chatAfterRender, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
 
 // The page opens in the look this browser last had, before anything is asked.
 applyRemembered();
@@ -1885,7 +1888,7 @@ function getTerm(st, p, where, mode) {
   const key = `${where}:${st}/${p.id}`;
   let t = S.terms.get(key);
   if (!t) {
-    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where, term), onUsage: (term) => usageDialog(st, term.pane), onFocus: (term) => { S.focused = `${st}/${term.pane.id}`; } });
+    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', face: where === 'leaf' || where === 'zoom' ? (term) => chatToggle(st, term.pane) : null, agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where, term), onUsage: (term) => usageDialog(st, term.pane), onFocus: (term) => { S.focused = `${st}/${term.pane.id}`; } });
     S.terms.set(key, t);
     t._fresh = true;
   } else t.update(p);
@@ -2395,11 +2398,14 @@ function renderTree(node, ctx) {
   if (isLeaf(node)) {
     const r = ctx.resolve(node);
     const guest = ctx.guest(node);
-    const t = r ? getTerm(r.st, r.p, 'leaf', 'control') : null;
+    // A pane shown as its conversation has no terminal on this page, so it
+    // holds no size: the choice is this device's, and is not in the layout.
+    const chat = r && faceOf(r.st, r.p) === 'chat' ? conversation(r.st, r.p, 'leaf') : null;
+    const t = r && !chat ? getTerm(r.st, r.p, 'leaf', 'control') : null;
     if (t) t.setGuest(guest);
     // The last pane on screen has no Hide: a layout always shows something.
     if (t) t.setHide(ctx.shown().length > 1 ? () => ctx.hide(node, true) : null);
-    const body = t ? t.el : ctx.missing(node);
+    const body = chat ? chat.frame() : t ? t.el : ctx.missing(node);
     if (!ctx.arrange) return body;
     const ref = ctx.refOf(node), label = ctx.label(node);
     return h('div', { class: 'arr-wrap' }, body,
@@ -2712,6 +2718,7 @@ function watchPage(st, project) {
 function paneView(st, id) {
   const p = findPane(st, id);
   if (!p) return shell(h('main', { class: 'station-main' }, h('div', { class: 'empty' }, !S.loaded ? 'Loading…' : online(st) ? 'That pane is not on this station any more.' : `${st} is unreachable.`)));
+  if (faceOf(st, p) === 'chat') return shell(h('main', { class: 'station-main zoomed' }, conversation(st, p, 'zoom').frame()));
   const t = getTerm(st, p, 'zoom', 'control');
   // The terminal takes the keyboard when the view opens, and keeps it across
   // redraws, but never takes it from a dialog or a box someone is typing in.
@@ -2766,6 +2773,8 @@ function composer(st, p) {
     h('div', { class: 'keys', role: 'group', 'aria-label': 'Keys' }, PHONE_KEYS.map(([label, bytes]) => h('button', { type: 'button', class: 'key', 'aria-label': KEY_NAMES[label] || label, onclick: () => key1(bytes) }, label))),
     h('form', { class: 'composer-row', onsubmit: (e) => { e.preventDefault(); send(); } }, box, mic, h('button', { class: 'primary', type: 'submit' }, 'Send')));
   composers.set(key, c);
+  // What is being written goes with the owner between Chat and Terminal.
+  termBox(st, p, box);
   return c;
 }
 
@@ -2929,6 +2938,12 @@ function phoneLayoutView(lay) {
 function phonePaneView(st, id) {
   const p = findPane(st, id);
   if (!p) return h('main', { class: 'phone' }, h('p', {}, 'That pane is gone.'), h('a', { href: '#/fleet' }, 'Back'));
+  // A pane has two faces. Its conversation (chat.js) never attaches to the
+  // pane, so it sets no size; the terminal below is as it always was, under
+  // the same bar, which is where Chat and Terminal are chosen. A shell, or an
+  // agent with no conversation, is its terminal, and the bar says why.
+  const conv = conversation(st, p, 'phone');
+  if (faceOf(st, p) === 'chat') return conv.phoneMain();
   // Watching shows the pane at the size someone else set, shrunk to fit.
   // Fitting resizes the pane to this screen, as a computer's deck would.
   const fitKey = `${st}/${p.id}`;
@@ -2952,21 +2967,25 @@ function phonePaneView(st, id) {
   if (v.sig !== sig) {
     v.sig = sig;
     // replaceChildren would print a missing piece as the word "null".
-    v.head.replaceChildren(...[h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'),
+    v.head.replaceChildren(...[
       p.exited ? null : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: (e) => { e.currentTarget.blur(); fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
       brief ? h('button', { class: 'phone-usage', title: usageTitle(p.usage), 'aria-label': `Usage: ${brief}`, onclick: (e) => { e.currentTarget.blur(); usageDialog(st, p); } }, brief, h('span', { class: 'muted' }, ' ›')) : null,
       h('span', { class: 'grow' }),
       h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(st, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn')].filter(Boolean));
   }
+  if (v.main.firstChild !== conv.bar) v.main.prepend(conv.bar);
   if (v.slot.firstChild !== t.el) v.slot.replaceChildren(t.el);
   const foot = p.exited ? (v.ended ||= h('p', { class: 'muted small' }, 'This pane has ended.')) : composer(st, p);
   if (v.foot.firstChild !== foot) v.foot.replaceChildren(foot);
   return v.main;
 }
 
-// The phone's list: what needs you first, then the same list as a computer
-// shows on its left: Pinned, each station with its projects (their layouts,
-// Watch, panes), and the global layouts.
+// The phone's list: what needs you first, then what is pinned, then the
+// sessions. "Recent" is every agent in the fleet, the one that changed last
+// first, with a dot on those that said something not yet read; "By station"
+// is the list a computer shows on its left, with everything a station
+// offers: each station with its projects (their layouts, Watch, panes), the
+// global layouts, usage, performance and the fleet's stop.
 function phoneList() {
   const all = S.fleet.stations.flatMap(s => liveAgents(s.station).map(p => ({ st: s.station, p })));
   const blockers = all.filter(x => x.p.agent !== 'shell' && (x.p.state === 'needs_you' || x.p.state === 'error'));
@@ -3004,16 +3023,22 @@ function phoneList() {
       }),
       loose.length ? h('div', { class: 'phone-project' }, projects.length ? h('div', { class: 'row phone-project-head' }, h('b', {}, 'Other panes')) : null, loose.map(p => line(st, p))) : null);
   };
-  return h('main', { class: 'phone' },
-    h('section', {}, h('h2', {}, 'Approvals'), S.approvals.length ? S.approvals.map(a => approvalRow(a)) : h('p', { class: 'muted' }, 'Nothing is waiting for approval.')),
-    h('section', {}, h('h2', {}, 'Needs you'), blockers.length ? blockers.map(x => line(x.st, x.p, whereOf(x.st, x.p))) : h('p', { class: 'muted' }, 'No agent is blocked.')),
-    pins.length ? h('section', { class: 'phone-pinned' }, h('h2', {}, 'Pinned'), pins.map(x => x.p ? line(x.st, x.p, whereOf(x.st, x.p)) : x.lay ? layRow(x.lay, layShort(x.lay)) : h('div', { class: 'phone-row muted' }, x.gone))) : null,
-    h('section', {}, h('h2', {}, 'Stations'), stationsByName().map(station), addRow()),
-    globals.length ? h('section', { class: 'phone-layouts' }, h('h2', {}, 'Layouts'), globals.map(x => layRow(x, 'every station'))) : null,
+  // An agent's row is its session: its title, and a dot when it is unread.
+  const row = (st, p) => (p.agent === 'shell' ? line(st, p, whereOf(st, p)) : sessionRow(st, p));
+  const byStation = homeMode() === 'stations';
+  return h('main', { class: 'phone phone-home' },
+    h('section', { class: 'phone-needs' }, h('h2', {}, 'Needs you'), S.approvals.map(a => approvalRow(a)), blockers.map(x => row(x.st, x.p)),
+      S.approvals.length || blockers.length ? null : h('p', { class: 'muted' }, 'Nothing is waiting for you.')),
+    pins.length ? h('section', { class: 'phone-pinned' }, h('h2', {}, 'Pinned'), pins.map(x => x.p ? row(x.st, x.p) : x.lay ? layRow(x.lay, layShort(x.lay)) : h('div', { class: 'phone-row muted' }, x.gone))) : null,
+    homeSwitch(),
+    byStation ? null : h('section', { class: 'phone-recents' }, h('h2', {}, 'Recents'), recentRows()),
+    byStation ? h('section', {}, h('h2', {}, 'Stations'), stationsByName().map(station), addRow()) : null,
+    byStation && globals.length ? h('section', { class: 'phone-layouts' }, h('h2', {}, 'Layouts'), globals.map(x => layRow(x, 'every station'))) : null,
     stopRows(),
-    h('section', {}, h('button', { class: 'wide', onclick: fleetUsageDialog }, 'Usage: tokens and estimated cost'),
-      h('a', { class: 'btn wide perf-btn', href: '#/perf' }, 'Performance', anyTrouble(S.perf) ? h('span', { class: 'perf-dot', 'aria-hidden': 'true' }) : null)),
-    h('section', {}, h('button', { class: 'danger big wide', onclick: () => confirmBox('Stop the whole fleet?', 'Every running agent turn on every station is interrupted.', 'Stop everything', () => rpc(api.station, 'stop.all', { scope: 'fleet' })) }, 'Stop every agent in the fleet')));
+    byStation ? h('section', {}, h('button', { class: 'wide', onclick: fleetUsageDialog }, 'Usage: tokens and estimated cost'),
+      h('a', { class: 'btn wide perf-btn', href: '#/perf' }, 'Performance', anyTrouble(S.perf) ? h('span', { class: 'perf-dot', 'aria-hidden': 'true' }) : null)) : null,
+    byStation ? h('section', {}, h('button', { class: 'danger big wide', onclick: () => confirmBox('Stop the whole fleet?', 'Every running agent turn on every station is interrupted.', 'Stop everything', () => rpc(api.station, 'stop.all', { scope: 'fleet' })) }, 'Stop every agent in the fleet')) : null,
+    h('div', { class: 'new-session-bar' }, h('button', { type: 'button', class: 'primary big wide new-session', dataset: { keep: 'new-session' }, onclick: (e) => { e.currentTarget.blur(); newSession(); } }, '+ New session')));
 }
 
 function phoneView() {
@@ -3085,6 +3110,7 @@ function render() {
   layCtx = null;
   S.route = parseRoute();
   for (const t of S.terms.values()) t._used = false;
+  chatBeforeRender();
   const r = S.route;
   // The page is drawn again for every change, every few seconds at least:
   // whatever was scrolled stays where it was. (On a phone the list jumped
@@ -3119,6 +3145,9 @@ function render() {
   }
   if (pageTop && document.scrollingElement) document.scrollingElement.scrollTop = pageTop;
   for (const [key, t] of S.terms) if (!t._used) { t.dispose(); S.terms.delete(key); }
+  // A conversation that left the page stops being watched; one still on it
+  // is where it was scrolled to.
+  chatAfterRender();
   // Each terminal has its look before it is first drawn.
   applyLook();
   for (const t of S.terms.values()) {
@@ -3194,6 +3223,19 @@ if (window.visualViewport) {
   document.addEventListener('focusout', () => setTimeout(fit, 50));
   fit();
 }
+
+// The conversation view is given what it needs of the page: nothing of it
+// reaches a station but through the calls the page already makes.
+initChat({
+  api, isPhone, update, go, paneUrl, rpc, findPane, paneMenu, online, onlineStations, panesOf, freeName, lastSessionNote, pref, setPref,
+  AGENTS: AGENT_CHOICES,
+  approvals: () => S.approvals,
+  stations: () => stationsByName(),
+  projects: (st) => S.projects.get(st) || [],
+  panes: () => S.fleet.stations.flatMap(s => liveAgents(s.station).map(p => ({ st: s.station, p }))),
+  paneMark: (p) => paneMark(p),
+  agentMark: (kind) => h('span', { class: 'ico-wrap' }, paneIcon(kind)),
+});
 
 api.onStatus(() => render());
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
