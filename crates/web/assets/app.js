@@ -105,7 +105,8 @@ async function refresh() {
   const lists = await Promise.all(stations.map(st => api.on(st, 'approval.list').catch(() => [])));
   S.approvals = lists.flat();
   await loadNotes(stations);
-  await loadStops(stations);
+  // Stops are on the fleet view and the phone's: asked for where they show.
+  if (S.route.view === 'fleet' || isPhone()) await loadStops(stations);
   try { S.trust = await api.call('trust.status'); } catch (e) { /* keep */ }
   try { S.adding = await api.call('fleet.add_status'); addChanged(); } catch (e) { /* keep */ }
   // Always from the station the deck was opened on: every station has the same copy.
@@ -1910,19 +1911,20 @@ const leafCandidates = (n) => onlineStations().filter(st => n.id !== undefined ?
 // could be in a project of the same name on a station that is away, so it is
 // bound only when one station has it and every station of the fleet answers.
 // Otherwise the leaf waits, and says so where it would be shown.
+const bindTried = new Set(); // a save that failed is not tried again by itself
 function bindGlobalLeaves() {
   if (!S.loaded) return;
   const allHere = !fleetAway().length && onlineStations().every(st => S.panes.has(st) && S.projects.has(st));
   for (const def of S.deck.layouts || []) {
     const lay = findLayout('global:' + def.name);
-    if (!lay || lay.cache.dirty) continue;
+    if (!lay || lay.cache.dirty || bindTried.has(JSON.stringify(def))) continue;
     let bound = 0;
     for (const n of leaves(lay.cache.tree)) {
       if (n.station) continue;
       const where = leafCandidates(n);
       if (where.length === 1 && (n.id !== undefined || allHere)) { n.station = where[0]; bound += 1; }
     }
-    if (bound) saveLayout(lay);
+    if (bound) { bindTried.add(JSON.stringify(def)); saveLayout(lay); }
   }
 }
 function leafPane(lay, n) {

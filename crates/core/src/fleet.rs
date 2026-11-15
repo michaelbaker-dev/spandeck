@@ -590,6 +590,10 @@ impl Daemon {
                 v["addr"] = json!(p.addr);
                 v["last_seen_ms"] = json!(p.last_seen_ms);
                 v["self"] = json!(false);
+                // A station that is off: the version it last had.
+                if v.get("version").is_none() {
+                    v["version"] = json!(p.version);
+                }
                 if p.state != "online" {
                     // Never imply anything about a station we cannot see.
                     v["working"] = Value::Null;
