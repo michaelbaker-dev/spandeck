@@ -217,6 +217,9 @@ function paneMenu(e, st, p, where, term) {
     return r;
   });
   const ctx = isPhone() ? null : layCtx, inLay = ctx && ctx.has(st, p), pin = panePin(st, p);
+  // In the layout on screen a pane can be hidden: it keeps running and keeps
+  // its place, and stays in sight as a chip beside the layout's name.
+  const leaf = inLay ? ctx.leafOf(st, p) : null, seen = ctx ? ctx.shown().length : 0;
   showMenu(e.clientX, e.clientY, [
     { title: `${p.name} · ${p.address}` },
     term && { label: 'Copy', hint: 'Cmd+C · Ctrl+Shift+C', disabled: !term.hasSelection(), action: () => term.copySelection() },
@@ -229,6 +232,9 @@ function paneMenu(e, st, p, where, term) {
     // keyboard; with none, into a layout you choose.
     ctx && !inLay && alive && { label: `Add to ${ctx.lay.name}, to the right`, hint: 'Ctrl+Shift+E', action: () => addToLayout(ctx.lay, st, p, 'row') },
     ctx && !inLay && alive && { label: `Add to ${ctx.lay.name}, below`, hint: 'Ctrl+Shift+O', action: () => addToLayout(ctx.lay, st, p, 'col') },
+    leaf && !leaf.hidden && { label: 'Hide', hint: seen < 2 ? 'the only pane showing' : 'it keeps running', disabled: seen < 2, action: () => ctx.hide(leaf, true) },
+    leaf && leaf.hidden && { label: 'Show', hint: 'where it was', action: () => ctx.hide(leaf, false) },
+    leaf && (leaf.hidden || seen > 1) && { label: 'Show only this', hint: 'hides the others', action: () => ctx.only(leaf) },
     ctx && inLay && { label: 'Take out of this layout', hint: where === 'leaf' ? 'Ctrl+Shift+W' : undefined, action: () => { ctx.remove(ctx.sideRef(st, p)); render(); } },
     !ctx && alive && !isPhone() && { label: 'Add to a layout…', action: () => addToLayoutDialog(st, p) },
     { label: isPinned(pin) ? 'Unpin' : 'Pin', action: () => togglePin(pin) },
@@ -1418,7 +1424,8 @@ function sidebar() {
     dot(p), paneMark(p), h('span', { class: 'side-name' }, p.name),
     where ? h('span', { class: 'muted side-where' }, where) : null,
     p.paused ? h('span', { class: 'chip warn' }, 'paused') : null,
-    can && ctx.arrange && ctx.has(st, p) ? h('span', { class: 'chip' }, 'in layout') : null);
+    ctx && ctx.leafOf(st, p)?.hidden ? h('span', { class: 'chip', title: `Hidden in ${ctx.lay.name}` }, 'hidden')
+      : can && ctx.arrange && ctx.has(st, p) ? h('span', { class: 'chip' }, 'in layout') : null);
   };
   const layRow = (lay, where) => {
     const cur = current(r.view === 'layout' && r.layout === lay.key);
@@ -1632,6 +1639,12 @@ function watchView(st, project) {
 // the deck document, which every station holds. Either may show any pane:
 // one in a project by its name there ({pane, project?, station?}), one in no
 // project by its id ({id, station?}). A leaf never names another layout.
+//
+// A pane of a layout can be hidden (the owner's request, 15 Nov 2026). The
+// tree is not changed: the leaf carries `hidden`, and what is drawn leaves it
+// out, so its neighbours take its room and showing it puts it back where it
+// was, at the sizes the splits had. Hidden panes are saved with the layout as
+// a list beside the tree (`hidden`), each named as its leaf is.
 
 const layCache = new Map();    // layout key -> { tree, lines, json, dirty, timer, v }
 let arranging = null;          // the key of the layout being arranged
@@ -1644,17 +1657,31 @@ const isLeaf = (n) => !!n && n.dir === undefined;
 const leaves = (n, out = []) => { if (!n) return out; if (isLeaf(n)) out.push(n); else { leaves(n.a, out); leaves(n.b, out); } return out; };
 const cleanLeaf = (n) => n.id !== undefined ? { id: n.id, ...(n.station ? { station: n.station } : {}) }
   : { pane: n.pane, ...(n.project ? { project: n.project } : {}), ...(n.station ? { station: n.station } : {}) };
+const leafSig = (n) => JSON.stringify(cleanLeaf(n));
+// Is any of this part on screen?
+const shows = (n) => !!n && (isLeaf(n) ? !n.hidden : shows(n.a) || shows(n.b));
 const fromServer = (n) => !n ? null : isLeaf(n) ? cleanLeaf(n) : { dir: n.dir, ratio: n.ratio / 1000, a: fromServer(n.a), b: fromServer(n.b) };
 const toServer = (n) => !n ? null : isLeaf(n) ? cleanLeaf(n)
   : { dir: n.dir, ratio: Math.min(950, Math.max(50, Math.round(n.ratio * 1000))), a: toServer(n.a), b: toServer(n.b) };
+
+// A saved layout's tree, its hidden panes marked; and a layout as it is saved.
+function treeFrom(def) {
+  const tree = fromServer(def.tree), hid = new Set((Array.isArray(def.hidden) ? def.hidden : []).filter(isLeaf).map(leafSig));
+  for (const n of leaves(tree)) if (hid.has(leafSig(n))) n.hidden = true;
+  return tree;
+}
+function layoutBody(name, c) {
+  const hidden = leaves(c.tree).filter(n => n.hidden).map(cleanLeaf);
+  return { name, lines: !!c.lines, tree: toServer(c.tree), ...(hidden.length ? { hidden } : {}) };
+}
 
 // One layout as the deck holds it. `station` and `project` are empty for a
 // global layout. What is on screen is kept while a change is being saved.
 function layoutOf(key, station, project, def) {
   const json = JSON.stringify(def);
   let c = layCache.get(key);
-  if (!c) { c = { tree: fromServer(def.tree), lines: !!def.lines, json }; layCache.set(key, c); }
-  else if (!c.dirty && c.json !== json) { c.tree = fromServer(def.tree); c.lines = !!def.lines; c.json = json; }
+  if (!c) { c = { tree: treeFrom(def), lines: !!def.lines, json }; layCache.set(key, c); }
+  else if (!c.dirty && c.json !== json) { c.tree = treeFrom(def); c.lines = !!def.lines; c.json = json; }
   return { key, station, project, name: def.name, cache: c };
 }
 const projectLayouts = (st) => (S.projects.get(st) || []).flatMap(pr => (pr.definition?.layout || []).map(l => layoutOf(`${st}/${pr.name}/${l.name}`, st, pr.name, l)));
@@ -1675,7 +1702,7 @@ function saveLayout(lay) {
   const v = c.v = (c.v || 0) + 1;
   clearTimeout(c.timer);
   c.timer = setTimeout(async () => {
-    const layout = { name: lay.name, lines: !!c.lines, tree: toServer(c.tree) };
+    const layout = layoutBody(lay.name, c);
     try {
       await (lay.project ? api.on(lay.station, 'project.layout.save', { project: lay.project, layout }) : api.call('deck.layout.save', { layout }));
       await refresh();
@@ -1738,7 +1765,8 @@ function ctxFor(lay) {
       if (!online(st)) return h('div', { class: 'empty' }, h('p', {}, `${st} is unreachable, so ${label(n)} cannot be shown.`));
       return h('div', { class: 'empty' }, h('p', {}, n.pane !== undefined ? `${label(n)}${project ? ' in ' + project : ''} is not running.` : 'This pane was closed.'),
         project ? h('button', { onclick: () => rpc(st, 'project.open', { name: project }) }, `Start ${project}'s panes`) : null,
-        h('button', { class: 'mini', onclick: () => { ctx.remove(refOf(n)); render(); } }, 'Take out of this layout'));
+        h('button', { class: 'mini', onclick: () => { ctx.remove(refOf(n)); render(); } }, 'Take out of this layout'),
+        ctx.shown().length > 1 ? h('button', { class: 'mini', onclick: () => ctx.hide(n, true) }, 'Hide') : null);
     },
     changed: () => saveLayout(lay),
     move: (ref, target, zone) => set(treeMove(tree(), ref, target, zone, refLeaf, refOf)),
@@ -1746,9 +1774,52 @@ function ctxFor(lay) {
     shape: (kind) => set(treeShape(kind, leaves(tree()).map(x => ({ ...x })))),
     // Any pane in the list can be put in: the name it would have here.
     sideRef: (st, p) => refOf(paneLeaf(lay, st, p)),
-    has: (st, p) => { const ref = refOf(paneLeaf(lay, st, p)); return leaves(tree()).some(n => refOf(n) === ref); },
+    has: (st, p) => !!ctx.leafOf(st, p),
+    leafOf: (st, p) => { const ref = refOf(paneLeaf(lay, st, p)); return leaves(tree()).find(n => refOf(n) === ref) || null; },
+    // Hiding changes only what is drawn. The pane's program is told nothing;
+    // its terminal here is let go like any terminal that leaves the screen,
+    // and comes back from the station's copy of the screen when it is shown.
+    shown: () => leaves(tree()).filter(n => !n.hidden),
+    hide: (n, on) => {
+      if (on && !ctx.shown().some(x => x !== n)) return toast('This is the only pane showing. Show another one first.');
+      setHidden(n, on);
+      saveLayout(lay);
+      render();
+      if (!on) focusLeafSoon(ctx, n);
+    },
+    only: (n) => { for (const x of leaves(tree())) setHidden(x, x !== n); saveLayout(lay); render(); focusLeafSoon(ctx, n); },
   };
   return ctx;
+}
+const setHidden = (n, on) => { if (on) n.hidden = true; else delete n.hidden; };
+function showAll(lay) {
+  for (const n of leaves(lay.cache.tree)) setHidden(n, false);
+  saveLayout(lay);
+  render();
+}
+// A pane that was just shown takes the keyboard, so it can be typed into at once.
+function focusLeafSoon(ctx, n) {
+  setTimeout(() => {
+    const r = ctx.resolve(n), t = r && S.terms.get(`leaf:${r.st}/${r.p.id}`);
+    if (t && !document.querySelector('.dialog')) t.focus();
+  }, 80);
+}
+// A hidden pane that is gone for good would be a chip that leads nowhere, so
+// it leaves the layout: a pane in no project that was closed, and a pane of a
+// project that is neither running nor one the project starts. Only when its
+// station has answered: nothing is concluded about a station that is away.
+function dropDeadHidden(lay, ctx) {
+  if (!S.loaded || lay.cache.dirty) return;
+  const dead = leaves(lay.cache.tree).filter((n) => {
+    const st = ctx.stationOf(n);
+    if (!n.hidden || !online(st) || !S.panes.has(st) || !S.projects.has(st) || ctx.resolve(n)) return false;
+    if (n.id !== undefined) return true;
+    const pr = S.projects.get(st).find(x => x.name === (n.project || lay.project));
+    return !pr || !(pr.definition?.pane || []).some(x => x.name === n.pane);
+  });
+  if (!dead.length) return;
+  for (const n of dead) lay.cache.tree = treeRemove(lay.cache.tree, ctx.refOf(n), ctx.refOf);
+  saveLayout(lay);
 }
 const focusedLeaf = (ctx) => leaves(ctx.tree()).find(n => { const r = ctx.resolve(n); return r && `${r.st}/${r.p.id}` === S.focused; }) || null;
 
@@ -1756,7 +1827,10 @@ const focusedLeaf = (ctx) => leaves(ctx.tree()).find(n => { const r = ctx.resolv
 function addToLayout(lay, st, p, dir) {
   const ctx = ctxFor(lay), leaf = paneLeaf(lay, st, p), all = leaves(lay.cache.tree);
   if (ctx.has(st, p)) return toast(`${p.name} is already in ${lay.name}`);
-  const beside = focusedLeaf(ctx) || all[all.length - 1];
+  // Beside the pane with the keyboard, else the last one on screen, so the
+  // new pane is seen even when others are hidden.
+  const seen = all.filter(n => !n.hidden), focused = focusedLeaf(ctx);
+  const beside = (focused && !focused.hidden ? focused : null) || seen[seen.length - 1] || all[all.length - 1];
   lay.cache.tree = beside ? treeInsert(lay.cache.tree, ctx.refOf(beside), dir === 'col' ? 'below' : 'right', leaf, ctx.refOf) : leaf;
   saveLayout(lay);
   render();
@@ -1872,11 +1946,17 @@ function renderTree(node, ctx) {
       ? h('div', { class: 'empty arr', 'data-empty': '1' }, h('div', { class: 'arr-zone' }), 'Drag a pane here from the list on the left.')
       : h('div', { class: 'empty' }, ctx.emptyText);
   }
+  // A hidden pane is not drawn; a split with one side hidden is its other
+  // side, at full size, and with both hidden it is nothing.
+  if (!shows(node)) return null;
+  if (!isLeaf(node) && !(shows(node.a) && shows(node.b))) return renderTree(shows(node.a) ? node.a : node.b, ctx);
   if (isLeaf(node)) {
     const r = ctx.resolve(node);
     const guest = ctx.guest(node);
     const t = r ? getTerm(r.st, r.p, 'leaf', 'control') : null;
     if (t) t.setGuest(guest);
+    // The last pane on screen has no Hide: a layout always shows something.
+    if (t) t.setHide(ctx.shown().length > 1 ? () => ctx.hide(node, true) : null);
     const body = t ? t.el : ctx.missing(node);
     if (!ctx.arrange) return body;
     const ref = ctx.refOf(node), label = ctx.label(node);
@@ -1950,7 +2030,7 @@ function renameLayoutDialog(lay) {
       if (to === lay.name) return close();
       if (layoutNames(lay.station, lay.project).includes(to)) return toast(`There is already a layout named ${to}. Choose another name.`, 'error');
       const pinned = isPinned(layPin(lay)), next = { ...lay, name: to, key: lay.project ? `${lay.station}/${lay.project}/${to}` : 'global:' + to };
-      await layoutSave(lay.station, lay.project, { name: to, lines: !!lay.cache.lines, tree: toServer(lay.cache.tree) });
+      await layoutSave(lay.station, lay.project, layoutBody(to, lay.cache));
       // The layout's own look moves to its new name.
       if (lookState.doc.layouts[lay.key]) await api.call('look.set', { level: 'layout', key: next.key, choice: lookState.doc.layouts[lay.key] }).catch(() => {});
       await layoutRemove(lay);
@@ -1966,7 +2046,7 @@ function renameLayoutDialog(lay) {
 
 async function duplicateLayout(lay) {
   const name = freeName(lay.name + '-copy', layoutNames(lay.station, lay.project));
-  await layoutSave(lay.station, lay.project, { name, lines: !!lay.cache.lines, tree: toServer(lay.cache.tree) });
+  await layoutSave(lay.station, lay.project, layoutBody(name, lay.cache));
   const copyKey = lay.project ? `${lay.station}/${lay.project}/${name}` : 'global:' + name;
   if (lookState.doc.layouts[lay.key]) await api.call('look.set', { level: 'layout', key: copyKey, choice: lookState.doc.layouts[lay.key] }).catch(() => {});
   await refresh();
@@ -1996,6 +2076,7 @@ function layMenu(e, lay) {
     { label: 'Rename', action: () => renameLayoutDialog(lay) },
     { label: 'Duplicate', action: () => duplicateLayout(lay) },
     { label: isPinned(pin) ? 'Unpin' : 'Pin', action: () => togglePin(pin) },
+    leaves(lay.cache.tree).some(n => n.hidden) && { label: 'Show all panes', hint: `${leaves(lay.cache.tree).filter(n => n.hidden).length} hidden`, action: () => showAll(lay) },
     // Opened on the layout itself, so the change is seen as it is made.
     !isPhone() && { label: 'Appearance…', hint: lookState.doc.layouts[lay.key] ? 'its own' : undefined, action: () => { go(layUrl(lay)); setTimeout(() => appearance('layout', { key: lay.key, name: lay.name }), 0); } },
     '-',
@@ -2104,9 +2185,11 @@ function layoutView(key) {
   if (arranging && arranging !== lay.key) arranging = null;
   const ctx = layCtx = ctxFor(lay);
   const c = lay.cache;
+  dropDeadHidden(lay, ctx);
   const head = h('div', { class: 'lay-head' },
     h('span', { class: 'ico-wrap' }, layoutIcon()), h('b', { class: 'lay-name' }, lay.name), h('span', { class: 'muted lay-saved' }, layWhere(lay)),
     lay.project ? linkedChip(lay.station, (S.projects.get(lay.station) || []).find(pr => pr.name === lay.project)) : null,
+    hiddenStrip(ctx),
     h('span', { class: 'grow' }),
     h('button', { class: 'toggle' + (ctx.arrange ? ' on' : ''), 'aria-pressed': String(ctx.arrange), title: 'Move panes around by dragging them', onclick: () => { arranging = ctx.arrange ? null : lay.key; render(); } }, ctx.arrange ? 'Done arranging' : 'Arrange'),
     h('button', { class: 'toggle' + (c.lines ? ' on' : ''), 'aria-pressed': String(!!c.lines), title: 'Draw lines between panes whose agents are talking', onclick: () => { c.lines = !c.lines; saveLayout(lay); render(); } }, c.lines ? 'Lines: on' : 'Lines: off'),
@@ -2115,15 +2198,54 @@ function layoutView(key) {
     h('b', {}, 'Arranging'), h('span', {}, 'Drag a pane onto another: an edge puts it beside, the middle swaps. Drag any pane in from the list.'),
     h('span', { class: 'grow' }),
     [['row', 'Side by side'], ['two-over-one', 'Two over one'], ['one-stack', 'One + stack'], ['grid', 'Grid']].map(([k, label]) => h('button', { class: 'mini', onclick: () => { ctx.shape(k); render(); } }, label))) : null;
-  const content = h('div', { class: 'workspace-col' }, bar, h('div', { class: 'workspace' + (ctx.arrange ? ' arranging' : '') }, renderTree(c.tree, ctx)));
+  // Every pane hidden: reached only when the last one showing was taken out
+  // or closed, since the last one showing cannot be hidden.
+  const allHidden = c.tree && !shows(c.tree) ? h('div', { class: 'empty all-hidden' + (ctx.arrange ? ' arr' : ''), 'data-empty': ctx.arrange ? '1' : undefined },
+    ctx.arrange ? h('div', { class: 'arr-zone' }) : null,
+    h('p', {}, 'Every pane in this layout is hidden. They are still running: choose one above, or show them all.'),
+    h('button', { class: 'primary', onclick: () => showAll(lay) }, 'Show all')) : null;
+  const content = h('div', { class: 'workspace-col' }, bar, h('div', { class: 'workspace' + (ctx.arrange ? ' arranging' : '') }, allHidden || renderTree(c.tree, ctx)));
   if (c.lines && !ctx.arrange) {
     // Messages stay on a station, so the lines are worked out for each.
     const by = new Map();
-    for (const r of leaves(c.tree).map(n => ctx.resolve(n)).filter(Boolean)) by.set(r.st, [...(by.get(r.st) || []), r.p]);
+    for (const r of ctx.shown().map(n => ctx.resolve(n)).filter(Boolean)) by.set(r.st, [...(by.get(r.st) || []), r.p]);
     pendingLinks = { selector: '.workspace', links: [...by].flatMap(([st, panes]) => linksFor(st, panes)).filter(x => x.kind === 'message') };
   }
   // The list on the left is drawn after the layout, so it can say what is in it.
   return shell(h('main', { class: 'station-main' }, head, content));
+}
+
+// The hidden panes of the layout on screen, beside its name: one chip each,
+// with the pane's icon, name and state, standing out as a pane does when it
+// needs you. The chip shows the pane again; the button beside it, or a
+// right-click, opens the pane's menu.
+function hiddenStrip(ctx) {
+  const hid = leaves(ctx.tree()).filter(n => n.hidden);
+  if (!hid.length) return null;
+  const chip = (n) => {
+    const r = ctx.resolve(n), p = r?.p || null, name = ctx.label(n), guest = ctx.guest(n), ref = ctx.refOf(n);
+    const state = p ? stateOf(p) : 'missing';
+    const stateText = p ? (p.exited ? 'ended' : STATE_LABEL[state] || state) : (online(ctx.stationOf(n)) ? 'not running' : 'unreachable');
+    const says = (p ? paneSays(p) : `${name}, ${stateText}`) + (guest ? `, ${guest}` : '') + (p?.needs_reason && state === 'needs_you' ? `: ${p.needs_reason}` : '');
+    const menu = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      // Opened from the keyboard there is no pointer: the menu goes under the chip.
+      const b = e.currentTarget.getBoundingClientRect(), at = e.clientX || e.clientY ? { clientX: e.clientX, clientY: e.clientY } : { clientX: b.left, clientY: b.bottom + 2 };
+      if (p) return paneMenu(at, r.st, p, 'chip');
+      showMenu(at.clientX, at.clientY, [{ title: `${name} · ${stateText}` },
+        { label: 'Show', hint: 'where it was', action: () => ctx.hide(n, false) },
+        { label: 'Take out of this layout', action: () => { ctx.remove(ref); render(); } }]);
+    };
+    return h('span', { class: `hid-chip ${state}`, dataset: { ref }, oncontextmenu: menu },
+      h('button', { type: 'button', class: 'hid-show', dataset: { keep: 'hid:' + ref }, 'aria-label': `Show ${says}. Hidden.`, title: `${says}. Hidden: click to show it where it was.`, onclick: () => ctx.hide(n, false) },
+        h('span', { class: 'dot ' + state }), p ? paneMark(p) : null, h('span', { class: 'hid-name' }, name),
+        state === 'needs_you' || state === 'error' || !p ? h('span', { class: 'hid-state' }, stateText) : null),
+      h('button', { type: 'button', class: 'icon-btn hid-menu', dataset: { keep: 'hidm:' + ref }, 'aria-label': `Menu for ${name}`, title: 'Pane menu', 'aria-haspopup': 'menu', onclick: menu }, '⋮'));
+  };
+  return h('div', { class: 'lay-hidden', role: 'group', 'aria-label': `Hidden panes of ${ctx.lay.name}` },
+    h('span', { class: 'muted hid-label' }, 'Hidden'), hid.map(chip),
+    hid.length > 1 ? h('button', { type: 'button', class: 'mini', dataset: { keep: 'hid-all' }, title: 'Show every hidden pane where it was', onclick: () => showAll(ctx.lay) }, 'Show all') : null);
 }
 
 // A project's Watch, with a header that says whose it is.
@@ -2206,7 +2328,7 @@ const phoneAt = new Map(); // layout key -> the pane shown, by its name in the l
 function layoutMap(node, cells, pick) {
   if (isLeaf(node)) {
     const c = cells.find(x => x.node === node);
-    return h('button', { type: 'button', class: `map-box ${c.state}${c.current ? ' current' : ''}`, 'aria-label': c.label, 'aria-current': c.current ? 'true' : undefined,
+    return h('button', { type: 'button', class: `map-box ${c.state}${c.current ? ' current' : ''}${c.hidden ? ' hid' : ''}`, 'aria-label': c.label, 'aria-current': c.current ? 'true' : undefined,
       onclick: (e) => { e.currentTarget.blur(); pick(c.ref); } }, h('span', { class: 'dot ' + c.state }), h('span', { class: 'map-name' }, c.name));
   }
   const a = layoutMap(node.a, cells, pick), b = layoutMap(node.b, cells, pick);
@@ -2225,15 +2347,22 @@ const mapSpan = (n) => {
 function phoneLayoutView(lay) {
   const lays = allLayouts();
   const ctx = ctxFor(lay);
+  dropDeadHidden(lay, ctx);
   const cells = leaves(lay.cache.tree).map((n) => {
     const p = ctx.resolve(n)?.p || null, guest = ctx.guest(n), name = ctx.label(n);
     const state = p ? stateOf(p) : 'missing';
-    return { node: n, ref: ctx.refOf(n), st: ctx.stationOf(n), p, guest, name, state, label: `${name}${guest ? ' ' + guest : ''}, ${p ? STATE_LABEL[state] || state : 'not running'}` };
+    return { node: n, ref: ctx.refOf(n), st: ctx.stationOf(n), p, guest, name, state, hidden: !!n.hidden, label: `${name}${guest ? ' ' + guest : ''}, ${p ? STATE_LABEL[state] || state : 'not running'}${n.hidden ? ', hidden' : ''}` };
   });
+  // A hidden pane is left out of the order that Previous, Next and a swipe
+  // step through. It stays in the map, marked, and a tap there looks at it
+  // without showing it again in the layout: Hide and Show do that.
+  const order = cells.filter(c => !c.hidden);
   let i = cells.findIndex(c => c.ref === phoneAt.get(lay.key));
-  if (i < 0) i = 0;
+  if (i < 0) i = Math.max(0, cells.indexOf(order[0]));
   const cur = cells[i] || null;
   if (cur) cur.current = true;
+  const stepTo = (d) => (cur && !cur.hidden ? order[order.indexOf(cur) + d]
+    : d > 0 ? order.find(c => cells.indexOf(c) > i) : order.filter(c => cells.indexOf(c) < i).pop()) || null;
   const p = cur?.p || null, st = cur?.st;
 
   // As in the pane view: the page is redrawn every few seconds, and what is
@@ -2248,7 +2377,9 @@ function phoneLayoutView(lay) {
       showing: h('span', { class: 'lay-showing', role: 'status' }), dots: h('span', { class: 'lay-dots', 'aria-hidden': 'true' }),
       prev: h('button', { type: 'button', onclick: (e) => { e.currentTarget.blur(); v.step(-1); } }, '‹'), next: h('button', { type: 'button', onclick: (e) => { e.currentTarget.blur(); v.step(1); } }, '›'),
       appr: h('div', { class: 'lay-approvals' }), rows: new Map(), slot: h('div', { class: 'keep' }), foot: h('div', { class: 'keep' }) };
-    v.nav = h('div', { class: 'lay-nav' }, v.prev, h('div', { class: 'lay-where' }, v.showing, v.dots), v.next);
+    // Hide the pane being looked at, or show it in the layout again.
+    v.hide = h('button', { type: 'button', class: 'lay-hide', onclick: (e) => { e.currentTarget.blur(); v.toggle(); } });
+    v.nav = h('div', { class: 'lay-nav' }, v.prev, h('div', { class: 'lay-where' }, v.showing, v.dots), v.hide, v.next);
     v.main = h('main', { class: 'phone phone-pane phone-layout' }, v.head, v.title, v.map, v.nav, v.appr, v.slot, v.foot);
     // A swipe left or right anywhere but the message box steps to the next or
     // the previous pane. Heard before the terminal, which scrolls on a drag
@@ -2273,7 +2404,8 @@ function phoneLayoutView(lay) {
     phonePanes.set(vkey, v);
   }
   const show = (ref) => { if (phoneAt.get(lay.key) !== ref) { phoneAt.set(lay.key, ref); render(); } };
-  v.step = (d) => { const to = cells[i + d]; if (to) show(to.ref); };
+  v.step = (d) => { const to = stepTo(d); if (to) show(to.ref); };
+  v.toggle = () => { if (cur) { setHidden(cur.node, !cur.hidden); saveLayout(lay); render(); } };
 
   const live = !!p && !p.exited;
   const fitKey = p ? `${st}/${p.id}` : '';
@@ -2303,10 +2435,15 @@ function phoneLayoutView(lay) {
     if (v.map.firstChild) Object.assign(v.map.firstChild.style, { minWidth: w * 48 - 4 + 'px', height: Math.max(hh * 48 - 4, 56) + 'px' });
     v.map.hidden = !cells.length;
     v.nav.hidden = !cells.length;
-    v.showing.textContent = cur ? `Showing ${cur.name}${cur.guest ? ' (' + cur.guest + ')' : ''} · ${i + 1} of ${cells.length}` : '';
-    v.dots.replaceChildren(...cells.map((c, j) => h('i', { class: j === i ? 'on' : '' })));
+    v.showing.textContent = cur ? `Showing ${cur.name}${cur.guest ? ' (' + cur.guest + ')' : ''} · ${cur.hidden ? 'hidden' : `${order.indexOf(cur) + 1} of ${order.length}`}` : '';
+    // The last pane showing cannot be hidden, as on a computer.
+    v.hide.hidden = !cur;
+    v.hide.disabled = !cur || (!cur.hidden && order.length < 2);
+    v.hide.textContent = cur?.hidden ? 'Show' : 'Hide';
+    v.hide.setAttribute('aria-label', !cur ? 'Hide' : cur.hidden ? `Show ${cur.name} in this layout again` : `Hide ${cur.name} in this layout. It keeps running.`);
+    v.dots.replaceChildren(...order.map((c) => h('i', { class: c === cur ? 'on' : '' })));
     for (const [b, d, word] of [[v.prev, -1, 'Previous'], [v.next, 1, 'Next']]) {
-      const to = cells[i + d];
+      const to = stepTo(d);
       b.disabled = !to;
       b.setAttribute('aria-label', to ? `${word} pane: ${to.name}` : `${word} pane`);
     }
@@ -2388,8 +2525,8 @@ function phoneList() {
     h('div', { class: 'grow' }, h('b', {}, p.name), where ? h('span', { class: 'muted' }, ' · ' + where) : null,
       h('div', { class: 'muted small' }, p.needs_reason || (p.exited ? 'ended' : p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}` : `${STATE_LABEL[stateOf(p)]} · ${ago(p.state_since_ms)}`))), '›');
   // A layout is opened as a map you step through, one pane at a time.
-  const layRow = (x, where) => { const n = leaves(x.cache.tree).length; return h('a', { class: 'phone-row lay-row', href: layUrl(x), 'aria-label': `${x.name}, layout` }, h('span', { class: 'ico-wrap' }, layoutIcon()),
-    h('div', { class: 'grow' }, h('b', {}, x.name), where ? h('span', { class: 'muted' }, ' · ' + where) : null, h('div', { class: 'muted small' }, `${n} pane${n === 1 ? '' : 's'}, one at a time`)), '›'); };
+  const layRow = (x, where) => { const n = leaves(x.cache.tree).length, hid = leaves(x.cache.tree).filter(y => y.hidden).length; return h('a', { class: 'phone-row lay-row', href: layUrl(x), 'aria-label': `${x.name}, layout` }, h('span', { class: 'ico-wrap' }, layoutIcon()),
+    h('div', { class: 'grow' }, h('b', {}, x.name), where ? h('span', { class: 'muted' }, ' · ' + where) : null, h('div', { class: 'muted small' }, `${n} pane${n === 1 ? '' : 's'}, one at a time${hid ? ` · ${hid} hidden` : ''}`)), '›'); };
   const watchRow = (st, pr) => h('a', { class: 'phone-row watch-row', href: watchUrl(st, pr.name), 'aria-label': `Watch ${pr.name}` }, h('span', { class: 'ico-wrap' }, watchIcon()),
     h('div', { class: 'grow' }, h('b', {}, 'Watch'), h('div', { class: 'muted small' }, 'Every agent here, and who is talking')), '›');
   const pins = pinnedItems();
@@ -2536,9 +2673,13 @@ function update() {
   const active = document.activeElement;
   const typing = active && active.closest && active.closest('.dialog');
   const focusedTerm = [...S.terms.values()].find(t => t.el.contains(active));
+  // A hidden pane's chip is drawn again with its new state: the one that had
+  // the keyboard has it afterwards.
+  const keep = active?.dataset?.keep;
   vaultPromptSync();
   render();
   if (focusedTerm && !typing) focusedTerm.focus();
+  if (keep && !typing) [...document.querySelectorAll('[data-keep]')].find(x => x.dataset.keep === keep)?.focus();
   // How many times the page was redrawn for new data. Nothing in the deck
   // reads it; a test waits on it instead of sleeping through a redraw.
   root.dataset.draws = String(++draws);

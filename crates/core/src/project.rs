@@ -89,6 +89,12 @@ pub struct Layout {
     pub lines: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree: Option<LayoutNode>,
+    /// Panes of the tree that are not on screen for now, each named as its
+    /// leaf in the tree is. The tree keeps their places and its split sizes,
+    /// so showing one puts it back where it was. A name that is not in the
+    /// tree (any more) means nothing, and goes at the Control Deck's next save.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden: Vec<LayoutNode>,
 }
 
 /// A pane, or two parts side by side (`row`) or one above the other (`col`).
@@ -218,6 +224,15 @@ impl Layout {
             if tree.check(0)? > 16 {
                 return Err("a layout holds at most 16 panes".into());
             }
+        }
+        if self.hidden.len() > 16 {
+            return Err("a layout hides at most 16 panes".into());
+        }
+        for leaf in &self.hidden {
+            if matches!(leaf, LayoutNode::Split { .. }) {
+                return Err("only a pane can be hidden, not a split".into());
+            }
+            leaf.check(0)?;
         }
         Ok(())
     }
@@ -704,5 +719,46 @@ mod tests {
         // A leaf names its pane one way.
         let both = "name = \"api\"\n[[layout]]\nname = \"x\"\n[layout.tree]\npane = \"dev\"\nid = \"p-1\"\n";
         assert!(toml::from_str::<ProjectFile>(both).is_err());
+    }
+
+    /// Hidden panes are saved with the layout (the owner's request, 15 Nov
+    /// 2026): they come back from a project file as they went in, a file
+    /// without them is written as it was before, and what is not a pane, has
+    /// a bad name or is too many is refused.
+    #[test]
+    fn a_layouts_hidden_panes_are_saved_with_it_and_checked() {
+        let text = "name = \"api\"\n[[layout]]\nname = \"all\"\n[layout.tree]\ndir = \"col\"\nratio = 600\n\
+                    [layout.tree.a]\npane = \"dev\"\n[layout.tree.b]\nid = \"p-01abc\"\nstation = \"spark2\"\n\
+                    [[layout.hidden]]\nid = \"p-01abc\"\nstation = \"spark2\"\n";
+        let file: ProjectFile = toml::from_str(text).unwrap();
+        let layout = &file.layouts[0];
+        assert_eq!(layout.validate(), Ok(()));
+        assert_eq!(
+            layout.hidden,
+            vec![LayoutNode::PaneId {
+                id: "p-01abc".into(),
+                station: Some("spark2".into())
+            }]
+        );
+        let written = toml::to_string_pretty(&file).unwrap();
+        assert_eq!(toml::from_str::<ProjectFile>(&written).unwrap(), file);
+        // As the Control Deck sends it, and as the deck document holds it.
+        let sent = serde_json::to_value(layout).unwrap();
+        assert_eq!(
+            sent["hidden"],
+            serde_json::json!([{"id": "p-01abc", "station": "spark2"}])
+        );
+        assert_eq!(&serde_json::from_value::<Layout>(sent).unwrap(), layout);
+
+        let mut bad = layout.clone();
+        bad.hidden = vec![layout.tree.clone().unwrap()];
+        assert!(bad.validate().is_err(), "a split cannot be hidden");
+        bad.hidden = vec![layout.hidden[0].clone(); 17];
+        assert!(bad.validate().is_err(), "more than a layout holds");
+        bad.hidden = vec![LayoutNode::PaneId {
+            id: "<b>x</b>".into(),
+            station: None,
+        }];
+        assert!(bad.validate().is_err(), "a hidden pane's name is checked");
     }
 }

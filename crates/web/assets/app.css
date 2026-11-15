@@ -151,6 +151,27 @@ a.side-row:hover { background: var(--panel2); }
 
 /* The right-hand side of a layout or of Watch: what it is, then the two switches */
 .lay-head { display: flex; align-items: center; gap: 8px; padding: 5px 10px; min-height: 36px; background: var(--panel); border-bottom: 1px solid var(--line); flex: none; white-space: nowrap; }
+/* The hidden panes of a layout: a chip each, beside the layout's name. The
+   strip gives way before the name does, and scrolls sideways when it is full. */
+.lay-hidden { display: flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 60px; overflow-x: auto; scrollbar-width: thin; padding: 2px; margin-left: 4px; }
+.hid-label { font-size: calc(11px * var(--ui-scale)); text-transform: uppercase; letter-spacing: .04em; }
+.hid-chip { display: inline-flex; align-items: center; flex: none; border: 1px dashed var(--line); border-radius: 999px; background: var(--panel2); }
+.hid-chip:hover { border-color: var(--blue); }
+.hid-chip button { border: none; background: none; min-height: 22px; }
+.hid-show { gap: 6px; padding: 1px 2px 1px 8px; border-radius: 999px 0 0 999px; max-width: 220px; }
+.hid-name { overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.hid-state { font-size: calc(11px * var(--ui-scale)); }
+.hid-chip .hid-menu { padding: 0 7px 0 3px; border-radius: 0 999px 999px 0; }
+.hid-chip.working { border-color: var(--blue-line); }
+.hid-chip.done { border-color: var(--green-line); }
+.hid-chip.needs_you { border-style: solid; border-color: var(--amber); background: var(--needs-bg); }
+.hid-chip.needs_you .hid-state { color: var(--amber); font-weight: 600; }
+.hid-chip.error { border-style: solid; border-color: var(--red); background: var(--err-bg); }
+.hid-chip.error .hid-state { color: var(--red); font-weight: 600; }
+.hid-chip.missing, .hid-chip.exited { color: var(--muted); }
+.dot.missing { background: transparent; border: 1px dashed var(--dim); }
+.strip-hide { flex: none; display: inline-flex; align-items: center; }
+.all-hidden { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .lay-name { font-size: calc(14px * var(--ui-scale)); } .lay-saved { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 button.toggle { padding: 2px 10px; } button.toggle.on { background: var(--toggle-bg); color: var(--on-accent); border-color: var(--toggle-line); }
 .menu-note { padding: 4px 10px 6px; color: var(--muted); font-size: calc(11px * var(--ui-scale)); max-width: 300px; white-space: normal; }
@@ -326,9 +347,12 @@ button.agent-row:hover { border-color: var(--blue); }
 .map-box.error { border-color: var(--red); background: var(--err-bg); }
 .map-box.done { border-color: var(--green-line); background: var(--done-bg); }
 .map-box.missing { border-style: dashed; color: var(--muted); background: transparent; }
+/* A hidden pane: still in the map where it belongs, but not in the swipe order. */
+.map-box.hid { border-style: dashed; } .map-box.hid:not(.needs_you):not(.error) { opacity: .55; }
 .map-box.current { outline: 2px solid var(--blue); outline-offset: -2px; color: var(--strong); font-weight: 600; }
 .lay-nav { display: flex; align-items: center; gap: 8px; flex: none; }
 .lay-nav button { min-width: 44px; min-height: 44px; justify-content: center; font-size: calc(18px * var(--ui-scale)); }
+.lay-nav .lay-hide { font-size: calc(13px * var(--ui-scale)); padding: 0 10px; } .lay-hide[hidden] { display: none; }
 .lay-where { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 5px; }
 .lay-showing { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lay-dots { display: flex; gap: 6px; } .lay-dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); } .lay-dots i.on { background: var(--blue); }

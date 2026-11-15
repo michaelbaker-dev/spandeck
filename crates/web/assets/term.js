@@ -12,7 +12,7 @@
 // font that stood in for it, so it measures again and then does as above.
 
 import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge } from './ui.js';
-import { paneIcon, iconName } from './icons.js';
+import { paneIcon, iconName, hideIcon } from './icons.js';
 import { BASE, termOptions, applyPaneFrame, SIZING } from './look.js';
 
 // A terminal as every pane has it. Emoji take two cells, as the programs
@@ -320,6 +320,14 @@ export class PaneTerm {
     this.renderStrip();
   }
 
+  // In a layout a pane can be hidden: `hide` does it, and is nothing where
+  // that is not offered (the pane on its own, or the last one showing).
+  setHide(hide) {
+    const had = !!this.onHide;
+    this.onHide = hide || null;
+    if (had !== !!hide) this.renderStrip();
+  }
+
   renderStrip() {
     const p = this.pane, s = stateOf(p);
     const activity = p.exited ? 'ended'
@@ -358,6 +366,7 @@ export class PaneTerm {
         onclick: () => { this.agentsOpen = !this.agentsOpen; this.renderStrip(); } }, this.agentsOpen ? 'Agents ›' : `‹ Agents ${agents.length}`) : null,
       p.agent !== 'shell' && !p.exited && (s === 'working' || s === 'needs_you')
         ? h('button', { class: 'mini danger', title: 'Stop: interrupt this turn. The process stays.', onclick: () => rpc('pane.stop') }, 'Stop') : null,
+      this.onHide ? h('button', { class: 'icon-btn strip-hide', title: 'Hide this pane. It keeps running, and stays as a chip beside the layout\'s name.', 'aria-label': `Hide ${p.name}`, onclick: () => this.onHide && this.onHide() }, hideIcon()) : null,
       h('button', { class: 'icon-btn', title: 'Pane menu', 'aria-label': 'Pane menu', onclick: (e) => this._menu(e) }, '⋮'),
     ].filter(Boolean));
   }
