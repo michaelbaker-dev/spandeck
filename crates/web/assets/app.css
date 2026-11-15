@@ -199,7 +199,10 @@ button.toggle { padding: 2px 10px; } button.toggle.on { background: var(--toggle
 .strip-name { font-weight: 600; } .strip-activity { color: var(--muted); }
 .strip-reason { color: var(--amber); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .term-body { flex: 1; min-height: 0; overflow: hidden; padding: 4px 0 0 6px; }
-.term-body.letterbox { display: grid; place-items: center; padding: 0; background: var(--well); }
+/* One cell the size of the body: a terminal larger than it is centred over it
+   (a cell sized by the terminal would start at the left edge, and the
+   terminal, shrunk about its own centre, was drawn off to the right). */
+.term-body.letterbox { display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; padding: 0; background: var(--well); }
 .term-body.letterbox .xterm { transform-origin: center; flex: none; }
 .term-note { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; display: flex; gap: 10px; align-items: center; }
 .term-note[hidden] { display: none; }
@@ -589,7 +592,33 @@ button.new-session { min-height: 48px; border-radius: 24px; }
 .tile-pick { min-height: 48px; padding: 6px 14px; border-radius: 12px; } .tile-pick.on { background: var(--accent-bg); border-color: var(--accent-line); color: var(--on-accent); }
 .new-session-form h3 { margin: 6px 0; } .new-session-form label.row { margin-bottom: 2px; } .chat-first { font-size: max(16px, calc(14px * var(--ui-scale))); }
 @media (max-width: 760px) {
-  .backdrop:has(> .dialog.sheet) { padding: 0; place-items: stretch; }
+  .backdrop:has(> .dialog.sheet) { padding: 0; place-items: start stretch; }
   .dialog.sheet { width: 100vw; min-height: 100dvh; margin: 0; border: none; border-radius: 0; }
   .sheet-foot { position: sticky; bottom: 0; background: var(--panel); padding: 10px 0 calc(10px + env(safe-area-inset-bottom)); } .sheet-foot button { flex: 1; justify-content: center; min-height: 48px; }
 }
+
+/* Appearance on a phone (phonelook.js). The reading size of a conversation
+   can be this device's own: look.js sets --chat-scale, and the conversation
+   uses it wherever it would use the deck's scale. */
+:root[data-chat-size] .chat-body, :root[data-chat-size] .pl-chat-sample { --ui-scale: var(--chat-scale); }
+.phone-look { display: flex; flex-direction: column; gap: 14px; } .phone-look section { display: flex; flex-direction: column; gap: 8px; } .phone-look h3 { margin: 0; } .phone-look p { margin: 0; }
+.pl-themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.pl-theme { flex-direction: column; align-items: stretch; gap: 6px; padding: 6px; min-height: 96px; border-radius: 12px; position: relative; text-align: left; }
+.pl-theme.on, .pl-font.on { border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue); }
+.pl-swatch { display: flex; align-items: center; gap: 5px; height: 48px; padding: 0 10px; border-radius: 8px; background: var(--sw-bg); border: 1px solid var(--sw-line); color: var(--sw-text); }
+.pl-aa { flex: 1; font-size: 18px; font-weight: 600; } .pl-swatch i { width: 10px; height: 10px; border-radius: 50%; }
+.pl-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 4px; font-weight: 600; }
+.pl-theme .pl-name { padding-right: 22px; } .pl-theme .pl-tick { position: absolute; right: 10px; bottom: 6px; }
+.pl-tick { flex: none; width: 1.2em; color: var(--blue); font-weight: 700; }
+.pl-size { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
+.pl-size-row { display: flex; align-items: center; gap: 8px; }
+.pl-step { min-width: 48px; min-height: 44px; justify-content: center; border-radius: 10px; font-weight: 600; }
+.pl-value { min-width: 3.4em; text-align: center; font-variant-numeric: tabular-nums; }
+.pl-chat-sample { display: flex; flex-direction: column; gap: 6px; font-size: calc(15px * var(--ui-scale)); line-height: 1.5; overflow: hidden; } .pl-chat-sample .chat-bubble { align-self: flex-end; }
+.pl-term-sample { margin: 0; padding: 6px 8px; border-radius: 6px; overflow: hidden; white-space: pre; background: var(--pl-bg); color: var(--pl-fg); font: var(--pl-px)/1.25 var(--pl-font), monospace, "Spandeck Symbols"; }
+.pl-reset { align-self: flex-start; min-height: 44px; }
+.pl-fonts { display: flex; flex-direction: column; gap: 6px; }
+.pl-font { min-height: 56px; padding: 8px 10px; border-radius: 12px; text-align: left; gap: 8px; }
+.pl-font-text { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 2px; } .pl-font-text .pl-name { padding: 0; }
+.pl-font-sample { font: 14px/1.3 var(--pl-font), monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.top-more { font-size: calc(18px * var(--ui-scale)); min-width: 44px; min-height: 44px; justify-content: center; }

@@ -17,6 +17,7 @@ import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, sta
 import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
 import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners } from './look.js';
 import { lookEditor } from './lookedit.js';
+import { phoneLook } from './phonelook.js';
 import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook } from './perf.js';
 import { qrSvg } from './qr.js';
 import { initChat, conversation, faceOf, chatToggle, termBox, chatBeforeRender, chatAfterRender, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
@@ -301,7 +302,11 @@ function applyLook() {
   }
 }
 // The editor for the deck, a layout ({key, name}) or a pane ({key, name}).
+// At a phone's width it is a sheet (phonelook.js): the deck's theme and font,
+// and this device's own text sizes. The editor is made for a wide screen.
 function appearance(level, scope = {}) {
+  const layoutKey = S.route.view === 'layout' ? S.route.layout : null;
+  if (isPhone()) return phoneLook({ api, apply: applyLook, reload: loadLook, update }, { layoutKey, paneKey: level === 'pane' ? scope.key : null, name: scope.name });
   lookEditor({ api, apply: applyLook, reload: async () => { await loadLook(); } },
     { level, ...scope, layoutKey: S.route.view === 'layout' ? S.route.layout : null });
 }
@@ -1333,7 +1338,12 @@ function topbar() {
     isPhone() ? null : h('button', { onclick: () => appearance('deck'), title: 'Themes, colours and fonts for the whole deck' }, 'Appearance'),
     isPhone() || !S.fleet.stations.some(x => x.vault?.found) ? null : h('button', { class: S.fleet.stations.some(x => x.state === 'online' && (['not_connected', 'token_rejected', 'locked'].includes(x.vault?.state) || x.vault?.health === 'problem')) ? 'attn' : '', onclick: vaultPanel, title: 'AgentVault: keys for agents without handing over keys' }, 'Vault'),
     h('button', { class: 'danger', onclick: stopAllMenu, title: 'Interrupt running agent turns' }, 'Stop all'),
-    isPhone() ? null : h('button', { onclick: palette, title: 'Ctrl+K' }, '⌘K'));
+    isPhone() ? null : h('button', { onclick: palette, title: 'Ctrl+K' }, '⌘K'),
+    // A phone's bar has no room for the rest: they are in a menu.
+    isPhone() ? h('button', { class: 'top-more', 'aria-label': 'More', title: 'More', 'aria-haspopup': 'menu', onclick: (e) => { const b = e.currentTarget.getBoundingClientRect(); showMenu(b.right, b.bottom + 2, [
+      { label: 'Appearance', hint: 'theme and text size', action: () => appearance('deck') },
+      { label: 'Usage', hint: 'tokens and cost', action: fleetUsageDialog },
+      { label: 'Performance', action: () => go('#/perf') }]); } }, '⋯') : null);
 }
 
 function stopRows() {
@@ -3034,7 +3044,9 @@ function phonePaneView(st, id) {
       h('span', { class: 'grow' }),
       h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(st, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn')].filter(Boolean));
   }
-  if (v.main.firstChild !== conv.bar) v.main.prepend(conv.bar);
+  // The bar is the conversation's, and a pane left and opened again has a
+  // new conversation: its bar takes the old one's place.
+  if (v.main.firstChild !== conv.bar) { if (v.bar) v.bar.remove(); v.bar = conv.bar; v.main.prepend(conv.bar); }
   if (v.slot.firstChild !== t.el) v.slot.replaceChildren(t.el);
   const foot = p.exited ? (v.ended ||= h('p', { class: 'muted small' }, 'This pane has ended.')) : composer(st, p);
   if (v.foot.firstChild !== foot) v.foot.replaceChildren(foot);

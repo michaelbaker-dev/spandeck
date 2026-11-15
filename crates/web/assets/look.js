@@ -250,6 +250,10 @@ export function applyPage(look) {
   // The shades worked out from these colours (a pressed button, a chip's
   // border) are written out for Spandeck Dark and computed for any other.
   if (sameFrame(look, BASE)) delete root.dataset.themed; else root.dataset.themed = '1';
+  // This device's own reading size for a conversation (below), in place of
+  // the deck's there and nowhere else.
+  const chat = chatSize(look);
+  if (chat.own) { root.style.setProperty('--chat-scale', String(chat.px / CHAT_BASE)); root.dataset.chatSize = '1'; } else { root.style.removeProperty('--chat-scale'); delete root.dataset.chatSize; }
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute('content', look['deck.bg']);
 }
@@ -354,6 +358,66 @@ export function fontFromFile(fileName) {
   return { name: name || 'My font', face: face.trim() || 'regular' };
 }
 
+// ---- this device's own text sizes ----
+// A phone needs another size than a 27-inch screen, so the size of the text
+// in a conversation and in a terminal can be this device's own: a number of
+// pixels kept in this browser, used in place of the deck's while the deck is
+// shown at a phone's width (the phone's Appearance sheet, phonelook.js, sets
+// them). Nothing of it is in the look document or reaches a station. A
+// terminal follows the sizing rule as for any font change: in control it
+// fits the pane again, watching it only scales what it shows.
+
+const DEVICE = 'spandeck.look.device';
+const CHAT_BASE = 15;
+export const DEVICE_SIZES = { chat: { min: 12, max: 24 }, term: { min: 8, max: 24 } };
+const narrow = () => matchMedia('(max-width: 760px)').matches;
+let device = {};
+try { device = JSON.parse(localStorage.getItem(DEVICE) || '{}') || {}; } catch (e) { device = {}; }
+const ownSize = (which) => {
+  const v = device[which], b = DEVICE_SIZES[which];
+  return narrow() && Number.isInteger(v) && v >= b.min && v <= b.max ? v : null;
+};
+// `px`, or null for the deck's size. Kept if the browser keeps things.
+export function setDeviceSize(which, px) {
+  const b = DEVICE_SIZES[which];
+  if (px === null) delete device[which]; else device[which] = Math.min(b.max, Math.max(b.min, Math.round(px)));
+  try { localStorage.setItem(DEVICE, JSON.stringify(device)); } catch (e) { /* until the page is closed, then */ }
+}
+// How much larger or smaller the device's owner asked all text to be, where
+// the browser says: iOS by its Dynamic Type font, the others by the size of
+// text a page did not set. 1 where it does not say.
+let systemScale = null;
+function textScale() {
+  if (systemScale !== null) return systemScale;
+  systemScale = 1;
+  try {
+    const el = document.createElement('span');
+    el.style.font = '-apple-system-body';
+    const ios = el.style.font !== '';
+    if (!ios) el.style.fontSize = 'medium';
+    el.style.position = 'absolute';
+    el.style.visibility = 'hidden';
+    document.documentElement.append(el);
+    const px = parseFloat(getComputedStyle(el).fontSize);
+    el.remove();
+    if (px > 0) systemScale = Math.min(1.6, Math.max(0.8, px / (ios ? 17 : 16)));
+  } catch (e) { systemScale = 1; }
+  return systemScale;
+}
+// The size of a conversation's text here: { px, deck (what the deck's look
+// gives this device), own (it is not what the style sheet works out from the
+// deck's alone), chosen (the owner set it on this device) }.
+export function chatSize(look) {
+  const scale = narrow() ? textScale() : 1;
+  const b = DEVICE_SIZES.chat, deck = Math.min(b.max, Math.max(b.min, Math.round(CHAT_BASE * (look['ui.size'] / 13) * scale))), mine = ownSize('chat');
+  return { px: mine ?? deck, deck, own: mine !== null || scale !== 1, chosen: mine !== null };
+}
+// The same for a terminal's text.
+export function termSize(look) {
+  const deck = look['font.size'], mine = ownSize('term');
+  return { px: mine ?? deck, deck, own: mine !== null, chosen: mine !== null };
+}
+
 // The terminal's options for a look. `smaller` is the phone-sized terminal.
 export function termOptions(look, smaller) {
   return {
@@ -363,7 +427,7 @@ export function termOptions(look, smaller) {
       ...Object.fromEntries(TERM_COLOURS.slice(5).map(c => [c, look['term.' + c]])),
     },
     fontFamily: fontList(look['font.family']) + ', ' + SYMBOLS,
-    fontSize: Math.max(6, look['font.size'] - (smaller ? 2 : 0)),
+    fontSize: ownSize('term') ?? Math.max(6, look['font.size'] - (smaller ? 2 : 0)),
     lineHeight: look['font.lineHeight'],
     letterSpacing: look['font.letterSpacing'],
     fontWeight: look['font.weight'], fontWeightBold: look['font.weightBold'],

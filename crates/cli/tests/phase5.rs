@@ -1427,6 +1427,142 @@ fn the_conversation_view(s: &Station, page: &common::browser::Page) {
             row("asker")
         ),
     );
+    the_phones_appearance_sheet(s, page, &counter);
+}
+
+/// The owner's request (15 Nov 2026): "Can the mobile change colors fonts
+/// etc?" On a phone Appearance is a sheet, opened from the list and from a
+/// pane's menu. A theme chosen there is the deck's, kept by the station; the
+/// sizes of the text are this device's own: they change what is on screen,
+/// are still there after a reload, are in nothing the station keeps, are not
+/// used by the same browser at a computer's width, and resize no pane.
+fn the_phones_appearance_sheet(s: &Station, page: &common::browser::Page, pane: &str) {
+    let click = |page: &common::browser::Page, what: &str, el: &str| {
+        page.wait(what, &format!("(e => e ? (e.click(), true) : false)({el})"));
+    };
+    let item = "[...document.querySelectorAll('.menu-item')].find(b => b.innerText.startsWith('Appearance'))";
+    let step = |which: &str, times: u32| {
+        format!("(b => {{ for (let i = 0; i < {times}; i += 1) b.click(); return true; }})(document.querySelector('.pl-size[data-size={which}] .pl-step:last-of-type'))")
+    };
+    let bg = "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()";
+    let was = s.pane(pane);
+    // From the list: the theme, for every device and station.
+    click(page, "More", "document.querySelector('.top-more')");
+    click(page, "Appearance", item);
+    click(
+        page,
+        "the light theme",
+        "document.querySelector('.phone-look .pl-theme[data-theme=spandeck-light]')",
+    );
+    page.wait("the page in the light theme, and the tick on it", &format!("{bg} === '#f4f6f8' && document.querySelector('.pl-theme[aria-checked=true]').dataset.theme === 'spandeck-light'"));
+    let said = page.js("document.querySelector('.phone-look').innerText");
+    for line in [
+        "Changes the theme everywhere",
+        "Only on this device",
+        "is on a computer",
+    ] {
+        assert!(said.as_str().unwrap().contains(line), "{line}: {said}");
+    }
+    wait_for("the station to hold the theme", 10, || {
+        (s.call("look.get", json!({}))["deck"]["theme"] == json!("spandeck-light")).then_some(())
+    });
+    click(page, "Done", "document.querySelector('.sheet-foot button')");
+
+    // From a conversation's menu: the sizes, shown as they are changed.
+    page.goto(&format!("#/s/{}/p/{pane}", s.name));
+    let sizes = "[parseFloat(getComputedStyle(document.querySelector('.phone-chat .chat-text')).fontSize), parseFloat(getComputedStyle(document.querySelector('.phone-chat .chat-box')).fontSize)]";
+    page.wait(
+        "the conversation",
+        "!!document.querySelector('.phone-chat .chat-text')",
+    );
+    assert_eq!(page.js(sizes), json!([15, 16]));
+    click(
+        page,
+        "the pane's menu",
+        "document.querySelector('.chat-more')",
+    );
+    click(page, "Appearance…", item);
+    page.wait("the sheet", "!!document.querySelector('.phone-look')");
+    page.js(&step("chat", 3));
+    page.js(&step("term", 3));
+    assert_eq!(
+        page.js(&format!(
+            "[{sizes}, [...document.querySelectorAll('.pl-value')].map(v => v.innerText)]"
+        )),
+        json!([[18, 18], ["18 px", "16 px"]])
+    );
+    click(page, "Done", "document.querySelector('.sheet-foot button')");
+    click(page, "Terminal", "[...document.querySelectorAll('.chat-switch button')].find(b => b.innerText === 'Terminal')");
+    let term = "document.querySelector('.pane')?.paneTerm?.term.options.fontSize";
+    page.wait(
+        "the terminal at this phone's size",
+        &format!("{term} === 16 && !!document.querySelector('.phone-pane .xterm-rows')"),
+    );
+    // A bug that happened (15 Nov 2026): a terminal left for the list and
+    // opened again had its bar twice.
+    page.goto("#/fleet");
+    page.wait("the list", "!document.querySelector('.phone-pane')");
+    page.goto(&format!("#/s/{}/p/{pane}", s.name));
+    page.wait("the terminal again, under one bar", "!!document.querySelector('.phone-pane .xterm-rows') && document.querySelectorAll('.phone-pane .chat-bar').length === 1");
+
+    // Kept in this browser, and by no station.
+    page.js("(location.reload(), true)");
+    page.wait(
+        "the sizes after a reload",
+        &format!("document.readyState === 'complete' && {term} === 16 && getComputedStyle(document.documentElement).getPropertyValue('--chat-scale') === '1.2'"),
+    );
+    // A bug that happened (15 Nov 2026): a pane wider than the phone, shown
+    // whole and shrunk, was drawn off to the right of its frame.
+    page.wait(
+        "the watched terminal inside its frame",
+        "((a, b) => !!a && a.left >= b.left - 1 && a.right <= b.right + 1 && a.width > b.width / 2)(document.querySelector('.phone-pane .xterm-screen')?.getBoundingClientRect(), document.querySelector('.phone-pane .term-body').getBoundingClientRect())",
+    );
+    let look = s.call("look.get", json!({}));
+    assert_eq!(look["deck"]["theme"], json!("spandeck-light"));
+    assert!(
+        look["deck"]["set"].as_object().is_none_or(|m| m.is_empty())
+            && !look.to_string().contains("size"),
+        "a size reached the station: {look}"
+    );
+    // A phone that is only watching resized nothing with its larger text.
+    let held = s.pane(pane);
+    assert_eq!(
+        (
+            held["cols"].as_u64(),
+            held["rows"].as_u64(),
+            held["controller"].is_null()
+        ),
+        (was["cols"].as_u64(), was["rows"].as_u64(), true),
+        "the phone's text size did not resize the pane: {held}"
+    );
+    // Another page of the same browser, at a computer's width: the theme,
+    // and the deck's sizes.
+    page.js(&format!(
+        "(window.open(location.origin + '/#/s/{}/p/{pane}', '_blank'), true)",
+        s.name
+    ));
+    let wide = page.opened("/p/");
+    wide.tab
+        .call_method(
+            headless_chrome::protocol::cdp::Emulation::SetDeviceMetricsOverride {
+                width: 1300,
+                height: 800,
+                device_scale_factor: 1.0,
+                mobile: false,
+                scale: None,
+                screen_width: None,
+                screen_height: None,
+                position_x: None,
+                position_y: None,
+                dont_set_visible_size: None,
+                screen_orientation: None,
+                viewport: None,
+                display_feature: None,
+                device_posture: None,
+            },
+        )
+        .unwrap();
+    wide.wait("the pane on a wide screen, in the deck's size", &format!("innerWidth > 760 && {bg} === '#f4f6f8' && {term} === 13 && !document.documentElement.dataset.chatSize"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4452,4 +4588,131 @@ fn the_rest_of_the_conversation_view() {
     s.wait_text(&long, "tally.csv from a computer");
     click(&wide, "Terminal", &button("Terminal"));
     wide.wait("the terminal again", "!!document.querySelector('.station-main.zoomed .pane .xterm-rows') && !document.querySelector('.chat-pane')");
+}
+
+/// Not a test of behaviour: pictures of the phone's Appearance sheet, and of
+/// a conversation and a terminal at the smallest, the deck's and the largest
+/// text size, in a dark and a light theme, for a person to look at.
+/// `SPANDECK_SHOTS=<folder> cargo test -p spandeck --test phase5 pictures_of_the_phones_appearance -- --ignored`
+#[test]
+#[ignore = "takes pictures for a person to look at; needs Chrome"]
+fn pictures_of_the_phones_appearance() {
+    use common::browser::Page;
+    use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png;
+    let out = std::path::PathBuf::from(std::env::var("SPANDECK_SHOTS").expect("SPANDECK_SHOTS"));
+    std::fs::create_dir_all(&out).unwrap();
+    let s = Station::start("spark2");
+    let line = |v: Value| json!({"transcript": v});
+    let said = |blocks: Value| json!({"type": "assistant", "message": {"role": "assistant", "content": blocks}});
+    let answer = "**Done: the tally now counts herons only.**\n\n- `tally.py` filters the rows to the heron family before it counts\n- the test for mixed rows passes again (3 of 3)\n\n```python\nherons = [r for r in rows if r.species.strip() == 'heron']\nreturn len(herons)\n```\n\n| Species | Rows |\n|:--|--:|\n| heron | 37 |\n| egret | 112 |";
+    let heron = s.fake(
+        json!({"steps": [
+            line(json!({"type": "ai-title", "aiTitle": "Heron counts for the marsh survey"})),
+            {"prompt": "Count the herons in survey.csv and fix the tally script."},
+            line(said(json!([{"type": "text", "text": "I'll count the rows first, then fix `tally.py`."}]))),
+            line(said(json!([{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "wc -l survey.csv"}}]))),
+            line(json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "412 survey.csv"}]}, "toolUseResult": {"stdout": "412 survey.csv", "stderr": "", "interrupted": false}})),
+            {"say": "$ wc -l survey.csv\n412 survey.csv\n$ python -m pytest -q tests/test_tally.py\n...                                              [100%]\n3 passed in 0.41s"},
+            {"permission": {"name": "Bash", "command": "git commit -am 'Count herons only'"}},
+            {"turn_end": answer}
+        ]}),
+        json!({"name": "heron"}),
+    );
+    s.wait_state(&heron, "needs_you");
+    let sh = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "scratch", "cwd": s.root.join("home")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let sh = sh.as_str();
+    let shot = |page: &Page, name: &str| {
+        std::thread::sleep(Duration::from_millis(700));
+        let png = page.tab.capture_screenshot(Png, None, None, true).unwrap();
+        std::fs::write(out.join(format!("{name}.png")), png).unwrap();
+    };
+    let click = |page: &Page, what: &str, el: &str| {
+        page.wait(what, &format!("(e => e ? (e.click(), true) : false)({el})"));
+    };
+    let button = |text: &str| {
+        format!("[...document.querySelectorAll('button')].find(b => b.innerText.trim().startsWith('{text}'))")
+    };
+    // Every step of a size, one way or the other, or back to the deck's.
+    let size = |page: &Page, to: &str| {
+        click(
+            page,
+            "the pane's menu",
+            "document.querySelector('.chat-more')",
+        );
+        click(page, "Appearance…", "[...document.querySelectorAll('.menu-item')].find(b => b.innerText.startsWith('Appearance'))");
+        page.wait("the sheet", "!!document.querySelector('.phone-look')");
+        page.js(&match to {
+            "deck" => "(document.querySelector('.pl-reset').click(), true)".to_string(),
+            _ => format!("([...document.querySelectorAll('.pl-size .pl-step:{to}-of-type')].forEach(b => {{ while (!b.disabled) b.click(); }}), true)"),
+        });
+    };
+    for theme in ["dark", "light"] {
+        s.call(
+            "look.set",
+            json!({"level": "deck", "choice": {"theme": format!("spandeck-{theme}")}}),
+        );
+        let phone = Page::open(&s, 390, 844);
+        phone.wait("the list", "!!document.querySelector('.session-row')");
+        click(&phone, "More", "document.querySelector('.top-more')");
+        shot(&phone, &format!("{theme}-0-more-menu"));
+        click(&phone, "Appearance", "[...document.querySelectorAll('.menu-item')].find(b => b.innerText.startsWith('Appearance'))");
+        phone.wait("the sheet", "!!document.querySelector('.phone-look')");
+        shot(&phone, &format!("{theme}-1-sheet-top"));
+        phone.js("(document.querySelector('.backdrop').scrollTop = 99999, true)");
+        shot(&phone, &format!("{theme}-2-sheet-bottom"));
+        click(&phone, "Done", &button("Done"));
+        phone.goto(&format!("#/s/spark2/p/{heron}"));
+        phone.wait(
+            "the conversation",
+            "!!document.querySelector('.phone-chat .chat-text')",
+        );
+        for (n, name, to) in [
+            (3, "deck", "deck"),
+            (5, "smallest", "first"),
+            (7, "largest", "last"),
+        ] {
+            if to != "deck" {
+                size(&phone, to);
+                shot(&phone, &format!("{theme}-{n}-sheet-{name}"));
+                click(&phone, "Done", &button("Done"));
+            }
+            shot(&phone, &format!("{theme}-{n}-conversation-{name}"));
+            if to == "deck" {
+                click(&phone, "Terminal", &button("Terminal"));
+                phone.wait(
+                    "the terminal",
+                    "!!document.querySelector('.phone-pane .xterm-rows')",
+                );
+                shot(&phone, &format!("{theme}-{n}-terminal-watching"));
+                click(&phone, "Chat", &button("Chat"));
+            }
+            // A terminal's size shows in a pane fitted to the phone.
+            phone.goto(&format!("#/s/spark2/p/{sh}"));
+            if to == "deck" {
+                click(&phone, "Fit to screen", &button("Fit to screen"));
+                phone.wait("fitted", &button("Fitted"));
+            }
+            phone.wait(
+                "the terminal",
+                "!!document.querySelector('.phone-pane .xterm-rows')",
+            );
+            std::thread::sleep(Duration::from_millis(500));
+            s.call(
+                "pane.paste",
+                json!({"pane": sh, "text": "clear; ls -l /; echo '=> != 0O 1lI'", "enter": true}),
+            );
+            shot(&phone, &format!("{theme}-{}-terminal-{name}", n + 1));
+            phone.goto(&format!("#/s/spark2/p/{heron}"));
+            phone.wait(
+                "the conversation",
+                "!!document.querySelector('.phone-chat .chat-text')",
+            );
+        }
+    }
 }
