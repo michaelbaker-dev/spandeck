@@ -503,8 +503,9 @@ pub fn close_inherited() {
 /// stays in one process.
 pub fn wait_for_exit(_pid: u32, _limit: Duration) {}
 
-/// Resolves when the daemon is asked to stop (SIGTERM, SIGINT).
-pub async fn shutdown_signal() -> io::Result<()> {
+/// Resolves when the daemon is asked to stop (SIGTERM, SIGINT). Which
+/// station it is matters only on Windows, where the request has a name.
+pub async fn shutdown_signal(_station: &Path) -> io::Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
@@ -513,6 +514,59 @@ pub async fn shutdown_signal() -> io::Result<()> {
         _ = int.recv() => {}
     }
     Ok(())
+}
+
+/// Windows only: there the daemon cannot be sent a signal. Here the login
+/// service stops it (`systemctl --user stop`, `launchctl bootout`).
+pub fn request_stop(_station: &Path) -> io::Result<bool> {
+    Ok(false)
+}
+
+/// Nothing to record: an upgrade stays in one process, so the pid file
+/// never names another.
+pub fn record_successor_in(_pid_file: &Path) {}
+
+// ------------------------------------------------ supervising the station
+//
+// Windows only (DECISIONS.md, "Windows"). Here systemd and launchd restart
+// a daemon that failed, and follow it through an upgrade because it stays
+// the same process; `spandeckd` is not installed. These exist so the code
+// that uses them is compiled and checked on every system.
+
+/// Never made here.
+pub struct Supervisor(());
+
+/// What `Supervisor::watch` saw.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Watched {
+    Ended(i32),
+    Gone,
+    Leave,
+}
+
+/// Not here: the login service supervises.
+pub fn supervise(_station: &Path, _take_over: Duration) -> Option<Supervisor> {
+    None
+}
+
+/// Not by a supervisor of ours.
+pub fn supervised(_station: &Path) -> bool {
+    false
+}
+
+impl Supervisor {
+    pub fn watch(&self, _pid: u32) -> Watched {
+        Watched::Gone
+    }
+
+    pub fn leave_within(&self, _wait: Duration) -> bool {
+        true
+    }
+}
+
+/// Not asked for here.
+pub fn process_started(_pid: u32) -> Option<std::time::SystemTime> {
+    None
 }
 
 /// Start `cmd` without opening a console window. Only Windows opens one.

@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, LocalFree, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, FILETIME, HANDLE,
+    INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -44,12 +45,13 @@ use windows_sys::Win32::System::Power::{
     SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, OpenProcess, OpenProcessToken, ResumeThread,
-    TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NEW_PROCESS_GROUP,
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
-    INFINITE, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CreateEventW, CreateMutexW, CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
+    GetExitCodeProcess, GetProcessTimes, InitializeProcThreadAttributeList, OpenEventW, OpenMutexW,
+    OpenProcess, OpenProcessToken, ResumeThread, SetEvent, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForMultipleObjects, WaitForSingleObject,
+    CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 use super::cmdline;
@@ -941,12 +943,30 @@ pub fn default_dirs(home: &Path) -> (PathBuf, PathBuf) {
 
 /// Put `new` where `to` is, although `to` may be a program that is running:
 /// a running program's file cannot be written over, but it can be renamed.
+/// The file moved aside is `<to>.old`; when a program that is still running
+/// from an earlier replacement holds that name (the supervisor, the pane
+/// host), the next free of `.old2` to `.old9`. Each is removed as soon as
+/// nothing runs from it.
 pub fn replace_file(new: &Path, to: &Path) -> io::Result<()> {
-    let mut old = to.as_os_str().to_os_string();
-    old.push(".old");
-    let old = PathBuf::from(old);
-    // Left by the last replacement; gone unless that program still runs.
-    let _ = std::fs::remove_file(&old);
+    let aside = |n: u32| {
+        let mut old = to.as_os_str().to_os_string();
+        old.push(if n == 1 {
+            ".old".to_string()
+        } else {
+            format!(".old{n}")
+        });
+        PathBuf::from(old)
+    };
+    let mut free = None;
+    for n in 1..=9 {
+        let old = aside(n);
+        // Left by an earlier replacement; gone unless that program still runs.
+        let _ = std::fs::remove_file(&old);
+        if free.is_none() && !old.exists() {
+            free = Some(old);
+        }
+    }
+    let old = free.unwrap_or_else(|| aside(1));
     if to.exists() {
         std::fs::rename(to, &old)?;
     }
@@ -964,11 +984,26 @@ pub fn replace_file(new: &Path, to: &Path) -> io::Result<()> {
 
 // ---------------------------------------------------------------- processes
 
+/// Where `replace_process` writes the pid of the daemon it starts: the
+/// station's pid file. The supervisor follows the station by that file, and
+/// the daemon that takes over writes it itself only once it has waited for
+/// this one to end.
+static SUCCESSOR_PID_FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Name the file `replace_process` records the next daemon's pid in.
+pub fn record_successor_in(pid_file: &Path) {
+    if let Ok(mut f) = SUCCESSOR_PID_FILE.lock() {
+        *f = Some(pid_file.to_path_buf());
+    }
+}
+
 /// Start `cmd` as the daemon that takes over from this one, then end this
 /// process. The panes are in the pane host and stay as they are. The new
 /// daemon is told to wait for this process to be gone (`SPANDECK_WAIT_PID`)
-/// before it opens the pipe and the database. Returns only if the new
-/// program could not be started.
+/// before it opens the pipe and the database, and its pid is written to the
+/// station's pid file before this process ends, so whoever watches this one
+/// end finds the next one there. Returns only if the new program could not
+/// be started.
 pub fn replace_process(cmd: &mut Command) -> io::Error {
     cmd.env("SPANDECK_WAIT_PID", std::process::id().to_string())
         .stdin(std::process::Stdio::null())
@@ -976,7 +1011,13 @@ pub fn replace_process(cmd: &mut Command) -> io::Error {
         .stderr(std::process::Stdio::null())
         .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     match cmd.spawn() {
-        Ok(_) => std::process::exit(0),
+        Ok(next) => {
+            let file = SUCCESSOR_PID_FILE.lock().ok().and_then(|f| f.clone());
+            if let Some(file) = file {
+                let _ = std::fs::write(file, next.id().to_string());
+            }
+            std::process::exit(0)
+        }
         Err(e) => e,
     }
 }
@@ -1036,22 +1077,217 @@ pub fn wait_for_exit(pid: u32, limit: Duration) {
 }
 
 /// Resolves when the daemon is asked to stop: Ctrl-C or Ctrl-Break in its
-/// console, the console closing, log off, shut down.
-pub async fn shutdown_signal() -> io::Result<()> {
+/// console, the console closing, log off, shut down, or `request_stop` for
+/// this station (`spandeck service --stop`), which is what SIGTERM is on
+/// Unix: a daemon with no console can be sent none of the others.
+pub async fn shutdown_signal(station: &Path) -> io::Result<()> {
     use tokio::signal::windows;
     let mut c = windows::ctrl_c()?;
     let mut brk = windows::ctrl_break()?;
     let mut close = windows::ctrl_close()?;
     let mut logoff = windows::ctrl_logoff()?;
     let mut shutdown = windows::ctrl_shutdown()?;
+    let (tx, asked) = tokio::sync::oneshot::channel::<()>();
+    if let Some(event) = named(station, "stop", |name| {
+        // SAFETY: a valid name; a null result is checked by `named`.
+        unsafe { CreateEventW(null(), 1, 0, name) }
+    }) {
+        std::thread::spawn(move || {
+            // The whole value moves here, not its field: it is what may
+            // cross threads, and it closes the handle when this ends.
+            let event = event;
+            // SAFETY: the handle is owned by this thread until it ends.
+            if unsafe { WaitForSingleObject(event.0, INFINITE) } == WAIT_OBJECT_0 {
+                let _ = tx.send(());
+            }
+        });
+    }
     tokio::select! {
         _ = c.recv() => {}
         _ = brk.recv() => {}
         _ = close.recv() => {}
         _ = logoff.recv() => {}
         _ = shutdown.recv() => {}
+        Ok(()) = asked => {}
     }
     Ok(())
+}
+
+/// Ask the daemon of this station to stop, as its owner. False when no
+/// daemon of this station is listening for it.
+pub fn request_stop(station: &Path) -> io::Result<bool> {
+    let Some(event) = named(station, "stop", |name| {
+        // SAFETY: a valid name; a null result is checked by `named`.
+        unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name) }
+    }) else {
+        return Ok(false);
+    };
+    // SAFETY: a handle just opened.
+    if unsafe { SetEvent(event.0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(true)
+}
+
+// ------------------------------------------------ supervising the station
+//
+// The log-on task's program (`spandeckd.exe`) keeps the station running: it
+// follows whichever daemon is current, which after an upgrade is not one it
+// started (DECISIONS.md, "Windows"). What it needs of the system is here.
+
+const EVENT_MODIFY_STATE: u32 = 0x0002;
+const SYNCHRONIZE: u32 = 0x0010_0000;
+
+/// Open or make a kernel object named for this station (`station` is its
+/// local socket, whose last part is one name per state folder). Tried in the
+/// namespace every session of the machine shares, so that a command typed
+/// over SSH reaches the station in the owner's desktop session, then in
+/// this session's own. The object is this user's: its access list is the
+/// default one, the user and SYSTEM.
+fn named(station: &Path, what: &str, open: impl Fn(*const u16) -> HANDLE) -> Option<Owned> {
+    named_new(station, what, open).map(|(h, _)| h)
+}
+
+/// `named`, saying also whether the object was there before a call that
+/// makes one.
+fn named_new(
+    station: &Path,
+    what: &str,
+    open: impl Fn(*const u16) -> HANDLE,
+) -> Option<(Owned, bool)> {
+    let text = station.to_string_lossy();
+    let leaf: String = text
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    for space in ["Global", "Local"] {
+        let name = wide(OsStr::new(&format!(r"{space}\{leaf}-{what}")));
+        let h = open(name.as_ptr());
+        // SAFETY: plain call, read at once after the call it is about.
+        let existed = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+        if !h.is_null() {
+            return Some((Owned(h), existed));
+        }
+    }
+    None
+}
+
+/// The claim that makes this process the one supervisor of a station, and
+/// the way the next supervisor asks it to leave.
+pub struct Supervisor {
+    _claim: Owned,
+    leave: Owned,
+}
+
+/// What `Supervisor::watch` saw.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Watched {
+    /// The process ended, with this exit code.
+    Ended(i32),
+    /// No such process (it ended before it could be watched).
+    Gone,
+    /// Another supervisor is taking over: this one is to end.
+    Leave,
+}
+
+/// Become the supervisor of a station. None when another process already
+/// is. With `take_over`, the one that is supervising is asked to leave and
+/// waited for that long: how a newly installed supervisor replaces the one
+/// that is running, whose file Windows would not let be written over.
+pub fn supervise(station: &Path, take_over: Duration) -> Option<Supervisor> {
+    let deadline = std::time::Instant::now() + take_over;
+    loop {
+        // The claim is the object's existence: it goes when the process
+        // that made it ends, however that happens. One that was there
+        // already is somebody else's, and is let go of at once.
+        let claim = named_new(station, "supervisor", |name| {
+            // SAFETY: a valid name; a null result is checked by `named_new`.
+            unsafe { CreateMutexW(null(), 0, name) }
+        });
+        if let Some((claim, false)) = claim {
+            let leave = named(station, "leave", |name| {
+                // SAFETY: a valid name; a null result is checked by `named`.
+                unsafe { CreateEventW(null(), 1, 0, name) }
+            })?;
+            return Some(Supervisor {
+                _claim: claim,
+                leave,
+            });
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        if let Some(leave) = named(station, "leave", |name| {
+            // SAFETY: a valid name; a null result is checked by `named`.
+            unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name) }
+        }) {
+            // SAFETY: a handle just opened.
+            unsafe { SetEvent(leave.0) };
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Does some process supervise this station now?
+pub fn supervised(station: &Path) -> bool {
+    named(station, "supervisor", |name| {
+        // SAFETY: a valid name; a null result is checked by `named`.
+        unsafe { OpenMutexW(SYNCHRONIZE, 0, name) }
+    })
+    .is_some()
+}
+
+impl Supervisor {
+    /// Wait until the process ends, or until this supervisor is asked to
+    /// leave.
+    pub fn watch(&self, pid: u32) -> Watched {
+        let Some(process) = open_process(pid) else {
+            return Watched::Gone;
+        };
+        let both = [process.0, self.leave.0];
+        // SAFETY: two handles that are open for the length of the call.
+        let woke = unsafe { WaitForMultipleObjects(2, both.as_ptr(), 0, INFINITE) };
+        if woke != WAIT_OBJECT_0 {
+            return Watched::Leave;
+        }
+        let mut code = 0u32;
+        // SAFETY: an open handle and a valid out pointer.
+        unsafe { GetExitCodeProcess(process.0, &mut code) };
+        Watched::Ended(code as i32)
+    }
+
+    /// Wait this long. True when asked to leave in that time.
+    pub fn leave_within(&self, wait: Duration) -> bool {
+        let ms = wait.as_millis().min(u32::MAX as u128 - 1) as u32;
+        // SAFETY: an open handle.
+        unsafe { WaitForSingleObject(self.leave.0, ms) == WAIT_OBJECT_0 }
+    }
+}
+
+/// When a process that is running now was started. None when there is no
+/// such process, or it has ended.
+pub fn process_started(pid: u32) -> Option<std::time::SystemTime> {
+    let process = open_process(pid)?;
+    // SAFETY: a handle just opened.
+    if unsafe { WaitForSingleObject(process.0, 0) } != WAIT_TIMEOUT {
+        return None;
+    }
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut made, mut ended, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: an open handle and four valid out pointers.
+    if unsafe { GetProcessTimes(process.0, &mut made, &mut ended, &mut kernel, &mut user) } == 0 {
+        return None;
+    }
+    // 100 ns steps since 1601; the Unix epoch is 11 644 473 600 s later.
+    let ticks = (u64::from(made.dwHighDateTime) << 32) | u64::from(made.dwLowDateTime);
+    let since_1970 = ticks.checked_sub(116_444_736_000_000_000)?;
+    Some(std::time::UNIX_EPOCH + Duration::from_nanos(since_1970.checked_mul(100)?))
 }
 
 /// Start `cmd` without opening a console window.

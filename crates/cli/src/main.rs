@@ -178,6 +178,10 @@ enum Cmd {
         /// Write the unit and print the command that enables it.
         #[arg(long)]
         install: bool,
+        /// Stop the station that is running, on purpose: its panes end,
+        /// and nothing starts it again until the next log on.
+        #[arg(long, conflicts_with = "install")]
+        stop: bool,
     },
     /// Replace the running daemon with a new binary, keeping every terminal.
     Upgrade { binary: PathBuf },
@@ -478,7 +482,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             );
             return Ok(0);
         }
-        Cmd::Service { install } => {
+        Cmd::Service { stop: true, .. } => return service_stop(&paths),
+        Cmd::Service { install, .. } => {
             let exe = std::env::current_exe()?;
             let home = spandeck_core::paths::home_dir();
             let (path, body, enable) = spandeck_core::doctor::service_definition(&exe, &home);
@@ -1256,6 +1261,44 @@ fn hook_main(paths: &Paths, agent: &str) -> i32 {
     }
 }
 
+/// `spandeck service --stop`. Windows: the daemon has no console and no
+/// signals, and the program that keeps it running would start a daemon that
+/// was merely ended, so the stop is asked for by name; the daemon then
+/// stops as it does for SIGTERM on Unix (panes ended, the clean-stop mark
+/// written), and its supervisor ends with it. Elsewhere the login service
+/// is what stops it, and its command is printed.
+fn service_stop(paths: &Paths) -> anyhow::Result<i32> {
+    use spandeck_terminal::sys;
+    if !sys::WINDOWS {
+        println!(
+            "The login service stops spandeck on this system:\n  {}",
+            if cfg!(target_os = "macos") {
+                "launchctl bootout gui/$(id -u)/dev.spandeck.spandeckd"
+            } else {
+                "systemctl --user stop spandeckd"
+            }
+        );
+        return Ok(0);
+    }
+    let socket = paths.socket();
+    if !sys::request_stop(&socket)? {
+        println!("spandeck is not running here.");
+        return Ok(0);
+    }
+    let asked = std::time::Instant::now();
+    while sys::local::connect(&socket).is_ok() {
+        if asked.elapsed() > Duration::from_secs(30) {
+            anyhow::bail!("spandeck was asked to stop and is still answering after 30 seconds");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    println!(
+        "spandeck was stopped and its panes closed. It starts again when you log on, or now with:\n  schtasks /Run /TN {}",
+        spandeck_core::doctor::WINDOWS_TASK
+    );
+    Ok(0)
+}
+
 fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::Result<i32> {
     use spandeck_terminal::sys;
     if handoff.is_none() {
@@ -1272,6 +1315,10 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
         sys::wait_for_exit(pid, std::time::Duration::from_secs(20));
     }
     std::env::remove_var("SPANDECK_WAIT_PID");
+    // Windows: whenever this daemon hands over to another process (an
+    // upgrade, a restart in place, going back), that process's pid goes in
+    // the pid file before this one ends, for the supervisor to follow.
+    sys::record_successor_in(&paths.pid_file());
     // Children and the next program image find the same station through these.
     std::env::set_var("SPANDECK_STATE_DIR", &paths.state_dir);
     std::env::set_var("SPANDECK_CONFIG_DIR", &paths.config_dir);
@@ -1454,6 +1501,29 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
                     if let Err(e) = installed {
                         tracing::warn!(error = %e, to = %to.display(), "the new version runs, but could not replace the installed binary");
                     }
+                    // Windows: the program that keeps this station running
+                    // was one of those replaced, and the copy that is
+                    // running is the old one (or, after an update from
+                    // before 15 Nov 2026, none is). The new one is started
+                    // now and the old one leaves. Only for a station that
+                    // has a supervisor, or is the one started at log on: a
+                    // daemon run by hand is not given one.
+                    let supervisor = to.with_file_name("spandeckd.exe");
+                    let home = spandeck_core::paths::home_dir();
+                    let at_log_on = sys::default_dirs(&home).0 == daemon.paths.state_dir
+                        && spandeck_core::doctor::service_installed(&home);
+                    if sys::WINDOWS
+                        && supervisor.is_file()
+                        && (at_log_on || sys::supervised(&daemon.paths.socket()))
+                    {
+                        let started = sys::spawn_detached(
+                            std::process::Command::new(&supervisor).env("SPANDECKD_TAKE_OVER", "1"),
+                        );
+                        match started {
+                            Ok(()) => tracing::info!(program = %supervisor.display(), "started the new supervisor"),
+                            Err(e) => tracing::warn!(error = %e, program = %supervisor.display(), "could not start the new supervisor; the one from before, if any, goes on"),
+                        }
+                    }
                 }
             }
         } else if let Some(reason) = unhealthy {
@@ -1465,8 +1535,9 @@ fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::
         tracing::info!(station = %daemon.station, version = spandeck_core::VERSION, socket = %daemon.paths.socket().display(), "spandeckd ready");
 
         // A signal, or the owner removing this station with "also stop it".
+        let station = daemon.paths.socket();
         tokio::select! {
-            r = sys::shutdown_signal() => r?,
+            r = sys::shutdown_signal(&station) => r?,
             _ = daemon.quit.notified() => {}
         }
         // The ship's log says the station was stopped on purpose: the next
