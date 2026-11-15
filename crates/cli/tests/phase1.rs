@@ -360,13 +360,38 @@ fn the_station_is_held_awake_only_while_an_agent_works() {
         json!(false)
     );
     let pane = s.fake(
-        json!({"steps": [{"prompt": "go"}, {"work": 2500}, {"turn_end": "done"}]}),
+        json!({"steps": [{"prompt": "go"}, {"work": 4000}, {"turn_end": "done"}]}),
         json!({}),
     );
     s.wait_state(&pane, "working");
     wait_for("keep-awake on", 5, || {
         (s.call("station.info", json!({}))["keep_awake"] == json!(true)).then_some(())
     });
+    // A restart in place must not leave the old helper running beside the
+    // new one: each upgrade leaked one (39 on a station after a day).
+    #[cfg(unix)]
+    {
+        let before = s.call("station.info", json!({}));
+        let pid = before["pid"].as_u64().unwrap();
+        let helpers = || {
+            let out = std::process::Command::new("pgrep")
+                .args(["-P", &pid.to_string(), "-x", "sleep"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).lines().count()
+        };
+        assert_eq!(helpers(), 1);
+        s.call("station.restart", json!({}));
+        wait_for("keep-awake on again after the restart", 15, || {
+            s.try_call("station.info", json!({}))
+                .ok()
+                .filter(|i| {
+                    i["started_ms"] != before["started_ms"] && i["keep_awake"] == json!(true)
+                })
+                .map(|_| ())
+        });
+        assert_eq!(helpers(), 1, "one helper, not one per restart");
+    }
     s.wait_state(&pane, "done");
     wait_for("keep-awake off", 5, || {
         (s.call("station.info", json!({}))["keep_awake"] == json!(false)).then_some(())

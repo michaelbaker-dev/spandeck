@@ -1432,6 +1432,7 @@ impl Daemon {
         std::thread::spawn(move || {
             // Let the reply reach the caller first.
             std::thread::sleep(Duration::from_millis(250));
+            d.stop_keep_awake();
             let state = d.prepare_handoff();
             let file = d.paths.handoff_file();
             if let Err(e) = crate::daemon::write_private(

@@ -1666,6 +1666,17 @@ impl Daemon {
         }
     }
 
+    /// End the keep-awake helper. Before this program image is replaced: the
+    /// next image does not know the helper, and each upgrade used to leave
+    /// one running (39 on one station after a day of upgrades). The next
+    /// image, or this one if the swap fails, starts its own when needed.
+    pub fn stop_keep_awake(&self) {
+        if let Some(mut child) = self.keep_awake.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
     pub fn keep_awake_active(&self) -> bool {
         self.keep_awake.lock().unwrap().is_some()
     }
