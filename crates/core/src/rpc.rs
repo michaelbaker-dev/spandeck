@@ -111,6 +111,9 @@ const NOT_FORWARDED: &[&str] = &[
     "fleet.add_cancel",
     "fleet.add_enable",
     "fleet.uninstall",
+    // The address at which a machine is signed in to Tailscale again is
+    // for whoever is at that machine.
+    "tailnet.signin",
 ];
 
 /// The owner's calls that only look, or only say what has been looked at,
@@ -123,6 +126,8 @@ const OWNER_LOOKS: &[&str] = &[
     "pane.conversation.detail",
     "pane.read",
     "pane.titles",
+    // The deck opened on the machine asks this by itself, once a minute.
+    "tailnet.signin",
 ];
 
 const READ_METHODS: &[&str] = &[
@@ -972,6 +977,7 @@ impl Daemon {
             "perf.get" => self.perf_view(),
             "tailnet.view" => self.tailnet_view(),
             "tailnet.report" => self.tailnet_report(),
+            "tailnet.signin" => self.tailnet_signin(caller)?,
             "fleet.view" => self.fleet_view(),
             "fleet.refresh" => {
                 self.discover_peers().await;

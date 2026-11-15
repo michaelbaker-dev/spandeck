@@ -17,7 +17,8 @@ import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, sta
 import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
 import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners } from './look.js';
 import { lookEditor } from './lookedit.js';
-import { perfPage, gather, anyTrouble, keyInfo, keySteps, clockWords, refreshTook } from './perf.js';
+import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook } from './perf.js';
+import { qrSvg } from './qr.js';
 import { initChat, conversation, faceOf, chatToggle, termBox, chatBeforeRender, chatAfterRender, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
 
 // The page opens in the look this browser last had, before anything is asked.
@@ -121,6 +122,7 @@ async function refresh() {
   await loadPrefs();
   refreshTook(performance.now() - began);
   loadPerf();
+  loadSignIn();
   S.loaded = true;
   update();
   vaultAtOpen();
@@ -148,16 +150,55 @@ async function loadPerf(now) {
 // A station's Tailscale key in words, or null when nothing is known of it.
 const stationKey = (st) => keyInfo(S.tailnet?.stations?.[st]);
 const keyName = (st) => S.tailnet?.stations?.[st]?.name || st;
+// A step's parts: text, a link that opens beside the deck, or a command.
+const stepPart = (x) => (typeof x === 'string' ? x : x.code ? h('code', { class: 'cmd' }, x.code) : h('a', { class: 'out', href: x.a, target: '_blank', rel: 'noopener noreferrer' }, x.text));
 // What a key's state means and what to do about it. The steps are the deck's
-// own words; the name is text from a station.
-function keyDialog(name, info) {
-  dialog(`Tailscale key of ${name}`, (close) => h('div', { class: 'consequences' },
-    h('p', {}, h('b', {}, `${name}'s Tailscale key ${info.text}.`), info.expired ? ' It cannot be reached over Tailscale until that is put right. Its agents may still be running.' : ' When it expires the machine drops off your Tailscale network, and spandeck cannot reach it.'),
+// own words; the name is text from a station. `more`: { station, os, lan }.
+function keyDialog(name, info, more = {}) {
+  const steps = keySteps(name, info, more);
+  const lead = info.expired ? (more.station ? ' It cannot be reached over Tailscale until that is put right. Its agents may still be running.' : ' It is off your Tailscale network, and cannot open the Control Deck, until that is put right.')
+    : more.station ? ' When it expires the machine drops off your Tailscale network, and spandeck cannot reach it.' : ' When it expires the device drops off your Tailscale network and can no longer open the Control Deck.';
+  dialog(`Tailscale key of ${name}`, (close) => h('div', { class: 'consequences key-steps' },
+    h('p', {}, h('b', {}, `${name}'s Tailscale key ${info.text}.`), lead),
     h('p', { class: 'muted small' }, 'The Tailscale key is the machine\'s sign-in to Tailscale, which Tailscale ends after 180 days unless told otherwise.'),
-    h('ol', {}, keySteps(name, info).map(line => h('li', {}, line))),
-    h('div', { class: 'row end' }, h('button', { class: 'primary', onclick: close }, 'Close'))), { wide: true });
+    steps.groups.map(g => [h('h3', {}, g.title), h('ol', {}, g.steps.map(step => h('li', {}, step.map(stepPart))))]),
+    steps.notes.map(n => h('p', { class: 'small' }, n)),
+    h('div', { class: 'row end' }, h('a', { class: 'btn out', href: TS_MACHINES, target: '_blank', rel: 'noopener noreferrer' }, 'Open Tailscale\'s admin console'), h('button', { class: 'primary', onclick: close }, 'Close'))), { wide: true });
+  // The keyboard starts on Close, at the foot: a phone still opens the
+  // steps at their first line.
+  for (const back of document.querySelectorAll('#overlays .backdrop')) if (back.querySelector('.key-steps')) back.scrollTop = 0;
 }
-const keyChip = (st) => { const k = stationKey(st); return k && k.level !== 'ok' ? h('button', { class: 'chip key-chip ' + k.level, title: 'What to do', onclick: (e) => { e.preventDefault(); e.stopPropagation(); keyDialog(keyName(st), k); } }, 'Tailscale key ' + k.text) : null; };
+const stationMore = (st) => ({ station: true, lan: lanOf(S.perf, st, S.tailnet) });
+const keyChip = (st) => { const k = stationKey(st); return k && k.level !== 'ok' ? h('button', { class: 'chip key-chip ' + k.level, title: 'What to do', onclick: (e) => { e.preventDefault(); e.stopPropagation(); keyDialog(keyName(st), k, stationMore(st)); } }, 'Tailscale key ' + k.text) : null; };
+// On the machine itself: is its Tailscale client signed out, and where does
+// it say to sign in? Asked of the station serving this deck, which answers
+// only the holder of its own token; a deck opened from another device is
+// refused once and does not ask again. Every 5 s while a sign-in is needed.
+let signAsked = 0, signRefused = false;
+async function loadSignIn() {
+  if (signRefused || Date.now() - signAsked < (S.signin?.needed ? 5000 : 60000)) return;
+  signAsked = Date.now();
+  const was = JSON.stringify(S.signin || null);
+  try { S.signin = await api.call('tailnet.signin'); } catch (e) { S.signin = null; signRefused = true; }
+  if (JSON.stringify(S.signin || null) !== was) update();
+}
+let signBox = null, signKey = '';
+function signInBar() {
+  const s = S.signin;
+  if (!s || !s.needed) { signBox = null; signKey = ''; return null; }
+  const key = JSON.stringify([api.station, s.state, s.expired, s.url]);
+  if (key === signKey) return signBox;
+  // An https address or nothing: it becomes a link.
+  const url = typeof s.url === 'string' && /^https:\/\/[\x21-\x7e]{1,292}$/.test(s.url) ? s.url : null;
+  const w = signInWords(api.station, s, !!url);
+  signKey = key;
+  signBox = h('div', { class: 'vault-prompt signin-bar', role: 'region', 'aria-label': 'Tailscale needs a sign-in on this machine' },
+    h('div', { class: 'grow' }, h('b', {}, w.title), h('div', { class: 'muted' }, w.why),
+      h('div', {}, w.how.map(stepPart), url ? h('a', { class: 'out', href: url, target: '_blank', rel: 'noopener noreferrer' }, url) : null),
+      h('div', { class: 'muted small' }, w.after)),
+    url ? qrSvg(url) : null);
+  return signBox;
+}
 // Why a station that is listed cannot be reached, when that is known: its
 // clock, or its Tailscale key. Otherwise null, and it is just unreachable.
 function awayWhy(s) {
@@ -169,9 +210,9 @@ function awayWhy(s) {
 // The device this browser is on, when its own key is within 14 days.
 function ownKey() {
   const st = Object.entries(S.tailnet?.stations || {}).find(([, k]) => k.id && k.id === api.device);
-  const d = st ? { name: st[1].name || st[0], k: st[1] } : (S.tailnet?.devices || []).filter(x => x.id && x.id === api.device).map(x => ({ name: String(x.name || 'this device'), k: { known: true, ...x } }))[0];
+  const d = st ? { name: st[1].name || st[0], k: st[1], more: stationMore(st[0]) } : (S.tailnet?.devices || []).filter(x => x.id && x.id === api.device).map(x => ({ name: String(x.name || 'this device'), k: { known: true, ...x }, more: { os: String(x.os || '') } }))[0];
   const info = d ? keyInfo(d.k) : null;
-  return info && (info.expired || info.left <= 14) ? { name: d.name, info } : null;
+  return info && (info.expired || info.left <= 14) ? { name: d.name, info, more: d.more } : null;
 }
 
 // The inbox is the whole fleet's: each station keeps the notices it raised,
@@ -1274,7 +1315,7 @@ function topbar() {
     h('nav', { class: 'crumbs', 'aria-label': 'Where you are' }, crumbs),
     h('span', { class: 'grow' }),
     !api.connected ? h('span', { class: 'chip bad' }, api.authError || 'reconnecting…') : null,
-    own ? h('button', { class: 'chip key-chip own-key ' + own.info.level, onclick: () => keyDialog(own.name, own.info), title: 'This is the device you are using. When its key expires it can no longer open the Control Deck.' }, `This device's Tailscale key ${own.info.text}`) : null,
+    own ? h('button', { class: 'chip key-chip own-key ' + own.info.level, onclick: () => keyDialog(own.name, own.info, own.more), title: 'This is the device you are using. When its key expires it can no longer open the Control Deck.' }, `This device's Tailscale key ${own.info.text}`) : null,
     needs ? h('span', { class: 'chip needs', title: 'Agents waiting for you' }, `${needs} need${needs === 1 ? 's' : ''} you`) : null,
     h('button', { class: S.approvals.length ? 'attn' : '', onclick: approvalsPanel }, 'Approvals', S.approvals.length ? h('span', { class: 'count' }, S.approvals.length) : null),
     h('button', { onclick: inboxPanel }, 'Inbox', unread ? h('span', { class: 'count' }, unread) : null),
@@ -1404,7 +1445,7 @@ function stationMenu(e, s) {
     { label: 'Agent programs and versions…', action: agentsPanel },
     { label: 'Usage: tokens and estimated cost…', action: fleetUsageDialog },
     { label: 'Performance…', action: () => go('#/perf') },
-    stationKey(s.station) && { label: `Tailscale key: ${stationKey(s.station).text}…`, action: () => keyDialog(keyName(s.station), stationKey(s.station)) },
+    stationKey(s.station) && { label: `Tailscale key: ${stationKey(s.station).text}…`, action: () => keyDialog(keyName(s.station), stationKey(s.station), stationMore(s.station)) },
     s.state === 'not_linked' && { label: `Add ${s.station} to this fleet…`, action: () => addMachineDialog({ station: s.station, kind: 'join' }) },
     up && { label: 'Restart spandeck here (keeps terminals)', action: () => confirmBox(`Restart spandeck on ${s.station}?`, 'Every terminal and agent keeps running. If it does not come back healthy, the restart is undone.', 'Restart', () => rpc(s.station, 'station.restart', {}).then(() => toast(`${s.station} is restarting`))) },
     up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`))) },
@@ -3146,7 +3187,7 @@ function render() {
   if (!layCtx) arranging = null;
   // A view that is already on the page stays attached: replacing it would
   // take the keyboard away from whatever is being typed into.
-  const kids = [versionBar(), vaultPromptBox, main].filter(Boolean);
+  const kids = [signInBar(), versionBar(), vaultPromptBox, main].filter(Boolean);
   if (root.children.length === kids.length + 1 && kids.every((k, i) => root.children[i + 1] === k)) root.replaceChild(topbar(), root.children[0]);
   else root.replaceChildren(topbar(), ...kids);
   const side = document.querySelector('.sidebar');
