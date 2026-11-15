@@ -63,6 +63,7 @@ const PEER_METHODS: &[&str] = &[
     "rpc.forward",
     "fleet.view",
     "trust.revoked",
+    "trust.relay",
     "fleet.rekey",
     "project.link.record",
     "project.link.findings",
@@ -849,9 +850,22 @@ impl Daemon {
             // --------------------------------------------------- agent setup
             // ---------------------------------------------------------- trust
             "trust.status" => self.trust_view(),
-            "trust.approve" => self.trust_decide(s(&params, "request")?, true, &caller.who)?,
-            "trust.deny" => self.trust_decide(s(&params, "request")?, false, &caller.who)?,
-            "fleet.join" => self.fleet_join(s(&params, "station")?).await?,
+            // The owner's alone, at any station of the fleet: a request that
+            // waits at another station is passed to it as the owner's
+            // request. On no agent's list and no station's.
+            "trust.approve" | "trust.deny" => {
+                self.trust_answer(
+                    s(&params, "request")?,
+                    method == "trust.approve",
+                    by,
+                    flag(&params, "here"),
+                )
+                .await?
+            }
+            // A station of this fleet saying which requests wait there. A
+            // peer's signed call only.
+            "trust.relay" => self.trust_relayed(caller, &params)?,
+            "fleet.join" => self.fleet_join(s(&params, "station")?, by).await?,
             "device.revoke" => {
                 let id = s(&params, "device")?;
                 let out = self.device_revoke(id, &caller.who)?;

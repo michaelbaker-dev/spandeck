@@ -1655,3 +1655,293 @@ fn an_unreachable_station_is_removed_from_the_fleets_side() {
         .unwrap_err();
     assert!(err.message.contains("not in this fleet"), "{}", err.message);
 }
+
+fn reaches(from: &Station, to: &str) -> bool {
+    from.try_call(
+        "peer.call",
+        json!({"station": to, "method": "pane.list", "params": {}}),
+    )
+    .is_ok_and(|v| v.is_array())
+}
+
+/// A bug that happened (15 Nov 2026): a station that had two fleet-mates
+/// joined a lone station, took its key and left its mates behind, so the
+/// owner had two fleets. "Should never have multiple fleets": a station that
+/// joins brings the stations of its fleet with it, one that is on at once
+/// and one that was off when it is next seen.
+#[test]
+#[cfg_attr(windows, ignore = "freezes a daemon with a signal")]
+fn a_station_that_joins_another_fleet_brings_its_fleet_mates_with_it() {
+    let key = "5a".repeat(32);
+    let all = Station::several(&[
+        ("alpha", Some(&key)),
+        ("bravo", Some(&key)),
+        ("delta", Some(&key)),
+        ("charlie", None),
+    ]);
+    let (a, b, d, c) = (&all[0], &all[1], &all[2], &all[3]);
+    wait_for("alpha to see its mates and charlie", 20, || {
+        (a.sees("bravo").as_deref() == Some("online")
+            && a.sees("delta").as_deref() == Some("online")
+            && a.sees("charlie").as_deref() == Some("not_linked"))
+        .then_some(())
+    });
+    let old_fleet = fleet_of(a);
+    let page = common::browser::Page::open(a, 1200, 800);
+    page.goto("/fleet");
+    let tile = "[...document.querySelectorAll('a.tile.station')].find(x => x.innerText.includes('charlie'))";
+    page.wait("charlie's tile", &format!("!!{tile}"));
+    // delta is off when it happens.
+    d.signal(SIGSTOP);
+
+    // alpha asks to join charlie. The request names the mates it brings.
+    // Asked from alpha's Control Deck, which says what it means: a merge.
+    page.right_click(tile);
+    page.choose("Merge this fleet into charlie's");
+    let said = page.wait(
+        "the dialog to show the code",
+        "document.querySelector('.dialog .code') && document.querySelector('.dialog').innerText",
+    );
+    let said = said.as_str().unwrap();
+    assert!(
+        said.contains(
+            "alpha and 2 other stations (bravo, delta) then move into one fleet with charlie"
+        ) && said.contains("these 3 stations"),
+        "{said}"
+    );
+    let code = page.js("document.querySelector('.dialog .code').innerText");
+    let asked = json!({"code": code});
+    let waiting = c.call("trust.status", json!({}));
+    assert_eq!(
+        waiting["requests"][0]["with"],
+        json!(["bravo", "delta"]),
+        "{waiting}"
+    );
+    let notes = c.call("notify.list", json!({})).to_string();
+    assert!(
+        notes.contains("Station alpha and 2 other stations (bravo, delta) ask to join this fleet"),
+        "{notes}"
+    );
+    c.call("trust.approve", json!({"request": asked["code"]}));
+
+    // One approval moves alpha and, at once, bravo, which was on.
+    wait_for("alpha and bravo to hold charlie's key", 20, || {
+        (fleet_of(a) == fleet_of(c) && fleet_of(b) == fleet_of(c)).then_some(())
+    });
+    assert_ne!(fleet_of(c), old_fleet);
+    assert_eq!(
+        b.log("fleet.rekeyed")[0]["data"]["joined"],
+        json!("charlie")
+    );
+    // The log says who asked, and what came with it.
+    assert_eq!(a.log("trust.join_asked")[0]["actor"], json!("you"));
+    let joined = &a.log("trust.joined")[0];
+    assert_eq!(
+        (joined["actor"].clone(), joined["data"]["with"].clone()),
+        (json!("you"), json!(["bravo", "delta"]))
+    );
+
+    // delta was off. It comes back still holding the old key, and is handed
+    // the new one with no second approval.
+    assert_eq!(a.sees("delta").as_deref(), Some("unreachable"));
+    d.signal(SIGCONT);
+    wait_for("delta to be handed the key", 20, || {
+        a.call("fleet.refresh", json!({}));
+        (fleet_of(d) == fleet_of(c)).then_some(())
+    });
+    assert_eq!(
+        d.log("fleet.rekeyed")[0]["data"]["joined"],
+        json!("charlie")
+    );
+    // One fleet of four: each station sees and can call the others.
+    wait_for("the four stations to be one fleet", 20, || {
+        all.iter()
+            .all(|s| {
+                all.iter()
+                    .all(|o| o.name == s.name || s.sees(&o.name).as_deref() == Some("online"))
+            })
+            .then_some(())
+    });
+    assert!(reaches(c, "bravo") && reaches(c, "delta") && reaches(a, "bravo"));
+    assert!(reaches(b, "charlie") && reaches(d, "charlie") && reaches(d, "alpha"));
+    assert!(c.call("trust.status", json!({}))["requests"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    // No key is shown anywhere.
+    let new_key = std::fs::read_to_string(c.root.join("state/fleet.key")).unwrap();
+    for s in &all {
+        let said = s.call("log.query", json!({"limit": 500})).to_string();
+        assert!(!said.contains(new_key.trim()) && !said.contains(&key));
+    }
+}
+
+/// The owner's requirement (15 Nov 2026): "Shouldn't all machines get the
+/// request? ... you should be able to approve from any machine you're on at
+/// the time". A request made at one station is listed at its fleet-mate,
+/// with a notice, and answered there. Guarantee (Trust): an agent never gets
+/// to answer one, wherever it waits.
+#[test]
+fn a_request_is_seen_and_answered_at_any_station_of_the_fleet() {
+    let key = "5a".repeat(32);
+    let all = Station::several(&[
+        ("alpha", Some(&key)),
+        ("bravo", Some(&key)),
+        ("charlie", None),
+    ]);
+    let (a, b, c) = (&all[0], &all[1], &all[2]);
+    wait_for("the stations to find each other", 20, || {
+        (a.sees("bravo").as_deref() == Some("online")
+            && b.sees("alpha").as_deref() == Some("online")
+            && c.sees("alpha").as_deref() == Some("not_linked"))
+        .then_some(())
+    });
+    let relayed = |s: &Station| {
+        s.call("trust.status", json!({}))["requests"]
+            .as_array()
+            .unwrap()
+            .first()
+            .cloned()
+    };
+
+    // charlie asks alpha. bravo, alpha's mate, lists the request and says
+    // where it was asked; what it was told holds nothing to collect with.
+    let asked = c.call("fleet.join", json!({"station": "alpha"}));
+    let seen = wait_for("bravo to list alpha's request", 15, || relayed(b));
+    assert_eq!(
+        (
+            seen["at"].clone(),
+            seen["kind"].clone(),
+            seen["name"].clone(),
+            seen["code"].clone()
+        ),
+        (
+            json!("alpha"),
+            json!("station"),
+            json!("charlie"),
+            asked["code"].clone()
+        ),
+        "{seen}"
+    );
+    assert!(seen.get("collect").is_none() && seen.get("key").is_none());
+    let notes = b.call("notify.list", json!({})).to_string();
+    assert!(
+        notes.contains("Station charlie asks to join this fleet")
+            && notes.contains("Asked at alpha"),
+        "{notes}"
+    );
+
+    // An agent on bravo cannot answer it, by code or by id, and cannot say
+    // that a request waits somewhere.
+    let pane = b.fake(
+        json!({"steps": [{"prompt": "go"}, {"work": 60000}]}),
+        json!({}),
+    );
+    let pane = pane.as_str();
+    for (method, params) in [
+        ("trust.approve", json!({"request": asked["code"]})),
+        ("trust.approve", json!({"request": seen["id"]})),
+        ("trust.deny", json!({"request": asked["code"]})),
+        ("trust.relay", json!({"requests": []})),
+        (
+            "peer.call",
+            json!({"station": "alpha", "method": "trust.approve", "params": {"request": asked["code"]}}),
+        ),
+    ] {
+        let err = b.call_as_pane(pane, method, params).unwrap_err();
+        assert_eq!(err.code, "denied", "{method}");
+    }
+    // Nor does the owner's own call stand in for a station's.
+    let err = b
+        .try_call("trust.relay", json!({"requests": []}))
+        .unwrap_err();
+    assert_eq!(err.code, "denied");
+    assert!(relayed(a).is_some() && relayed(b).is_some());
+    assert_eq!(c.sees("alpha").as_deref(), Some("not_linked"));
+
+    // The owner approves at bravo. alpha decides, hands charlie the key, and
+    // its log says who decided and through which station.
+    // bravo's Control Deck says where it was asked, and its button answers.
+    let page = common::browser::Page::open(b, 1200, 800);
+    page.wait(
+        "the Access button to show a request",
+        "!!document.querySelector('.topbar button.attn')",
+    );
+    page.js("document.querySelector('.topbar button.attn').click()");
+    let shown = page.wait(
+        "the request",
+        "document.querySelector('.dialog .note')?.innerText",
+    );
+    let shown = shown.as_str().unwrap();
+    assert!(
+        shown.contains("Station charlie")
+            && shown.contains("asked at alpha")
+            && shown.contains(asked["code"].as_str().unwrap()),
+        "{shown}"
+    );
+    page.js("[...document.querySelectorAll('.dialog .note button')].find(x => x.innerText === 'Approve').click()");
+    wait_for("charlie to be let in", 20, || {
+        (c.sees("alpha").as_deref() == Some("online")
+            && c.sees("bravo").as_deref() == Some("online"))
+        .then_some(())
+    });
+    assert_eq!(fleet_of(c), fleet_of(b));
+    let approved = &a.log("trust.approved")[0];
+    assert_eq!(
+        approved["data"]["by"],
+        json!("you (via bravo)"),
+        "{approved}"
+    );
+    assert_eq!(b.log("trust.passed_on")[0]["actor"], json!("you"));
+    // It is cleared on both, and a second answer finds nothing to decide.
+    wait_for("the request to be cleared everywhere", 15, || {
+        (relayed(a).is_none() && relayed(b).is_none()).then_some(())
+    });
+    let err = b
+        .try_call("trust.deny", json!({"request": asked["code"]}))
+        .unwrap_err();
+    assert_eq!(err.code, "not_found", "{}", err.message);
+
+    let post = |path: &str, body: Value| -> Value {
+        let url = a.url(path);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let r = reqwest::Client::new().post(url).json(&body).send();
+            r.await.unwrap().json().await.unwrap()
+        })
+    };
+    // Names in a request come from another machine (rule 6: they are
+    // data). Markup and a long list are cut down before anything is shown,
+    // here and at the mate.
+    let hostile: Vec<String> = (0..30).map(|i| format!("<img src=x>{i}")).collect();
+    post(
+        "/api/peer/rpc",
+        json!({"method": "fleet.join.request", "from": "x", "params": {"station": "<script>evil", "with": hostile}}),
+    );
+    let seen = wait_for("bravo to list the hostile request", 15, || relayed(b));
+    for req in [&seen, &relayed(a).unwrap()] {
+        assert_eq!(req["name"], json!("scriptevil"), "{req}");
+        assert_eq!(req["with"].as_array().unwrap().len(), 20);
+        assert!(!req.to_string().contains('<'), "{req}");
+    }
+    assert!(!b.call("notify.list", json!({})).to_string().contains('<'));
+    a.call("trust.deny", json!({"request": seen["id"]}));
+    wait_for("bravo to stop listing it", 15, || {
+        relayed(b).is_none().then_some(())
+    });
+
+    // A browser's request is relayed the same way, and refusing it at the
+    // mate reaches the station that holds it.
+    let asked = post("/api/device/request", json!({"name": "a phone"}));
+    let asked = &asked["result"];
+    let seen = wait_for("bravo to list the browser's request", 15, || relayed(b));
+    assert_eq!(
+        (seen["kind"].clone(), seen["at"].clone()),
+        (json!("device"), json!("alpha"))
+    );
+    b.call("trust.deny", json!({"request": seen["id"]}));
+    let answer = post(
+        "/api/device/collect",
+        json!({"id": asked["id"], "collect": asked["collect"]}),
+    );
+    assert_eq!(answer["result"]["status"], json!("denied"), "{answer}");
+}

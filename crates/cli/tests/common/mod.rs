@@ -136,6 +136,31 @@ impl Station {
         (a, b, c)
     }
 
+    /// Stations that list each other as peers. Those given the same key are
+    /// one fleet; one given none starts a fleet of its own. Nothing is
+    /// waited for: the test says what it expects each to see.
+    pub fn several(stations: &[(&str, Option<&str>)]) -> Vec<Station> {
+        let ports: Vec<u16> = stations.iter().map(|_| free_port()).collect();
+        stations
+            .iter()
+            .enumerate()
+            .map(|(i, (name, key))| {
+                let others: Vec<String> = ports
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(_, port)| format!("\"127.0.0.1:{port}\""))
+                    .collect();
+                Station::start_keyed(
+                    name,
+                    ports[i],
+                    &format!("peers = [{}]\n", others.join(", ")),
+                    *key,
+                )
+            })
+            .collect()
+    }
+
     /// How this station sees another one, after looking again.
     pub fn sees(&self, other: &str) -> Option<String> {
         self.call("fleet.refresh", json!({}))["stations"]

@@ -467,8 +467,15 @@ function approvalRow(a, close) {
       h('button', { class: 'danger', onclick: () => answer(false) }, 'Deny')));
 }
 
-// Stations and browsers asking to be let in. Approving one gives it control
-// of every station, so the code shown here must match the one it shows.
+// " and 2 other stations (a, b)": the fleet-mates a station says come with
+// it. Names from another machine: only ever put in as text.
+const cameWith = (w) => !(w || []).length ? '' : ` and ${w.length} other station${w.length === 1 ? '' : 's'} (${w.join(', ')})`;
+// The stations of this fleet other than the one the deck is open on.
+const fleetMates = () => (S.fleet?.stations || []).filter(s => !s.self && s.state !== 'not_linked').map(s => s.station);
+
+// Stations and browsers asking to be let in, at any station of the fleet.
+// Approving one gives it control of every station, so the code shown here
+// must match the one it shows.
 function trustPanel() {
   dialog('Stations and browsers', (close) => {
     const t = S.trust || {};
@@ -476,27 +483,37 @@ function trustPanel() {
     return h('div', {},
       h('h3', {}, 'Asking to be let in'),
       (t.requests || []).length ? h('div', { class: 'list' }, t.requests.map(r => h('div', { class: 'note unread' },
-        h('div', {}, h('b', {}, r.kind === 'station' ? `Station ${r.name}` : r.name), h('span', { class: 'muted' }, ` · from ${r.from}`)),
-        h('div', {}, 'It shows the code ', h('b', { class: 'code' }, r.code), '. Approve only if you started this and the codes match: it will be able to control every station.'),
+        h('div', {}, h('b', {}, r.kind === 'station' ? `Station ${r.name}${cameWith(r.with)}` : r.name), h('span', { class: 'muted' }, ` · from ${r.from}${r.at && r.at !== t.station ? ` · asked at ${r.at}` : ''}`)),
+        h('div', {}, 'It shows the code ', h('b', { class: 'code' }, r.code), '. Approve only if you started this and the codes match: it will be able to control every station.',
+          (r.with || []).length ? ` Its whole fleet joins this one: every station that holds its key, whatever names it gives. Browsers signed in to those stations sign in again; browsers signed in to this fleet are not affected.` : '',
+          r.at && r.at !== t.station ? ` Your answer is passed to ${r.at}, which decides.` : ''),
         h('div', { class: 'row end' }, h('button', { class: 'mini', onclick: () => answer(r, false) }, 'Refuse'), h('button', { class: 'mini primary', onclick: () => answer(r, true) }, 'Approve')))))
         : h('p', { class: 'muted' }, 'Nothing is waiting.'),
       t.outgoing ? h('p', { class: t.outgoing.problem ? 'warn-text' : '' }, t.outgoing.problem
         ? `Joining ${t.outgoing.station}'s fleet did not finish: ${t.outgoing.problem}.`
-        : `Waiting for ${t.outgoing.station} to approve this station. It should show the code ${t.outgoing.code}.`) : null,
+        : `Waiting for an approval at ${t.outgoing.station}, or at any station of its fleet, of the request that shows the code ${t.outgoing.code}. ${(t.outgoing.with || []).length ? `This station${cameWith(t.outgoing.with)} then move into one fleet with ${t.outgoing.station}.` : `This station then joins ${t.outgoing.station}'s fleet.`}`) : null,
       h('h3', {}, 'Browsers signed in here'),
       (t.devices || []).length ? h('div', { class: 'list' }, t.devices.map(d => h('div', { class: 'note' },
         h('div', { class: 'row' }, h('b', {}, d.name), h('span', { class: 'muted' }, ` · from ${d.from} · ${ago(d.approved_ms)} ago`), h('span', { class: 'grow' }),
           h('button', { class: 'mini danger', onclick: () => rpc(api.station, 'device.revoke', { device: d.id }).then(close) }, 'Sign out')))))
         : h('p', { class: 'muted' }, 'None. A browser on another device asks to sign in the first time it opens the Control Deck.'),
-      h('p', { class: 'muted' }, `Fleet ${t.fleet || ''}. To add a station, run "spandeck fleet --join ${api.station}" on it, then approve it here.`));
+      h('p', { class: 'muted' }, `Fleet ${t.fleet || ''}. To add a station, run "spandeck fleet --join ${api.station}" on it, then approve it here or at any station of this fleet. If it is in a fleet of its own, every station of that fleet joins with it: there is one fleet afterwards.`));
   });
 }
 
+// A join is a merge: the stations of this fleet all move into the other
+// one, after one approval on that side.
 function joinFleet(station) {
-  rpc(api.station, 'fleet.join', { station }).then((r) => dialog(`Joining ${station}'s fleet`, () => h('div', {},
-    h('p', {}, 'This station asked to join. It shows the code ', h('b', { class: 'code' }, r.code), '.'),
-    h('p', {}, `On ${station}, open its Control Deck and approve the request with that code, or run "spandeck approve ${r.code}" there.`),
-    h('p', { class: 'muted' }, 'This station then leaves its own fleet. Browsers signed in to it sign in again.'))));
+  rpc(api.station, 'fleet.join', { station }).then((r) => {
+    const w = r.with || [], n = w.length + 1;
+    dialog(w.length ? `Merging this fleet into ${station}'s` : `Joining ${station}'s fleet`, () => h('div', {},
+      h('p', {}, `${api.station} asked to join. It shows the code `, h('b', { class: 'code' }, r.code), '.'),
+      h('p', {}, `At ${station}, or at any station of its fleet, approve the request with that code: under Access in the Control Deck, or with "spandeck approve ${r.code}". One approval is all it takes.`),
+      h('p', {}, w.length
+        ? `${api.station}${cameWith(w)} then move into one fleet with ${station}. A station that is off at that moment is moved when it is next seen (for 30 days; after that it joins on your approval).`
+        : `${api.station} then joins ${station}'s fleet.`),
+      h('p', { class: 'muted' }, `Browsers signed in to ${n === 1 ? 'this station' : `these ${n} stations`} from other devices sign in again. Browsers signed in to ${station}'s fleet are not affected.`)));
+  });
 }
 
 function approvalsPanel() {
@@ -1068,7 +1085,7 @@ function stationMenu(e, s) {
     up && { label: 'Check this station', action: () => doctorPanel(s.station) },
     { label: 'Agent programs and versions…', action: agentsPanel },
     { label: 'Usage: tokens and estimated cost…', action: fleetUsageDialog },
-    s.state === 'not_linked' && { label: `Join ${s.station}'s fleet…`, action: () => joinFleet(s.station) },
+    s.state === 'not_linked' && { label: fleetMates().length ? `Merge this fleet into ${s.station}'s…` : `Join ${s.station}'s fleet…`, action: () => joinFleet(s.station) },
     up && { label: 'Restart spandeck here (keeps terminals)', action: () => confirmBox(`Restart spandeck on ${s.station}?`, 'Every terminal and agent keeps running. If it does not come back healthy, the restart is undone.', 'Restart', () => rpc(s.station, 'station.restart', {}).then(() => toast(`${s.station} is restarting`))) },
     up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`))) },
     s.state === 'unreachable' && { label: 'Wake it (same network only)', action: () => rpc(api.station, 'fleet.wake', { station: s.station }).then((r) => toast(`Sent ${r.sent} wake packets to ${s.station}. Give it a minute.`)) },
@@ -1194,7 +1211,7 @@ function stationTile(s) {
       s.load != null ? h('span', { class: 'muted' }, 'load ' + Number(s.load).toFixed(1)) : null, s.keep_awake ? h('span', { class: 'chip' }, 'kept awake') : null,
       s.codex_sandbox_blocked ? h('span', { class: 'chip warn', title: 'Codex cannot run commands on this station: the system blocks its sandbox. On the station, run "spandeck doctor --fix" once. It asks for your password.' }, 'Codex blocked') : null,
       s.service === false ? h('span', { class: 'chip warn', title: 'spandeck does not start at login on this station. After a reboot it stays down until someone starts it. Run "spandeck service --install" there.' }, 'not started at login') : null, vaultChip(s))
-      : h('div', { class: 'tile-stats warn-text' }, s.state === 'update_needed' ? 'Needs an update before it can be controlled' : s.state === 'unreachable' ? `Unreachable · last seen ${ago(s.last_seen_ms)} ago. Right-click to wake or start it.` : s.state === 'not_linked' ? `Not in this fleet. On ${s.station}, run "spandeck fleet --join ${api.station}", then approve it under Access.` : `Unreachable · last seen ${ago(s.last_seen_ms)} ago`),
+      : h('div', { class: 'tile-stats warn-text' }, s.state === 'update_needed' ? 'Needs an update before it can be controlled' : s.state === 'unreachable' ? `Unreachable · last seen ${ago(s.last_seen_ms)} ago. Right-click to wake or start it.` : s.state === 'not_linked' ? `Not in this fleet. To make one fleet of both: on ${s.station}, run "spandeck fleet --join ${api.station}", then approve it under Access at any station of this fleet. Every station of ${s.station}'s fleet comes with it.` : `Unreachable · last seen ${ago(s.last_seen_ms)} ago`),
     h('div', { class: 'tile-agents' }, agents.slice(0, 8).map(p => h('div', { class: 'agent-line' }, dot(p), paneMark(p), h('span', {}, p.name), h('span', { class: 'muted' }, p.tool || p.needs_reason || STATE_LABEL[stateOf(p)]))),
       up && !agents.length ? h('span', { class: 'muted' }, 'No agents running') : null));
 }
