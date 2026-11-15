@@ -193,6 +193,65 @@ async fn a_websocket_must_authenticate_in_its_first_message() {
     })
     .await;
     assert_eq!(got, Ok(true));
+
+    // The audit's gap 13, measured on 0.4.2: the page comes back after a
+    // drop still holding this pane's channel number, and what it sends with
+    // it must not reach the pane the new connection gave that number to
+    // (every connection used to count from 1, so it did).
+    drop(ws);
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let say = |v: Value| Message::Text(v.to_string().into());
+    ws.send(say(
+        json!({"auth": {"token": s.token(), "client": "test-1"}}),
+    ))
+    .await
+    .unwrap();
+    ws.send(say(json!({"id": 3, "method": "pane.spawn", "params": {"program": "/bin/sh", "cwd": s.root.join("home")}}))).await.unwrap();
+    async fn answer(
+        ws: &mut (impl futures_util::Stream<
+            Item = Result<Message, tokio_tungstenite::tungstenite::Error>,
+        > + Unpin),
+        id: u64,
+    ) -> Value {
+        loop {
+            let m = ws.next().await.unwrap().unwrap();
+            let v: Value = serde_json::from_str(m.to_text().unwrap_or("")).unwrap_or(Value::Null);
+            if v["id"] == json!(id) {
+                return v;
+            }
+        }
+    }
+    let other = answer(&mut ws, 3).await["result"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ws.send(say(
+        json!({"id": 4, "method": "pane.attach", "params": {"pane": other}}),
+    ))
+    .await
+    .unwrap();
+    let now = answer(&mut ws, 4).await["result"]["chan"].as_u64().unwrap();
+    assert_ne!(
+        now, chan as u64,
+        "a connection counts from a place of its own"
+    );
+    // Asked for an answer, it is refused; sent as a key is, it goes nowhere.
+    ws.send(say(json!({"id": 5, "method": "pane.input", "params": {"chan": chan, "data": "echo stray-$((1+1))\r"}}))).await.unwrap();
+    let refused = answer(&mut ws, 5).await;
+    assert_eq!(refused["error"]["message"], json!("no such channel"));
+    for (c, line) in [(chan as u64, "stray-$((1+1))"), (now, "here-$((2+3))")] {
+        ws.send(say(json!({"id": null, "method": "pane.input", "params": {"chan": c, "data": format!("echo {line}\r")}}))).await.unwrap();
+    }
+    let s = tokio::task::spawn_blocking(move || {
+        // What was sent after the stray keys has arrived, and they have not.
+        s.wait_text(&other, "here-5");
+        for p in [&pane, &other] {
+            assert!(!s.text(p).contains("stray"), "{}", s.text(p));
+        }
+        s
+    })
+    .await
+    .unwrap();
     drop(tokio::task::spawn_blocking(move || drop(s)).await);
 }
 

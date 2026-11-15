@@ -755,6 +755,77 @@ impl Chan {
     }
 }
 
+/// The channel numbers of one connection: its pane attachments, watched
+/// conversations and relays to other stations.
+///
+/// A number names a channel on the connection that gave it and nowhere
+/// else. Every connection used to count from 1, so a page that came back
+/// after a drop still held numbers the new connection was handing out
+/// again: a key sent with one pane's old number was written to whichever
+/// pane had that number now (measured on 0.4.2). Each connection now starts
+/// counting at a place of its own, and what is sent with a number this
+/// connection did not give is refused.
+struct Channels<T> {
+    live: HashMap<u32, T>,
+    next: u32,
+}
+
+/// A connection's first number is below this, which leaves a connection
+/// three thousand million numbers before it comes round.
+const CHAN_FIRST_BELOW: u32 = 1 << 30;
+
+impl<T> Channels<T> {
+    /// `seed`: any number, from the system's random source for a real
+    /// connection. The first number is in `1..CHAN_FIRST_BELOW`.
+    fn starting_from(seed: u32) -> Self {
+        Channels {
+            live: HashMap::new(),
+            next: 1 + seed % (CHAN_FIRST_BELOW - 1),
+        }
+    }
+
+    /// A number for a new channel: never 0 (which an answer without a
+    /// number reads as), and never one in use on this connection, however
+    /// long it has counted.
+    fn fresh(&mut self) -> u32 {
+        loop {
+            let chan = self.next;
+            self.next = if chan >= u32::MAX - 1 { 1 } else { chan + 1 };
+            if !self.live.contains_key(&chan) {
+                return chan;
+            }
+        }
+    }
+
+    /// The number a request names, if it is one: a whole number that fits
+    /// the frame's four bytes. Anything else names no channel (it used to
+    /// be cut to its low 32 bits, and so could name one).
+    fn named(params: &Value) -> Option<u32> {
+        params
+            .get("chan")
+            .and_then(|c| c.as_u64())
+            .and_then(|c| u32::try_from(c).ok())
+    }
+
+    fn open(&mut self, chan: u32, what: T) {
+        self.live.insert(chan, what);
+    }
+
+    fn get(&self, params: &Value) -> Option<&T> {
+        Self::named(params).and_then(|c| self.live.get(&c))
+    }
+
+    fn close(&mut self, params: &Value) -> Option<T> {
+        Self::named(params).and_then(|c| self.live.remove(&c))
+    }
+}
+
+/// Where a new connection starts counting its channels.
+fn chan_seed() -> u32 {
+    u32::from_str_radix(&spandeck_core::paths::random_token()[..8], 16)
+        .expect("a random token is hex")
+}
+
 fn frame(kind: u8, chan: u32, payload: &[u8]) -> Message {
     let mut buf = Vec::with_capacity(payload.len() + 5);
     buf.push(kind);
@@ -826,8 +897,7 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
         }
     });
 
-    let mut chans: HashMap<u32, Chan> = HashMap::new();
-    let mut next_chan: u32 = 1;
+    let mut chans: Channels<Chan> = Channels::starting_from(chan_seed());
     let mut events_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // A browser signed in from another device, or another station relaying
@@ -878,15 +948,12 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
             .unwrap_or("")
             .to_string();
         let params = req.get("params").cloned().unwrap_or(json!({}));
-        let chan_of = |p: &Value| p.get("chan").and_then(|c| c.as_u64()).map(|c| c as u32);
-
         let reply: Result<Value, Value> = match method.as_str() {
             "pane.attach" => {
                 if !who.is_owner() {
                     Err(json!({"code": "denied", "message": "attaching is for the user's clients"}))
                 } else {
-                    let chan = next_chan;
-                    next_chan += 1;
+                    let chan = chans.fresh();
                     let pane = params
                         .get("pane")
                         .and_then(|p| p.as_str())
@@ -913,7 +980,7 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                                     &who.client,
                                     control,
                                 );
-                                chans.insert(
+                                chans.open(
                                     chan,
                                     Chan::Local {
                                         pane: result["pane"].as_str().unwrap_or(&pane).to_string(),
@@ -937,7 +1004,7 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                         .await
                         {
                             Ok((result, tx, peer_chan, task)) => {
-                                chans.insert(
+                                chans.open(
                                     chan,
                                     Chan::Remote {
                                         tx,
@@ -954,7 +1021,7 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                 }
             }
             "pane.detach" | "pane.conversation.unwatch" => {
-                if let Some(c) = chan_of(&params).and_then(|c| chans.remove(&c)) {
+                if let Some(c) = chans.close(&params) {
                     c.close();
                 }
                 Ok(json!({"ok": true}))
@@ -971,8 +1038,7 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                         json!({"code": "denied", "message": "a conversation is for the user's clients"}),
                     )
                 } else {
-                    let chan = next_chan;
-                    next_chan += 1;
+                    let chan = chans.fresh();
                     let station = params
                         .get("station")
                         .and_then(|s| s.as_str())
@@ -995,13 +1061,16 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                         }
                     };
                     watched.map(|(result, task)| {
-                        chans.insert(chan, Chan::Watch { task });
+                        chans.open(chan, Chan::Watch { task });
                         result
                     })
                 }
             }
-            "pane.input" | "pane.resize" if chan_of(&params).is_some() => {
-                match chan_of(&params).and_then(|c| chans.get(&c)) {
+            // Typing and resizing name the channel they are for. A number
+            // this connection did not give names nothing, whatever pane a
+            // connection before this one had under it.
+            "pane.input" | "pane.resize" if params.get("chan").is_some_and(|c| !c.is_null()) => {
+                match chans.get(&params) {
                     Some(Chan::Watch { .. }) => Err(
                         json!({"code": "denied", "message": "a watched conversation takes no typing"}),
                     ),
@@ -1102,7 +1171,7 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
         }
     }
 
-    for (_, c) in chans {
+    for (_, c) in chans.live {
         c.close();
     }
     if let Some(t) = events_task {
@@ -1619,4 +1688,49 @@ fn assets_build() -> &'static str {
         }
         format!("{:016x}", h.finish())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The audit's gap 13, measured on 0.4.2: every connection counted its
+    /// channels from 1, so a key carrying a pane's number from before a
+    /// reconnect was written to the pane that had the number now.
+    #[test]
+    fn a_number_from_another_connection_names_nothing() {
+        // Two connections, each starting where its own seed puts it.
+        let mut before = Channels::starting_from(0x1234_5678);
+        let mut after = Channels::starting_from(0x9abc_def0);
+        let (b, c) = (before.fresh(), after.fresh());
+        before.open(b, "pane B");
+        after.open(c, "pane C");
+        assert_ne!(b, c);
+        assert_eq!(after.get(&json!({"chan": b})), None, "B's old number");
+        assert_eq!(after.get(&json!({"chan": c})), Some(&"pane C"));
+        // A number is not cut down to one that fits: 2^32 more than C's
+        // number is not C's.
+        let wide = c as u64 + (1 << 32);
+        assert_eq!(after.get(&json!({"chan": wide})), None);
+        assert_eq!(after.close(&json!({"chan": wide})), None);
+        assert_eq!(after.get(&json!({"chan": "1"})), None);
+        // Whatever the seed, the first number is in 1..2^30.
+        for seed in [0, 1, CHAN_FIRST_BELOW - 2, CHAN_FIRST_BELOW - 1, u32::MAX] {
+            let first = Channels::<()>::starting_from(seed).fresh();
+            assert!((1..CHAN_FIRST_BELOW).contains(&first), "{seed}: {first}");
+        }
+    }
+
+    /// The frame's channel field is four bytes and 0 is read as "no
+    /// number": a connection that counts all the way round passes over 0
+    /// and over every number it still has open.
+    #[test]
+    fn a_connection_that_counts_round_reuses_no_live_number() {
+        let mut chans = Channels::starting_from(0);
+        chans.next = u32::MAX - 2;
+        chans.open(1, "still open");
+        chans.open(2, "still open");
+        let given: Vec<u32> = (0..3).map(|_| chans.fresh()).collect();
+        assert_eq!(given, [u32::MAX - 2, u32::MAX - 1, 3]);
+    }
 }

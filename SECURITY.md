@@ -38,6 +38,10 @@ days, not hours.
   it as text, and accepts a member's address only if it is one it would look at by
   itself: an address in its own config, or a device under your Tailscale login. A
   station cannot make another one send a call or a key to an address it chose.
+- **Channel numbers are not reused from one connection to the next.** What a Control
+  Deck types names its pane by a channel number of its connection. Each connection
+  starts counting at a random place, and a number it did not give is refused, so a key
+  sent with a number from before a reconnect does not reach another pane.
 - **Agents are not the owner.** Each pane has its own token. Agents can message, delegate
   and search history; they never get a call that administers a station. Text from agents,
   other stations and session history is shown as text and labelled as quoted, never run
