@@ -3127,6 +3127,17 @@ fn device(name: &str, os: &str, expires_in_days: Option<i64>, more: Value) -> Va
     v
 }
 
+/// What a station's stand-in `tailscale` prints from now on.
+fn restatus(s: &Station, change: impl FnOnce(&mut Value)) {
+    let file = s.root.join("standin/status.json");
+    let mut status: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    change(&mut status);
+    std::fs::write(file, status.to_string()).unwrap();
+}
+
+/// The address a signed-out Tailscale client offers, in these tests.
+const SIGN_IN: &str = "https://login.tailscale.com/a/1a2b3c4d5e6f";
+
 fn notices(s: &Station, holding: &str) -> Vec<Value> {
     s.call("notify.list", json!({"limit": 100}))
         .as_array()
@@ -3144,6 +3155,13 @@ fn notices(s: &Station, holding: &str) -> Vec<Value> {
 /// agent; a key that expires in 6 days is warned of once for the fleet, in
 /// the same words by both stations, and pushed by one; none of the owner's
 /// devices is in anything an agent can read.
+///
+/// And what the owner agreed the same day comes after the warning: the steps
+/// to renew a key or stop it expiring, as Tailscale's help gives them, with a
+/// link to its admin console and nothing done by spandeck itself; for a
+/// machine that has already expired, the way back, its last address on its
+/// own network included; and on a signed-out machine's own deck, and nowhere
+/// else, the address to sign in at.
 #[test]
 #[cfg_attr(
     windows,
@@ -3158,7 +3176,12 @@ fn each_station_reports_its_numbers_and_a_key_near_expiry_is_warned_of_once() {
                 root,
                 me("alpha", None),
                 &[
-                    device("bravo-ts", "linux", Some(6), json!({"Online": true})),
+                    device(
+                        "bravo-ts",
+                        "linux",
+                        Some(6),
+                        json!({"Online": true, "CurAddr": "192.168.1.20:41641"}),
+                    ),
                     device(
                         "pocket-phone",
                         "iOS",
@@ -3174,9 +3197,11 @@ fn each_station_reports_its_numbers_and_a_key_near_expiry_is_warned_of_once() {
                 ],
             )
         } else {
+            // bravo's own addresses: one at home, and its router's.
+            let at = json!({"Online": true, "Addrs": ["192.168.1.21:41641", "203.0.113.4:41641"]});
             standin_tailnet(
                 root,
-                me("bravo-ts", Some(6)),
+                device("bravo-ts", "linux", Some(6), at),
                 &[device("alpha", "linux", None, json!({"Online": true}))],
             )
         };
@@ -3308,7 +3333,13 @@ fn each_station_reports_its_numbers_and_a_key_near_expiry_is_warned_of_once() {
     // Rule 7: no agent reads any of it, and what an agent can read
     // (`station.info`) names none of the owner's devices or their keys.
     let pane = a.fake(json!({"steps": []}), json!({}));
-    for method in ["perf.get", "tailnet.view", "tailnet.report", "fleet.view"] {
+    for method in [
+        "perf.get",
+        "tailnet.view",
+        "tailnet.report",
+        "tailnet.signin",
+        "fleet.view",
+    ] {
         let err = a.call_as_pane(&pane, method, json!({})).unwrap_err();
         assert_eq!(err.code, "denied", "{method}: {}", err.message);
     }
@@ -3356,7 +3387,221 @@ fn each_station_reports_its_numbers_and_a_key_near_expiry_is_warned_of_once() {
             .contains("without being stopped"),
         "{restarts}"
     );
+
+    // ---- The steps, and the sign-in address.
+    // Where bravo is on its own network: where alpha last reached it
+    // there, then what bravo said of itself (not its router's address).
+    let lan = |a: &Station| a.call("tailnet.view", json!({}))["stations"]["bravo"]["lan"].clone();
+    wait_for("bravo's addresses at home", 30, || {
+        a.call("fleet.refresh", json!({}));
+        (lan(a) == json!(["192.168.1.20", "192.168.1.21"])).then_some(())
+    });
+    // alpha is not signed out, so there is no address to give; and one
+    // station cannot ask another for it at all.
+    let said = a.call("tailnet.signin", json!({}));
+    assert_eq!(
+        (&said["needed"], &said["url"]),
+        (&json!(false), &Value::Null)
+    );
+    let refused = fleet[1]
+        .try_call(
+            "peer.call",
+            json!({"station": "alpha", "method": "tailnet.signin", "params": {}}),
+        )
+        .unwrap_err();
+    assert!(
+        refused.message.contains("cannot be forwarded"),
+        "{}",
+        refused.message
+    );
+
+    // bravo's key expires and it drops off; alpha's own Tailscale is signed
+    // out and offers an address; and a device turns up whose name is markup.
+    restatus(a, |status| {
+        status["BackendState"] = json!("NeedsLogin");
+        status["AuthURL"] = json!(SIGN_IN);
+        let bravo = &mut status["Peer"]["key-n-bravo-ts"];
+        *bravo = device("bravo-ts", "linux", Some(-2), json!({"Online": false}));
+        status["Peer"]["key-n-x"] = device(
+            "x",
+            "linux",
+            Some(3),
+            json!({"HostName": "<img src=x onerror=window.pwned=1>", "DNSName": "", "TailscaleIPs": ["100.64.0.12"]}),
+        );
+    });
+    let (alpha, rest) = fleet.split_at_mut(1);
+    let a = &alpha[0];
+    rest[0].kill9();
+    wait_for("bravo to be off, its key expired", 30, || {
+        let view = a.call("fleet.refresh", json!({}));
+        let off = view["stations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["station"] == json!("bravo") && s["state"] == json!("unreachable"));
+        let key = a.call("tailnet.view", json!({}))["stations"]["bravo"].clone();
+        (off && key["expired"] == json!(true)).then_some(())
+    });
+    // Its address at home is no longer in what Tailscale prints: it is the
+    // one remembered.
+    assert_eq!(lan(a), json!(["192.168.1.20", "192.168.1.21"]));
+    // The address to sign in at goes to the holder of alpha's own token,
+    // and is in nothing else alpha gives out or writes down.
+    let said = a.call("tailnet.signin", json!({}));
+    assert_eq!(
+        (&said["needed"], &said["url"]),
+        (&json!(true), &json!(SIGN_IN)),
+        "{said}"
+    );
+    for (method, params) in [
+        ("tailnet.view", json!({})),
+        ("tailnet.report", json!({})),
+        ("perf.get", json!({})),
+        ("station.info", json!({})),
+        ("fleet.view", json!({})),
+        ("notify.list", json!({"limit": 100})),
+        ("log.query", json!({"limit": 2000})),
+    ] {
+        let given = a.call(method, params).to_string();
+        assert!(
+            !given.contains("1a2b3c4d5e6f"),
+            "{method} holds it: {given}"
+        );
+    }
+    the_deck_gives_the_steps_and_the_sign_in_address(a);
 }
+
+/// The Control Deck opened on alpha itself, as `spandeck cc` opens it.
+fn the_deck_gives_the_steps_and_the_sign_in_address(a: &Station) {
+    let page = common::browser::Page::open(a, 1200, 900);
+    // Signed out: the bar, with the address as a link and as a code to
+    // scan that is drawn in the page.
+    let bar = page.wait(
+        "the sign-in bar",
+        "(b => b && ({text: b.innerText, links: [...b.querySelectorAll('a')].map(x => x.href), code: !!b.querySelector('svg.qr path')}))(document.querySelector('.signin-bar'))",
+    );
+    assert!(
+        bar["text"]
+            .as_str()
+            .unwrap()
+            .contains("Tailscale is signed out on this machine (alpha)"),
+        "{bar}"
+    );
+    assert_eq!(
+        (&bar["links"], &bar["code"]),
+        (&json!([SIGN_IN]), &json!(true))
+    );
+    // The code is the one a phone reads as that address: these modules were
+    // read back with a QR reader when the test was written.
+    let code = page.js(&format!(
+        "import('./qr.js').then(q => (m => [m.length, m.flat().reduce((h, dark) => Math.imul(h ^ (dark ? 1 : 0), 16777619) >>> 0, 2166136261)])(q.qrMatrix({})))",
+        json!(SIGN_IN)
+    ));
+    assert_eq!(code, json!(QR_OF_SIGN_IN), "the code changed: read it back");
+
+    // bravo's tile says why it is away. Waking or starting it cannot help,
+    // so neither is offered.
+    let tile =
+        "[...document.querySelectorAll('a.tile.station')].find(x => x.innerText.includes('bravo'))";
+    page.wait(
+        "bravo's tile to say its key expired",
+        &format!("(t => !!t && t.innerText.includes('Its Tailscale key expired') && !!t.querySelector('.key-chip.bad'))({tile})"),
+    );
+    page.right_click(tile);
+    let menu =
+        page.js("[...document.querySelectorAll('.menu-item, .menu-note')].map(x => x.innerText)");
+    let menu: Vec<&str> = menu
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|x| x.as_str())
+        .collect();
+    assert!(
+        !menu
+            .iter()
+            .any(|i| i.starts_with("Wake it") || i.starts_with("Start spandeck there")),
+        "{menu:?}"
+    );
+    assert!(
+        menu.iter()
+            .any(|i| i.starts_with("Its Tailscale key expired")),
+        "{menu:?}"
+    );
+    page.js("document.body.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}))");
+    // The way back, in Tailscale's words for what to click, with its admin
+    // console as a link and bravo's last address at home.
+    page.js(&format!("{tile}.querySelector('.key-chip.bad').click()"));
+    let steps = page.wait(
+        "the steps",
+        "(d => d && ({text: d.textContent, links: [...d.querySelectorAll('a')].map(x => x.href), cmds: [...d.querySelectorAll('code')].map(x => x.innerText)}))(document.querySelector('.dialog .key-steps'))",
+    );
+    let text = steps["text"].as_str().unwrap();
+    let order: Vec<usize> = [
+        "Temporarily extend key",
+        "30 minutes",
+        "Disable Key Expiry",
+        "Or at the machine itself",
+        "Or over its own network",
+    ]
+    .iter()
+    .map(|words| {
+        text.find(words)
+            .unwrap_or_else(|| panic!("no {words:?} in {text}"))
+    })
+    .collect();
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}: {text}");
+    assert_eq!(
+        steps["links"],
+        json!([
+            "https://console.tailscale.com/admin/machines",
+            "https://console.tailscale.com/admin/machines?q=disabled%3Aexpired",
+            "https://console.tailscale.com/admin/machines"
+        ])
+    );
+    assert_eq!(
+        steps["cmds"],
+        json!([
+            "sudo tailscale up --force-reauth",
+            "ssh 192.168.1.20",
+            "sudo tailscale up --force-reauth"
+        ])
+    );
+    page.js("document.querySelector('.dialog .primary').click()");
+
+    // Which steps come first is what the owner agreed: a machine nobody
+    // sits at should not expire, a phone keeps its expiry and is renewed.
+    let first = page.js(
+        "import('./perf.js').then(p => [{station: true}, {os: 'iOS'}].map(more => p.keySteps('it', {left: 6}, more).groups[0].title))",
+    );
+    assert_eq!(
+        first,
+        json!([
+            "Stop it expiring: from here, on any device",
+            "Renew it: on the device"
+        ])
+    );
+
+    // A device's name is text from Tailscale: shown as text, in the list
+    // and in its steps.
+    page.goto("#/perf");
+    let name = "<img src=x onerror=window.pwned=1>";
+    page.wait(
+        "the device on the Performance page",
+        &format!(
+            "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.perf-page li')].find(li => li.innerText.includes({}))?.querySelector('button'))",
+            json!(name)
+        ),
+    );
+    let shown = page.wait(
+        "its steps",
+        "(d => d && [d.innerText, document.querySelectorAll('img').length, window.pwned === undefined])(document.querySelector('.dialog'))",
+    );
+    assert!(shown[0].as_str().unwrap().contains(name), "{shown}");
+    assert_eq!((&shown[1], &shown[2]), (&json!(0), &json!(true)));
+}
+
+/// The size and a hash of the QR code's modules for `SIGN_IN`.
+const QR_OF_SIGN_IN: (u32, u32) = (29, 3_208_721_812);
 
 /// Audit, section 10: two stations whose clocks are five minutes apart
 /// listed each other as "unreachable", a direct call said "not in this
@@ -3594,6 +3839,151 @@ fn pictures_of_the_performance_page() {
         page.tab.capture_screenshot(Png, None, None, true).unwrap(),
     )
     .unwrap();
+}
+
+/// Not a test of anything: pictures of the steps for a Tailscale key and of
+/// the sign-in bar, at a computer's width and a phone's, and the modules of
+/// a few QR codes for a reader to be tried on.
+/// `SPANDECK_SHOTS=<folder> cargo test -p spandeck --test phase5 pictures_of_the_tailscale -- --ignored`
+#[test]
+#[ignore = "takes pictures for a person to look at; needs Chrome"]
+fn pictures_of_the_tailscale_steps() {
+    use common::browser::Page;
+    use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png;
+    let out = std::path::PathBuf::from(std::env::var("SPANDECK_SHOTS").expect("SPANDECK_SHOTS"));
+    std::fs::create_dir_all(&out).unwrap();
+    const WIDE: (u32, u32) = (1300, 900);
+    const PHONE: (u32, u32) = (390, 844);
+    let shot = |page: &Page, name: &str| {
+        std::thread::sleep(Duration::from_millis(500));
+        std::fs::write(
+            out.join(format!("{name}.png")),
+            page.tab.capture_screenshot(Png, None, None, true).unwrap(),
+        )
+        .unwrap();
+        let said = page.js("(document.querySelector('.dialog') || document.querySelector('.signin-bar') || document.body).innerText");
+        std::fs::write(
+            out.join(format!("{name}.txt")),
+            said.as_str().unwrap_or_default(),
+        )
+        .unwrap();
+    };
+    let names = ["alpha", "bravo", "charlie"];
+    let mut fleet = Station::fleet(&names, |name, root| {
+        let on = json!({"Online": true});
+        let others: Vec<Value> = [
+            ("alpha", None, json!({"Online": true})),
+            ("bravo", Some(6), json!({"Online": true})),
+            (
+                "charlie",
+                Some(-2),
+                json!({"Online": true, "CurAddr": "192.168.1.20:41641"}),
+            ),
+        ]
+        .iter()
+        .filter(|(n, _, _)| *n != name)
+        .map(|(n, days, more)| device(n, "linux", *days, more.clone()))
+        .chain([device(
+            "pocket-phone",
+            "iOS",
+            Some(2),
+            json!({"TailscaleIPs": ["100.64.0.9"]}),
+        )])
+        .collect();
+        let mine = (name == "bravo").then_some(6);
+        standin_tailnet(root, device(name, "linux", mine, on), &others)
+    });
+    let online = |s: &Station| {
+        s.call("fleet.refresh", json!({}))["stations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|x| x["state"] == json!("online"))
+            .count()
+    };
+    wait_for("the three to find each other", 40, || {
+        (online(&fleet[0]) == 3).then_some(())
+    });
+    fleet[2].kill9();
+    wait_for("charlie to be seen as off", 40, || {
+        (online(&fleet[0]) == 2).then_some(())
+    });
+    let a = &fleet[0];
+    let chip = |station: &str| {
+        format!("(c => c ? (c.click(), true) : false)([...document.querySelectorAll('.tile.station, .phone-station')].find(x => x.innerText.includes('{station}'))?.querySelector('.key-chip'))")
+    };
+    let by_station = "(b => (b && b.getAttribute('aria-pressed') !== 'true' && b.click(), document.querySelectorAll('.phone-station').length === 3))([...document.querySelectorAll('.home-switch button')].find(b => b.innerText === 'By station'))";
+    for (size, width) in [(WIDE, "desktop"), (PHONE, "phone")] {
+        for (station, what) in [("bravo", "before-expiry"), ("charlie", "expired")] {
+            let page = Page::open(a, size.0, size.1);
+            page.goto("#/fleet");
+            if width == "phone" {
+                page.wait("the phone's stations", by_station);
+            }
+            page.wait("the chip", &chip(station));
+            page.wait("the steps", "!!document.querySelector('.dialog ol')");
+            shot(&page, &format!("{what}-{width}"));
+        }
+    }
+    // The expired station's menu: the reason, and no Wake or Start.
+    let page = Page::open(a, WIDE.0, WIDE.1);
+    page.right_click(
+        "[...document.querySelectorAll('a.tile.station')].find(x => x.innerText.includes('charlie') && x.innerText.includes('Tailscale key'))",
+    );
+    shot(&page, "expired-menu-desktop");
+    // A phone's key, from the Performance page.
+    let page = Page::open(a, WIDE.0, WIDE.1);
+    page.goto("#/perf");
+    page.wait(
+        "the phone on the Performance page",
+        "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.perf-page li')].find(li => li.innerText.includes('pocket-phone'))?.querySelector('button'))",
+    );
+    page.wait("the steps", "!!document.querySelector('.dialog ol')");
+    shot(&page, "phone-device-desktop");
+
+    // alpha's own Tailscale is signed out: first with nothing offered, then
+    // with an address; then its key expired instead.
+    let bar = |name: &str, change: &dyn Fn(&mut Value), ready: &str| {
+        restatus(a, change);
+        a.call("fleet.refresh", json!({}));
+        for (size, width) in [(WIDE, "desktop"), (PHONE, "phone")] {
+            let page = Page::open(a, size.0, size.1);
+            page.wait("the bar", ready);
+            shot(&page, &format!("{name}-{width}"));
+        }
+    };
+    bar(
+        "signed-out-no-address",
+        &|s| s["BackendState"] = json!("NeedsLogin"),
+        "!!document.querySelector('.signin-bar') && !document.querySelector('.signin-bar svg')",
+    );
+    bar(
+        "signed-out-address",
+        &|s| s["AuthURL"] = json!(SIGN_IN),
+        "!!document.querySelector('.signin-bar svg')",
+    );
+    bar(
+        "own-key-expired",
+        &|s| {
+            s["BackendState"] = json!("Running");
+            s["Self"] = device("alpha", "linux", Some(-1), json!({"Online": true}));
+        },
+        "!!document.querySelector('.signin-bar svg') && document.querySelector('.signin-bar').innerText.includes('has expired')",
+    );
+    // The modules of some codes, for a reader outside the browser.
+    let page = Page::open(a, WIDE.0, WIDE.1);
+    let texts = json!([
+        SIGN_IN,
+        "a",
+        "https://login.tailscale.com/a/1a2b3c4d5e6f?with=a-longer-address&and=more-of-it-to-reach-a-bigger-code",
+        "x".repeat(150),
+        "y".repeat(200),
+        "z".repeat(331),
+    ]);
+    let codes = page.js(&format!(
+        "import('./qr.js').then(q => {texts}.map(t => (m => ({{text: t, size: m.length, hash: m.flat().reduce((h, dark) => Math.imul(h ^ (dark ? 1 : 0), 16777619) >>> 0, 2166136261), rows: m.map(r => r.map(Number).join(''))}}))(q.qrMatrix(t))))"
+    ));
+    std::fs::write(out.join("qr-codes.json"), codes.to_string()).unwrap();
 }
 
 /// Not a test of behaviour: pictures of the conversation view for a person to

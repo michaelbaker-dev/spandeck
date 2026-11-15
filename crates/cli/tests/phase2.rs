@@ -778,6 +778,17 @@ async fn a_browser_is_signed_in_only_when_the_owner_approves_it() {
     );
     // The token is the owner's authority, and a changed one is nothing.
     assert_eq!(rpc(&s, Some(&token), None, None, "pane.list").await.0, 200);
+    // Except for one thing: the address at which the station's Tailscale
+    // client is signed in again is given on the machine's own deck, which
+    // holds the station's own token, and to no browser signed in from
+    // another device.
+    let own = s.token();
+    assert_eq!(
+        rpc(&s, Some(&own), None, None, "tailnet.signin").await.0,
+        200
+    );
+    let (_, refused) = rpc(&s, Some(&token), None, None, "tailnet.signin").await;
+    assert_eq!(refused["error"]["code"], json!("denied"), "{refused}");
     let mut forged = token.clone();
     forged.replace_range(
         forged.len() - 1..,

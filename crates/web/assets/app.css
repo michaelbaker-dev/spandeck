@@ -386,6 +386,10 @@ button.agent-row:hover { border-color: var(--blue); }
 .usage-table.both { table-layout: fixed; } .usage-table.both th:first-child { width: 32%; }
 .vault-prompt { flex: none; display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: var(--panel2); border-bottom: 1px solid var(--line); border-left: 4px solid var(--blue); }
 .version-bar { border-left-color: var(--amber); flex-wrap: wrap; }
+.signin-bar { border-left-color: var(--red); align-items: flex-start; flex-wrap: wrap; } .signin-bar .grow > div { margin-top: 3px; overflow-wrap: anywhere; } .signin-bar .qr { flex: none; border-radius: 6px; }
+a.out { color: var(--blue); text-decoration: underline; } a.btn.out { text-decoration: none; }
+code.cmd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--well); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; overflow-wrap: anywhere; user-select: all; }
+.key-steps h3 { margin: 12px 0 2px; font-size: calc(13px * var(--ui-scale)); }
 .vault-prompt .grow { min-width: 0; } .vault-prompt .muted { overflow-wrap: anywhere; }
 .vault-checks h3 { margin: 14px 0 4px; font-size: calc(13px * var(--ui-scale)); } .vault-checks td { vertical-align: top; overflow-wrap: anywhere; } .vault-checks td:nth-child(2) { white-space: nowrap; }
 .agent-problem { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 3px; font-size: calc(12px * var(--ui-scale)); }

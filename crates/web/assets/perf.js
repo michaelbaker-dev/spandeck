@@ -61,17 +61,68 @@ export function keyInfo(k, now = Date.now()) {
   return { text: n < 1 ? `expires today (${day(e)})` : `expires in ${days(n)} (${day(e)})`, level: n <= 7 ? 'bad' : n <= 30 ? 'warn' : 'ok', left: n, at: e };
 }
 const TS_STATE = { NeedsLogin: 'signed out of Tailscale', Stopped: 'Tailscale is stopped', NoState: 'Tailscale is starting', Starting: 'Tailscale is starting', not_running: 'Tailscale is not running' };
-// What to do about a key: the same steps the station writes in its notice.
-export function keySteps(name, info) {
-  if (info?.expired) return [
-    `On any device, open Tailscale's admin console (login.tailscale.com/admin/machines), find ${name}, and in its menu choose "Temporarily extend key". It is back for 30 minutes.`,
-    'Within that time, in the same menu choose "Disable key expiry", or go to the machine and sign in to Tailscale again.',
-    'Or at the machine itself, at any time: open Tailscale and sign in. On Linux: sudo tailscale up --force-reauth, then open the address it prints.',
-    'When it is back, spandeck finds it by itself and delivers what was waiting. Wake and Start do not help: the machine is on, and only Tailscale is refusing it.'];
-  return [
-    `In Tailscale's admin console (login.tailscale.com/admin/machines), open ${name}'s menu and choose "Disable key expiry". Good for a machine that is always on and that nobody sits at.`,
-    'Or at the machine: open Tailscale and sign in again. That lasts until the next expiry (180 days unless your tailnet says otherwise).',
-    'spandeck warns at 14, 7, 3 and 1 day before, and when it has expired. It does not renew a key itself.'];
+// Tailscale's admin console (the address its own help gives), and the same
+// page listing only machines whose key has expired, which is a filter its
+// help documents. No address is built from a device's name.
+export const TS_MACHINES = 'https://console.tailscale.com/admin/machines';
+export const TS_EXPIRED = TS_MACHINES + '?q=disabled%3Aexpired';
+const MACHINES = { a: TS_MACHINES, text: 'Machines page of Tailscale\'s admin console' };
+const REAUTH = { code: 'sudo tailscale up --force-reauth' };
+// An address a station gave for a machine: shown only if it reads as one.
+const addresses = (list) => (Array.isArray(list) ? list : []).filter(x => typeof x === 'string' && /^[0-9a-f.:]{3,45}$/i.test(x)).slice(0, 3);
+// What to do about a key, in the order Tailscale's help gives the steps and
+// in its words for what to click. Groups of steps; a step is text, links
+// ({a, text}) and commands ({code}). `more`: { station, os, lan }.
+// spandeck does none of it: every step is the owner's.
+export function keySteps(name, info, more = {}) {
+  const phone = /^(ios|android)$/i.test(more.os || ''), lan = addresses(more.lan);
+  const row = `Find the row for ${name}`;
+  const there = phone ? ['On the device, open the Tailscale app and sign in again.']
+    : ['Open Tailscale on it and sign in again. Or, in a terminal on it, run ', REAUTH, ' and open the address it prints.'];
+  if (info?.expired) {
+    const groups = [
+      { title: 'From here, on any device', steps: [
+        ['Open the ', MACHINES, ' and sign in. (Or ', { a: TS_EXPIRED, text: 'the same page showing only machines whose key has expired' }, '.)'],
+        [`${row}, open the … menu at the far right of it, and choose "Temporarily extend key". Tailscale offers that only for a machine whose key has expired. If it offers "Reauthorize machine" in its place, choose that.`],
+        ['The key then works for 30 minutes. Within them, in the same menu choose "Disable Key Expiry", after which it stays on your network; or sign in again at the machine, as below. If neither is done it drops off again.'],
+      ] },
+      { title: phone ? 'Or on the device itself' : 'Or at the machine itself, at any time', steps: [there] }];
+    if (more.station) groups.push({ title: 'Or over its own network, if you are on it', steps: [
+      lan.length ? ['Connect to it without Tailscale: ', { code: `ssh ${lan[0]}` }, lan.length > 1 ? ` (its last addresses there: ${lan.join(', ')}; they may have changed since).` : ' (its last address there; it may have changed since).']
+        : ['Connect to it without Tailscale: ssh to its address on that network. spandeck has not seen one for it.'],
+      ['There, run ', REAUTH, ' and open the address it prints, on any device. That connection does not go through Tailscale, so signing in again cannot cut it.'],
+    ] });
+    return { groups, notes: [more.station ? 'When it is back, spandeck finds it by itself and delivers what was waiting. Wake and Start do not help: the machine is on, and only Tailscale is refusing it.'
+      : 'spandeck changes nothing in Tailscale: these steps are yours to take.'] };
+  }
+  const never = { title: 'Stop it expiring: from here, on any device', steps: [
+    ['Open the ', MACHINES, ' and sign in.'],
+    [`${row} and open the … menu at the far right of it.`],
+    ['Choose "Disable Key Expiry". Its key then no longer expires, and spandeck says so within a minute.']] };
+  const renew = { title: phone ? 'Renew it: on the device' : 'Renew it: at the machine itself', steps: [there,
+    ['That renews the key for your network\'s usual time: 180 days unless you changed it.' + (phone ? '' : ' Do it at the machine and not over a remote connection: Tailscale\'s help says signing in again may bring the connection down.')]] };
+  return { groups: phone ? [renew, never] : [never, renew], notes: [
+    phone ? 'Which one: for a phone or tablet, renew. It is the device most likely to be lost, and expiry is what takes a lost device off your network without your doing anything.'
+      : 'Which one: stop the key expiring on a machine that is always on and that nobody sits at, or it drops off on a day nobody is there to sign in (Tailscale\'s help names "trusted servers" and devices "that are hard to reach"). A laptop is your call: with no expiry, one that is lost or stolen stays on your network until you remove it. A phone should keep its expiry.',
+    'spandeck warns at 14, 7, 3 and 1 day before, and when the key has expired. It does not renew a key or change anything in Tailscale itself.'] };
+}
+// What the deck opened on a machine itself says when that machine's
+// Tailscale client is signed out or its key has expired. `s`: what
+// `tailnet.signin` said; `link`: whether there is an address to open.
+export function signInWords(station, s, link) {
+  return {
+    title: s.expired && s.state !== 'NeedsLogin' ? `The Tailscale key of this machine (${station}) has expired` : `Tailscale is signed out on this machine (${station})`,
+    why: `${station} is off your Tailscale network: no other station or device can reach it, and this Control Deck opens only here. Its agents keep running.`,
+    how: link ? ['Sign in at this address, here or on a phone (scan the code), with the account your other machines are under: ']
+      : ['To sign in: open Tailscale on this machine and sign in. Or, in a terminal here, run ', { code: s.expired ? 'sudo tailscale up --force-reauth' : 'sudo tailscale up' }, ' and open the address it prints. Once Tailscale offers an address, it is shown here with a code to scan.'],
+    after: 'spandeck does not sign in for you. This goes away by itself within a few seconds of the sign-in.' };
+}
+// Where a station is on its own network, for the steps: what the station
+// serving this deck knows first, then what any other station answered.
+export function lanOf(data, station, local) {
+  const all = [...addresses(local?.stations?.[station]?.lan)];
+  for (const r of data?.rows || []) for (const a of addresses(r.report?.tailnet?.stations?.[station]?.lan)) if (!all.includes(a)) all.push(a);
+  return all.slice(0, 3);
 }
 
 // ---- gathering ----
@@ -197,7 +248,7 @@ export function asText(data, facts) {
   return out.join('\n');
 }
 
-// `ctx`: { data, api, phone, reload, explain(name, info) }.
+// `ctx`: { data, api, phone, reload, explain(name, info, more) }.
 export function perfPage(ctx) {
   const { data, api, phone } = ctx;
   const head = (extra) => h('div', { class: 'row perf-head' }, phone ? h('a', { class: 'btn', href: '#/fleet' }, '‹ Back') : null, h('h1', {}, 'Performance'), h('span', { class: 'grow' }), extra);
@@ -210,7 +261,7 @@ export function perfPage(ctx) {
   const back = data.rows.filter(row => row.report?.recovered && num(row.report.recovered.at_ms)).map(row => ({ ...row.report.recovered, on: row.s.station }));
   const versions = [...new Set(data.rows.map(r => r.s.version).filter(Boolean))];
   const keyCell = (x) => { const name = x.key ? (x.r?.tailnet?.stations?.[x.s.station]?.name || keyOf(data, x.s.station)?.name || x.s.station) : x.s.station;
-    return x.key && x.key.level !== 'ok' ? h('button', { class: 'mini key-' + x.key.level, onclick: () => ctx.explain(name, x.key), title: 'What to do' }, x.facts[x.facts.length - 1].value) : x.facts[x.facts.length - 1].value; };
+    return x.key && x.key.level !== 'ok' ? h('button', { class: 'mini key-' + x.key.level, onclick: () => ctx.explain(name, x.key, { station: true, lan: lanOf(data, x.s.station) }), title: 'What to do' }, x.facts[x.facts.length - 1].value) : x.facts[x.facts.length - 1].value; };
   const cell = (x, i) => { const f = x.facts[i]; return h('td', { title: f.title || null, class: x.r || i === 0 || i === labels.length - 1 ? '' : 'na' }, i === labels.length - 1 ? keyCell(x) : f.value); };
   const sec = (title, note, ...kids) => h('section', { 'aria-label': title }, h('h2', {}, title), note ? h('p', { class: 'muted small' }, note) : null, ...kids);
   const echo = mine.echo, asked = [...mine.asked.entries()].sort();
@@ -255,7 +306,7 @@ export function perfPage(ctx) {
       h('ul', { class: 'perf-list' }, facts.map(x => h('li', {}, h('b', {}, x.s.station), ' ', keyCell(x)))),
       h('h3', {}, 'Other devices under your login'),
       others.length ? h('ul', { class: 'perf-list' }, others.map(d => { const k = keyInfo({ known: true, expires_ms: d.expires_ms, expired: d.expired });
-        return h('li', {}, h('b', {}, String(d.name || 'a device')), d.os ? h('span', { class: 'muted' }, ` ${d.os}`) : null, ' ', h('button', { class: 'mini key-' + k.level, onclick: () => ctx.explain(String(d.name || 'the device'), k) }, k.text), d.deck ? h('span', { class: 'chip' }, 'uses the deck') : null); }))
+        return h('li', {}, h('b', {}, String(d.name || 'a device')), d.os ? h('span', { class: 'muted' }, ` ${d.os}`) : null, ' ', h('button', { class: 'mini key-' + k.level, onclick: () => ctx.explain(String(d.name || 'the device'), k, { os: String(d.os || '') }) }, k.text), d.deck ? h('span', { class: 'chip' }, 'uses the deck') : null); }))
         : h('p', { class: 'muted' }, facts.some(x => x.r?.tailnet?.read) ? 'None expires within 30 days, and none expired in the last 30.' : 'No station has read its Tailscale client.')),
 
     sec('This browser', 'Measured in this page, on this device; it is sent nowhere and starts again when the page is reloaded.',

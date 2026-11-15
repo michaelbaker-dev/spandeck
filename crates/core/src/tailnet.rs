@@ -1,11 +1,15 @@
 //! Tailscale key expiry: a machine whose key lapses drops off the tailnet,
 //! and spandeck with it. This reads what the local Tailscale client already
 //! says (the status output discovery fetches), shows the days left, and
-//! warns before it happens. It renews nothing and changes nothing.
+//! warns before it happens. It renews nothing and changes nothing: the
+//! deck gives the owner the steps and a link to Tailscale's admin console.
 //!
 //! Who may see it: the owner and the stations of the fleet (`perf.get`,
 //! `tailnet.view`, `tailnet.report`). It is a list of the owner's devices,
-//! so none of it is in `station.info` or any call an agent has.
+//! so none of it is in `station.info` or any call an agent has. The address
+//! at which a signed-out machine is signed in again (`tailnet.signin`) goes
+//! to nobody but the holder of that station's own token: whoever opens it
+//! chooses the account the machine joins.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -13,7 +17,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::daemon::Daemon;
+use crate::daemon::{Caller, Daemon, Error, Result};
 use crate::fleet::Peer;
 use crate::paths::now_ms;
 
@@ -25,6 +29,7 @@ const MAX_DEVICES: usize = 64;
 /// A device counts as one the owner uses the deck from for this long.
 const DECK_DEVICE_MS: u64 = 30 * DAY_MS;
 const MAX_DECK_DEVICES: usize = 32;
+const MAX_LAN: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Device {
@@ -41,6 +46,10 @@ pub struct Device {
     /// "direct" or "relayed", when this station is talking to it.
     pub path: Option<String>,
     pub relay: Option<String>,
+    /// Its address on a home or office network, when this station is
+    /// talking to it there: where `ssh` finds it once Tailscale does not.
+    #[serde(default)]
+    pub lan: Option<String>,
 }
 
 /// What the local Tailscale client said, at one look.
@@ -52,6 +61,11 @@ pub struct Tailnet {
     pub state: String,
     /// This device first, then the owner's others: soonest expiry first.
     pub devices: Vec<Device>,
+    /// This machine's own addresses on its home or office network.
+    pub own_lan: Vec<String>,
+    /// Where the client says to sign in, when it has asked for one. Given
+    /// out by `tailnet.signin` alone.
+    pub auth_url: Option<String>,
 }
 
 /// What a station says of its own key to the stations of its fleet.
@@ -73,6 +87,9 @@ pub struct Report {
     /// Devices that used a Control Deck there: Tailscale address, and when.
     #[serde(default)]
     pub decks: BTreeMap<String, u64>,
+    /// Its addresses on its own network, as it gave them.
+    #[serde(default)]
+    pub lan: Vec<String>,
 }
 
 #[derive(Default)]
@@ -82,6 +99,10 @@ pub struct TailnetState {
     asked: Mutex<BTreeMap<String, u64>>,
     /// When each device's deck use was last written down (not every time).
     noted: Mutex<BTreeMap<String, u64>>,
+    /// Each device's last address on a network this station shares with
+    /// it, by Tailscale id. An expired machine has none in the status any
+    /// more, which is when it is wanted.
+    lan: Mutex<BTreeMap<String, String>>,
 }
 
 impl TailnetState {
@@ -93,6 +114,47 @@ impl TailnetState {
 /// Text from somewhere else: no control characters, and bounded.
 fn clean(s: &str, max: usize) -> String {
     s.chars().filter(|c| !c.is_control()).take(max).collect()
+}
+
+/// The address of an endpoint ("192.168.1.9:41641"), if it is one of a home
+/// or office network. A public address is where a router is, not the
+/// machine, and a Tailscale address stops working with the key.
+fn lan_address(endpoint: &str) -> Option<String> {
+    use std::net::{IpAddr, SocketAddr};
+    let ip = endpoint
+        .parse::<SocketAddr>()
+        .map(|a| a.ip())
+        .or_else(|_| endpoint.parse::<IpAddr>())
+        .ok()?;
+    match ip {
+        IpAddr::V4(v) => v.is_private(),
+        // Not Tailscale's own range (fd7a:115c:a1e0::/48).
+        IpAddr::V6(v) => {
+            v.segments()[0] & 0xfe00 == 0xfc00 && v.segments()[..3] != [0xfd7a, 0x115c, 0xa1e0]
+        }
+    }
+    .then(|| ip.to_string())
+}
+
+/// The addresses among these that are on a home or office network: three
+/// at most, each once.
+fn lan_addresses<'a>(given: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for a in given.filter_map(lan_address) {
+        if !out.contains(&a) && out.len() < MAX_LAN {
+            out.push(a);
+        }
+    }
+    out
+}
+
+/// The sign-in address the Tailscale client offers: an https address and
+/// nothing else, whatever the client printed.
+fn sign_in_address(s: &str) -> Option<String> {
+    (s.len() <= 300
+        && s.strip_prefix("https://")
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_graphic())))
+    .then(|| s.to_string())
 }
 
 /// Days since 1970-01-01 of a date (proleptic Gregorian).
@@ -212,6 +274,7 @@ fn device(v: &Value, me: bool) -> Device {
             .then(|| if direct { "direct" } else { "relayed" }.to_string()),
         relay: (!me && !direct && active && !text("Relay").is_empty())
             .then(|| clean(text("Relay"), 16)),
+        lan: lan_address(text("CurAddr")),
     }
 }
 
@@ -224,6 +287,8 @@ pub fn parse_status(status: Option<&Value>, now: u64) -> Tailnet {
             checked_ms: now,
             state: "not_running".into(),
             devices: vec![],
+            own_lan: vec![],
+            auth_url: None,
         };
     };
     let state = clean(
@@ -262,6 +327,17 @@ pub fn parse_status(status: Option<&Value>, now: u64) -> Tailnet {
         checked_ms: now,
         state,
         devices,
+        own_lan: lan_addresses(
+            me.and_then(|m| m.get("Addrs"))
+                .and_then(|a| a.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a.as_str()),
+        ),
+        auth_url: status
+            .get("AuthURL")
+            .and_then(|u| u.as_str())
+            .and_then(sign_in_address),
     }
 }
 
@@ -335,7 +411,56 @@ pub fn recovery(name: &str) -> String {
 impl Daemon {
     /// After a look: what the local client says now.
     pub(crate) fn tailnet_refresh(&self, status: Option<&Value>) {
-        *self.tailnet.now.lock().unwrap() = Some(parse_status(status, now_ms()));
+        let t = parse_status(status, now_ms());
+        // Where each device was last found on a network shared with this
+        // station: kept while the client lists the device, in memory.
+        if status.is_some() {
+            let mut lan = self.tailnet.lan.lock().unwrap();
+            lan.retain(|id, _| t.devices.iter().any(|d| &d.id == id));
+            for d in t.devices.iter().filter(|d| !d.id.is_empty()) {
+                if let Some(a) = &d.lan {
+                    lan.insert(d.id.clone(), a.clone());
+                }
+            }
+        }
+        *self.tailnet.now.lock().unwrap() = Some(t);
+    }
+
+    /// Where a machine is on its own network: the address this station
+    /// last reached it at there, then the ones it gave itself.
+    fn lan_of(&self, id: &str, said: &[String]) -> Vec<String> {
+        let seen = self.tailnet.lan.lock().unwrap().get(id).cloned();
+        lan_addresses(seen.iter().chain(said).map(String::as_str))
+    }
+
+    /// `tailnet.signin`: whether this machine's Tailscale client needs a
+    /// sign-in, and the address it offers for one. Whoever opens that
+    /// address chooses the account the machine joins, so it is given only
+    /// to the holder of this station's own token (the deck `spandeck cc`
+    /// opens on the machine, and its command line): not to a browser signed
+    /// in from another device, not to another station or a request passed
+    /// on by one, and not to an agent. It is in no event and no log.
+    pub fn tailnet_signin(&self, caller: &Caller) -> Result<Value> {
+        if !caller.is_owner() || caller.who != "you" {
+            return Err(Error::Denied(
+                "the Tailscale sign-in address is shown only on the machine's own Control Deck"
+                    .into(),
+            ));
+        }
+        let t = self.tailnet.get();
+        let me = t.as_ref().and_then(|t| t.devices.iter().find(|d| d.me));
+        let now = now_ms();
+        let expired = me.is_some_and(|d| d.expired || d.expires_ms.is_some_and(|e| e <= now));
+        let state = t.as_ref().map(|t| t.state.clone()).unwrap_or_default();
+        let needed = state == "NeedsLogin" || expired;
+        Ok(json!({
+            "read": t.is_some(),
+            "state": state,
+            "expired": expired,
+            "needed": needed,
+            "device": me.map(|d| d.name.clone()).unwrap_or_default(),
+            "url": t.as_ref().filter(|_| needed).and_then(|t| t.auth_url.clone()),
+        }))
     }
 
     fn tailnet_reports(&self) -> BTreeMap<String, Report> {
@@ -408,6 +533,7 @@ impl Daemon {
             "expires_ms": me.and_then(|d| d.expires_ms),
             "expired": me.is_some_and(|d| d.expired),
             "decks": self.deck_devices(),
+            "lan": t.as_ref().map(|t| t.own_lan.clone()).unwrap_or_default(),
         })
     }
 
@@ -460,6 +586,13 @@ impl Daemon {
                 .filter_map(|(ip, at)| Some((ip.clone(), at.as_u64()?.min(now))))
                 .take(MAX_DECK_DEVICES)
                 .collect();
+            let lan = lan_addresses(
+                said["lan"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| a.as_str()),
+            );
             reports.insert(
                 station,
                 Report {
@@ -470,6 +603,7 @@ impl Daemon {
                     expired: said["expired"] == json!(true),
                     at_ms: now,
                     decks,
+                    lan,
                 },
             );
         }
@@ -530,23 +664,26 @@ impl Daemon {
     /// device (which it does while the device is off), else what the
     /// station last said of itself, which is remembered.
     fn station_key(&self, peer: Option<&Peer>, t: Option<&Tailnet>) -> Value {
-        let key = |d: &Device, source: &str, as_of: u64| json!({"known": true, "id": d.id, "device": d.name, "expires_ms": d.expires_ms, "expired": d.expired, "source": source, "as_of_ms": as_of});
+        let key = |d: &Device, source: &str, as_of: u64, lan: Vec<String>| json!({"known": true, "id": d.id, "device": d.name, "expires_ms": d.expires_ms, "expired": d.expired, "source": source, "as_of_ms": as_of, "lan": lan});
         let Some(peer) = peer else {
             return match t.and_then(|t| t.devices.iter().find(|d| d.me).map(|d| (t, d))) {
                 Some((t, d)) => {
-                    let mut v = key(d, "tailscale", t.checked_ms);
+                    let mut v = key(d, "tailscale", t.checked_ms, t.own_lan.clone());
                     v["state"] = json!(t.state);
                     v
                 }
                 None => json!({"known": false, "state": t.map(|t| t.state.clone())}),
             };
         };
+        let reports = self.tailnet_reports();
+        let said = reports.get(&peer.station);
         if let Some(d) = self.tailnet_device_of(peer, t) {
-            return key(&d, "tailscale", t.map_or(0, |t| t.checked_ms));
+            let lan = self.lan_of(&d.id, said.map_or(&[], |r| &r.lan));
+            return key(&d, "tailscale", t.map_or(0, |t| t.checked_ms), lan);
         }
-        match self.tailnet_reports().get(&peer.station) {
+        match said {
             Some(r) => {
-                json!({"known": true, "id": r.id, "device": r.device, "expires_ms": r.expires_ms, "expired": r.expired,
+                json!({"known": true, "id": r.id, "device": r.device, "expires_ms": r.expires_ms, "expired": r.expired, "lan": self.lan_of(&r.id, &r.lan),
                 "state": r.state, "source": if peer.state == "online" { "station" } else { "remembered" }, "as_of_ms": r.at_ms})
             }
             None => json!({"known": false}),
@@ -852,5 +989,66 @@ mod tests {
             "alpha is off: the next one does"
         );
         assert!(pushes("solo", &[]));
+    }
+
+    /// The owner's steps for a machine whose key has expired (15 Nov 2026)
+    /// end with "or over its own network", and a signed-out machine's own
+    /// deck gives the address to sign in at. A router's public address is
+    /// not the machine, a Tailscale address stops with the key, and what
+    /// the deck makes a link of is an https address or nothing.
+    #[test]
+    fn a_machines_own_network_address_and_the_sign_in_address_are_read() {
+        let status = |auth: &str| {
+            json!({
+                "BackendState": "NeedsLogin", "AuthURL": auth,
+                "Self": {"ID": "n-me", "DNSName": "spark2.tail0.ts.net.", "UserID": 7,
+                    "Addrs": ["203.0.113.7:41641", "192.168.1.5:41641", "172.17.0.1:41641", "192.168.1.5:41641",
+                        "[fd7a:115c:a1e0::1]:41641", "[fd12:3456::5]:41641", "10.0.0.5:41641", "100.64.0.1:41641", "junk"]},
+                "Peer": {
+                    "k1": {"ID": "n-home", "DNSName": "home.tail0.ts.net.", "UserID": 7, "CurAddr": "192.168.1.9:41641"},
+                    "k2": {"ID": "n-away", "DNSName": "away.tail0.ts.net.", "UserID": 7, "CurAddr": "203.0.113.9:41641"},
+                    "k3": {"ID": "n-relayed", "DNSName": "relayed.tail0.ts.net.", "UserID": 7, "CurAddr": ""},
+                }
+            })
+        };
+        let t = parse_status(
+            Some(&status("https://login.tailscale.com/a/1a2b3c4d5e6f")),
+            0,
+        );
+        assert_eq!(t.own_lan, ["192.168.1.5", "172.17.0.1", "fd12:3456::5"]);
+        let lan: Vec<_> = t
+            .devices
+            .iter()
+            .map(|d| (d.name.as_str(), d.lan.as_deref()))
+            .collect();
+        assert_eq!(
+            lan,
+            [
+                ("spark2", None),
+                ("away", None),
+                ("home", Some("192.168.1.9")),
+                ("relayed", None)
+            ]
+        );
+        assert_eq!(
+            t.auth_url.as_deref(),
+            Some("https://login.tailscale.com/a/1a2b3c4d5e6f")
+        );
+        for bad in [
+            "",
+            "https://",
+            "http://login.tailscale.com/a/1",
+            "javascript:alert(1)",
+            "https://login.tailscale.com/a/1 onclick=x",
+            "https://login.tailscale.com/a/1\n",
+        ] {
+            assert_eq!(
+                parse_status(Some(&status(bad)), 0).auth_url,
+                None,
+                "{bad:?}"
+            );
+        }
+        let long = format!("https://x.example/{}", "a".repeat(300));
+        assert_eq!(parse_status(Some(&status(&long)), 0).auth_url, None);
     }
 }
