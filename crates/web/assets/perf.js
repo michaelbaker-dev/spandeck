@@ -225,7 +225,7 @@ function stationFacts(data, row) {
     f('Look at the fleet', r ? stat(r.look) : na, r ? statTitle(r.look, 'One look at every station, every 10 seconds') : ''),
     f('Repaints', r ? `${num(r.terminal?.resyncs?.last_5m) ?? 0} (${num(r.terminal?.resyncs?.since_start) ?? 0} since start)` : na, 'A client that fell behind a pane and was sent the whole screen again'),
     f('Messages', r ? `there ${stat(r.messages?.received, '—')} · told ${stat(r.messages?.woken, '—')}` + ((r.messages?.waiting || []).length ? ` · ${r.messages.waiting.reduce((a, w) => a + (num(w.count) || 0), 0)} waiting` : '') : na,
-      r ? statTitle(r.messages?.received, 'From sent here to stored at another station') + '\n' + statTitle(r.messages?.woken, 'From stored here to the agent being told') + (r.messages?.waiting || []).map(w => `\n${w.count} waiting for ${w.station}, the oldest for ${span(w.oldest_ms)}`).join('') : ''),
+      r ? statTitle(r.messages?.received, 'From sent here to stored at another station') + '\n' + statTitle(r.messages?.woken, 'From stored here to the agent being told') + (r.messages?.waiting || []).map(w => `\n${w.count} waiting for ${w.station}, the oldest for ${span(w.oldest_ms)}` + (num(w.failed_in_a_row) ? `; ${num(w.failed_in_a_row)} tries in a row not answered, the next in ${span(num(w.next_try_in_ms) || 0)}` : '')).join('') + (r.messages?.push === false ? '\nSent by the half-second pump only (relay_push is off)' : '') : ''),
     f('Tailscale key', key ? key.text : r && r.tailnet && !r.tailnet.read ? 'not read here' : 'not known', key ? '' : 'A station reads its key when it finds stations through Tailscale (discovery).'),
   ], key };
 }

@@ -4,6 +4,13 @@
 //! Guarantees checked: at-least-once delivery with duplicates dropped by id
 //! (a reconnect cannot start the same task twice), ordering within a thread,
 //! and no remote task without a valid authorization.
+//!
+//! Since unit 08a of the performance plan (15 Nov 2026) each destination has
+//! a sender of its own (`Relay`): the cases below run with it, and the last
+//! ones hold it to the owner's rule, "the slow or absent station has to be
+//! fixed with the right architecture for a system like this, never to slow
+//! everyone else down": a station that hangs does not delay another
+//! station's message, and nothing depends on a sender being told.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -11,13 +18,27 @@ use std::time::Duration;
 use serde_json::json;
 use spandeck_core::db::Db;
 use spandeck_core::relay::{
-    BoxFuture, Envelope, MessageStore, NewMessage, RelayAck, TaskAuth, Transport,
+    BoxFuture, Envelope, Link, MessageStore, NewMessage, Relay, RelayAck, TaskAuth, Transport,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use turmoil::net::{TcpListener, TcpStream};
 
 /// The station link over simulated TCP: one JSON line each way.
+#[derive(Clone)]
 struct SimLink;
+
+impl Link for SimLink {}
+
+/// Until nothing waits at `store`, with the safety net run every `every`
+/// (`None`: never, so only senders that were told deliver).
+async fn drained(store: &MessageStore, relay: &Relay, every: Option<Duration>) {
+    while store.queued() > 0 {
+        if every.is_some() {
+            relay.pump(&SimLink);
+        }
+        tokio::time::sleep(every.unwrap_or(Duration::from_millis(20))).await;
+    }
+}
 
 impl Transport for SimLink {
     fn deliver<'a>(
@@ -148,6 +169,10 @@ fn a_task_is_delivered_exactly_once_under_drops_and_reconnects() {
         sim.client("alpha", async move {
             let start = tokio::time::Instant::now();
             let now = || start.elapsed().as_millis() as u64 + 1;
+            // Every other seed with the switch off: no sender is told of
+            // a message, and the half-second safety net alone delivers.
+            let relay = Relay::new(alpha.clone());
+            relay.set_push(seed % 2 == 0);
             let mut ids = vec![];
             for i in 0..6 {
                 ids.push(
@@ -164,11 +189,9 @@ fn a_task_is_delivered_exactly_once_under_drops_and_reconnects() {
                         .unwrap()
                         .id,
                 );
+                relay.push(&SimLink, "bravo");
             }
-            while alpha.queued() > 0 {
-                alpha.pump(&SimLink, now()).await;
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+            drained(&alpha, &relay, Some(Duration::from_millis(500))).await;
             Ok(())
         });
         sim.run().unwrap_or_else(|e| panic!("seed {seed}: {e}"));
@@ -223,19 +246,18 @@ fn a_lost_acknowledgment_does_not_start_the_task_twice() {
             .unwrap();
         // Requests get through; replies do not.
         turmoil::partition_oneway("bravo", "alpha");
-        assert_eq!(
-            alpha.pump(&SimLink, 2).await,
-            0,
-            "no acknowledgment came back"
-        );
-        assert_eq!(alpha.queued(), 1, "so the message stays queued");
+        let relay = Relay::new(alpha.clone());
+        let mut tries = relay.tries();
+        relay.push(&SimLink, "bravo");
+        tries.changed().await.unwrap();
+        assert_eq!(alpha.queued(), 1, "no acknowledgment came back: it stays");
         turmoil::repair_oneway("bravo", "alpha");
-        tokio::time::sleep(Duration::from_secs(40)).await;
-        // The wall clock was meanwhile set back (given here as 1, before
-        // the failed try): the next try is counted on a clock that only
-        // goes forward, so it is still made. (A message once waited 223 s
-        // after a clock was corrected: audit, section 10.)
-        assert_eq!(alpha.pump(&SimLink, 1).await, 1);
+        // The sender tries again by itself when its wait is over: nobody
+        // tells it, and the safety net is not run. The wait is counted on
+        // a clock that only goes forward, never the wall clock. (A message
+        // once waited 223 s after a clock was corrected: audit, section 10.)
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(alpha.queued(), 0);
         Ok(())
     });
     sim.run().unwrap();
@@ -282,12 +304,12 @@ fn the_receiver_can_crash_and_come_back() {
                 )
                 .unwrap();
         }
-        alpha.pump(&SimLink, now()).await; // task 0 arrives
+        let relay = Relay::new(alpha.clone());
+        let mut tries = relay.tries();
+        relay.push(&SimLink, "bravo");
+        tries.changed().await.unwrap(); // task 0 arrives
         let _ = tx.send(());
-        while alpha.queued() > 0 {
-            alpha.pump(&SimLink, now()).await;
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
+        drained(&alpha, &relay, Some(Duration::from_millis(200))).await;
         Ok(())
     });
     let mut crashed = false;
@@ -336,11 +358,26 @@ fn a_remote_task_needs_an_authorization_that_has_not_expired() {
         let mut note = task("reviewer@bravo", "a note needs none", None, None);
         note.kind = "note".into();
         let note = alpha.send(note, 1).unwrap();
-        for _ in 0..6 {
-            alpha.pump(&SimLink, 10_000).await;
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        assert_eq!(alpha.queued(), 0, "a refusal is final, not retried forever");
+        let relay = Relay::new(alpha.clone());
+        relay.push(&SimLink, "bravo");
+        // A refusal is final, not retried for ever, and what is behind a
+        // refused message goes on: told once, with no safety net.
+        drained(&alpha, &relay, None).await;
+        // Each refusal is told to its sender, once, in its own inbox and
+        // in the thread of the message that was refused.
+        let told = alpha.inbox(&["author".to_string()], false, false, 1);
+        let about = |id: &str| -> Vec<&serde_json::Value> {
+            told.iter().filter(|m| m["thread"] == json!(id)).collect()
+        };
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert_eq!(about(&none.id).len(), 1);
+        assert_eq!(about(&expired.id).len(), 1);
+        let words = about(&expired.id)[0]["body"].as_str().unwrap();
+        assert!(
+            words.starts_with("Not delivered to reviewer@bravo: its task authorization expired"),
+            "{words}"
+        );
+        assert_eq!(about(&expired.id)[0]["from"], json!("spandeck@alpha"));
         assert!(alpha
             .recent(None, 10)
             .iter()
@@ -361,6 +398,276 @@ fn a_remote_task_needs_an_authorization_that_has_not_expired() {
     let inbox = w.bravo.inbox(&["reviewer".to_string()], false, false, 1);
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0]["body"], json!("a note needs none"));
+}
+
+// ---------------------------------------------------------------------------
+// One sender per destination (unit 08a). Measured before it: messages were
+// tried one station after another, once every half second, so a burst of ten
+// arrived at 0.5, 1.0 … 5.0 s, and a station that hung held the next
+// station's message up to five seconds at each try; a task whose
+// authorization ran out while it waited was refused with nothing said to
+// its sender.
+
+/// A link with a fixed, short delay, so that times can be compared.
+fn quick_sim() -> turmoil::Sim<'static> {
+    turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(1800))
+        .tick_duration(Duration::from_millis(1))
+        .min_message_latency(Duration::from_millis(5))
+        .max_message_latency(Duration::from_millis(5))
+        .rng_seed(1)
+        .build()
+}
+
+fn note(to: &str, body: &str, thread: &str) -> NewMessage {
+    let mut m = task(to, body, Some(thread), None);
+    m.kind = "note".into();
+    m
+}
+
+fn bodies(store: &MessageStore, name: &str) -> Vec<String> {
+    store
+        .inbox(&[name.to_string()], false, false, 1)
+        .iter()
+        .map(|m| m["body"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The owner's rule: a station that hangs delays only its own messages.
+/// With the senders told of each message, and with the switch off (the
+/// safety net alone): in neither is one station tried after another.
+#[test]
+fn a_station_that_hangs_does_not_delay_another_stations_message() {
+    for push in [true, false] {
+        let w = world();
+        let charlie = MessageStore::new(Arc::new(Db::memory().unwrap()), "charlie");
+        let at_charlie: Accepted = Arc::new(Mutex::new(vec![]));
+        let mut sim = quick_sim();
+        let t0 = tokio::time::Instant::now();
+        let (bravo, accepted) = (w.bravo.clone(), w.accepted.clone());
+        sim.host("bravo", move || {
+            receiver(bravo.clone(), accepted.clone(), t0)
+        });
+        let (c, seen) = (charlie.clone(), at_charlie.clone());
+        sim.host("charlie", move || receiver(c.clone(), seen.clone(), t0));
+        let (alpha, seen) = (w.alpha.clone(), at_charlie.clone());
+        sim.client("alpha", async move {
+            let relay = Relay::new(alpha.clone());
+            relay.set_push(push);
+            // bravo hangs: what is sent to it goes nowhere and nothing
+            // comes back. Its messages are the older ones.
+            turmoil::hold("alpha", "bravo");
+            let began = tokio::time::Instant::now();
+            for i in 0..3 {
+                alpha
+                    .send(note("reviewer@bravo", &format!("b{i}"), "tb"), 1)
+                    .unwrap();
+                relay.push(&SimLink, "bravo");
+            }
+            for i in 0..3 {
+                alpha
+                    .send(note("reviewer@charlie", &format!("c{i}"), "tc"), 1)
+                    .unwrap();
+                relay.push(&SimLink, "charlie");
+            }
+            while alpha.head("charlie").is_some() {
+                relay.pump(&SimLink);
+                tokio::time::sleep(Duration::from_millis(if push { 5 } else { 500 })).await;
+            }
+            // The link gives a try two seconds: charlie's three are there
+            // before bravo's first try has even been given up. (One
+            // station after another, they would begin after it.)
+            let took = began.elapsed();
+            let limit = if push { 200 } else { 1_700 };
+            assert!(
+                took < Duration::from_millis(limit),
+                "push {push}: charlie's messages took {took:?}"
+            );
+            assert_eq!(seen.lock().unwrap().len(), 3);
+            assert_eq!(alpha.queued(), 3, "bravo's still wait");
+            // bravo answers again: its own, in order.
+            turmoil::release("alpha", "bravo");
+            relay.back("bravo");
+            drained(&alpha, &relay, Some(Duration::from_millis(500))).await;
+            Ok(())
+        });
+        sim.run().unwrap();
+        assert_eq!(bodies(&charlie, "reviewer"), ["c0", "c1", "c2"]);
+        assert_eq!(bodies(&w.bravo, "reviewer"), ["b0", "b1", "b2"]);
+    }
+}
+
+/// A burst goes at once and in the order it was sent, whatever the thread;
+/// a link cut in the middle of it loses nothing, repeats nothing and keeps
+/// the order. The safety net is never run here: being told is enough.
+#[test]
+fn a_burst_drains_at_once_and_in_order_through_a_cut() {
+    let w = world();
+    let mut sim = quick_sim();
+    let t0 = tokio::time::Instant::now();
+    let (bravo, accepted) = (w.bravo.clone(), w.accepted.clone());
+    sim.host("bravo", move || {
+        receiver(bravo.clone(), accepted.clone(), t0)
+    });
+    let (alpha, seen) = (w.alpha.clone(), w.accepted.clone());
+    sim.client("alpha", async move {
+        let relay = Relay::new(alpha.clone());
+        let send = |range: std::ops::Range<u32>| {
+            let mut ids = vec![];
+            for i in range {
+                let thread = format!("t{}", i % 3);
+                let env = alpha
+                    .send(note("reviewer@bravo", &format!("n{i}"), &thread), 1)
+                    .unwrap();
+                relay.push(&SimLink, "bravo");
+                ids.push(env.id);
+            }
+            ids
+        };
+        let began = tokio::time::Instant::now();
+        let mut ids = send(0..12);
+        drained(&alpha, &relay, None).await;
+        // Twelve round trips of about 20 ms: before, one each half second.
+        let took = began.elapsed();
+        assert!(took < Duration::from_millis(600), "the burst took {took:?}");
+        // A second burst, and the link is cut when part of it is there.
+        ids.extend(send(12..24));
+        while seen.lock().unwrap().len() < 16 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        turmoil::partition("alpha", "bravo");
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        turmoil::repair("alpha", "bravo");
+        drained(&alpha, &relay, None).await;
+        let seen = seen.lock().unwrap();
+        let stored: Vec<&String> = seen.iter().filter(|(_, dup)| !dup).map(|s| &s.0).collect();
+        assert_eq!(
+            stored,
+            ids.iter().collect::<Vec<_>>(),
+            "each once, in the order sent"
+        );
+        Ok(())
+    });
+    sim.run().unwrap();
+    let got = bodies(&w.bravo, "reviewer");
+    assert_eq!(got.len(), 24, "{got:?}");
+}
+
+/// Nothing depends on a sender being told, or on a sender staying alive:
+/// a message nobody was told of is found by the safety net, and a sender
+/// that ends in the middle of its queue is started again by it.
+#[test]
+fn the_safety_net_delivers_what_no_sender_was_told_of_and_restarts_a_sender_that_ended() {
+    let w = world();
+    let mut sim = quick_sim();
+    let t0 = tokio::time::Instant::now();
+    let (bravo, accepted) = (w.bravo.clone(), w.accepted.clone());
+    sim.host("bravo", move || {
+        receiver(bravo.clone(), accepted.clone(), t0)
+    });
+    let alpha = w.alpha.clone();
+    sim.client("alpha", async move {
+        let relay = Relay::new(alpha.clone());
+        // Stored, and nobody told (as after a restart, or a lost wake).
+        alpha.send(note("reviewer@bravo", "n0", "t"), 1).unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(alpha.queued(), 1, "nothing sends without being started");
+        relay.pump(&SimLink);
+        drained(&alpha, &relay, None).await;
+        // A sender ends where it stands, in the middle of a try, with two
+        // more behind it.
+        turmoil::hold("alpha", "bravo");
+        for i in 1..4 {
+            alpha
+                .send(note("reviewer@bravo", &format!("n{i}"), "t"), 1)
+                .unwrap();
+            relay.push(&SimLink, "bravo");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(relay.kill("bravo"));
+        turmoil::release("alpha", "bravo");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(alpha.queued(), 3, "its queue waits: nothing sends");
+        drained(&alpha, &relay, Some(Duration::from_millis(500))).await;
+        assert_eq!(relay.view()["restarted"], json!(1));
+        Ok(())
+    });
+    sim.run().unwrap();
+    assert_eq!(bodies(&w.bravo, "reviewer"), ["n0", "n1", "n2", "n3"]);
+    let accepted = w.accepted.lock().unwrap();
+    assert_eq!(accepted.iter().filter(|(_, dup)| !dup).count(), 4);
+}
+
+/// A task that waits longer than its authorization lasts is refused when
+/// it arrives ("these expire"), once, and its sender is told once, in its
+/// own inbox; it is not sent again by itself, and what waits behind it
+/// goes on. A task that did arrive, at a try whose answer was lost, is not
+/// reported as undelivered when the try after it comes too late.
+#[test]
+fn a_task_held_past_its_authorization_is_refused_once_and_its_sender_is_told() {
+    let w = world();
+    let mut sim = quick_sim();
+    let t0 = tokio::time::Instant::now();
+    let (bravo, accepted) = (w.bravo.clone(), w.accepted.clone());
+    sim.host("bravo", move || {
+        receiver(bravo.clone(), accepted.clone(), t0)
+    });
+    let alpha = w.alpha.clone();
+    sim.client("alpha", async move {
+        let relay = Relay::new(alpha.clone());
+        // The receiver's clock is the simulation's, in milliseconds.
+        let until = t0.elapsed().as_millis() as u64 + 60_000;
+        // Arrives, and its answer is lost.
+        turmoil::partition_oneway("bravo", "alpha");
+        let arrived = alpha
+            .send(task("reviewer@bravo", "arrived", None, Some(until)), 1)
+            .unwrap();
+        let mut tries = relay.tries();
+        relay.push(&SimLink, "bravo");
+        tries.changed().await.unwrap();
+        // Never arrives in time, and a note behind it.
+        turmoil::partition("alpha", "bravo");
+        let late = alpha
+            .send(task("reviewer@bravo", "too late", None, Some(until)), 1)
+            .unwrap();
+        alpha
+            .send(note("reviewer@bravo", "behind it", "other"), 1)
+            .unwrap();
+        relay.push(&SimLink, "bravo");
+        tokio::time::sleep(Duration::from_secs(90)).await;
+        turmoil::repair("alpha", "bravo");
+        relay.back("bravo");
+        drained(&alpha, &relay, Some(Duration::from_millis(500))).await;
+        for _ in 0..4 {
+            relay.pump(&SimLink);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let status = |id: &str| {
+            alpha
+                .recent(None, 100)
+                .iter()
+                .find(|m| m["id"] == json!(id))
+                .and_then(|m| m["status"].as_str().map(String::from))
+        };
+        assert_eq!(status(&arrived.id).as_deref(), Some("delivered"));
+        assert_eq!(
+            status(&late.id).as_deref(),
+            Some("refused: the task authorization has expired")
+        );
+        let told = alpha.inbox(&["author".to_string()], false, false, 1);
+        assert_eq!(told.len(), 1, "told once, of the one refused: {told:?}");
+        assert_eq!(told[0]["thread"], json!(late.thread));
+        assert_eq!(told[0]["kind"], json!("note"));
+        Ok(())
+    });
+    sim.run().unwrap();
+    assert_eq!(bodies(&w.bravo, "reviewer"), ["arrived", "behind it"]);
+    let accepted = w.accepted.lock().unwrap();
+    assert_eq!(
+        accepted.iter().filter(|(_, dup)| !dup).count(),
+        2,
+        "the refused task was never stored there: {accepted:?}"
+    );
 }
 
 /// Received and acted-on are separate acknowledgments.

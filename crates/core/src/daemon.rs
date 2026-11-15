@@ -404,8 +404,8 @@ pub struct Inner {
     pub(crate) db_told: std::sync::atomic::AtomicBool,
     /// The schedule of rounds with the other stations (rounds.rs).
     pub rounds: Arc<crate::rounds::Rounds>,
-    /// When each waiting message for another station may next be tried.
-    pub(crate) relay_retries: crate::relay::Retries,
+    /// The senders of messages for other stations, one per station.
+    pub relay: crate::relay::Relay,
     /// Requests that carry an id: done once, and answered again (rids.rs).
     pub rids: Arc<crate::rids::Rids>,
 }
@@ -509,7 +509,10 @@ impl Daemon {
             restore: Default::default(),
             db_told: Default::default(),
             rounds: crate::rounds::Rounds::new(crate::fleet::ROUND_DEADLINE),
-            relay_retries: Default::default(),
+            relay: crate::relay::Relay::new(crate::relay::MessageStore::new(
+                db.clone(),
+                &cfg.station,
+            )),
             rids: crate::rids::Rids::new(db.clone()),
             trust,
             stops: crate::stops::StopsState::new(db.clone(), &cfg.station),
@@ -727,9 +730,9 @@ impl Daemon {
         // From here on, work that waits for another machine. Each loop can
         // only make itself late.
         let d = self.clone();
-        spawn(&self.perf, remote("relay", 500, 500), move |n| {
-            let d = d.clone();
-            Box::pin(async move { d.pump_relay(n).await })
+        spawn(&self.perf, remote("relay", 500, 500), move |_| {
+            d.pump_relay();
+            Box::pin(async {})
         });
         let d = self.clone();
         spawn(&self.perf, remote("notifications", 2000, 2000), move |_| {
@@ -783,7 +786,7 @@ impl Daemon {
             self.pump_mail();
             self.db_health();
         }
-        self.pump_relay(n).await;
+        self.pump_relay();
         self.pump_recipes().await;
         if n.is_multiple_of(4) {
             self.pump_notifications().await;
