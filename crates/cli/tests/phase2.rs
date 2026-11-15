@@ -970,11 +970,14 @@ fn a_saved_theme_is_used_again_and_a_panes_own_look_wins() {
         "the pane's own look beside the deck's",
         json!(["rgb(244, 246, 248)", "#101820", "#300000"]),
     );
+    // The page shows the look before the station has stored it (the store
+    // was read too soon once, on the Linux CI runner).
+    page.wait("the editor to close", "!document.querySelector('.dialog')");
     let key = format!("alpha/{two}");
-    assert_eq!(
-        s.call("look.get", json!({}))["panes"],
-        json!({ key.as_str(): {"set": {"term.background": "#300000"}} })
-    );
+    let want = json!({ key.as_str(): {"set": {"term.background": "#300000"}} });
+    wait_for("the pane's look to be stored", 10, || {
+        (s.call("look.get", json!({}))["panes"] == want).then_some(())
+    });
 
     // Rule 7: how the deck looks is the owner's. A pane's program changes none of it.
     for (method, params) in [
