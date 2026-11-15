@@ -225,6 +225,8 @@ pub struct Config {
     pub update: UpdateConfig,
     /// Model list prices for cost estimates: fetched automatically.
     pub prices: crate::prices::PricesConfig,
+    /// Switches (`[flags]`), read at start. One that is not named is on.
+    pub flags: BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -273,11 +275,17 @@ impl Default for Config {
             wake_broadcast: None,
             update: UpdateConfig::default(),
             prices: Default::default(),
+            flags: BTreeMap::new(),
         }
     }
 }
 
 impl Config {
+    /// A switch is on unless `[flags]` turns it off.
+    pub fn flag(&self, name: &str) -> bool {
+        self.flags.get(name).copied().unwrap_or(true)
+    }
+
     pub fn load(paths: &Paths) -> anyhow::Result<Config> {
         let file = paths.config_file();
         match std::fs::read_to_string(&file) {

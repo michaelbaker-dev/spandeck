@@ -14,8 +14,9 @@ use serde_json::{json, Value};
 use spandeck_agents::AgentState;
 
 use crate::daemon::{invalid, Daemon, Error, Result, PROTOCOL, VERSION};
-use crate::paths::{new_id, now_ms, Config};
+use crate::paths::{now_ms, Config};
 use crate::relay::{BoxFuture, Envelope, RelayAck, Transport};
+use crate::stops;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Peer {
@@ -713,59 +714,71 @@ impl Daemon {
     // ----------------------------------------------------------------- stop-all
 
     /// Interrupt every agent turn that was running when the stop was issued.
-    /// Processes stay (Guarantees: Stop).
+    /// Processes stay (Guarantees: Stop). Applied once, however often the
+    /// same stop arrives.
     ///
-    /// "When it was issued" is worked out on this station's own clock: the
-    /// station that issued it says how long ago that was (`age_ms`, a length
-    /// of time, which two clocks that disagree still agree on), and this one
-    /// counts back from now. A station from before this sends only its own
-    /// clock's time (`issued_ms`), which is then used as it was.
+    /// "When it was issued" is on this station's own clock. A station that
+    /// announces `stop_cutoff` sends that moment already converted
+    /// (`cutoff_ms`), and a stop that arrives late is still aimed at it. One
+    /// from before says how long ago the stop was issued when it sent it
+    /// (`age_ms`), and this station counts back from now; older still, only
+    /// its own clock's time (`issued_ms`), used as it is. See stops.rs.
     pub fn apply_stop(
         &self,
         stop_id: &str,
         issued_ms: u64,
         age_ms: Option<u64>,
+        cutoff_ms: Option<u64>,
         by: &str,
     ) -> Value {
-        let issued_ms = match age_ms {
-            Some(age) => now_ms().saturating_sub(age),
-            None => issued_ms,
-        };
-        let key = format!("stop:{stop_id}");
-        if let Some(prev) = self.db.kv_get(&key) {
-            // Delivered twice (a retry after a lost reply): same answer, no second stop.
-            return serde_json::from_str(&prev).unwrap_or(json!({"stopped": []}));
-        }
-        let mut stopped = vec![];
-        for p in self.list_panes() {
-            let hit = {
-                let m = p.meta.lock().unwrap();
-                m.exit.is_none()
-                    && m.agent.is_agent()
-                    && matches!(m.state, AgentState::Working | AgentState::NeedsYou)
-                    && m.created_ms <= issued_ms
-                    && m.state_since_ms <= issued_ms.max(m.turn.started_ms)
-                    && m.turn.started_ms <= issued_ms
-            };
-            if hit && self.stop(&p.id, by).is_ok() {
-                stopped.push(p.id.clone());
+        let cutoff_ms = cutoff_ms.filter(|_| self.cfg.flag(stops::CAP));
+        let aim = stops::aim(now_ms(), issued_ms, age_ms, cutoff_ms);
+        let (result, first) = self.stops.applier.apply(stop_id, || {
+            let mut stopped = vec![];
+            for p in self.list_panes() {
+                let work = {
+                    let m = p.meta.lock().unwrap();
+                    stops::Work {
+                        busy: m.exit.is_none()
+                            && m.agent.is_agent()
+                            && matches!(m.state, AgentState::Working | AgentState::NeedsYou),
+                        created_ms: m.created_ms,
+                        state_since_ms: m.state_since_ms,
+                        turn_started_ms: m.turn.started_ms,
+                        busy_since_ms: m.busy_since_ms,
+                    }
+                };
+                if stops::hit(&work, &aim) && self.stop(&p.id, by).is_ok() {
+                    stopped.push(p.id.clone());
+                }
             }
+            json!({"stopped": stopped, "station": self.station, "applied_ms": now_ms()})
+        });
+        if first {
+            self.record(
+                "station.stop_all",
+                None,
+                None,
+                None,
+                Some(by),
+                json!({
+                    "id": stop_id, "issued_ms": aim.ms(),
+                    "aimed_by": if matches!(aim, stops::Aim::Cutoff(_)) { "cutoff" } else { "age" },
+                    "stopped": result["stopped"].as_array().map_or(0, |s| s.len()),
+                }),
+            );
         }
-        let result = json!({"stopped": stopped, "station": self.station, "applied_ms": now_ms()});
-        self.db.kv_set(&key, &result.to_string());
-        self.record(
-            "station.stop_all",
-            None,
-            None,
-            None,
-            Some(by),
-            json!({"id": stop_id, "issued_ms": issued_ms, "stopped": stopped.len()}),
-        );
         result
     }
 
     /// Stop-all for this station, one other station, or the whole fleet.
     /// Each target gets its own row: requested, confirmed or unreachable.
+    ///
+    /// Nothing waits for anything else: this station's agents are stopped,
+    /// the rows are written, and every other station is sent its stop, all
+    /// at the same time and each station within its own five seconds. The
+    /// database is given one second; a row it has not taken by then is held
+    /// in memory, said to be not saved, and written by the stops task.
     pub async fn stop_all(&self, scope: &str, by: &str) -> Result<Value> {
         let issued = now_ms();
         // The fleet is its members: a machine that has not joined cannot
@@ -786,12 +799,9 @@ impl Daemon {
             other => vec![other.to_string()],
         };
         targets.dedup();
-        let mut rows = vec![];
-        for station in targets {
-            let id = new_id("x");
-            let local = station == self.station;
-            match self.fleet.peer(&station) {
-                _ if local => {}
+        // Refused before anything is stopped.
+        for station in targets.iter().filter(|s| **s != self.station) {
+            match self.fleet.peer(station) {
                 None => return Err(Error::NotFound(format!("station {station}"))),
                 Some(p) if !member(&p) => {
                     return Err(invalid(format!(
@@ -800,114 +810,94 @@ impl Daemon {
                 }
                 Some(_) => {}
             }
-            self.db.with(|c| {
-                c.execute(
-                    "INSERT INTO stops(id,station,scope,issued,issued_by,status,updated) VALUES(?1,?2,?3,?4,?5,'requested',?4)",
-                    rusqlite::params![id, station, scope, issued as i64, by],
-                )
-            })?;
-            if local {
-                let result = self.apply_stop(&id, issued, None, by);
-                self.stop_mark(&id, "confirmed", &result);
-            } else {
-                self.stop_try(&id, &station, issued, by).await;
-            }
-            rows.push(id);
         }
-        self.emit("stop.updated", None, None, json!({"ids": rows}));
+        let book = &self.stops.book;
+        let ids = book.issue(&targets, scope, by, issued);
+        let (here, there): (Vec<_>, Vec<_>) = ids
+            .iter()
+            .zip(&targets)
+            .partition(|(_, station)| **station == self.station);
+        // This station: on a thread of its own, since stopping a pane also
+        // writes the ship's log, and a database that is slow to take that
+        // must not hold up the stops for the other stations.
+        let local = here.first().map(|(id, _)| {
+            let (d, id, by) = (self.clone(), id.to_string(), by.to_string());
+            tokio::task::spawn_blocking(move || {
+                let result = d.apply_stop(&id, issued, None, None, &by);
+                d.stops.book.mark(&id, "confirmed", result, now_ms());
+            })
+        });
+        let cutoff = self.cfg.flag(stops::CAP);
+        let sends = futures_join_all(
+            there
+                .iter()
+                .map(|(id, _)| stops::send(book, self, id, cutoff)),
+        );
+        let (_, _, _) = tokio::join!(
+            self.stops_sync(false),
+            async {
+                if let Some(local) = local {
+                    let _ = local.await;
+                }
+            },
+            sends
+        );
+        // What came of each, written too.
+        self.stops_sync(false).await;
+        self.emit("stop.updated", None, None, json!({"ids": ids}));
         Ok(
-            json!({"issued_ms": issued, "stops": self.stops(20).into_iter().filter(|s| rows.iter().any(|r| s["id"] == json!(r))).collect::<Vec<_>>()}),
+            json!({"issued_ms": issued, "stops": self.stops(50).into_iter().filter(|s| ids.iter().any(|r| s["id"] == json!(r))).collect::<Vec<_>>()}),
         )
     }
 
-    fn stop_mark(&self, id: &str, status: &str, result: &Value) {
-        let _ = self.db.with(|c| {
-            c.execute(
-                "UPDATE stops SET status=?2, updated=?3, result=?4 WHERE id=?1",
-                rusqlite::params![id, status, now_ms() as i64, result.to_string()],
-            )
+    /// Write the stops' rows, off the request threads, waiting at most a
+    /// second: a database that is locked or full delays no stop. `load`:
+    /// first take in the rows that wait in the database (after a restart).
+    /// True when every row is written.
+    async fn stops_sync(&self, load: bool) -> bool {
+        let book = self.stops.book.clone();
+        let job = tokio::task::spawn_blocking(move || {
+            if load {
+                book.load_waiting();
+            }
+            book.save()
         });
-    }
-
-    async fn stop_try(&self, id: &str, station: &str, issued: u64, by: &str) {
-        match self
-            .fleet
-            .call(
-                station,
-                "stop.apply",
-                // How long ago, for the station's own clock; and when by
-                // this one's, for a station from before it read the first.
-                json!({"id": id, "issued_ms": issued, "age_ms": now_ms().saturating_sub(issued), "by": by}),
-            )
-            .await
-        {
-            Ok(result) => self.stop_mark(id, "confirmed", &result),
-            // Unreachable is its own state. It is never shown as stopped.
-            Err(e) => self.stop_mark(id, "unreachable", &json!({"error": e})),
-        }
-        self.emit("stop.updated", None, None, json!({"ids": [id]}));
+        matches!(
+            tokio::time::timeout(Duration::from_secs(1), job).await,
+            Ok(Ok(true))
+        )
     }
 
     /// A stop for an unreachable station is delivered when it comes back.
+    /// Run by its own task (daemon.rs): every two seconds, and at once when
+    /// the list of stations changes.
     pub(crate) async fn pump_stops(&self) {
-        let waiting: Vec<(String, String, i64, Option<String>)> = self
-            .db
-            .with(|c| {
-                let mut stmt = c.prepare("SELECT id, station, issued, issued_by FROM stops WHERE status IN ('requested','unreachable') AND station != ?1")?;
-                let rows = stmt.query_map([&self.station], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-                rows.collect()
-            })
-            .unwrap_or_default();
-        for (id, station, issued, by) in waiting {
-            match self.fleet.peer(&station).map(|p| p.state) {
-                // A member that answers, on any version: it is tried.
-                Some(state) if state == "online" || state == "update_needed" => {
-                    self.stop_try(&id, &station, issued as u64, by.as_deref().unwrap_or("you"))
-                        .await;
-                }
-                // It is no longer (or never was) in this fleet: the stop
-                // cannot be delivered, and is not left saying it will be.
-                Some(state) if state == "not_linked" => {
-                    let _ = self
-                        .db
-                        .with(|c| c.execute("DELETE FROM stops WHERE id=?1", [&id]));
-                    self.record(
-                        "stop.dropped",
-                        None,
-                        None,
-                        None,
-                        None,
-                        json!({"id": id, "station": station, "why": "not in this fleet"}),
-                    );
-                    self.emit("stop.updated", None, None, json!({"ids": [id]}));
-                }
-                _ => {}
-            }
+        let book = &self.stops.book;
+        let unsaved = book.unsaved();
+        let saved = self.stops_sync(true).await;
+        let round = stops::deliver_waiting(book, self, self.cfg.flag(stops::CAP)).await;
+        for (id, station) in &round.dropped {
+            self.record(
+                "stop.dropped",
+                None,
+                None,
+                None,
+                None,
+                json!({"id": id, "station": station, "why": "not in this fleet"}),
+            );
+        }
+        let mut ids: Vec<&String> = round.tried.iter().collect();
+        ids.extend(round.dropped.iter().map(|(id, _)| id));
+        if !round.tried.is_empty() {
+            self.stops_sync(false).await;
+        }
+        if !ids.is_empty() || (unsaved > 0 && saved) {
+            self.emit("stop.updated", None, None, json!({"ids": ids}));
         }
     }
 
     pub fn stops(&self, limit: u32) -> Vec<Value> {
-        self.db
-            .with(|c| {
-                let mut stmt = c.prepare("SELECT id,station,scope,issued,issued_by,status,updated,result FROM stops ORDER BY issued DESC, rowid DESC LIMIT ?1")?;
-                let rows = stmt.query_map([limit], |r| {
-                    let result: String = r.get(7)?;
-                    let status: String = r.get(5)?;
-                    Ok(json!({
-                        "id": r.get::<_, String>(0)?, "station": r.get::<_, String>(1)?, "scope": r.get::<_, String>(2)?,
-                        // The station that issued it, which keeps the row and delivers it,
-                        // and how long ago that was by its own clock.
-                        "from": self.station,
-                        "age_ms": now_ms().saturating_sub(r.get::<_, i64>(3)? as u64),
-                        "issued_ms": r.get::<_, i64>(3)?, "by": r.get::<_, Option<String>>(4)?,
-                        "label": match status.as_str() { "confirmed" => "stop confirmed", "unreachable" => "station unreachable", _ => "stop requested" },
-                        "status": status, "updated_ms": r.get::<_, i64>(6)?,
-                        "result": serde_json::from_str::<Value>(&result).unwrap_or(Value::Null),
-                    }))
-                })?;
-                rows.collect()
-            })
-            .unwrap_or_default()
+        self.stops.book.list(limit, now_ms())
     }
 
     /// Recall across stations: each station answers from its own scrubbed copy.
@@ -942,6 +932,65 @@ impl Daemon {
         self.fleet
             .peer(station)
             .ok_or_else(|| invalid(format!("station {station} is not in the fleet")))
+    }
+}
+
+/// Sending a stop from a running station: its clock, what it has read of
+/// the other station's, and the calls over the fleet's HTTP client (so a
+/// clock reading and the stop that follows it share a connection).
+impl stops::StopLink for Daemon {
+    fn now_ms(&self) -> u64 {
+        now_ms()
+    }
+
+    fn samples(&self, station: &str) -> (Vec<crate::perf::ClockSample>, u64) {
+        (self.perf.clock_samples(station), crate::perf::secs())
+    }
+
+    fn peer(&self, station: &str) -> Option<(String, bool)> {
+        self.fleet.peer(station).map(|p| {
+            let cutoff = p.info["caps"]
+                .as_array()
+                .is_some_and(|caps| caps.iter().any(|c| c == stops::CAP));
+            (p.state, cutoff)
+        })
+    }
+
+    fn hello<'a>(
+        &'a self,
+        station: &'a str,
+    ) -> BoxFuture<'a, std::result::Result<stops::Hello, String>> {
+        Box::pin(async move {
+            let peer = self
+                .fleet
+                .peer(station)
+                .ok_or_else(|| format!("station {station} is not in the fleet"))?;
+            let (sent, began) = (now_ms(), std::time::Instant::now());
+            let h = self
+                .fleet
+                .call_open(&peer.addr, "station.hello", json!({}))
+                .await?;
+            let theirs = h.get("now_ms").and_then(|n| n.as_u64());
+            // The reading is kept with the looks' own, for the next stop
+            // and for the Performance page.
+            self.perf
+                .link_hello(&peer.addr, began.elapsed(), sent, theirs);
+            Ok(stops::Hello {
+                station: h.get("station").and_then(|s| s.as_str()).map(String::from),
+                now_ms: theirs,
+                cutoff: h["caps"]
+                    .as_array()
+                    .is_some_and(|caps| caps.iter().any(|c| c == stops::CAP)),
+            })
+        })
+    }
+
+    fn apply<'a>(
+        &'a self,
+        station: &'a str,
+        params: Value,
+    ) -> BoxFuture<'a, std::result::Result<Value, String>> {
+        Box::pin(self.fleet.call(station, "stop.apply", params))
     }
 }
 

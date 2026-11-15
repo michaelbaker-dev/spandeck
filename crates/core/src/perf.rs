@@ -261,6 +261,10 @@ struct Slow {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClockSample {
     pub at_sec: u64,
+    /// This station's own clock when the reading was taken. A reading
+    /// whose age by this clock and by `at_sec` differ was taken before
+    /// this station slept or its clock was set: stops.rs does not use it.
+    pub at_ms: u64,
     /// Theirs minus ours, taking the answer to have been written halfway
     /// through the round trip.
     pub offset_ms: i64,
@@ -457,10 +461,22 @@ impl Perf {
             }
             link.clock.push(ClockSample {
                 at_sec: secs(),
+                at_ms: sent_ms + rtt_ms,
                 offset_ms: theirs as i64 - (sent_ms + rtt_ms / 2) as i64,
                 rtt_ms,
             });
         }
+    }
+
+    /// The readings of a station's clock, oldest first (their times are
+    /// counted on `secs`). A stop's cut-off is converted with them.
+    pub fn clock_samples(&self, station: &str) -> Vec<ClockSample> {
+        let links = self.links.lock().unwrap();
+        links
+            .values()
+            .find(|l| l.station == station)
+            .map(|l| l.clock.clone())
+            .unwrap_or_default()
     }
 
     /// What is known of a station's clock against this one's.
@@ -765,6 +781,7 @@ mod tests {
     fn a_clock_difference_is_the_best_of_the_last_readings_and_goes_stale() {
         let s = |at_sec, offset_ms, rtt_ms| ClockSample {
             at_sec,
+            at_ms: 0,
             offset_ms,
             rtt_ms,
         };

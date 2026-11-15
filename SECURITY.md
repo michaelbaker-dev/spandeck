@@ -89,6 +89,14 @@ days, not hours.
   already read your Tailscale traffic. A call refused only for its time is told so
   ("clock"), and only when its signature was made with the fleet key; a station also
   says its clock in the unsigned `station.hello`, to any device under your login.
+- A fleet stop is aimed using the stopped station's own statement of its clock, from
+  that unsigned `station.hello` (15 Nov 2026). The stop itself (`stop.apply`) is still a
+  station's signed call, and `stop.all` is still yours alone: no agent has either. A
+  machine that answers at a station's address with a false clock can shift which of
+  that station's own turns the stop takes, and nothing else: the station never takes
+  the moment to be later than the stop's age gives, so the worst a false clock does is
+  leave a turn running that should have been stopped, which a machine in that position
+  could do anyway by not answering. An answer that names another station is not used.
 - Counters for the Performance page and the list of your Tailscale devices with their
   key expiry dates (`perf.get`, `tailnet.view`, `tailnet.report`) are for you and for a
   station's signed call. No agent has them, and `station.info`, which an agent can
