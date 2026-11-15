@@ -444,7 +444,7 @@ The owner showed two pictures of the Claude app on a phone: a list of sessions w
 - Pause: no new work is delivered; the current turn finishes.
 - Stop: the agent's current turn is interrupted; the process stays.
 - Kill: the process ends.
-- A stop never reports a program it could not reach as stopped: a program that is not reading its terminal is listed as not reading, and the owner is told to use Kill (15 Nov 2026).
+- A stop never reports a program it could not reach as stopped: a program that is not reading its terminal is listed as not reading, and the owner is told to use Kill (15 Nov 2026). What a stop can know is whether the terminal took the key, not whether the program read it: while a terminal that nobody reads still has room (its first few kilobytes), the key goes in and the stop says stopped.
 - A stopped agent stays stopped: no mail reaches it by any road, typed or through a hook, until the owner releases it. An agent the station started again after a restart waits for the owner the same way. (Both decided by default on 15 Nov 2026 and switchable per station; see A stopped agent stays stopped.)
 - Pause, the stop's mark and the restart's mark are apart: releasing a pane never ends its Pause, and no mail reaches a paused agent by any road.
 - Only the owner releases a pane, and never by looking at it; no agent and no other station can.

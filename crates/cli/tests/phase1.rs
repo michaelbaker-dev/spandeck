@@ -650,7 +650,11 @@ fn a_paste_into_a_program_that_is_not_reading_does_not_stop_the_station() {
     // The station still answers, and the pane can still be ended.
     assert_eq!(s.call("station.info", json!({}))["station"], json!("alpha"));
     // Stop answers too, and never claims a program it could not reach
-    // (DECISIONS.md, "A stopped agent stays stopped").
+    // (DECISIONS.md, "A stopped agent stays stopped"). The terminal takes
+    // the first few kilobytes whoever is reading; a stop that comes before
+    // it is full still gets its key in, and says stopped. Give the paste the
+    // moment it needs to fill the terminal.
+    std::thread::sleep(std::time::Duration::from_millis(700));
     let e = s.try_call("pane.stop", json!({"pane": pane})).unwrap_err();
     assert_eq!(e.code, "not_reading", "{}", e.message);
     s.call("pane.kill", json!({"pane": pane}));
