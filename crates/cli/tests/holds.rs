@@ -136,6 +136,10 @@ fn a_stopped_agent_stays_stopped() {
     // pane (as after an agent update); then released.
     let second = agent(&s, "second", json!([]));
     s.wait_state(&second, "idle");
+    // A restart resumes only a session the agent has named.
+    wait_for("the second agent's session id", 10, || {
+        s.pane(&second)["session_id"].as_str().map(String::from)
+    });
     assert_eq!(
         s.call("pane.pause", json!({"pane": second, "paused": true}))["saved"],
         json!(true)
