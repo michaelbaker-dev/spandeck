@@ -720,7 +720,7 @@ impl Proxy {
                         };
                         if spawn
                             && lose
-                                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                                     n.checked_sub(1)
                                 })
                                 .is_ok()
