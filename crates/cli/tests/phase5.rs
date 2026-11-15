@@ -644,9 +644,9 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     // The drag is repeated until it takes: on a slow machine the first one
     // landed while the last lines were still being drawn, and the view went
     // back to the end (seen twice on the Mac CI runner).
-    page.wait(
-        "earlier output after dragging down",
-        &format!(
+    // Still fails now and then on the Mac CI runner only (never on a real
+    // Mac): when it does, say what the page showed, so the cause can be found.
+    let dragged = format!(
             "(() => {{ // The finger lands on the terminal's own element, as on a real phone.
            if (!{rows}.includes('1300')) return /1[0-2][0-9][0-9]/.test({rows});
            const el = document.querySelector('.phone-pane .xterm-screen');
@@ -655,8 +655,23 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
            for (let y = 220; y <= 700; y += 20) el.dispatchEvent(touch('touchmove', y));
            el.dispatchEvent(touch('touchend', null));
            return false; }})()"
-        ),
-    );
+        );
+    let start = std::time::Instant::now();
+    loop {
+        let v = page.js(&dragged);
+        if v == json!(true) {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(20) {
+            let seen = page.js(
+                "(() => { const v = document.querySelector('.phone-pane .xterm-viewport'); const r = document.querySelector('.phone-pane .xterm-rows'); const s = document.querySelector('.phone-pane .xterm-screen'); return JSON.stringify({scrollTop: v && v.scrollTop, scrollHeight: v && v.scrollHeight, clientHeight: v && v.clientHeight, rowCount: r && r.children.length, rowHeight: r && r.firstElementChild && r.firstElementChild.getBoundingClientRect().height, screen: s && [s.clientWidth, s.clientHeight], hidden: document.hidden, lastRows: r && r.innerText.split('\\n').filter(x => x.trim()).slice(-3)}); })()",
+            );
+            panic!(
+                "timed out waiting for earlier output after dragging down; the page showed {seen}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 
     // Found from a real phone's drag reports: Claude Code runs full-screen and
     // listens for the mouse, so it has to be told to scroll. A drag over such a
