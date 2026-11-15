@@ -18,6 +18,10 @@ use std::time::{Duration, Instant};
 use common::*;
 use serde_json::{json, Value};
 
+// The numbers differ between Linux and macOS.
+const SIGSTOP: i32 = if cfg!(target_os = "macos") { 17 } else { 19 };
+const SIGCONT: i32 = if cfg!(target_os = "macos") { 19 } else { 18 };
+
 /// A TCP relay that holds everything it passes for `delay` milliseconds,
 /// each way: a station behind a slow link.
 fn slow_link(to: u16, delay: Arc<AtomicU64>) -> u16 {
@@ -152,7 +156,7 @@ fn a_frozen_station_and_a_slow_one_delay_nobody_else() {
     // bravo stops answering (its name sorts first: whatever went through
     // the stations in order met it first), charlie's link takes a quarter
     // of a second each way, and a message waits for bravo.
-    bravo.signal(19);
+    bravo.signal(SIGSTOP);
     bravo.wait_frozen();
     delay.store(250, Ordering::SeqCst);
     alpha.call(
@@ -183,7 +187,7 @@ fn a_frozen_station_and_a_slow_one_delay_nobody_else() {
             .collect::<Vec<_>>()
             .join("; ")
     );
-    bravo.signal(18);
+    bravo.signal(SIGCONT);
 
     // The local wake-up is the 1 s poll whatever the others do: the brief's
     // bound (the poll plus the idle rule, generous), and no worse than
