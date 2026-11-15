@@ -2313,7 +2313,7 @@ dependencies = [
 
 [[package]]
 name = "spandeck"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2340,7 +2340,7 @@ dependencies = [
 
 [[package]]
 name = "spandeck-agents"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "insta",
@@ -2351,7 +2351,7 @@ dependencies = [
 
 [[package]]
 name = "spandeck-archive"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "proptest",
@@ -2365,7 +2365,7 @@ dependencies = [
 
 [[package]]
 name = "spandeck-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2393,7 +2393,7 @@ dependencies = [
 
 [[package]]
 name = "spandeck-terminal"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -2413,7 +2413,7 @@ dependencies = [
 
 [[package]]
 name = "spandeck-web"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
