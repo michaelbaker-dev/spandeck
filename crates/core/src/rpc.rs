@@ -67,6 +67,7 @@ const PEER_METHODS: &[&str] = &[
     "fleet.rekey",
     "project.link.record",
     "project.link.findings",
+    "notify.relay",
 ];
 
 /// Methods that act from the station the owner is using and are never
@@ -1083,6 +1084,15 @@ impl Daemon {
             "notify.read" => {
                 self.notifications_read(opt(&params, "id"));
                 json!({"ok": true})
+            }
+            // A station of this fleet saying what it raised, for the decks
+            // connected here. A peer's signed call only: the owner and an
+            // agent have no use for it.
+            "notify.relay" => {
+                if caller.authority != Authority::Peer {
+                    return Err(Error::Denied("notify.relay is for another station".into()));
+                }
+                self.notify_relayed(by, &params)
             }
 
             // ------------------------------------------------------- upgrade

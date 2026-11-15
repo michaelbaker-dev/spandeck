@@ -142,6 +142,16 @@ anything else in the repo or the Features tab, this file wins. Copied 13 Nov 202
 - **On a phone**, where a layout is one pane at a time, a hidden pane is left out of the order that Previous, Next and a swipe go through, and is drawn dashed and dim in the map (not dimmed when it needs the owner). Tapping it there looks at it without changing the layout; "Hide" and "Show" beside the pane's name change it, for every device.
 - Hiding is a change to a layout, so it is the owner's by the methods a layout is already saved with (`project.layout.save`, `deck.layout.save`): no new method, and nothing for an agent.
 
+## The same view from every station (15 Nov 2026, the owner's requirement)
+
+"It's so important that no matter where I go, it's all the same view from spandeck. I hop around across multiple machines and now I see my phone is different from my m5 and that different from rtx6000... these must stay the same no matter which machine I'm on ... I guess the only thing that would be different would be a machine that didn't join a fleet yet."
+
+**The rule: a Control Deck shows the same things whichever station of the fleet serves it.** Whatever the deck shows is one of three kinds, and nothing may be a fourth: kept the same on every station (a synced document, or the roster); fetched from the station that holds it, from every station that answers, with a station that does not answer named as not counted; or the device's own. What is only the serving station's is said to be, by name. A machine that has not joined the fleet is the one exception the owner named.
+
+- **The inbox is the fleet's** (before: the serving station's notices, unread count, "Mark all read" and "Messages to you" only). Each station keeps the notices it raised and the messages sent to "you" there; the deck asks every station that answers, and each entry says which station it is from. A notice is marked read at the station that holds it; "Mark all read" goes to every station that answers. A station that does not answer is named under "Not counted", as the Usage view does, and what it last said stays on screen.
+- **A notice raised at any station reaches a deck served by any other at once.** The station that raises one tells the other stations (`notify.relay`, a station's signed call only: refused from the owner and from an agent), and each passes it to the decks connected to it as the same `notify.new` event, with the station it is from. Nothing is stored at the stations told. What is passed is text from another machine: bounded, control characters dropped, a link kept only if it is a place in the deck, shown as text. That an inbox was read is passed the same way. The deck also announces a notice it first sees in a station's list, so one from a station that does not tell the others (0.4.0) is announced at the deck's next look (2.5 s, while the page is in front; not while it is in the background).
+- **One thing every station raised is one entry.** A request to be let in is raised at each station; the deck shows notices with the same kind, title and text and no pane as one, naming the stations, announces it once, and marks every copy read.
+
 ## AgentVault (14 Nov 2026)
 
 - spandeck and AgentVault stay separate programs. spandeck works without a vault.

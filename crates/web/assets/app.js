@@ -96,7 +96,7 @@ async function refresh() {
   await Promise.all(stations.map(refreshStation));
   const lists = await Promise.all(stations.map(st => api.on(st, 'approval.list').catch(() => [])));
   S.approvals = lists.flat();
-  try { S.notes = await api.call('notify.list', { limit: 60 }); } catch (e) { /* keep */ }
+  await loadNotes(stations);
   try { S.trust = await api.call('trust.status'); } catch (e) { /* keep */ }
   try { S.adding = await api.call('fleet.add_status'); addChanged(); } catch (e) { /* keep */ }
   // Always from the station the deck was opened on: every station has the same copy.
@@ -107,6 +107,41 @@ async function refresh() {
   vaultAtOpen();
   migrateWorkspaces();
 }
+
+// The inbox is the whole fleet's: each station keeps the notices it raised,
+// and every station that answers is asked for them. A station that does not
+// answer is named as not counted (S.notesAway), never passed over in silence.
+// A notice every station raised for the same thing (a request to be let in)
+// is one entry that names them all.
+const fleetAway = () => S.fleet.stations.filter(s => s.state !== 'online' && s.state !== 'not_linked').map(s => s.station);
+const announced = new Set();
+let notesSeeded = false;
+async function loadNotes(stations) {
+  const failed = [];
+  const lists = await Promise.all(stations.map(st => api.on(st, 'notify.list', { limit: 60 })
+    .then(list => list.map(n => ({ ...n, station: st })))
+    // What it last said is kept on screen; it is named as not counted.
+    .catch(() => { failed.push(st); return S.notes.flatMap(n => n.at.filter(a => a.station === st).map(a => ({ ...n, ...a }))); })));
+  const merged = new Map();
+  for (const n of lists.flat().sort((a, b) => b.ts - a.ts)) {
+    const key = n.pane ? `${n.station}/${n.id}` : `${n.kind}\n${n.title}\n${n.body}`;
+    const had = merged.get(key);
+    if (had) { if (!had.at.some(a => a.station === n.station)) had.at.push({ station: n.station, id: n.id }); had.read = had.read && n.read; }
+    else merged.set(key, { ...n, at: [{ station: n.station, id: n.id }] });
+  }
+  S.notes = [...merged.values()].slice(0, 120);
+  S.notesAway = [...new Set([...fleetAway(), ...failed])].sort();
+  // A notice from a station that does not tell the others (one from before
+  // it could) is announced when it first shows in the list.
+  for (const n of S.notes) {
+    const fresh = n.at.filter(a => !announced.has(`${a.station}/${a.id}`));
+    for (const a of n.at) announced.add(`${a.station}/${a.id}`);
+    if (notesSeeded && !n.read && fresh.length === n.at.length) notifyBrowser(n);
+  }
+  notesSeeded = true;
+}
+// Mark a notice read at every station that holds it.
+const readNote = (n) => Promise.all(n.at.map(a => api.on(a.station, 'notify.read', { id: a.id }).catch(() => {})));
 
 // The look document: themes, and what the deck, a layout or a pane uses. Like
 // the deck document it is asked of the station the deck was opened on.
@@ -151,15 +186,22 @@ api.onEvent((ev) => {
   }
   // A line from a machine being added: shown as it arrives, nothing re-read.
   if (ev.kind === 'fleet.add.output') { if (addDlg) addDlg.line(ev.data); return; }
-  if (ev.kind === 'notify.new') notifyBrowser(ev.data);
+  // Raised here, or at another station of the fleet, which told this one.
+  if (ev.kind === 'notify.new') { announced.add(`${ev.data.station}/${ev.data.id}`); notifyBrowser(ev.data); }
   if (ev.kind === 'connection.restored') { for (const t of S.terms.values()) t.attach(); }
   if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events|vault|trust|deck|look)\./.test(ev.kind)) refreshSoon();
 });
 
+const lastSaid = new Map(); // what was announced -> when, so one thing every station raised is said once
 function notifyBrowser(n) {
-  toast(n.title + (n.body ? ' — ' + n.body : ''), n.kind === 'error' ? 'error' : 'info');
+  const same = `${n.kind}\n${n.title}\n${n.body}`, now = Date.now();
+  for (const [k, at] of lastSaid) if (now - at > 15000) lastSaid.delete(k);
+  if (lastSaid.has(same)) return;
+  lastSaid.set(same, now);
+  const from = n.station && n.station !== api.station ? ` · ${n.station}` : '';
+  toast(n.title + from + (n.body ? ' — ' + n.body : ''), n.kind === 'error' ? 'error' : 'info');
   if (document.visibilityState !== 'visible' && 'Notification' in window && Notification.permission === 'granted') {
-    const note = new Notification(n.title, { body: n.body || '', tag: n.id });
+    const note = new Notification(n.title + from, { body: n.body || '', tag: n.id });
     note.onclick = () => { window.focus(); if (n.url) location.hash = n.url.replace(/^\/#/, '#'); };
   }
 }
@@ -528,19 +570,26 @@ function approvalsPanel() {
     : h('p', {}, 'Nothing is waiting for your approval.'));
 }
 
-function inboxPanel() {
-  api.call('msg.inbox', { all: true, peek: true }).then((msgs) => {
-    dialog('Inbox', () => h('div', {},
-      h('div', { class: 'row end' }, h('button', { class: 'mini', onclick: () => { api.call('notify.read', {}); api.call('msg.inbox', {}); refreshSoon(); } }, 'Mark all read'),
-        'Notification' in window && Notification.permission === 'default' ? h('button', { class: 'mini', onclick: () => Notification.requestPermission() }, 'Enable browser notifications') : null),
-      h('h3', {}, 'Messages to you'),
-      msgs.length ? h('div', { class: 'list' }, msgs.slice().reverse().map(m => h('div', { class: 'note' + (m.read ? '' : ' unread') },
-        h('div', {}, h('b', {}, m.from), h('span', { class: 'muted' }, ` · ${m.kind} · ${ago(m.ts)} ago`)), h('div', { class: 'pre' }, m.body)))) : h('p', { class: 'muted' }, 'No messages.'),
-      h('h3', {}, 'Notifications'),
-      S.notes.length ? h('div', { class: 'list' }, S.notes.map(n => h('button', { class: 'list-row note' + (n.read ? '' : ' unread'), onclick: () => { api.call('notify.read', { id: n.id }); if (n.url) location.hash = n.url.replace(/^\/#/, '#'); } },
-        h('span', { class: 'dot ' + (n.kind === 'approval' ? 'needs_you' : n.kind) }), h('b', {}, n.title), h('span', { class: 'muted' }, n.body), h('span', { class: 'grow' }),
-        h('span', { class: 'muted' }, n.pushed === 2 ? 'held (you were here) · ' : n.pushed === 1 ? 'pushed · ' : '', ago(n.ts))))) : h('p', { class: 'muted' }, 'No notifications.')), { wide: true });
-  }).catch(e => toast(e.message, 'error'));
+// One inbox for the fleet: what agents wrote to you and what was raised for
+// you on every station that answers, each entry with the station it is from.
+async function inboxPanel() {
+  const stations = onlineStations(), failed = [];
+  const msgs = (await Promise.all(stations.map(st => api.on(st, 'msg.inbox', { all: true, peek: true })
+    .then(list => list.map(m => ({ ...m, station: st }))).catch(() => { failed.push(st); return []; })))).flat().sort((a, b) => b.ts - a.ts);
+  const away = [...new Set([...(S.notesAway || []), ...failed])].sort();
+  // Each notice is marked at the station that holds it; so is each message.
+  const readAll = () => Promise.all(stations.flatMap(st => [api.on(st, 'notify.read', {}).catch(() => {}), api.on(st, 'msg.inbox', {}).catch(() => {})])).then(() => refreshSoon(0));
+  dialog('Inbox', (close) => h('div', {},
+    h('div', { class: 'row end' }, h('button', { class: 'mini', onclick: () => readAll().then(close) }, 'Mark all read'),
+      'Notification' in window && Notification.permission === 'default' ? h('button', { class: 'mini', onclick: () => Notification.requestPermission() }, 'Enable browser notifications') : null),
+    away.length ? h('p', { class: 'muted small' }, `Not counted, because ${away.length === 1 ? 'it is' : 'they are'} not reachable: ${away.join(', ')}.`) : null,
+    h('h3', {}, 'Messages to you'),
+    msgs.length ? h('div', { class: 'list' }, msgs.map(m => h('div', { class: 'note' + (m.read ? '' : ' unread') },
+      h('div', {}, h('b', {}, m.from), h('span', { class: 'muted' }, ` · ${m.station} · ${m.kind} · ${ago(m.ts)} ago`)), h('div', { class: 'pre' }, m.body)))) : h('p', { class: 'muted' }, 'No messages.'),
+    h('h3', {}, 'Notifications'),
+    S.notes.length ? h('div', { class: 'list' }, S.notes.map(n => h('button', { class: 'list-row note' + (n.read ? '' : ' unread'), onclick: () => { readNote(n).then(() => refreshSoon(0)); if (n.url) { close(); location.hash = n.url.replace(/^\/#/, '#'); } } },
+      h('span', { class: 'dot ' + (n.kind === 'approval' ? 'needs_you' : n.kind) }), h('b', {}, n.title), h('span', { class: 'muted' }, n.body), h('span', { class: 'grow' }),
+      h('span', { class: 'muted' }, n.at.map(a => a.station).join(', '), ' · ', n.pushed === 2 ? 'held (you were here) · ' : n.pushed === 1 ? 'pushed · ' : '', ago(n.ts))))) : h('p', { class: 'muted' }, 'No notifications.')), { wide: true });
 }
 
 function stopAllMenu(e) {
