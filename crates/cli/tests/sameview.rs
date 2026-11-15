@@ -81,13 +81,42 @@ fn a_deck_opened_on_either_station_shows_the_same() {
         "the count to go",
         &format!("{inbox} && !{inbox}.querySelector('.count')"),
     );
-    // The same from the other side.
+
+    // ---- Fault 4: a leaf of a global layout that named no station meant
+    // "the station serving this deck", so one layout showed bravo's pane on
+    // bravo and nothing on alpha. Such a leaf is given the station its pane
+    // is found on, once, and the layout then shows that pane everywhere.
+    let scratch = b.call("pane.spawn", json!({"agent": "shell", "name": "scratch"}));
+    let scratch = scratch["id"].as_str().unwrap();
+    a.call(
+        "deck.layout.save",
+        json!({"layout": {"name": "all", "tree": {"id": scratch}}}),
+    );
+    wait_for("the leaf to be given bravo, where its pane is", 15, || {
+        let tree = a.call("deck.get", json!({}))["layouts"][0]["tree"].clone();
+        (tree == json!({"id": scratch, "station": "bravo"})).then_some(())
+    });
+    let shown = "[...document.querySelectorAll('.station-main .pane')].map(p => p.dataset.pane)";
+    page.goto("#/l/all");
+    let on_alpha = page.wait(
+        "the layout on alpha's deck",
+        &format!("(p => p.length ? p : null)({shown})"),
+    );
+    assert_eq!(on_alpha, json!([scratch]));
+
+    // The same from the other side: the inbox, and the layout.
     a.call("msg.send", json!({"to": "you", "body": "deploy is done"}));
     page.visit(&b);
     page.wait(
         "alpha's notice to be counted on bravo's deck",
         &format!("{inbox}?.querySelector('.count')?.innerText === '1'"),
     );
+    page.goto("#/l/all");
+    let on_bravo = page.wait(
+        "the layout on bravo's deck",
+        &format!("(p => p.length ? p : null)({shown})"),
+    );
+    assert_eq!(on_bravo, on_alpha);
 }
 
 #[test]

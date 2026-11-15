@@ -69,7 +69,10 @@ impl Pin {
 #[serde(default)]
 pub struct Deck {
     pub updated_ms: u64,
-    /// Global layouts. A leaf with no station means the station being viewed.
+    /// Global layouts. Each leaf names its station: the Control Deck saves
+    /// it so, and gives one saved without (through this API, or by a deck
+    /// of 0.4.0 or earlier) the station its pane is found on. Until then such a
+    /// leaf is on no station; it is never read as "the station being viewed".
     pub layouts: Vec<Layout>,
     pub pins: Vec<Pin>,
     /// Which stations' changes this copy holds (sync.rs). A station from

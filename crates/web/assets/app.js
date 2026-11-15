@@ -106,6 +106,7 @@ async function refresh() {
   update();
   vaultAtOpen();
   migrateWorkspaces();
+  bindGlobalLeaves();
 }
 
 // The inbox is the whole fleet's: each station keeps the notices it raised,
@@ -1781,8 +1782,39 @@ function saveLayout(lay) {
   }, 250);
 }
 
-// How a layout names and finds a pane.
-const leafStation = (lay, n) => n.station || lay.station || api.station;
+// How a layout names and finds a pane. A project's layout is kept on one
+// station, and a leaf with no station is on that one. A global layout is the
+// same on every station, so each of its leaves names its station; one that
+// does not (saved through the API, or by an older deck, for which it meant
+// "the station this deck is served by") is on no station until it is given
+// the one its pane is found on (bindGlobalLeaves). It is never read as the
+// serving station: that made one layout show different panes on each station.
+const leafStation = (lay, n) => n.station || lay.station || null;
+// The stations a leaf with no station could mean: those where its pane is.
+const leafCandidates = (n) => onlineStations().filter(st => n.id !== undefined ? panesOf(st).some(p => p.id === n.id)
+  : panesOf(st).some(p => !p.exited && (p.project || null) === (n.project || null) && p.name === n.pane)
+    || (!!n.project && (S.projects.get(st) || []).some(pr => pr.name === n.project && (pr.definition?.pane || []).some(x => x.name === n.pane))));
+// Give each such leaf its station, once, and save: from then on the layout
+// names the same panes wherever it is opened. A pane's id is its own on every
+// station, so a pane in no project is bound where it is found. A named pane
+// could be in a project of the same name on a station that is away, so it is
+// bound only when one station has it and every station of the fleet answers.
+// Otherwise the leaf waits, and says so where it would be shown.
+function bindGlobalLeaves() {
+  if (!S.loaded) return;
+  const allHere = !fleetAway().length && onlineStations().every(st => S.panes.has(st) && S.projects.has(st));
+  for (const def of S.deck.layouts || []) {
+    const lay = findLayout('global:' + def.name);
+    if (!lay || lay.cache.dirty) continue;
+    let bound = 0;
+    for (const n of leaves(lay.cache.tree)) {
+      if (n.station) continue;
+      const where = leafCandidates(n);
+      if (where.length === 1 && (n.id !== undefined || allHere)) { n.station = where[0]; bound += 1; }
+    }
+    if (bound) saveLayout(lay);
+  }
+}
 function leafPane(lay, n) {
   const st = leafStation(lay, n);
   if (n.id !== undefined) return panesOf(st).find(p => p.id === n.id) || null;
@@ -1793,7 +1825,7 @@ function leafPane(lay, n) {
 // "web/logs" (another project), "spark2:web/logs" (another station),
 // "#p-01abc" (a pane in no project).
 function leafRef(lay, n) {
-  const st = lay.station ? (n.station && n.station !== lay.station ? n.station : '') : (n.station || api.station);
+  const st = lay.station ? (n.station && n.station !== lay.station ? n.station : '') : (n.station || '');
   const at = st ? st + ':' : '';
   if (n.id !== undefined) return `${at}#${n.id}`;
   return at + (n.project && (n.project !== lay.project || st) ? n.project + '/' : '') + n.pane;
@@ -1815,7 +1847,10 @@ function paneLeaf(lay, st, p) {
 function leafGuest(lay, n) {
   const st = leafStation(lay, n);
   const project = n.id !== undefined ? null : (n.project || lay.project || null);
-  return [project && project !== lay.project ? 'from ' + project : '', st !== (lay.station || api.station) ? 'on ' + st : ''].filter(Boolean).join(' ') || null;
+  // In a global layout every pane says its station, whichever station serves
+  // the deck; in a fleet of one there is nothing to tell apart.
+  const elsewhere = st && st !== lay.station && (lay.station || S.fleet.stations.filter(s => s.state !== 'not_linked').length > 1);
+  return [project && project !== lay.project ? 'from ' + project : '', elsewhere ? 'on ' + st : ''].filter(Boolean).join(' ') || null;
 }
 
 function ctxFor(lay) {
@@ -1831,6 +1866,14 @@ function ctxFor(lay) {
     emptyText: 'This layout is empty. Press Arrange, or drag a pane here from the list on the left.',
     missing: (n) => {
       const st = leafStation(lay, n), project = n.pane !== undefined ? (n.project || lay.project) : null;
+      // Saved without a station, and not yet given one: it is not guessed.
+      if (!st) {
+        const where = leafCandidates(n), give = (to) => { n.station = to; saveLayout(lay); render(); };
+        return h('div', { class: 'empty' }, h('p', {}, `${label(n)}${project ? ' in ' + project : ''} was saved in this layout without its station. `,
+          where.length > 1 ? 'More than one station has such a pane: say which it is.' : where.length ? `${where[0]} has such a pane, but a station that is not reachable may too.` : 'No station that answers has such a pane.'),
+          where.map(to => h('button', { onclick: () => give(to) }, `It is the one on ${to}`)),
+          h('button', { class: 'mini', onclick: () => { ctx.remove(refOf(n)); render(); } }, 'Take out of this layout'));
+      }
       if (!online(st)) return h('div', { class: 'empty' }, h('p', {}, `${st} is unreachable, so ${label(n)} cannot be shown.`));
       return h('div', { class: 'empty' }, h('p', {}, n.pane !== undefined ? `${label(n)}${project ? ' in ' + project : ''} is not running.` : 'This pane was closed.'),
         project ? h('button', { onclick: () => rpc(st, 'project.open', { name: project }) }, `Start ${project}'s panes`) : null,
@@ -2294,7 +2337,7 @@ function hiddenStrip(ctx) {
   const chip = (n) => {
     const r = ctx.resolve(n), p = r?.p || null, name = ctx.label(n), guest = ctx.guest(n), ref = ctx.refOf(n);
     const state = p ? stateOf(p) : 'missing';
-    const stateText = p ? (p.exited ? 'ended' : STATE_LABEL[state] || state) : (online(ctx.stationOf(n)) ? 'not running' : 'unreachable');
+    const stateText = p ? (p.exited ? 'ended' : STATE_LABEL[state] || state) : (!ctx.stationOf(n) ? 'no station' : online(ctx.stationOf(n)) ? 'not running' : 'unreachable');
     const says = (p ? paneSays(p) : `${name}, ${stateText}`) + (guest ? `, ${guest}` : '') + (p?.needs_reason && state === 'needs_you' ? `: ${p.needs_reason}` : '');
     const menu = (e) => {
       e.preventDefault();

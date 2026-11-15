@@ -110,8 +110,8 @@ pub enum LayoutNode {
         /// own project.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
-        /// Empty: the station the layout is stored on, or, for a layout kept
-        /// by the whole fleet, the station it is being viewed from.
+        /// Empty: the station the layout is stored on. A layout kept by
+        /// the whole fleet names the station of each leaf (see deck.rs).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         station: Option<String>,
     },
