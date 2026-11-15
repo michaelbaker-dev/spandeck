@@ -691,6 +691,9 @@ fn http_message(r: &mut BufReader<TcpStream>) -> Option<Vec<u8>> {
 }
 
 impl Proxy {
+    // `fetch_update` was renamed `try_update`; the older compiler on the Mac
+    // has only the first name, and the newer one warns of it.
+    #[allow(deprecated)]
     fn to(port_of_station: u16) -> Proxy {
         let port = free_port();
         let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();

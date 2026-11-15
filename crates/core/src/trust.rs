@@ -1231,14 +1231,15 @@ impl Daemon {
         self.trust_sync().await;
         // A station from before the lists were shared takes one at a time,
         // and only while it is on.
-        for peer in self.fleet.peers() {
-            if peer.state == "online" && peer.info["trust_relay"] != json!(true) {
-                let _ = self
-                    .fleet
-                    .call(&peer.station, "trust.revoked", json!({"device": id}))
-                    .await;
-            }
-        }
+        let peers = self.fleet.peers();
+        let old = peers
+            .iter()
+            .filter(|p| p.state == "online" && p.info["trust_relay"] != json!(true))
+            .map(|p| {
+                self.fleet
+                    .call(&p.station, "trust.revoked", json!({"device": id}))
+            });
+        crate::fleet::futures_join_all(old).await;
         Ok(json!({"revoked": id}))
     }
 

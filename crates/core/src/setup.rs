@@ -646,21 +646,23 @@ impl Daemon {
         );
         let mut stations = vec![json!({"station": self.station, "sent": sent, "skipped": skipped})];
         if fleet && pane.is_none() {
-            for peer in self
-                .fleet
-                .peers()
-                .into_iter()
+            // Every station at the same time: one that does not answer
+            // holds up none of the others.
+            let peers = self.fleet.peers();
+            let calls = peers
+                .iter()
                 .filter(|p| p.state == "online")
-            {
-                let r = self
-                    .fleet
-                    .call(&peer.station, "rpc.forward", json!({"method": "agents.command", "params": {"command": command, "agent": agent, "force": force}}))
-                    .await;
-                stations.push(match r {
-                    Ok(v) => v["stations"][0].clone(),
-                    Err(e) => json!({"station": peer.station, "error": e}),
+                .map(|peer| async move {
+                    let r = self
+                        .fleet
+                        .call(&peer.station, "rpc.forward", json!({"method": "agents.command", "params": {"command": command, "agent": agent, "force": force}}))
+                        .await;
+                    match r {
+                        Ok(v) => v["stations"][0].clone(),
+                        Err(e) => json!({"station": peer.station, "error": e}),
+                    }
                 });
-            }
+            stations.extend(crate::fleet::futures_join_all(calls).await);
         }
         Ok(json!({"command": command, "stations": stations}))
     }
