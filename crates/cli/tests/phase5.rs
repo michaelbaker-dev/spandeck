@@ -327,6 +327,97 @@ async fn a_pane_on_another_station_is_attached_through_the_gateway() {
     drop(tokio::task::spawn_blocking(move || drop((a, b))).await);
 }
 
+/// A fault found on 15 Nov 2026: a pane on another station, shown through the
+/// station the deck was opened on, did not follow the sizing rule. Every tab
+/// reached it as one client (`gw-<station>`), so two windows fought over its
+/// size and neither was offered "Take control", and its resizes never
+/// reached a deck served from elsewhere.
+#[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
+fn a_pane_on_another_station_keeps_one_size_whichever_station_serves_the_deck() {
+    use common::browser::Page;
+    let (a, b) = Station::pair();
+    let pane = b.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "one", "cwd": b.root.join("home")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let size = || {
+        let p = b.pane(&pane);
+        (p["cols"].as_u64().unwrap(), p["rows"].as_u64().unwrap())
+    };
+    let open = |s: &Station, w: u32, h: u32| {
+        let page = Page::open(s, w, h);
+        page.goto(&format!("/s/bravo/p/{pane}"));
+        page.wait("the pane", "!!document.querySelector('.pane .xterm-rows')");
+        page
+    };
+    // What a deck shows of the pane: whether it gave way, and the size its
+    // terminal is drawn at.
+    let gave_way = "!!document.querySelector('.term-body.letterbox') && [...document.querySelectorAll('.strip button')].some(b => b.innerText === 'Take control')";
+    let shown = |page: &Page| {
+        let v = page.js("(t => [t.cols, t.rows])(document.querySelector('.pane').paneTerm.term)");
+        (v[0].as_u64().unwrap(), v[1].as_u64().unwrap())
+    };
+    let shows = |page: &Page, what: &str, want: (u64, u64)| {
+        wait_for(what, 10, || (shown(page) == want).then_some(()));
+    };
+
+    // Opened at the pane's own station, and watched on a phone through
+    // alpha, which takes no size.
+    let direct = open(&b, 1500, 900);
+    let first = wait_for("the size of the window at bravo", 10, || {
+        let s = size();
+        (s.0 > 120).then_some(s)
+    });
+    let phone = open(&a, 390, 800);
+    shows(&phone, "the phone to show the pane's size", first);
+    assert_eq!(size(), first, "watching on a phone took no size");
+
+    // A window through alpha takes the size: the window at bravo gives way,
+    // and the phone, which hears of it through alpha, shows the new size.
+    let one = open(&a, 1100, 700);
+    let through_one = wait_for("the size of alpha's window", 10, || {
+        let s = size();
+        (s.0 < first.0).then_some(s)
+    });
+    direct.wait("the window at bravo to give way", gave_way);
+    shows(&phone, "the phone to follow the pane's size", through_one);
+    let who = b.pane(&pane)["controller"].as_str().unwrap().to_string();
+    assert!(who.starts_with("gw-alpha-web-"), "{who}");
+
+    // Fitting the pane to the phone: a second client through alpha is a
+    // client of its own at bravo. It takes the size, and alpha's window is
+    // told, as the window at bravo is.
+    phone.js("[...document.querySelectorAll('.phone-pane button')].find(b => b.innerText === 'Fit to screen').click()");
+    let on_phone = wait_for("the phone's size", 10, || {
+        let s = size();
+        (s.0 < 80).then_some(s)
+    });
+    one.wait("alpha's window to give way", gave_way);
+    assert_ne!(b.pane(&pane)["controller"], json!(who));
+    shows(&one, "alpha's window to show the pane's size", on_phone);
+    shows(&direct, "the window at bravo to show it", on_phone);
+
+    // Taking control back in alpha's window works through alpha, and both
+    // of the others are told.
+    one.js("[...document.querySelectorAll('.strip button')].find(b => b.innerText === 'Take control').click()");
+    wait_for("the size of alpha's window again", 10, || {
+        (size() == through_one).then_some(())
+    });
+    assert_eq!(b.pane(&pane)["controller"], json!(who));
+    phone.wait("the phone to give way", gave_way);
+    shows(&phone, "the phone to show the pane's size", through_one);
+    shows(&direct, "the window at bravo to show it", through_one);
+    assert!(direct.js(gave_way).as_bool().unwrap());
+    // Nobody fights over it.
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(size(), through_one);
+    assert!(!one.js(gave_way).as_bool().unwrap());
+}
+
 fn stop_row(s: &Station, station: &str) -> Value {
     s.call("stop.list", json!({}))
         .as_array()

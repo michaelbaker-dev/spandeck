@@ -753,6 +753,7 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
                             &station,
                             &pane,
                             control,
+                            &who.client,
                             chan,
                             out_tx.clone(),
                         )
@@ -953,13 +954,54 @@ type RemoteAttach = (
     tokio::task::JoinHandle<()>,
 );
 
+/// Who a browser tab is at a pane's station when it comes through this one.
+/// Each tab is a client of its own there, as it is here, so the sizing rule
+/// (one size per pane, set by whoever has control) holds through a gateway:
+/// before, every tab came as `gw-<station>` and they fought over the size.
+/// Both parts are cut to what any station takes as a client id (letters,
+/// digits and `-`, 64 in all); a longer one would be passed over there.
+fn gateway_client(station: &str, client: &str) -> String {
+    let clean = |s: &str, max: usize| -> String {
+        s.chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+            .take(max)
+            .collect()
+    };
+    format!("gw-{}-{}", clean(station, 24), clean(client, 36))
+}
+
+/// A `pane.resized` event of the pane's station, as a message on the
+/// browser's channel for that pane: the size, and which client set it.
+/// It is text from another station: numbers within a terminal's range and a
+/// bounded name, or nothing.
+fn resized_for(ev: &Value, pane: &str, chan: u32) -> Option<Value> {
+    if ev["kind"] != json!("pane.resized") || ev["pane"] != json!(pane) {
+        return None;
+    }
+    let cols = ev["data"]["cols"]
+        .as_u64()
+        .filter(|c| (2..=500).contains(c))?;
+    let rows = ev["data"]["rows"]
+        .as_u64()
+        .filter(|r| (1..=300).contains(r))?;
+    let controller: String = ev["data"]["controller"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(128)
+        .collect();
+    Some(json!({"chan": chan, "resized": {"cols": cols, "rows": rows, "controller": controller}}))
+}
+
 /// Gateway: attach to a pane on another station and relay its stream, so the
-/// browser keeps a single connection to the station it opened.
+/// browser keeps a single connection to the station it opened. `client` is
+/// the browser tab the attach is for.
 async fn attach_remote(
     daemon: &Daemon,
     station: &str,
     pane: &str,
     control: bool,
+    client: &str,
     chan: u32,
     out: mpsc::Sender<Message>,
 ) -> Result<RemoteAttach, String> {
@@ -991,7 +1033,15 @@ async fn attach_remote(
     let send = |v: Value| tungstenite::Message::Text(v.to_string().into());
     peer_sink
         .send(send(
-            json!({"auth": {"client": format!("gw-{}", daemon.station)}}),
+            json!({"auth": {"client": gateway_client(&daemon.station, client)}}),
+        ))
+        .await
+        .map_err(|e| e.to_string())?;
+    // The station's events come down this connection too, for one thing:
+    // who resized the pane and to what.
+    peer_sink
+        .send(send(
+            json!({"id": 2, "method": "events.subscribe", "params": {}}),
         ))
         .await
         .map_err(|e| e.to_string())?;
@@ -999,13 +1049,18 @@ async fn attach_remote(
         .send(send(json!({"id": 1, "method": "pane.attach", "params": {"pane": pane, "mode": if control { "control" } else { "watch" }}})))
         .await
         .map_err(|e| e.to_string())?;
-    // Wait for the attach reply (the auth hello comes first).
+    // Wait for the attach reply (the auth hello comes first). The hello says
+    // which client that station took this connection for.
+    let mut me = Value::Null;
     let mut result = loop {
         match tokio::time::timeout(std::time::Duration::from_secs(5), peer_stream.next()).await {
             Ok(Some(Ok(tungstenite::Message::Text(t)))) => {
                 let v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
                 if v.get("auth").is_some_and(|a| a["ok"] == json!(false)) {
                     return Err(format!("{station} refused this station"));
+                }
+                if let Some(c) = v["auth"]["client"].as_str() {
+                    me = json!(c.chars().take(128).collect::<String>());
                 }
                 if v.get("id") == Some(&json!(1)) {
                     if let Some(e) = v.get("error") {
@@ -1021,6 +1076,9 @@ async fn attach_remote(
     let peer_chan = result["chan"].as_u64().unwrap_or(0);
     result["chan"] = json!(chan);
     result["station"] = json!(station);
+    // Who this tab is there: what a `resized` message names when it was us.
+    result["client"] = me;
+    let pane_id = result["pane"].as_str().unwrap_or(pane).to_string();
 
     let (tx, mut rx) = mpsc::channel::<String>(256);
     let task = tokio::spawn(async move {
@@ -1041,6 +1099,8 @@ async fn attach_remote(
                         if v.get("chan").is_some() {
                             v["chan"] = json!(chan);
                             if out.send(Message::Text(v.to_string().into())).await.is_err() { break; }
+                        } else if let Some(msg) = v.get("event").and_then(|ev| resized_for(ev, &pane_id, chan)) {
+                            if out.send(Message::Text(msg.to_string().into())).await.is_err() { break; }
                         }
                     }
                     Some(Ok(_)) => {}

@@ -145,6 +145,8 @@ function refreshSoon(ms = 120) { clearTimeout(refreshTimer); refreshTimer = setT
 setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, 2500);
 
 api.onEvent((ev) => {
+  // This station's panes. A pane on another station hears of its resizes on
+  // its own channel, through the gateway (term.js, onResized).
   if (ev.kind === 'pane.resized') {
     for (const t of S.terms.values()) if (t.station === api.station && t.pane.id === ev.pane) t.resizedBy(ev.data.controller, ev.data.cols, ev.data.rows);
     return;
