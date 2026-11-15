@@ -176,17 +176,36 @@ export class PaneTerm {
       this.term.reset();
       this.term.resize(res.info.cols, res.info.rows);
       this.term.write(res.snapshot);
-      this._note(res.exited ? `This pane's process ended (${describeExit(res.exited)}).` : null);
+      this._ended(res.exited);
       this.layout();
     } catch (e) {
-      this._note(`Cannot show this pane: ${e.message}`, () => this.attach());
+      // A pane that is gone does not come back by asking again: said once,
+      // with a button, and not asked for every three seconds for ever.
+      if (/no such pane/i.test(String(e.message))) this._note('This pane is no longer on its station.', () => this.attach(), 'manual');
+      else this._note(`Cannot show this pane: ${e.message}`, () => this.attach());
     }
   }
 
-  _note(text, retry) {
+  // The pane's program has ended: why, and for one that ended with a restart
+  // of spandeck (or was not started again after three), the way back.
+  _ended(exit) {
+    clearTimeout(this._retry);
+    if (!exit) return this._note(null);
+    const p = this.pane, why = endedWhy(p);
+    if (!why) return this._note(`This pane's process ended (${describeExit(exit)}).`);
+    const back = () => this.api.on(this.station, 'pane.restart', { pane: p.id })
+      .then(() => { if (this.chan !== null) this.api.detach(this.chan); this.chan = null; this.attach(); })
+      .catch(e => toast(e.message, 'error'));
+    this.note.hidden = false;
+    this.note.replaceChildren(why[0].toUpperCase() + why.slice(1) + '. ', h('button', { onclick: back }, 'Bring back'));
+  }
+
+  // `how` "manual": the button only, no timer.
+  _note(text, retry, how) {
     this.note.hidden = !text;
     this.note.replaceChildren(...(text ? [text, retry ? h('button', { onclick: retry }, 'Retry') : null].filter(Boolean) : []));
-    if (retry && text) { clearTimeout(this._retry); this._retry = setTimeout(() => !this.disposed && retry(), 3000); }
+    clearTimeout(this._retry);
+    if (retry && text && how !== 'manual') this._retry = setTimeout(() => !this.disposed && retry(), 3000);
   }
 
   // Keys and the like, sent to the pane whether this client holds its size or not.
@@ -341,7 +360,7 @@ export class PaneTerm {
 
   renderStrip() {
     const p = this.pane, s = stateOf(p);
-    const activity = p.exited ? 'ended'
+    const activity = p.exited ? (endedWhy(p) || 'ended')
       : p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}`
       : `${STATE_LABEL[s] || s}${s === 'working' || s === 'needs_you' ? ' · ' + ago(p.state_since_ms) : ''}`;
     const rpc = (m, extra = {}) => this.api.on(this.station, m, { pane: p.id, ...extra }).catch(e => toast(e.message, 'error'));
@@ -417,6 +436,16 @@ export class PaneTerm {
     this.term.dispose();
     this.el.remove();
   }
+}
+
+// Why a pane that has no program is still listed, in words, or null for a
+// pane that simply ended. Times are shown in the browser's own time zone.
+export function endedWhy(p) {
+  if (!p || !p.exited) return null;
+  if (p.held_back) return 'not started again: spandeck restarted 3 times in 10 minutes';
+  if (p.ended_by !== 'restart') return null;
+  const at = Number(p.ended_ms) > 0 ? ' at ' + new Date(Number(p.ended_ms)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+  return `ended when spandeck restarted${at}`;
 }
 
 function describeExit(info) {

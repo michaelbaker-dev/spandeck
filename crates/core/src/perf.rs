@@ -595,6 +595,8 @@ impl Daemon {
 
     /// The station is stopping because it was asked to.
     pub fn note_stopping(&self, why: &str) {
+        // The next start is told from one that followed a crash.
+        self.restore_stopping();
         self.record(
             "station.stopped",
             None,
@@ -684,6 +686,10 @@ impl Daemon {
         v["now_ms"] = json!(now_ms());
         v["started_ms"] = json!(self.started_ms);
         v["restarts"] = self.restarts();
+        // What the last restart in a day left: sessions started again,
+        // ended, held back. And the switches in force on this station.
+        v["recovered"] = self.last_recovered();
+        v["flags"] = self.flags_view()["flags"].clone();
         v["messages"]["waiting"] = json!(self.messages_waiting());
         v["panes"] = json!(self
             .list_panes()

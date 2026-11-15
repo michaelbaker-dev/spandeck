@@ -37,6 +37,18 @@ const span = (v) => { v = num(v); if (v === null) return '—'; const s = Math.r
 const clock = (at) => (num(at) ? new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '');
 const day = (at) => new Date(at).toLocaleDateString([], { day: 'numeric', month: 'short' });
 const days = (n) => `${n} day${n === 1 ? '' : 's'}`;
+// What a station says its last restart left of its sessions. Numbers from
+// another station: each is a number or is not shown.
+function cameBack(x) {
+  const n = (k) => num(x[k]) || 0, parts = [];
+  if (n('kept')) parts.push(`${n('kept')} kept running`);
+  if (n('resumed')) parts.push(`${n('resumed')} started again`);
+  if (n('held_back')) parts.push(`${n('held_back')} not started again (3 restarts in 10 minutes)`);
+  if (n('closed')) parts.push(`${n('closed')} ended`);
+  if (n('tasks_failed')) parts.push(`${n('tasks_failed')} task${n('tasks_failed') === 1 ? '' : 's'} failed`);
+  const away = num(x.away_ms) !== null ? `away ${span(x.away_ms)}; ` : '';
+  return `${x.why === 'crash' ? 'ended without being stopped' : x.why === 'upgrade' ? 'an upgrade lost terminals' : 'stopped and started'}: ${away}${parts.length ? parts.join(', ') : 'no session was open'}`;
+}
 export const clockWords = (diff) => { const s = Math.round(Math.abs(diff) / 1000); return s >= 5400 ? `${Math.round(s / 3600)} h` : s >= 90 ? `${Math.round(s / 60)} min` : `${s} s`; };
 
 // A Tailscale key, in words: null when nothing is known of it.
@@ -193,6 +205,7 @@ export function perfPage(ctx) {
   const others = otherDevices(data);
   const slow = data.rows.flatMap(row => (row.report?.requests?.slowest || []).map(x => ({ ...x, on: row.s.station }))).sort((a, b) => (num(b.ms) || 0) - (num(a.ms) || 0)).slice(0, 10);
   const restarts = data.rows.flatMap(row => (row.report?.restarts?.list || []).map(x => ({ ...x, on: row.s.station }))).sort((a, b) => (num(b.at_ms) || 0) - (num(a.at_ms) || 0)).slice(0, 12);
+  const back = data.rows.filter(row => row.report?.recovered && num(row.report.recovered.at_ms)).map(row => ({ ...row.report.recovered, on: row.s.station }));
   const versions = [...new Set(data.rows.map(r => r.s.version).filter(Boolean))];
   const keyCell = (x) => { const name = x.key ? (x.r?.tailnet?.stations?.[x.s.station]?.name || keyOf(data, x.s.station)?.name || x.s.station) : x.s.station;
     return x.key && x.key.level !== 'ok' ? h('button', { class: 'mini key-' + x.key.level, onclick: () => ctx.explain(name, x.key), title: 'What to do' }, x.facts[x.facts.length - 1].value) : x.facts[x.facts.length - 1].value; };
@@ -231,7 +244,10 @@ export function perfPage(ctx) {
     sec('Restarts', 'Each station\'s starts, upgrades and restarts of the last 24 hours, and why.',
       restarts.length ? h('ul', { class: 'perf-list' }, restarts.map(x => h('li', {}, h('b', {}, x.on), ` ${new Date(x.at_ms).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })} · ${x.what}: ${x.why}`,
         num(x.panes) !== null ? ` (${num(x.kept) ?? '?'} of ${x.panes} terminals kept)` : num(x.resumed) ? ` (${x.resumed} agents resumed)` : '')))
-        : h('p', { class: 'muted' }, 'None in the last 24 hours.')),
+        : h('p', { class: 'muted' }, 'None in the last 24 hours.'),
+      // What each station's last restart without a handoff left of its
+      // sessions (a station from before this says nothing of it).
+      back.length ? h('ul', { class: 'perf-list', 'aria-label': 'What came back' }, back.map(x => h('li', {}, h('b', {}, x.on), ` ${clock(x.at_ms)} · ${cameBack(x)}`))) : null),
 
     sec('Tailscale keys', 'A machine\'s sign-in to Tailscale, which Tailscale ends after 180 days unless told otherwise. When it ends the machine drops off your network, and spandeck with it.',
       h('ul', { class: 'perf-list' }, facts.map(x => h('li', {}, h('b', {}, x.s.station), ' ', keyCell(x)))),

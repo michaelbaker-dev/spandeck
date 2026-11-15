@@ -222,6 +222,70 @@ impl TrustState {
         Ok(())
     }
 
+    /// The requests still waiting for the owner, for the daemon that takes
+    /// over at an upgrade or a restart in place: before this they were lost
+    /// there, and whoever had asked waited for nothing. Each carries the
+    /// hash of what its asker collects with, as it is held here; never the
+    /// key or a token. One already answered is not carried.
+    pub(crate) fn requests_for_handoff(&self) -> Vec<Value> {
+        let now = now_ms();
+        self.requests
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|r| r.decision == Decision::Waiting && r.expires_ms > now)
+            .map(|r| {
+                json!({"id": r.id, "kind": r.kind, "name": r.name, "from": r.from,
+                    "code": r.code, "with": r.with, "collect_hash": hex(&r.collect_hash),
+                    "expires_ms": r.expires_ms})
+            })
+            .collect()
+    }
+
+    /// Take back the requests the daemon before this one was holding. They
+    /// come from its handoff file, which only this user can write; each is
+    /// still checked, bounded and dropped once it has lapsed.
+    pub(crate) fn adopt_requests(&self, held: &[Value]) {
+        let now = now_ms();
+        let mut map = self.requests.lock().unwrap();
+        for v in held {
+            let text = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default();
+            let kind = match text("kind") {
+                "station" => "station",
+                "device" => "device",
+                _ => continue,
+            };
+            let hash: Option<[u8; 32]> =
+                unhex(text("collect_hash")).and_then(|h| h.try_into().ok());
+            let expires_ms = v.get("expires_ms").and_then(|x| x.as_u64()).unwrap_or(0);
+            let id = text("id");
+            let (Some(collect_hash), true) = (
+                hash,
+                expires_ms > now
+                    && expires_ms <= now + REQUEST_MS
+                    && !id.is_empty()
+                    && id.len() <= 64
+                    && map.len() < MAX_PENDING,
+            ) else {
+                continue;
+            };
+            map.insert(
+                id.to_string(),
+                Request {
+                    id: id.to_string(),
+                    kind,
+                    name: clean_name(text("name")),
+                    from: text("from").chars().take(64).collect(),
+                    code: text("code").chars().take(16).collect(),
+                    with: clean_names(v.get("with")),
+                    collect_hash,
+                    decision: Decision::Waiting,
+                    expires_ms,
+                },
+            );
+        }
+    }
+
     /// Changes when the key is replaced: see `replace_key`.
     pub fn rekeyed(&self) -> tokio::sync::watch::Receiver<u64> {
         self.epoch.subscribe()

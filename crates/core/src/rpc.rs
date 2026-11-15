@@ -698,6 +698,10 @@ impl Daemon {
             "task.cancel" => {
                 self.task_set_state(s(&params, "task")?, "cancelled", json!({}), by)?
             }
+            // The owner's alone (on no list above): a failed task's agent
+            // is sent back to it. Reaches another station as the owner's
+            // forwarded request.
+            "task.continue" => self.task_continue(s(&params, "task")?, by)?,
             "task.wait" => {
                 let id = s(&params, "task")?.to_string();
                 let timeout = params
@@ -1164,6 +1168,13 @@ impl Daemon {
             // ------------------------------------------------------- upgrade
             "station.upgrade" => self.upgrade(Path::new(s(&params, "binary")?), by, None)?,
             "station.restart" => self.station_restart(by)?,
+            // This station's switches (`[flags]`): read, or set with `set`.
+            // The owner's alone: on no agent's list, no station's and not
+            // the read-only one.
+            "station.flags" => match params.get("set") {
+                Some(set) => self.flags_set(set, by)?,
+                None => self.flags_view(),
+            },
             "station.update" => self.station_update(opt(&params, "version"), by).await?,
             "fleet.wake" => self.fleet_wake(s(&params, "station")?, by)?,
             "fleet.start" => self.fleet_start(s(&params, "station")?, by).await?,

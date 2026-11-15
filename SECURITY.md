@@ -94,6 +94,23 @@ days, not hours.
   station's signed call. No agent has them, and `station.info`, which an agent can
   read, holds none of it. The counters hold method names, station names, times and
   counts; never a parameter, a message, a path or a pane's contents.
+- Sending a failed task's agent back to it (`task.continue`, "Continue this task") and
+  reading or setting a station's switches (`station.flags`) are yours alone. No agent
+  has either, another station has neither, and the read-only caller cannot read the
+  switches; from a Control Deck opened on another station they arrive as your own
+  request, like a restart. `task.continue` types one fixed line into the task's pane
+  and nothing a caller wrote; it is refused for a paused pane.
+- After a station ends without being stopped, the next start ends what a pane's program
+  left running, for a pane it starts again. It ends a process only when the pane's
+  record of the program's pid and start time, the process's session and its own start
+  time all agree, so that a process which was later given the same number is not
+  touched; where they do not agree it does nothing. What a pane that is not started
+  again left running is never ended, only named to you. A program's name in that notice
+  is text from the machine: bounded, and shown as text.
+- Requests to join or sign in that were waiting are handed to the daemon that takes over
+  at an upgrade, in the same private file as the terminals. They hold the hash of what
+  the asker collects with, never the key or a token, and one already approved is not
+  carried.
 - `remote_start = true` lets a station run a start command on your other machines over
   Tailscale SSH. It is off by default; what it may do there is governed by your
   Tailscale SSH rules, not by spandeck.

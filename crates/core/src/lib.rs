@@ -29,6 +29,7 @@
 //!   perf      counters for the Performance page: where time goes on this station
 //!   tailnet   Tailscale key expiry: read from the local client, shown, warned of
 //!   http      the one outgoing HTTPS client builder, and what it trusts
+//!   restore   after a restart: what is put right and listed, the one notice, `[flags]`
 
 pub mod add;
 pub mod agents;
@@ -57,6 +58,7 @@ pub mod project;
 pub mod recipes;
 pub mod relay;
 pub mod remove;
+pub mod restore;
 pub mod rpc;
 pub mod server;
 pub mod setup;

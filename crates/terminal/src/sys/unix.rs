@@ -426,6 +426,69 @@ pub fn end_leftover_child(pid: i32) {
     }
 }
 
+/// A process, as `processes` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proc {
+    pub pid: i32,
+    /// The session it is in. A pane's program starts a session, so this is
+    /// that program's pid for everything the pane started.
+    pub sid: i32,
+    /// How long ago it started, in seconds.
+    pub age_secs: u64,
+    /// Its program's name, without the folder.
+    pub name: String,
+}
+
+/// Every process on this machine with its session and its age, from one run
+/// of `ps` (the same on macOS and Linux). Empty when `ps` cannot be run.
+pub fn processes() -> Vec<Proc> {
+    let Ok(out) = Command::new("ps")
+        .args(["-axo", "pid=,etime=,comm="])
+        .output()
+    else {
+        return vec![];
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pid = parts.next()?.parse::<i32>().ok().filter(|p| *p > 1)?;
+            let age_secs = elapsed_secs(parts.next()?)?;
+            let comm = parts.collect::<Vec<_>>().join(" ");
+            // SAFETY: getsid only reads; a pid that is gone gives -1.
+            let sid = unsafe { libc::getsid(pid) };
+            (sid > 1).then(|| Proc {
+                pid,
+                sid,
+                age_secs,
+                name: comm.rsplit('/').next().unwrap_or("").to_string(),
+            })
+        })
+        .collect()
+}
+
+/// `ps`'s elapsed time, `[[days-]hours:]minutes:seconds`, as seconds.
+fn elapsed_secs(etime: &str) -> Option<u64> {
+    let (days, clock) = match etime.split_once('-') {
+        Some((d, rest)) => (d.parse::<u64>().ok()?, rest),
+        None => (0, etime),
+    };
+    let mut secs = 0u64;
+    for part in clock.split(':') {
+        secs = secs * 60 + part.parse::<u64>().ok()?;
+    }
+    Some(days * 86_400 + secs)
+}
+
+/// End these processes now. For what a pane's program left running when the
+/// daemon that held the pane ended: they are in no pane any more and are not
+/// this process's children, so nothing else would end them.
+pub fn end_processes(pids: &[i32]) {
+    for pid in pids.iter().filter(|p| **p > 1) {
+        let _ = nix::sys::signal::kill(Pid::from_raw(*pid), nix::sys::signal::Signal::SIGKILL);
+    }
+}
+
 /// Close descriptors inherited from a previous image whose handoff is not
 /// being adopted, so orphaned terminals do not stay half-open. Call before
 /// this process opens anything.

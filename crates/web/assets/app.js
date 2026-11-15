@@ -711,6 +711,11 @@ function stopAllMenu(e) {
 async function tasksPanel(st, project) {
   const [tasks, recipes, sign] = await Promise.all([
     api.on(st, 'task.list', { project, limit: 30 }), api.on(st, 'recipe.list', { project }), api.on(st, 'signoff.status', { project }).catch(() => null)]);
+  // A failed task that kept its resume information can be sent back to its
+  // agent, on a station that knows how (one from before this does not say so).
+  const canContinue = (S.fleet.stations.find(s => s.station === st)?.caps || []).includes('task_continue');
+  const again = (t, close) => canContinue && t.state === 'failed' && t.resume?.pane
+    ? h('button', { class: 'mini', title: 'The task is running again, and its agent is told it was interrupted and to check its last step', onclick: () => rpc(st, 'task.continue', { task: t.id }).then(() => { close(); toast('The task is running again'); }) }, 'Continue this task') : null;
   dialog(`Tasks in ${project}`, (close) => h('div', {},
     h('h3', {}, 'Sign-off'),
     sign ? h('p', {}, sign.signed ? `Commit ${String(sign.commit).slice(0, 10)} was signed off ${ago(sign.ts)} ago. ` : 'No sign-off yet. ',
@@ -721,7 +726,7 @@ async function tasksPanel(st, project) {
       r.state === 'active' ? h('button', { class: 'mini', onclick: () => rpc(st, 'recipe.cancel', { id: r.id }).then(close) }, 'Cancel') : null))) : h('p', { class: 'muted' }, 'None.'),
     h('h3', {}, 'Tasks'),
     tasks.length ? h('table', { class: 'table' }, h('thead', {}, h('tr', {}, h('th', {}, 'State'), h('th', {}, 'Role'), h('th', {}, 'Goal'), h('th', {}, 'Result'))),
-      h('tbody', {}, tasks.map(t => h('tr', {}, h('td', {}, h('span', { class: 'chip' }, t.state.replaceAll('_', ' '))), h('td', {}, t.role || ''), h('td', {}, t.goal), h('td', { class: 'muted' }, t.outputs?.summary || t.resume?.reason || ''))))) : h('p', { class: 'muted' }, 'No tasks yet.')), { wide: true });
+      h('tbody', {}, tasks.map(t => h('tr', {}, h('td', {}, h('span', { class: 'chip' }, t.state.replaceAll('_', ' '))), h('td', {}, t.role || ''), h('td', {}, t.goal), h('td', { class: 'muted' }, t.outputs?.summary || t.resume?.reason || '', ' ', again(t, close)))))) : h('p', { class: 'muted' }, 'No tasks yet.')), { wide: true });
 }
 
 function palette() {

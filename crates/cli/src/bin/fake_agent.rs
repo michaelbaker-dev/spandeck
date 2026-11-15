@@ -49,7 +49,15 @@ fn out(s: &str) {
 
 impl Agent {
     fn rpc(&self, method: &str, params: Value) -> Result<Value, String> {
-        let mut c = Client::from_env(&self.paths).map_err(|e| e.to_string())?;
+        // A hook waits for a daemon that is starting, exactly as
+        // `spandeck hook` does (it is what this stands in for); a tool
+        // call does not.
+        let wait = if method == "hook.ingest" {
+            spandeck_core::client::HOOK_WAIT
+        } else {
+            Duration::ZERO
+        };
+        let mut c = Client::from_env_waiting(&self.paths, wait).map_err(|e| e.to_string())?;
         c.set_timeout(Some(Duration::from_secs(400)));
         c.call(method, params).map_err(|e| e.to_string())
     }

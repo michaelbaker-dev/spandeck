@@ -225,6 +225,11 @@ pub struct Config {
     pub update: UpdateConfig,
     /// Model list prices for cost estimates: fetched automatically.
     pub prices: crate::prices::PricesConfig,
+    /// Switches: `[flags]`, each a true/false, a whole number or a short
+    /// text (`holds.restored = false`). Read at start; the owner can also
+    /// set one while the station runs (`station.flags`), which wins.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub flags: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -273,6 +278,7 @@ impl Default for Config {
             wake_broadcast: None,
             update: UpdateConfig::default(),
             prices: Default::default(),
+            flags: BTreeMap::new(),
         }
     }
 }

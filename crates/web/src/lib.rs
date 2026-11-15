@@ -50,19 +50,142 @@ pub struct Web {
 const FRAME_OUTPUT: u8 = 1;
 const FRAME_RESYNC: u8 = 2;
 
+/// The addresses the web server listens on, kept in step with what is
+/// wanted: an address that could not be bound is tried again, and with no
+/// `web_bind` the machine's Tailscale addresses are followed as they change.
+struct Listening {
+    web: Web,
+    app: Router,
+    port: u16,
+    /// Always wanted: localhost, or what `web_bind` names.
+    fixed: Vec<IpAddr>,
+    /// With no `web_bind`: this machine's Tailscale addresses, and its name
+    /// there, as last read.
+    tailnet: Vec<IpAddr>,
+    dns: Option<String>,
+    serving: Vec<(IpAddr, SocketAddr, tokio::task::JoinHandle<()>)>,
+}
+
+impl Listening {
+    /// Listen on every wanted address that is not being served, and stop
+    /// serving a Tailscale address the machine no longer has.
+    async fn bring_in_line(&mut self) {
+        let wanted: Vec<IpAddr> = self
+            .fixed
+            .iter()
+            .chain(self.tailnet.iter())
+            .copied()
+            .collect();
+        let mut changed = false;
+        // Gone: stop accepting there first, then take it off the allowlist.
+        let (kept, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut self.serving)
+            .into_iter()
+            .partition(|(ip, _, _)| wanted.contains(ip));
+        self.serving = kept;
+        for (ip, _, task) in gone {
+            task.abort();
+            tracing::info!(%ip, "no longer listening: the address is gone");
+            changed = true;
+        }
+        // New, or not bound before: bind, learn the port, fill in the Host
+        // allowlist, and only then start answering. A request must never
+        // race the allowlist.
+        let mut fresh = vec![];
+        for ip in wanted {
+            if self.serving.iter().any(|(have, _, _)| *have == ip)
+                || fresh.iter().any(|(have, _, _)| *have == ip)
+            {
+                continue;
+            }
+            match tokio::net::TcpListener::bind(SocketAddr::new(ip, self.port)).await {
+                Ok(listener) => match listener.local_addr() {
+                    Ok(addr) => fresh.push((ip, addr, listener)),
+                    Err(e) => tracing::warn!(%ip, error = %e, "could not listen"),
+                },
+                // Tried again at the next round, ten seconds on.
+                Err(e) => tracing::warn!(%ip, port = self.port, error = %e, "could not listen"),
+            }
+        }
+        if !changed && fresh.is_empty() && self.hosts() == *self.web.hosts.read().unwrap() {
+            return;
+        }
+        let mut hosts = self.hosts();
+        for (_, addr, _) in &fresh {
+            hosts.extend(self.hosts_of(addr));
+        }
+        hosts.sort();
+        hosts.dedup();
+        *self.web.hosts.write().unwrap() = hosts;
+        for (ip, addr, listener) in fresh {
+            let app = self.app.clone();
+            let task = tokio::spawn(async move {
+                let _ = axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await;
+            });
+            tracing::info!(%addr, "Control Deck listening");
+            self.serving.push((ip, addr, task));
+        }
+        *self.web.daemon.web_addrs.lock().unwrap() =
+            self.serving.iter().map(|(_, a, _)| a.to_string()).collect();
+    }
+
+    /// The Host values answered to for what is being served.
+    fn hosts(&self) -> Vec<String> {
+        let mut hosts: Vec<String> = self
+            .serving
+            .iter()
+            .flat_map(|(_, addr, _)| self.hosts_of(addr))
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+        hosts
+    }
+
+    fn hosts_of(&self, addr: &SocketAddr) -> Vec<String> {
+        let p = addr.port();
+        let mut hosts = vec![format!("{}:{p}", addr.ip())];
+        for name in [
+            "localhost".to_string(),
+            self.web.daemon.station.to_lowercase(),
+            spandeck_core::paths::hostname().to_lowercase(),
+        ] {
+            hosts.push(format!("{name}:{p}"));
+        }
+        if let Some(dns) = &self.dns {
+            hosts.push(format!("{dns}:{p}"));
+            // Behind `tailscale serve`, the browser sees the bare HTTPS name,
+            // or the name with whichever port serve was given. The name
+            // belongs to this machine alone, so any port of it is ours.
+            hosts.push(dns.clone());
+            hosts.push(format!("{dns}:*"));
+        }
+        hosts
+    }
+}
+
 /// Bind the listeners and start serving. Returns the bound addresses.
+///
+/// What could not be bound is tried again every ten seconds, and (with no
+/// `web_bind`) the machine's Tailscale addresses are followed: before this,
+/// a station that started before Tailscale was up, or whose address
+/// changed, was never served there until spandeck was restarted.
 pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
     let port = daemon.cfg.web_port;
-    let mut ips: Vec<IpAddr> = vec![];
-    if daemon.cfg.web_bind.is_empty() {
-        ips.push(IpAddr::from([127, 0, 0, 1]));
+    let follow = daemon.cfg.web_bind.is_empty();
+    let mut fixed: Vec<IpAddr> = vec![];
+    let mut tailnet: Vec<IpAddr> = vec![];
+    if follow {
+        fixed.push(IpAddr::from([127, 0, 0, 1]));
         let fleet_daemon = daemon.clone();
         let me = tokio::task::spawn_blocking(move || fleet_daemon.fleet.tailnet_self())
             .await
             .ok()
             .flatten();
         if let Some(me) = me {
-            ips.extend(
+            tailnet.extend(
                 me.ips
                     .iter()
                     .filter_map(|i| i.parse::<IpAddr>().ok())
@@ -71,7 +194,7 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
         }
     } else {
         for b in &daemon.cfg.web_bind {
-            ips.push(
+            fixed.push(
                 b.parse()
                     .map_err(|_| anyhow::anyhow!("web_bind: {b} is not an IP address"))?,
             );
@@ -93,67 +216,51 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
         .layer(DefaultBodyLimit::max(100 << 20))
         .with_state(web.clone());
 
-    // Bind first, learn the ports, fill in the Host allowlist, and only then
-    // start answering: a request must never race the allowlist.
-    let mut listeners = vec![];
-    for ip in ips {
-        match tokio::net::TcpListener::bind(SocketAddr::new(ip, port)).await {
-            Ok(listener) => listeners.push(listener),
-            Err(e) => tracing::warn!(%ip, port, error = %e, "could not listen"),
-        }
-    }
-    if listeners.is_empty() {
-        anyhow::bail!("could not listen on port {port} on any address");
-    }
-    let bound: Vec<SocketAddr> = listeners
-        .iter()
-        .filter_map(|l| l.local_addr().ok())
-        .collect();
-
-    let mut hosts = vec![];
     let dns = tokio::task::spawn_blocking(|| {
-        spandeck_core::fleet::tailscale_status().and_then(|s| {
-            s.pointer("/Self/DNSName")
-                .and_then(|d| d.as_str())
-                .map(|d| d.trim_end_matches('.').to_lowercase())
-        })
+        spandeck_core::fleet::tailscale_status()
+            .and_then(|s| spandeck_core::fleet::OwnAddrs::of(&s).dns)
     })
     .await
     .ok()
     .flatten();
-    for addr in &bound {
-        let p = addr.port();
-        hosts.push(format!("{}:{p}", addr.ip()));
-        for name in [
-            "localhost".to_string(),
-            daemon.station.to_lowercase(),
-            spandeck_core::paths::hostname().to_lowercase(),
-        ] {
-            hosts.push(format!("{name}:{p}"));
+    let mut listening = Listening {
+        web,
+        app,
+        port,
+        fixed,
+        tailnet,
+        dns,
+        serving: vec![],
+    };
+    listening.bring_in_line().await;
+    let bound: Vec<SocketAddr> = listening.serving.iter().map(|(_, a, _)| *a).collect();
+
+    // From here on: every ten seconds, and at once when a look at the fleet
+    // finds this machine's Tailscale addresses changed.
+    let mut own = daemon.fleet.own_addrs.subscribe();
+    tokio::spawn(async move {
+        let mut watching = true;
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
+                changed = own.changed(), if watching => watching = changed.is_ok(),
+            }
+            let now = own.borrow_and_update().clone();
+            if let Some(now) = now {
+                // The machine's name there is answered to under either
+                // setting; its addresses are listened on only when no
+                // `web_bind` says where to listen.
+                listening.dns = now.dns.or(listening.dns.take());
+                if follow {
+                    listening.tailnet = now.ips.into_iter().filter(|i| i.is_ipv4()).collect();
+                }
+            }
+            listening.bring_in_line().await;
         }
-        if let Some(dns) = &dns {
-            hosts.push(format!("{dns}:{p}"));
-            // Behind `tailscale serve`, the browser sees the bare HTTPS name,
-            // or the name with whichever port serve was given. The name
-            // belongs to this machine alone, so any port of it is ours.
-            hosts.push(dns.clone());
-            hosts.push(format!("{dns}:*"));
-        }
+    });
+    if bound.is_empty() {
+        anyhow::bail!("could not listen on port {port} on any address");
     }
-    hosts.sort();
-    hosts.dedup();
-    *web.hosts.write().unwrap() = hosts;
-    for listener in listeners {
-        let app = app.clone();
-        tokio::spawn(async move {
-            let _ = axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await;
-        });
-    }
-    *daemon.web_addrs.lock().unwrap() = bound.iter().map(|a| a.to_string()).collect();
     Ok(bound)
 }
 

@@ -1006,6 +1006,24 @@ pub const UPGRADE_KEEPS_PID: bool = false;
 /// that started it.
 pub fn end_leftover_child(_pid: i32) {}
 
+/// A process, as `processes` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proc {
+    pub pid: i32,
+    pub sid: i32,
+    pub age_secs: u64,
+    pub name: String,
+}
+
+/// Nothing is listed: a pane's programs are in a job object, which ends
+/// every one of them with the pane, so none is ever left over.
+pub fn processes() -> Vec<Proc> {
+    vec![]
+}
+
+/// Nothing to do: see `processes`.
+pub fn end_processes(_pids: &[i32]) {}
+
 /// Nothing to do: handles are not inherited unless asked for.
 pub fn close_inherited() {}
 

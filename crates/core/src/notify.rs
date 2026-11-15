@@ -45,7 +45,7 @@ impl Daemon {
         title: &str,
         body: &str,
     ) {
-        self.notify_as(kind, pane, project, title, body, true);
+        let _ = self.notify_as(kind, pane, project, title, body, true);
     }
 
     /// A notice every station of the fleet raises in the same words, which
@@ -54,7 +54,39 @@ impl Daemon {
     /// and the owner is not at a keyboard). The others mark theirs 3, "left
     /// to another station".
     pub(crate) fn notify_with(&self, kind: &str, title: &str, body: &str, push: bool) {
-        self.notify_as(kind, None, None, title, body, push);
+        let _ = self.notify_as(kind, None, None, title, body, push);
+    }
+
+    /// A notice about the station itself whose words may be replaced later
+    /// (`notify_rewrite`): returns its id.
+    pub(crate) fn notify_station(&self, kind: &str, title: &str, body: &str) -> String {
+        self.notify_as(kind, None, None, title, body, true)
+    }
+
+    /// Replace the words of a notice already raised, and show it as unread
+    /// again. It is not pushed a second time. False when it is no longer
+    /// in the inbox.
+    pub(crate) fn notify_rewrite(&self, id: &str, kind: &str, title: &str, body: &str) -> bool {
+        let changed = self
+            .db
+            .with(|c| {
+                c.execute(
+                    "UPDATE notifications SET title=?2, body=?3, read=0 WHERE id=?1",
+                    rusqlite::params![id, title, body],
+                )
+            })
+            .unwrap_or(0);
+        if changed == 0 {
+            return false;
+        }
+        self.emit(
+            "notify.new",
+            None,
+            None,
+            json!({"id": id, "kind": kind, "title": title, "body": body, "url": null, "station": self.station}),
+        );
+        self.notify_relay(json!({"id": id, "kind": kind, "title": title, "body": body}));
+        true
     }
 
     fn notify_as(
@@ -65,7 +97,7 @@ impl Daemon {
         title: &str,
         body: &str,
         push: bool,
-    ) {
+    ) -> String {
         let id = new_id("n");
         let url = pane.map(|p| format!("/#/s/{}/p/{}", self.station, p));
         let pushed = if push { 0 } else { 3 };
@@ -85,6 +117,7 @@ impl Daemon {
         self.notify_relay(
             json!({"id": id, "kind": kind, "title": title, "body": body, "url": url}),
         );
+        id
     }
 
     /// Tell the other stations of the fleet, so that a Control Deck served by

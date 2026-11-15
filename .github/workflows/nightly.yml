@@ -18,6 +18,10 @@ jobs:
         run: SPANDECK_SIM_SEEDS=500 cargo test -p spandeck-core --test relay_sim --release
       - name: 50-pane soak
         run: cargo test -p spandeck --test soak --release -- --ignored
+      # Scenario tests that kill and start a station several times: too slow
+      # for the every-change check, so they are ignored there.
+      - name: After a restart (crash, restart in place, Tailscale address)
+        run: cargo test -p spandeck --test restore -- --ignored
   build:
     strategy:
       fail-fast: false

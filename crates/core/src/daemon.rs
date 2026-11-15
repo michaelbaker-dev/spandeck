@@ -152,6 +152,23 @@ pub struct PaneMeta {
     /// one.
     #[serde(default)]
     pub resumed: bool,
+    /// When the pane's program was started, by this station's clock. Kept
+    /// beside the pid so that, after the daemon ended without stopping its
+    /// panes, what the program left running is told from an unrelated
+    /// process that was given the same pid since. `None`: a pane from
+    /// before this was kept, whose leftovers are never touched.
+    #[serde(default)]
+    pub proc_started_ms: Option<u64>,
+    /// Why the pane is listed though it has no program: `restart` when it
+    /// ended with a daemon that went away and could not be started again.
+    #[serde(default)]
+    pub ended_by: Option<String>,
+    #[serde(default)]
+    pub ended_ms: u64,
+    /// Listed and not started again: the station restarted three times in
+    /// ten minutes. Its record stays open, so a later start tries again.
+    #[serde(default)]
+    pub held_back: bool,
 }
 
 /// What `Daemon::last_session` found.
@@ -198,6 +215,7 @@ impl PaneEntry {
             "watch": m.watch, "slot": m.slot, "last_message": m.last_message,
             "cols": info.cols, "rows": info.rows, "controller": m.controller,
             "subagents": m.subagents, "resumed": m.resumed,
+            "ended_by": m.ended_by, "ended_ms": m.ended_ms, "held_back": m.held_back,
             "last_output_ms": self.term.last_output_ms(), "pid": self.term.pid(),
             "program": m.spec.program,
             "icon": spandeck_agents::icon(m.agent, &m.spec.program),
@@ -330,6 +348,9 @@ pub struct Inner {
     pub perf: Arc<crate::perf::Perf>,
     /// What the local Tailscale client last said of key expiry.
     pub tailnet: crate::tailnet::TailnetState,
+    /// The switches later steps read (`[flags]` in the config, and what the
+    /// owner set with `station.flags`), and what the last start found.
+    pub(crate) restore: crate::restore::RestoreState,
 }
 
 #[derive(Clone)]
@@ -363,6 +384,11 @@ pub struct HandoffState {
     pub pid: u32,
     pub prev_exe: PathBuf,
     pub panes: Vec<HandoffPane>,
+    /// Requests to join or sign in that were waiting for the owner. They
+    /// hold the hash of what the asker collects with, never the key. A
+    /// daemon from before this neither writes nor reads them.
+    #[serde(default)]
+    pub trust_requests: Vec<Value>,
 }
 
 impl Daemon {
@@ -411,6 +437,7 @@ impl Daemon {
             fleet: crate::fleet::FleetState::new(&cfg, trust.clone(), perf.clone()),
             perf,
             tailnet: Default::default(),
+            restore: Default::default(),
             trust,
             paths,
             cfg,
@@ -450,10 +477,16 @@ impl Daemon {
             Some(file) => daemon.adopt_handoff(&file),
             None => false,
         };
+        daemon.flags_load();
         if !adopted {
-            let resumed = daemon.recover();
-            daemon.note_started(resumed);
+            // Restore first, serve afterwards: no deck ever sees this
+            // station with its panes missing.
+            let start = daemon.restore_begin();
+            let found = daemon.recover(&start);
+            daemon.note_started(found.resumed);
+            daemon.restore_report(&start, &found, if start.clean { "stop" } else { "crash" });
         }
+        daemon.restore_started(adopted);
         // Keep hold of this binary. A hard link costs nothing and survives the
         // file at its path being replaced by an installer; where a link is not
         // possible (another filesystem), rollback uses the path as it is then.
@@ -561,6 +594,13 @@ impl Daemon {
         }
         if n % 4 == 2 {
             self.pump_stops().await;
+        }
+        // For the next start: when this one was last running.
+        if n % 20 == 3 {
+            self.restore_alive();
+        }
+        if n % 1200 == 40 {
+            self.prune_ended();
         }
     }
 
@@ -925,6 +965,10 @@ impl Daemon {
             launcher: opts.program.clone(),
             launcher_recorded: true,
             resumed: resume.is_some(),
+            proc_started_ms: Some(now),
+            ended_by: None,
+            ended_ms: 0,
+            held_back: false,
         };
         let entry = Arc::new(PaneEntry {
             id: id.clone(),
@@ -1048,7 +1092,14 @@ impl Daemon {
 
     pub(crate) fn save_pane(&self, p: &PaneEntry) {
         let meta = p.meta();
-        let closed: Option<i64> = meta.exit.map(|_| now_ms() as i64);
+        // A pane held back after three restarts keeps an open record, so a
+        // later start tries it again; one that ended with a restart keeps
+        // the time it ended, which is what its seven days are counted from.
+        let closed: Option<i64> = match (meta.held_back, meta.ended_ms) {
+            (true, _) => None,
+            (false, 0) => meta.exit.map(|_| now_ms() as i64),
+            (false, at) => Some(at as i64),
+        };
         let r = self.db.with(|c| {
             c.execute(
                 "INSERT INTO panes(id,meta,token,pid,created,closed) VALUES(?1,?2,?3,?4,?5,?6)
@@ -1301,22 +1352,34 @@ impl Daemon {
         // The new program takes the old one's place, under the same id.
         old.term.forget();
         self.panes.write().unwrap().remove(&old.id);
-        let p = self.spawn_pane(SpawnOpts {
-            id: Some(old.id.clone()),
-            name: Some(meta.name.clone()),
-            agent: Some(meta.agent),
-            program: self.launcher_program(&meta),
-            cwd: Some(PathBuf::from(&meta.cwd)),
-            cols: Some(meta.spec.cols),
-            rows: Some(meta.spec.rows),
-            project: meta.project.clone(),
-            role: meta.role.clone(),
-            task: meta.task.clone(),
-            parent_pane: meta.parent_pane.clone(),
-            resume: resume.clone(),
-            slot: meta.slot.clone(),
-            ..Default::default()
-        })?;
+        let p = self
+            .spawn_pane(SpawnOpts {
+                id: Some(old.id.clone()),
+                name: Some(meta.name.clone()),
+                agent: Some(meta.agent),
+                program: self.launcher_program(&meta),
+                cwd: Some(PathBuf::from(&meta.cwd)),
+                cols: Some(meta.spec.cols),
+                rows: Some(meta.spec.rows),
+                project: meta.project.clone(),
+                role: meta.role.clone(),
+                task: meta.task.clone(),
+                parent_pane: meta.parent_pane.clone(),
+                resume: resume.clone(),
+                slot: meta.slot.clone(),
+                ..Default::default()
+            })
+            .inspect_err(|_| {
+                // A pane listed after a restart stays listed when it cannot
+                // be brought back (its folder is gone, say), with the reason
+                // the caller is given; it is not lost from the list.
+                if meta.ended_by.is_some() || meta.held_back {
+                    self.panes
+                        .write()
+                        .unwrap()
+                        .insert(old.id.clone(), old.clone());
+                }
+            })?;
         self.keep_owner_marks(&p, &meta);
         self.write_instructions(&p.meta());
         self.record(
@@ -1515,6 +1578,7 @@ impl Daemon {
         self.cancel_pane_approvals(&p.id);
         self.look_forget_pane(&p.id, by);
         let m = p.meta();
+        self.forget_ended(&m);
         self.record(
             "pane.closed",
             Some(&p.id),
@@ -1817,8 +1881,16 @@ impl Daemon {
     /// After a crash or reboot: agents resume their conversation by session
     /// id. Where a pane host is used, panes it still holds are simply taken
     /// over as they are.
-    fn recover(&self) -> usize {
-        let mut resumed = 0;
+    ///
+    /// Nothing is left wrong behind it (DECISIONS.md, "After a restart"): a
+    /// task whose agent went with the daemon is failed with its resume
+    /// information; what a pane that is started again left running is
+    /// ended; a pane that cannot be started again stays listed as ended;
+    /// approvals nobody can answer any more are expired. With `start.hold`
+    /// (the third start in ten minutes that followed no clean stop) no
+    /// agent is started: each is listed, and waits for the owner.
+    fn recover(&self, start: &crate::restore::StartInfo) -> crate::restore::Recovery {
+        let mut found = crate::restore::Recovery::default();
         let rows: Vec<(String, String, String, Option<i64>)> = self
             .db
             .with(|c| {
@@ -1829,10 +1901,15 @@ impl Daemon {
                 rows.collect()
             })
             .unwrap_or_default();
-        let kept = self.adopt_from_host(&rows);
+        let mut kept = self.adopt_from_host(&rows);
+        found.kept = kept.len();
+        // What runs on this machine now: read once, and only when a pane
+        // that is not kept needs it.
+        let mut running: Option<Vec<sys::Proc>> = None;
         for (id, meta, token, pid) in rows {
             // Already in service: kept by the pane host, or adopted from a handoff.
             if kept.contains(&id) || self.panes.read().unwrap().contains_key(&id) {
+                kept.push(id);
                 continue;
             }
             // A child left over from a handoff that did not complete: its
@@ -1840,23 +1917,55 @@ impl Daemon {
             if let Some(pid) = pid.map(|p| p as i32).filter(|p| *p > 1) {
                 sys::end_leftover_child(pid);
             }
-            let Ok(meta) = serde_json::from_str::<PaneMeta>(&meta) else {
+            let Ok(mut meta) = serde_json::from_str::<PaneMeta>(&meta) else {
                 continue;
             };
-            let resumable =
-                meta.agent.is_agent() && meta.session_id.is_some() && meta.exit.is_none();
-            if !resumable {
-                let _ = self.db.with(|c| {
-                    c.execute(
-                        "UPDATE panes SET closed=?2 WHERE id=?1",
-                        rusqlite::params![id, now_ms() as i64],
-                    )
-                });
+            // Held back before an upgrade whose handoff lost other panes:
+            // still held back, and listed again once this is done.
+            if meta.held_back && start.handoff {
                 continue;
             }
+            found.panes += 1;
+            // Held back at an earlier start: looked at again as it was.
+            if meta.held_back {
+                meta.held_back = false;
+                meta.exit = None;
+            }
+            if self.fail_task_for_restart(&meta) {
+                found.tasks_failed += 1;
+            }
+            // What the pane's program left running in no pane, if anything.
+            let left = crate::restore::leftovers(
+                running.get_or_insert_with(sys::processes),
+                pid,
+                meta.proc_started_ms,
+                start.last_alive_ms,
+                now_ms(),
+            );
+            let resumable =
+                meta.agent.is_agent() && meta.session_id.is_some() && meta.exit.is_none();
+            if !resumable || start.hold {
+                // Not started again, so what it left running is the
+                // owner's to judge (a job detached on purpose): listed in
+                // the notice and not touched.
+                found.note_left(&left);
+                if resumable {
+                    found.held += 1;
+                } else if meta.agent.is_agent() {
+                    found.closed_agents += 1;
+                } else {
+                    found.closed_shells += 1;
+                }
+                self.list_ended(meta, token, resumable);
+                continue;
+            }
+            // Started again: the old program's leftovers would run beside
+            // the new one, in no pane. Their whole session is ended.
+            sys::end_processes(&left.iter().map(|p| p.pid).collect::<Vec<_>>());
+            found.leftovers_ended += left.len();
             let opts = SpawnOpts {
                 id: Some(id.clone()),
-                token: Some(token),
+                token: Some(token.clone()),
                 name: Some(meta.name.clone()),
                 agent: Some(meta.agent),
                 program: self.launcher_program(&meta),
@@ -1873,7 +1982,7 @@ impl Daemon {
             };
             match self.spawn_pane(opts) {
                 Ok(p) => {
-                    resumed += 1;
+                    found.resumed += 1;
                     self.keep_owner_marks(&p, &meta);
                     self.record(
                         "pane.resumed",
@@ -1886,16 +1995,13 @@ impl Daemon {
                 }
                 Err(e) => {
                     tracing::warn!(pane = %id, error = %e, "could not resume pane");
-                    let _ = self.db.with(|c| {
-                        c.execute(
-                            "UPDATE panes SET closed=?2 WHERE id=?1",
-                            rusqlite::params![id, now_ms() as i64],
-                        )
-                    });
+                    found.closed_agents += 1;
+                    self.list_ended(meta, token, false);
                 }
             }
         }
-        resumed
+        found.approvals_expired = self.expire_ghost_approvals(&kept);
+        found
     }
 
     /// A pane started again under its old id keeps what the owner set on
@@ -1996,6 +2102,7 @@ impl Daemon {
             pid: std::process::id(),
             prev_exe: self.exe.clone(),
             panes,
+            trust_requests: self.trust.requests_for_handoff(),
         }
     }
 
@@ -2019,6 +2126,8 @@ impl Daemon {
             tracing::error!("handoff state is not for this process; resuming agents by session id");
             return false;
         }
+        // Whoever was waiting to be let in is still waiting.
+        self.trust.adopt_requests(&state.trust_requests);
         let total = state.panes.len();
         let mut adopted = 0;
         for hp in state.panes {
@@ -2049,8 +2158,12 @@ impl Daemon {
             json!({"from": state.from_version, "to": VERSION, "panes": total, "adopted": adopted}),
         );
         if adopted < total {
-            // Whatever did not survive resumes by session id.
-            let _ = self.recover();
+            // Whatever did not survive resumes by session id, and the owner
+            // is told as after any other restart. This is not a start that
+            // counts towards holding sessions back.
+            let start = crate::restore::StartInfo::handoff(now_ms());
+            let found = self.recover(&start);
+            self.restore_report(&start, &found, "upgrade");
         }
         true
     }
@@ -2123,6 +2236,12 @@ impl Daemon {
             "perf": 1,
             // It lists requests that wait at other stations (`trust.relay`).
             "trust_relay": true,
+            // What this station can be asked for that an older one cannot.
+            // One line each, so that additions do not collide.
+            "caps": [
+                "task_continue",
+                "station_flags",
+            ],
             "pane_host": self.pane_host_info(),
             "arch": std::env::consts::ARCH,
             "panes": panes.iter().filter(|p| p.meta.lock().unwrap().exit.is_none()).count(),

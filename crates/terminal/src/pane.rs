@@ -47,6 +47,9 @@ pub struct PaneHandoff {
 enum Terminal {
     Local(Pty),
     Hosted(hosted::Handle),
+    /// No terminal at all: a pane that is only listed, because its program
+    /// ended with a daemon before this one (see `Pane::ended`).
+    Ended,
 }
 
 enum Source {
@@ -233,6 +236,36 @@ impl Pane {
         )
     }
 
+    /// A pane with no program and no terminal, for a pane that is still
+    /// listed after its program ended with the daemon before this one. Its
+    /// screen shows `note`; nothing can be written to it, and it has ended.
+    pub fn ended(cols: u16, rows: u16, note: &str) -> io::Result<Pane> {
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "this pane's program has ended",
+                ))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut screen = Screen::new(cols, rows);
+        screen.feed(note.as_bytes());
+        Ok(Pane {
+            pty: Terminal::Ended,
+            screen: Arc::new(Mutex::new(screen)),
+            input: Input::start(Box::new(Closed))?,
+            exited: Arc::new(Mutex::new(Some(ExitInfo::Unknown))),
+            detach: Arc::new(AtomicBool::new(true)),
+            bytes_out: Arc::new(AtomicU64::new(0)),
+            last_output_ms: Arc::new(AtomicU64::new(0)),
+            reader: Mutex::new(None),
+        })
+    }
+
     /// Rebuild a pane from handoff state inside the new process image.
     ///
     /// # Safety
@@ -272,6 +305,7 @@ impl Pane {
         let pid = match &pty {
             Terminal::Local(p) => p.pid(),
             Terminal::Hosted(h) => h.pid(),
+            Terminal::Ended => 0,
         };
 
         let handle = {
@@ -353,6 +387,7 @@ impl Pane {
         match &self.pty {
             Terminal::Local(p) => p.pid(),
             Terminal::Hosted(h) => h.pid(),
+            Terminal::Ended => 0,
         }
     }
 
@@ -376,6 +411,7 @@ impl Pane {
         match &self.pty {
             Terminal::Local(p) => p.resize(cols, rows)?,
             Terminal::Hosted(h) => h.resize(cols, rows)?,
+            Terminal::Ended => {}
         }
         screen.resize(cols, rows);
         Ok(())
@@ -385,6 +421,7 @@ impl Pane {
         match &self.pty {
             Terminal::Local(p) => p.signal(sig),
             Terminal::Hosted(h) => h.signal(sig),
+            Terminal::Ended => Ok(()),
         }
     }
 
@@ -436,12 +473,19 @@ impl Pane {
                 "a terminal in this process cannot be handed to another on this system",
             ));
         }
+        if matches!(self.pty, Terminal::Ended) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this pane has no terminal to hand over",
+            ));
+        }
         self.detach.store(true, Ordering::SeqCst);
         if let Some(h) = self.reader.lock().unwrap().take() {
             let _ = h.join();
         }
         let mut screen = self.screen.lock().unwrap();
         let (raw, host_id, offset) = match &self.pty {
+            Terminal::Ended => unreachable!("refused above"),
             Terminal::Local(p) => (p.handoff_fd()?, None, 0),
             // The reader has stopped: this is the first byte it did not take.
             Terminal::Hosted(h) => (-1, Some(h.id().to_string()), h.offset()),

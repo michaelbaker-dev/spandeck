@@ -1165,7 +1165,10 @@ fn hook_main(paths: &Paths, agent: &str) -> i32 {
     let Ok(payload) = serde_json::from_str::<Value>(&input) else {
         return nothing();
     };
-    let Ok(mut client) = Client::from_env(paths) else {
+    // A daemon that is starting again is waited for, for three seconds: it
+    // restores its panes before it listens, so a restored agent's first
+    // hook arrives too early. After that, silence, as before.
+    let Ok(mut client) = Client::from_env_waiting(paths, spandeck_core::client::HOOK_WAIT) else {
         return nothing();
     };
     // A permission request may wait minutes for an answer from the phone.

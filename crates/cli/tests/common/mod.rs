@@ -300,6 +300,12 @@ impl Station {
         } else {
             "discovery = false\n"
         };
+        // A test of where the station listens says so itself.
+        let bind = if extra.contains("web_bind =") {
+            ""
+        } else {
+            "web_bind = [\"127.0.0.1\"]\n"
+        };
         // A program that only waits stands in for the keep-awake helper.
         let wait = if spandeck_terminal::sys::WINDOWS {
             r#"["ping", "-n", "300", "127.0.0.1"]"#
@@ -309,7 +315,7 @@ impl Station {
         std::fs::write(
             root.join("config/config.toml"),
             format!(
-                "station = \"{name}\"\nweb_port = {port}\nweb_bind = [\"127.0.0.1\"]\n{discovery}keep_awake_cmd = {wait}\n{prices}{}\n[agents.fake]\nprogram = '{FAKE}'\n{}\n",
+                "station = \"{name}\"\nweb_port = {port}\n{bind}{discovery}keep_awake_cmd = {wait}\n{prices}{}\n[agents.fake]\nprogram = '{FAKE}'\n{}\n",
                 top.join(""),
                 tables
                     .join("")

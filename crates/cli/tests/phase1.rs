@@ -151,9 +151,49 @@ fn after_a_daemon_crash_agents_resume_and_shells_do_not() {
         (&json!(true), &json!(true), &json!(true)),
         "still paused, muted and watched after the crash"
     );
+    // A plain shell is not brought back, but it is not lost from the list
+    // either (15 Nov 2026, "After a restart"): it is listed as ended, with
+    // the reason, and the owner is told once what the restart left.
+    let gone = s.pane(&shell);
+    assert_eq!(
+        (&gone["exited"], &gone["ended_by"], &gone["pid"]),
+        (&json!(true), &json!("restart"), &json!(0)),
+        "the shell is listed as ended with the restart: {gone}"
+    );
+    // The restored agent's first hook reached the daemon. It used not to:
+    // panes are restored before the socket is served (49 of 50, measured).
+    wait_for_or(
+        "the restored agent's first hook",
+        10,
+        || s.text(&agent),
+        || s.pane(&agent)["hooks_seen"].as_bool().filter(|seen| *seen),
+    );
+    assert!(!s.text(&agent).contains("hook error"), "{}", s.text(&agent));
+    let told = s.log("station.recovered");
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(
+        (
+            &told[0]["data"]["why"],
+            &told[0]["data"]["resumed"],
+            &told[0]["data"]["closed"]
+        ),
+        (&json!("crash"), &json!(1), &json!(1))
+    );
+    let notices = s.call("notify.list", json!({}));
+    let about: Vec<&serde_json::Value> = notices
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["kind"] == json!("station.recovered"))
+        .collect();
+    assert_eq!(about.len(), 1, "{notices}");
     assert!(
-        s.try_call("pane.get", json!({"pane": shell})).is_err(),
-        "a plain shell is not brought back"
+        about[0]["body"]
+            .as_str()
+            .unwrap()
+            .starts_with("1 session was started again, 1 shell ended."),
+        "{}",
+        about[0]
     );
 }
 

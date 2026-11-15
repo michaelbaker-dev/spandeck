@@ -62,6 +62,38 @@ pub struct FleetState {
     pub station: String,
     /// Round trips and failures of calls to other stations are counted here.
     pub perf: Arc<crate::perf::Perf>,
+    /// This machine's own Tailscale addresses and name, as the local client
+    /// said at the last look at the fleet. The web server listens on what
+    /// this says. `None` until a look has read them.
+    pub own_addrs: tokio::sync::watch::Sender<Option<OwnAddrs>>,
+}
+
+/// See `FleetState::own_addrs`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OwnAddrs {
+    pub ips: Vec<IpAddr>,
+    /// The machine's name on the tailnet, lower case, no final dot.
+    pub dns: Option<String>,
+}
+
+impl OwnAddrs {
+    /// From `tailscale status --json`.
+    pub fn of(status: &Value) -> OwnAddrs {
+        OwnAddrs {
+            ips: status
+                .pointer("/Self/TailscaleIPs")
+                .and_then(|a| a.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|i| i.as_str()?.parse().ok())
+                .collect(),
+            dns: status
+                .pointer("/Self/DNSName")
+                .and_then(|d| d.as_str())
+                .map(|d| d.trim_end_matches('.').to_lowercase())
+                .filter(|d| !d.is_empty()),
+        }
+    }
 }
 
 impl FleetState {
@@ -84,6 +116,7 @@ impl FleetState {
             trust,
             station: cfg.station.clone(),
             perf,
+            own_addrs: tokio::sync::watch::Sender::new(None),
         }
     }
 
@@ -447,6 +480,17 @@ impl Daemon {
             let status = tokio::task::block_in_place(tailscale_status);
             // The same output says when each device's key expires.
             self.tailnet_refresh(status.as_ref());
+            // And which addresses this machine has now: the web server
+            // listens on a new one and lets go of one that is gone. When
+            // the client does not answer, what it last said stands.
+            if let Some(status) = &status {
+                let now = Some(OwnAddrs::of(status));
+                fleet.own_addrs.send_if_modified(|held| {
+                    let changed = *held != now;
+                    *held = now;
+                    changed
+                });
+            }
             if let (Some(me), Some(status)) = (me, status) {
                 for peer in status
                     .get("Peer")

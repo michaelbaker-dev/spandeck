@@ -463,6 +463,9 @@ impl Daemon {
     ) -> Result<()> {
         let tx = self.approvals.lock().unwrap().remove(id);
         let Some(tx) = tx else {
+            // Still listed as waiting with nobody waiting for it: it leaves
+            // the list now, instead of staying there for ever.
+            self.expire_unanswerable(id);
             return Err(invalid(
                 "that request is no longer waiting (answered, expired, or the agent moved on)",
             ));
