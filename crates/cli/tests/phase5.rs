@@ -499,11 +499,39 @@ fn a_stop_for_an_unreachable_station_is_shown_honestly_and_delivered_on_reconnec
 /// second (a generous bound: the exact figure is the nightly benchmark's),
 /// while the frozen one's row still says only that the stop was requested;
 /// that row then says unreachable, never stopped; and the stop reaches the
-/// frozen station when it is back, once.
+/// frozen station when it is back, once. The other two stations' clocks are
+/// 45 and 60 seconds ahead of the issuing one's, so the moment the stop was
+/// issued has to be converted to each: counted the wrong way, the work that
+/// was running would be taken for work started after the stop.
 #[test]
 #[ignore = "merge tier: three daemons, and it waits out the five-second limit of a station that does not answer"]
 fn a_fleet_stop_reaches_the_station_that_answers_while_another_is_frozen() {
-    let (a, b, c) = Station::three();
+    let fleet = Station::fleet(&["alpha", "bravo", "charlie"], |name, _| {
+        let ahead = match name {
+            "bravo" => "45000",
+            "charlie" => "60000",
+            _ => "0",
+        };
+        (
+            String::new(),
+            vec![("SPANDECK_TEST_CLOCK_MS".to_string(), ahead.to_string())],
+        )
+    });
+    let (a, b, c) = (&fleet[0], &fleet[1], &fleet[2]);
+    wait_for("the three stations to find each other", 30, || {
+        fleet
+            .iter()
+            .all(|s| {
+                s.call("fleet.refresh", json!({}))["stations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|x| x["state"] == json!("online"))
+                    .count()
+                    == 3
+            })
+            .then_some(())
+    });
     let long_job = json!({"steps": [{"prompt": "long job"}, {"work": 120000}]});
     let on_a = a.fake(long_job.clone(), json!({}));
     let on_b = b.fake(long_job.clone(), json!({}));
@@ -518,9 +546,9 @@ fn a_fleet_stop_reaches_the_station_that_answers_while_another_is_frozen() {
     std::thread::scope(|scope| {
         let all = scope.spawn(|| a.call("stop.all", json!({"scope": "fleet"})));
         let took = wait_for("bravo's stop to be confirmed", 20, || {
-            (stop_row(&a, "bravo")["status"] == json!("confirmed")).then(|| began.elapsed())
+            (stop_row(a, "bravo")["status"] == json!("confirmed")).then(|| began.elapsed())
         });
-        let charlie = stop_row(&a, "charlie");
+        let charlie = stop_row(a, "charlie");
         assert!(
             took < Duration::from_secs(1),
             "bravo was confirmed after {took:?}"
@@ -539,11 +567,16 @@ fn a_fleet_stop_reaches_the_station_that_answers_while_another_is_frozen() {
             "{out}"
         );
     });
-    let row = stop_row(&a, "charlie");
+    let row = stop_row(a, "charlie");
     assert_eq!(
         (&row["status"], &row["label"]),
         (&json!("unreachable"), &json!("station unreachable")),
         "{row}"
+    );
+    assert_eq!(stop_row(a, "bravo")["result"]["stopped"], json!([on_b]));
+    assert_eq!(
+        b.log("station.stop_all")[0]["data"]["aimed_by"],
+        json!("cutoff")
     );
 
     // Charlie is back. Work started there since is left alone.
@@ -552,17 +585,15 @@ fn a_fleet_stop_reaches_the_station_that_answers_while_another_is_frozen() {
     c.wait_state(&later, "working");
     wait_for("the waiting stop to be delivered", 30, || {
         a.call("fleet.refresh", json!({}));
-        (stop_row(&a, "charlie")["status"] == json!("confirmed")).then_some(())
+        (stop_row(a, "charlie")["status"] == json!("confirmed")).then_some(())
     });
     c.wait_text(&on_c, "[fake] interrupted");
-    assert_eq!(stop_row(&a, "charlie")["result"]["stopped"], json!([on_c]));
+    assert_eq!(stop_row(a, "charlie")["result"]["stopped"], json!([on_c]));
     std::thread::sleep(Duration::from_millis(400));
     assert_eq!(c.pane(&later)["state"], json!("working"));
-    assert_eq!(
-        c.log("station.stop_all").len(),
-        1,
-        "applied once, however many times it arrived"
-    );
+    let applied = c.log("station.stop_all");
+    assert_eq!(applied.len(), 1, "applied once, however often it arrived");
+    assert_eq!(applied[0]["data"]["aimed_by"], json!("cutoff"));
 }
 
 /// Merge tier. One station of the fleet stays a version behind. A station
