@@ -94,6 +94,14 @@ async function refresh() {
   try { S.fleet = await api.call('fleet.view'); } catch (e) { return; }
   const stations = S.fleet.stations.filter(s => s.state === 'online').map(s => s.station);
   await Promise.all(stations.map(refreshStation));
+  // How many agents are working or waiting on a station is counted from the
+  // pane list it has just given, as "needs you" in the top bar is. What the
+  // serving station last heard of another one can be ten seconds old, and
+  // differs from one serving station to the next.
+  for (const s of S.fleet.stations) {
+    const live = s.state === 'online' && S.panes.has(s.station) ? liveAgents(s.station) : null;
+    if (live) Object.assign(s, { working: live.filter(p => p.state === 'working').length, needs_you: live.filter(p => p.state === 'needs_you').length });
+  }
   const lists = await Promise.all(stations.map(st => api.on(st, 'approval.list').catch(() => [])));
   S.approvals = lists.flat();
   await loadNotes(stations);
@@ -160,9 +168,19 @@ async function loadLook() {
   try { setDoc(await api.call('look.get')); } catch (e) { return; }
   // What is being tried in the editor is not what to open with next time.
   if (!lookState.preview) rememberPage(pageLook(null));
-  // The fonts the owner uploaded, from this station. Not waited for: a
-  // terminal shows in the next font of its list until one arrives.
-  loadFonts((id) => api.file('/api/font/' + id));
+  // The fonts the owner uploaded. Not waited for: a terminal shows in the
+  // next font of its list until one arrives. The serving station has the
+  // file unless it has not fetched it yet (or cannot keep fonts); then any
+  // station that has it is asked, so a font does not show on one station's
+  // deck and not on another's.
+  loadFonts(async (id) => {
+    try { return await api.file('/api/font/' + id); } catch (e) {
+      for (const st of onlineStations().filter(x => x !== api.station)) {
+        try { return Uint8Array.from(atob((await api.on(st, 'look.font.fetch', { id })).data_b64), c => c.charCodeAt(0)).buffer; } catch (e2) { /* the next station */ }
+      }
+      throw e;
+    }
+  });
 }
 // A font arrived after terminals were drawn with another in its place.
 fontListeners.add(() => { for (const t of S.terms.values()) t.remeasure(); });
@@ -669,20 +687,23 @@ async function tasksPanel(st, project) {
 }
 
 function palette() {
+  const here = online(S.route.station) ? S.route.station : api.station;
   const actions = [
     { label: 'Go to the fleet', run: () => go('#/fleet') },
     ...S.fleet.stations.map(s => ({ label: `Go to station ${s.station}`, run: () => go(stationUrl(s.station)) })),
     ...S.fleet.stations.flatMap(s => liveAgents(s.station).map(p => ({ label: `Open pane ${p.name} on ${s.station}`, run: () => go(paneUrl(s.station, p.id)) }))),
     ...allLayouts().map(x => ({ label: `Open layout ${x.name} (${layShort(x)})`, run: () => go(layUrl(x)) })),
     { label: 'New global layout…', run: () => newLayoutDialog(null, null) },
-    { label: 'New pane…', run: () => newPaneDialog(S.route.station || api.station) },
-    { label: 'New project…', run: () => newProjectDialog(S.route.station || api.station) },
+    // An action on one station names it: which one it is depends on what
+    // is on screen, or on the station serving this deck.
+    { label: `New pane on ${here}…`, run: () => newPaneDialog(here) },
+    { label: `New project on ${here}…`, run: () => newProjectDialog(here) },
     { label: 'Approval requests', run: approvalsPanel },
     { label: 'Inbox', run: inboxPanel },
     { label: 'Usage: tokens and estimated cost', run: fleetUsageDialog },
     { label: 'Appearance: themes, colours and fonts', run: () => appearance('deck') },
-    { label: 'Stop every agent on this station', run: () => rpc(api.station, 'stop.all', { scope: 'station' }) },
-    { label: 'Check this station (doctor)', run: doctorPanel },
+    { label: `Stop every agent on ${api.station}`, run: () => rpc(api.station, 'stop.all', { scope: 'station' }) },
+    { label: `Check ${here} (doctor)`, run: () => doctorPanel(here) },
     { label: 'Agent setup: MCP servers, skills, models', run: setupPanel },
     { label: 'Vault: connect stations and set token rotation', run: vaultPanel },
     { label: 'Run a command in every agent…', run: () => commandDialog(api.station, null) },
