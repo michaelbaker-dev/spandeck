@@ -39,6 +39,18 @@ pub struct TailnetSelf {
     pub ips: Vec<String>,
 }
 
+/// What became of a call to another station that did not give a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sent {
+    /// No connection was made: the station was sent nothing.
+    No,
+    /// The request went out and no answer, or no readable one, came back:
+    /// it may have been carried out.
+    Maybe,
+    /// The station answered, with an error.
+    Answered,
+}
+
 /// Who is on the other end of a connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Remote {
@@ -68,7 +80,7 @@ pub struct FleetState {
     /// this says. `None` until a look has read them.
     pub own_addrs: tokio::sync::watch::Sender<Option<OwnAddrs>>,
     /// Addresses whose last calls got no answer at all: see `not_answering`.
-    silent: Mutex<HashMap<String, Silent>>,
+    silent: Mutex<Silence>,
 }
 
 /// Calls in a row to one address that got no answer (no connection, or
@@ -77,7 +89,56 @@ pub struct FleetState {
 struct Silent {
     fails: u32,
     since_ms: u64,
+    probed: bool,
     probe_ms: u64,
+}
+
+/// Which addresses are not answering: the whole of the rule, apart from
+/// the calls that feed it and the clock.
+#[derive(Default)]
+pub struct Silence {
+    by_addr: HashMap<String, Silent>,
+}
+
+impl Silence {
+    /// A call to `addr` was answered (whatever the answer), or got no
+    /// answer at all.
+    pub fn note(&mut self, addr: &str, answered: bool, now_ms: u64) {
+        if answered {
+            self.by_addr.remove(addr);
+            return;
+        }
+        if self.by_addr.len() >= 256 && !self.by_addr.contains_key(addr) {
+            return;
+        }
+        let s = self.by_addr.entry(addr.to_string()).or_default();
+        if s.fails == 0 {
+            s.since_ms = now_ms;
+        }
+        s.fails = s.fails.saturating_add(1);
+    }
+
+    /// Not answering, and since when: from the second call in a row with
+    /// no answer until the first answer.
+    pub fn since(&self, addr: &str) -> Option<u64> {
+        self.by_addr
+            .get(addr)
+            .filter(|s| s.fails >= SILENT_AFTER)
+            .map(|s| s.since_ms)
+    }
+
+    /// May a call go to `addr` to find out whether it is back? Once in
+    /// `SILENT_PROBE_MS`; always for an address that is answering.
+    pub fn probe(&mut self, addr: &str, now_ms: u64) -> bool {
+        match self.by_addr.get_mut(addr) {
+            Some(s) if s.probed && now_ms.saturating_sub(s.probe_ms) < SILENT_PROBE_MS => false,
+            Some(s) => {
+                (s.probed, s.probe_ms) = (true, now_ms);
+                true
+            }
+            None => true,
+        }
+    }
 }
 
 /// After this many calls in a row with no answer a station is taken to be
@@ -136,26 +197,14 @@ impl FleetState {
             station: cfg.station.clone(),
             perf,
             own_addrs: tokio::sync::watch::Sender::new(None),
-            silent: Mutex::new(HashMap::new()),
+            silent: Mutex::new(Silence::default()),
         }
     }
 
     /// A call to this address was answered (whatever the answer), or was
     /// not answered at all.
     fn note_answer(&self, addr: &str, answered: bool) {
-        let mut silent = self.silent.lock().unwrap();
-        if answered {
-            silent.remove(addr);
-            return;
-        }
-        if silent.len() >= 256 && !silent.contains_key(addr) {
-            return;
-        }
-        let s = silent.entry(addr.to_string()).or_default();
-        if s.fails == 0 {
-            s.since_ms = now_ms();
-        }
-        s.fails = s.fails.saturating_add(1);
+        self.silent.lock().unwrap().note(addr, answered, now_ms());
     }
 
     /// Is this station not answering: did its last calls, two or more in a
@@ -167,11 +216,7 @@ impl FleetState {
     /// station at once where each would wait out its five seconds.
     pub fn not_answering(&self, station: &str) -> Option<u64> {
         let addr = self.peer(station)?.addr;
-        let silent = self.silent.lock().unwrap();
-        silent
-            .get(&addr)
-            .filter(|s| s.fails >= SILENT_AFTER)
-            .map(|s| s.since_ms)
+        self.silent.lock().unwrap().since(&addr)
     }
 
     /// May one call be let through to a station that is not answering, to
@@ -181,15 +226,7 @@ impl FleetState {
         let Some(addr) = self.peer(station).map(|p| p.addr) else {
             return true;
         };
-        let mut silent = self.silent.lock().unwrap();
-        match silent.get_mut(&addr) {
-            Some(s) if now_ms().saturating_sub(s.probe_ms) < SILENT_PROBE_MS => false,
-            Some(s) => {
-                s.probe_ms = now_ms();
-                true
-            }
-            None => true,
-        }
+        self.silent.lock().unwrap().probe(&addr, now_ms())
     }
 
     pub fn peer(&self, station: &str) -> Option<Peer> {
@@ -375,6 +412,21 @@ impl FleetState {
         self.post(addr, method, params, None).await
     }
 
+    /// `call`, for a caller that must know whether a call that failed may
+    /// have arrived: the error says which it was.
+    pub async fn call_sent(
+        &self,
+        station: &str,
+        method: &str,
+        params: Value,
+    ) -> std::result::Result<Value, (Sent, String)> {
+        let peer = self
+            .peer(station)
+            .ok_or_else(|| (Sent::No, format!("station {station} is not in the fleet")))?;
+        self.post_sent(&peer.addr, method, params, Some(self.trust.key()))
+            .await
+    }
+
     async fn post(
         &self,
         addr: &str,
@@ -382,6 +434,18 @@ impl FleetState {
         params: Value,
         key: Option<Vec<u8>>,
     ) -> std::result::Result<Value, String> {
+        self.post_sent(addr, method, params, key)
+            .await
+            .map_err(|(_, why)| why)
+    }
+
+    async fn post_sent(
+        &self,
+        addr: &str,
+        method: &str,
+        params: Value,
+        key: Option<Vec<u8>>,
+    ) -> std::result::Result<Value, (Sent, String)> {
         let body =
             json!({"method": method, "params": params, "from": self.station, "protocol": PROTOCOL})
                 .to_string()
@@ -411,14 +475,19 @@ impl FleetState {
             };
             self.perf.link_call(addr, began.elapsed(), Some(why));
             self.note_answer(addr, false);
-            format!("unreachable: {e}")
+            // No connection was made: nothing was sent.
+            let sent = match e.is_connect() {
+                true => Sent::No,
+                false => Sent::Maybe,
+            };
+            (sent, format!("unreachable: {e}"))
         })?;
         self.note_answer(addr, true);
         let status = resp.status();
         let body: Value = resp.json().await.map_err(|e| {
             self.perf
                 .link_call(addr, began.elapsed(), Some("bad reply"));
-            format!("bad reply: {e}")
+            (Sent::Maybe, format!("bad reply: {e}"))
         })?;
         let refused = match body.pointer("/error/code").and_then(|c| c.as_str()) {
             Some("clock") => Some("clock"),
@@ -427,14 +496,16 @@ impl FleetState {
         };
         self.perf.link_call(addr, began.elapsed(), refused);
         if let Some(err) = body.get("error") {
-            return Err(err
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("error")
-                .to_string());
+            return Err((
+                Sent::Answered,
+                err.get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("error")
+                    .to_string(),
+            ));
         }
         if !status.is_success() {
-            return Err(format!("HTTP {status}"));
+            return Err((Sent::Answered, format!("HTTP {status}")));
         }
         Ok(body.get("result").cloned().unwrap_or(Value::Null))
     }
@@ -962,6 +1033,7 @@ impl Daemon {
         by: &str,
         marks: crate::holds::StopMarks,
         mut legs: crate::rpc::StopLegs,
+        rid_key: Option<&str>,
     ) -> Result<Value> {
         let issued = now_ms();
         // The fleet is its members: a machine that has not joined cannot
@@ -996,6 +1068,11 @@ impl Daemon {
         }
         let book = &self.stops.book;
         let ids = book.issue(&targets, scope, by, issued);
+        // Asked with a request id: a second try of the same request is
+        // given these stops, and issues none. Not waited for (rids.rs).
+        if let Some(key) = rid_key {
+            self.rids.stop_issued(key, &ids, issued);
+        }
         let (here, there): (Vec<_>, Vec<_>) = ids
             .iter()
             .zip(&targets)

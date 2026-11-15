@@ -420,6 +420,9 @@ impl Daemon {
         // `db_writer = false`: the ship's log and pane records are written
         // by their callers again (db.rs says what that does not take back).
         self.db.set_queued(self.flag_on("db_writer", true));
+        // `request_ids = false`: no id is kept and none is announced, so
+        // no change is tried again by its id at this station (rids.rs).
+        self.rids.set_on(self.flag_on(crate::rids::FLAG, true));
     }
 
     /// A switch as it stands now, if the config or the owner set it.

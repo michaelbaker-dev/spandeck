@@ -30,6 +30,7 @@ use serde_json::{json, Value};
 use spandeck_core::daemon::{Authority, Caller, Daemon};
 use spandeck_core::fleet::Remote;
 use spandeck_core::perf::Kind;
+use spandeck_core::rids::Retry;
 use spandeck_core::rpc::AtRead;
 use spandeck_core::server::error_json;
 use spandeck_core::trust::Signed;
@@ -889,6 +890,22 @@ struct Req {
     id: Value,
     method: String,
     params: Value,
+    /// The request's id, and on a second try how long ago the first was
+    /// written (rids.rs).
+    retry: Option<Retry>,
+}
+
+impl Req {
+    /// Is this a second try of a request written before?
+    fn again(&self) -> bool {
+        self.retry.as_ref().is_some_and(|r| r.again_ms.is_some())
+    }
+}
+
+/// What is typed is never sent a second time: a second try of it is told
+/// that what became of the first is not known.
+fn typed_twice() -> Value {
+    json!({"code": "outcome_unknown", "message": "could not confirm whether what was typed arrived. Nothing was sent again: look at the pane before typing it again."})
 }
 
 /// Where what is typed into a channel goes.
@@ -1063,9 +1080,17 @@ impl Conn {
         }
     }
 
-    async fn dispatch(&self, method: &str, params: Value, at: AtRead) -> Result<Value, Value> {
+    /// Carry a request out. `retry`: its id, when it came with one, so
+    /// that a change is done once whichever lane it runs in (rids.rs).
+    async fn dispatch(
+        &self,
+        method: &str,
+        params: Value,
+        retry: Option<Retry>,
+        at: AtRead,
+    ) -> Result<Value, Value> {
         self.daemon()
-            .dispatch_at(&self.who, method, params, at)
+            .dispatch_read(&self.who, method, params, retry, at)
             .await
             .map_err(|e| error_json(&e))
     }
@@ -1236,7 +1261,12 @@ impl Running {
         {
             let began = std::time::Instant::now();
             let reply = conn
-                .dispatch(method, req.params.clone(), AtRead::default())
+                .dispatch(
+                    method,
+                    req.params.clone(),
+                    req.retry.clone(),
+                    AtRead::default(),
+                )
                 .await;
             return conn.say(conn.done(&req, Some(lane), began, reply));
         }
@@ -1246,17 +1276,17 @@ impl Running {
         // whether it is back. A Stop, a Pause, a Kill or an answer for it
         // is always sent.
         let mut finds_out = false;
-        if let Some(to) = station.as_deref().filter(|_| lane != Lane::Urgent) {
+        if let Some(to) = station.as_deref() {
             let fleet = &conn.daemon().fleet;
-            if let Some(since) = fleet.not_answering(to) {
-                if !fleet.probe(to) {
-                    conn.daemon().perf.busy.add();
-                    let for_ms = spandeck_core::paths::now_ms().saturating_sub(since);
-                    let no = lanes::not_answering(to, for_ms, self.page_knows_busy);
-                    return conn.say(answer(&req.id, Err(no)));
-                }
-                finds_out = true;
+            let silent = fleet.not_answering(to);
+            if let Some(since) = lanes::held_back(lane, silent, || fleet.probe(to)) {
+                conn.daemon().perf.busy.add();
+                let for_ms = spandeck_core::paths::now_ms().saturating_sub(since);
+                let no = lanes::not_answering(to, for_ms, self.page_knows_busy);
+                return conn.say(answer(&req.id, Err(no)));
             }
+            // Let through to find out: not asked again at its turn.
+            finds_out = silent.is_some();
         }
         // Attaching to a pane of another station is counted for that
         // station and has that station's places: it waits for that station
@@ -1280,7 +1310,11 @@ impl Running {
         let mut at = AtRead::default();
         let mut place = None;
         let stop_all = station.is_none() && route.method == "stop.all";
-        if station.is_none() && lane == Lane::Urgent && conn.who.is_owner() {
+        // A second try of a stop takes nothing here: it is answered from
+        // the record of the first, or, with none, stops as any stop does
+        // and takes its places when it runs.
+        let again = req.again();
+        if station.is_none() && lane == Lane::Urgent && conn.who.is_owner() && !again {
             let daemon = conn.daemon();
             match (route.method.as_str(), &scope) {
                 ("pane.stop", Some(Scope::Pane(id))) if !self.lines.input_waits("", id) => {
@@ -1319,7 +1353,7 @@ impl Running {
                 _ => {}
             }
         }
-        if !stop_all || at.legs.is_empty() {
+        if !stop_all || (at.legs.is_empty() && !again) {
             place = scope.map(|s| self.lines.enter(&line, s, lane == Lane::Input));
         }
         // A read for another station has that station's places and no
@@ -1353,6 +1387,13 @@ impl Running {
             _ => None,
         };
         let knows = self.page_knows_busy;
+        // The parameters of the call that acts, for what is said if a
+        // station gives no answer.
+        let route_params = match req.method.as_str() {
+            "peer.call" => req.params.get("params").cloned().unwrap_or(Value::Null),
+            _ => req.params.clone(),
+        };
+        let ends_with_connection = route.ends_with_connection;
         let task = async move {
             let _counted = counted;
             // Its place among the reads, and its turn in its line. For
@@ -1377,7 +1418,10 @@ impl Running {
                     began = std::time::Instant::now();
                     match lane {
                         Lane::Attach => conn.attach(&req.method, &req.params).await,
-                        _ => conn.dispatch(&req.method, req.params.clone(), at).await,
+                        _ => {
+                            conn.dispatch(&req.method, req.params.clone(), req.retry.clone(), at)
+                                .await
+                        }
                     }
                 }
                 Some(to) => {
@@ -1386,9 +1430,9 @@ impl Running {
                     let fleet = &conn.daemon().fleet;
                     // While it waited the station may have stopped
                     // answering: then it is not sent either (a Stop is).
-                    let silent = fleet
-                        .not_answering(to)
-                        .filter(|_| lane != Lane::Urgent && !finds_out && !fleet.probe(to));
+                    let silent = lanes::held_back(lane, fleet.not_answering(to), || {
+                        finds_out || fleet.probe(to)
+                    });
                     match (held, silent) {
                         (Err(_), _) => Err(lanes::not_sent(to, knows)),
                         (Ok(_), Some(since)) => {
@@ -1398,10 +1442,20 @@ impl Running {
                         // Given up here after the deadline, whatever the
                         // call underneath is doing.
                         (Ok(_held), None) => {
-                            let call = conn.dispatch(&req.method, req.params.clone(), at);
+                            let call = conn.dispatch(
+                                &req.method,
+                                req.params.clone(),
+                                req.retry.clone(),
+                                at,
+                            );
                             match tokio::time::timeout(lanes::STATION_DEADLINE, call).await {
                                 Ok(reply) => reply,
-                                Err(_) => Err(lanes::no_answer(to, knows)),
+                                Err(_) => Err(lanes::no_answer(
+                                    to,
+                                    &route.method,
+                                    spandeck_core::rpc::repeatable(&route.method, &route_params),
+                                    knows,
+                                )),
                             }
                         }
                     }
@@ -1410,7 +1464,7 @@ impl Running {
             drop(place);
             conn.finish(&req, lane, began, reply).await;
         };
-        if route.ends_with_connection {
+        if ends_with_connection {
             self.ending.spawn(task);
         } else {
             self.lasting.spawn(task);
@@ -1428,7 +1482,12 @@ impl Running {
                 req.params["pane"] = json!(pane);
                 if self.lines.free("", &scope) {
                     let reply = conn
-                        .dispatch(&req.method, req.params.clone(), AtRead::default())
+                        .dispatch(
+                            &req.method,
+                            req.params.clone(),
+                            req.retry.clone(),
+                            AtRead::default(),
+                        )
                         .await;
                     return conn.say(conn.done(&req, Some(Lane::Input), began, reply));
                 }
@@ -1444,7 +1503,12 @@ impl Running {
                     place.turn().await;
                     let began = std::time::Instant::now();
                     let reply = conn
-                        .dispatch(&req.method, req.params.clone(), AtRead::default())
+                        .dispatch(
+                            &req.method,
+                            req.params.clone(),
+                            req.retry.clone(),
+                            AtRead::default(),
+                        )
                         .await;
                     drop(place);
                     conn.finish(&req, Lane::Input, began, reply).await;
@@ -1460,6 +1524,10 @@ impl Running {
                 // waited for: when that station takes nothing and 256
                 // things already wait, this one is refused and the page
                 // told, where it used to stop every request of this page.
+                if req.again() {
+                    let no = Err(typed_twice());
+                    return conn.say(conn.done(&req, Some(Lane::Input), began, no));
+                }
                 let scope = Scope::Pane(pane);
                 let (to, knows) = (station.clone(), self.page_knows_busy);
                 let hand = move |conn: &Conn, req: &Req| match tx.try_send(text) {
@@ -1525,16 +1593,23 @@ impl Running {
                 Typed::Here(pane) => {
                     let mut p = req.params.clone();
                     p["pane"] = json!(pane);
-                    conn.dispatch(&req.method, p, AtRead::default()).await
+                    conn.dispatch(&req.method, p, req.retry.clone(), AtRead::default())
+                        .await
                 }
+                Typed::There { .. } if req.again() => Err(typed_twice()),
                 Typed::There { tx, text, .. } => {
                     let _ = tx.send(text).await;
                     Ok(json!({"ok": true}))
                 }
             },
             _ => {
-                conn.dispatch(&req.method, req.params.clone(), AtRead::default())
-                    .await
+                conn.dispatch(
+                    &req.method,
+                    req.params.clone(),
+                    req.retry.clone(),
+                    AtRead::default(),
+                )
+                .await
             }
         };
         if let Some(msg) = conn.done(&req, None, began, reply) {
@@ -1591,7 +1666,7 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     };
     // Read once, here: a connection keeps the way it began.
     let in_lanes = web.daemon.flag_on(lanes::FLAG, true);
-    let hello = json!({"auth": {"ok": true, "station": web.daemon.station, "version": spandeck_core::VERSION, "build": assets_build(), "client": who.client, "full": who.is_owner(), "device": device, "lanes": in_lanes}});
+    let hello = json!({"auth": {"ok": true, "station": web.daemon.station, "version": spandeck_core::VERSION, "build": assets_build(), "client": who.client, "full": who.is_owner(), "device": device, "lanes": in_lanes, "caps": web.daemon.caps()}});
     if sink
         .send(Message::Text(hello.to_string().into()))
         .await
@@ -1670,9 +1745,18 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
         let Ok(req) = serde_json::from_str::<Value>(&text) else {
             continue;
         };
+        let id = req.get("id").cloned().unwrap_or(Value::Null);
+        let retry = match Retry::parse(req.get("rid"), req.get("again_ms")) {
+            Ok(retry) => retry,
+            Err(why) => {
+                conn.say(answer(&id, Err(json!({"code": "invalid", "message": why}))));
+                continue;
+            }
+        };
         let req = Req {
             arrived,
-            id: req.get("id").cloned().unwrap_or(Value::Null),
+            retry,
+            id,
             method: req
                 .get("method")
                 .and_then(|m| m.as_str())

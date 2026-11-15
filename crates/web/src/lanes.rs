@@ -324,6 +324,20 @@ impl Drop for Counted {
     }
 }
 
+/// Is a call for another station held back unsent because that station is
+/// not answering (`not_answering`: since when, from `FleetState`)? Then
+/// since when. Never a Stop, a Pause, a Kill, a Release or an approval's
+/// answer: those are always sent. `finds_out`: asked only for a call that
+/// would be held back; true lets this one through to find out whether the
+/// station is back.
+pub fn held_back(
+    lane: Lane,
+    not_answering: Option<u64>,
+    finds_out: impl FnOnce() -> bool,
+) -> Option<u64> {
+    not_answering.filter(|_| lane != Lane::Urgent && !finds_out())
+}
+
 /// A request for a station that is not answering, refused at once: the
 /// words, and the code for a page that knows it (a page from before gets
 /// the code any failed call had).
@@ -354,13 +368,23 @@ pub fn not_sent(station: &str, page_knows: bool) -> Value {
     })
 }
 
-/// A call to another station that got no answer within the deadline.
-pub fn no_answer(station: &str, page_knows: bool) -> Value {
+/// A call to another station that got no answer within the deadline. A
+/// read (or anything a second try of is as good as a first) is said to
+/// have had no answer; for a change it is not known whether it was made,
+/// which is said with the code a retried change has for that
+/// (`outcome_unknown`, rids.rs), to a page of any version.
+pub fn no_answer(station: &str, method: &str, repeatable: bool, page_knows: bool) -> Value {
+    let secs = STATION_DEADLINE.as_secs();
+    if repeatable {
+        return serde_json::json!({
+            "code": if page_knows { "not_answering" } else { "internal" },
+            "message": format!("{station} did not answer within {secs} s"),
+        });
+    }
     serde_json::json!({
-        "code": if page_knows { "not_answering" } else { "internal" },
+        "code": "outcome_unknown",
         "message": format!(
-            "{station} did not answer within {} s. If this was a change, it is not known whether it was made",
-            STATION_DEADLINE.as_secs()
+            "{station}: could not confirm whether {method} was carried out there (no answer within {secs} s). Nothing was sent again: check before asking again."
         ),
     })
 }
@@ -728,6 +752,55 @@ mod tests {
         let key = json!({"pane": "p1"});
         assert!(deck.read("key", "pane.input", key, false).is_none());
         assert_eq!(deck.settle().await, ["key"]);
+    }
+
+    /// The owner's rule, "never to slow everyone else down", for a station
+    /// that has stopped answering: it is known as that after two calls in
+    /// a row with no answer and until the first answer; a deck's call for
+    /// it is then held back unsent, but for one every two seconds that
+    /// finds out whether it is back; and a Stop, a Pause, a Kill or an
+    /// approval's answer for it is always sent.
+    #[test]
+    fn a_station_is_not_answering_after_two_silences_and_until_one_answer() {
+        use spandeck_core::fleet::{Silence, SILENT_PROBE_MS};
+        let (mut silence, bravo, t) = (Silence::default(), "10.0.0.2:7373", 1_000_000);
+        silence.note(bravo, false, t);
+        assert_eq!(silence.since(bravo), None, "one call says nothing yet");
+        silence.note(bravo, false, t + 5_000);
+        assert_eq!(silence.since(bravo), Some(t), "since the first silence");
+        assert_eq!(silence.since("10.0.0.3:7373"), None, "another station");
+        let now = t + 5_001;
+        // The first call after that finds out; the ones behind it do not.
+        let mut sent = 0;
+        for lane in [Lane::Read, Lane::Write, Lane::Input, Lane::Held, Lane::Read] {
+            let since = silence.since(bravo);
+            sent += held_back(lane, since, || silence.probe(bravo, now)).is_none() as u32;
+        }
+        assert_eq!(sent, 1);
+        // What stops, pauses, kills or answers is sent whatever the state,
+        // and uses up no finding out.
+        let since = silence.since(bravo);
+        assert_eq!(held_back(Lane::Urgent, since, || unreachable!()), None);
+        // Two seconds on, one more finds out.
+        let later = now + SILENT_PROBE_MS;
+        assert_eq!(
+            held_back(Lane::Read, since, || silence.probe(bravo, later)),
+            None
+        );
+        assert_eq!(
+            held_back(Lane::Read, since, || silence.probe(bravo, later + 1)),
+            Some(t)
+        );
+        // It still gives no answer: nothing changes. Then any call is
+        // answered, an error included: it is answering again, at once.
+        silence.note(bravo, false, later + 5_000);
+        assert_eq!(silence.since(bravo), Some(t));
+        silence.note(bravo, true, later + 6_000);
+        assert_eq!(silence.since(bravo), None);
+        assert_eq!(held_back(Lane::Read, silence.since(bravo), || false), None);
+        // And one silence after that is, again, not enough.
+        silence.note(bravo, false, later + 7_000);
+        assert_eq!(silence.since(bravo), None);
     }
 
     /// Which lane: decided by the method that acts, wherever it is going.

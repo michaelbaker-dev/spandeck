@@ -113,6 +113,29 @@ impl Deck {
         id
     }
 
+    /// A request that carries an id (rids.rs), and on a second try how
+    /// long ago the first was written: asked, and its answer.
+    async fn with_id(
+        &self,
+        method: &str,
+        params: Value,
+        rid: &str,
+        again_ms: Option<u64>,
+    ) -> Result<Value, Value> {
+        let id = 1 + self.id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut req = json!({"id": id, "method": method, "params": params, "rid": rid});
+        if let Some(ms) = again_ms {
+            req["again_ms"] = json!(ms);
+        }
+        self.sink
+            .lock()
+            .await
+            .send(Message::Text(req.to_string().into()))
+            .await
+            .unwrap();
+        self.answer(id).await
+    }
+
     /// How long the answer to a request took, if it has come.
     fn took(&self, id: u64) -> Option<Duration> {
         self.seen.lock().unwrap().took.get(&id).copied()
@@ -357,8 +380,9 @@ async fn a_station_that_hangs_slows_only_itself() {
 /// through another station (ten pastes each followed by Enter; a line
 /// typed a key at a time through `peer.call`), here by name and by
 /// channel, around a Stop of a program that reads and of one that does
-/// not, and for Pause and Resume; and `ws_lanes = false` gives a
-/// connection that still works.
+/// not, and for Pause and Resume; a request that carries an id is done
+/// once in whichever lane, and what is typed is never sent twice; and
+/// `ws_lanes = false` gives a connection that still works.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "merge tier: starts two daemons; waits out a stop that cannot be delivered"]
 async fn what_is_sent_to_one_pane_keeps_its_order_by_every_road() {
@@ -492,6 +516,110 @@ async fn what_is_sent_to_one_pane_keeps_its_order_by_every_road() {
         let pane = deck.call("pane.get", json!({"pane": here})).await;
         assert_eq!(pane["paused"], json!(last), "round {round}");
     }
+
+    // ---- a request that carries an id is done once whichever lane it
+    // runs in (DECISIONS.md, "A retried change is done once"): a change
+    // here, a change through this station to another, "stop every agent";
+    // and what is typed is never sent a second time, by any road.
+    assert!(deck.hello["auth"]["caps"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("rid")));
+    let home = a.root.join("home");
+    let spawn = json!({"program": "/bin/sh", "name": "once", "cwd": home});
+    let first = deck
+        .with_id("pane.spawn", spawn.clone(), "lanes-spawn-here-0001", None)
+        .await
+        .unwrap();
+    let second = deck
+        .with_id("pane.spawn", spawn, "lanes-spawn-here-0001", Some(300))
+        .await
+        .unwrap();
+    assert_eq!(first["id"], second["id"], "started twice");
+    let far = json!({"program": "/bin/sh", "name": "once-far", "cwd": b.root.join("home")});
+    let call =
+        |params: &Value| json!({"station": "bravo", "method": "pane.spawn", "params": params});
+    let first = deck
+        .with_id("peer.call", call(&far), "lanes-spawn-far-00001", None)
+        .await
+        .unwrap();
+    let second = deck
+        .with_id("peer.call", call(&far), "lanes-spawn-far-00001", Some(300))
+        .await
+        .unwrap();
+    assert_eq!(first["id"], second["id"], "started twice at bravo");
+    let panes = deck.call("pane.list", json!({})).await;
+    let named = |list: &Value, name: &str| {
+        let is = |p: &&Value| p["name"] == json!(name);
+        list.as_array().unwrap().iter().filter(is).count()
+    };
+    assert_eq!(named(&panes, "once"), 1, "{panes}");
+    let list = deck.ask_at("bravo", "pane.list", json!({})).await;
+    assert_eq!(named(&deck.answer(list).await.unwrap(), "once-far"), 1);
+    // Typed a second time: refused, by name, by channel, and down the
+    // connection to another station's pane; nothing arrives.
+    for (method, params) in [
+        (
+            "pane.input",
+            json!({"pane": here, "data": "echo twice-$((1+1))\r"}),
+        ),
+        (
+            "pane.input",
+            json!({"chan": at_here, "data": "echo twice-$((1+1))\r"}),
+        ),
+        (
+            "pane.input",
+            json!({"chan": at_bee, "data": "echo twice-$((1+1))\r"}),
+        ),
+    ] {
+        let no = deck
+            .with_id(method, params.clone(), "lanes-typed-twice-001", Some(300))
+            .await
+            .unwrap_err();
+        assert_eq!(no["code"], json!("outcome_unknown"), "{params}: {no}");
+    }
+    let bad = deck.with_id("pane.list", json!({}), "short", None).await;
+    assert_eq!(bad.unwrap_err()["code"], json!("invalid"));
+    // "Stop every agent" with an id is one stop: the second try is given
+    // the first one's rows, and what is typed after it still arrives.
+    let first = deck
+        .with_id(
+            "stop.all",
+            json!({"scope": "fleet"}),
+            "lanes-stop-fleet-0001",
+            None,
+        )
+        .await
+        .unwrap();
+    let again = deck
+        .with_id(
+            "stop.all",
+            json!({"scope": "fleet"}),
+            "lanes-stop-fleet-0001",
+            Some(300),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again["repeat"], json!(true), "{again}");
+    let ids = |v: &Value| -> Vec<Value> {
+        let mut ids: Vec<Value> = v["stops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].clone())
+            .collect();
+        ids.sort_by_key(|i| i.to_string());
+        ids
+    };
+    assert_eq!(ids(&first), ids(&again));
+    assert_eq!(ids(&first).len(), 2, "{first}");
+    deck.key(at_here, "echo once-$((5+5))\r").await;
+    deck.key(at_bee, "echo once-$((5+5))\r").await;
+    deck.shows(at_here, "once-10").await;
+    deck.shows(at_bee, "once-10").await;
+    let (sa, sb, h, be) = (a.clone(), b.clone(), here.clone(), bee.clone());
+    let screens = off(move || format!("{}\n{}", sa.text(&h), sb.text(&be))).await;
+    assert!(!screens.contains("twice-2"), "{screens}");
 
     // ---- the switch: off, a new connection takes its requests one at a
     // time, as before, and still works; a connection keeps what it began
