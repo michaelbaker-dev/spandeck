@@ -384,7 +384,13 @@ impl Daemon {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let exe = opts
             .exe
-            .or_else(|| std::env::var_os("SPANDECK_BIN").map(PathBuf::from))
+            // What the image before this one called its program. One updated
+            // by 0.4.1 or earlier may name a release unpacked under the state
+            // directory, which is not what this station starts from.
+            .or_else(|| {
+                std::env::var_os("SPANDECK_BIN")
+                    .map(|bin| paths.started_from(std::path::Path::new(&bin)))
+            })
             .or_else(|| {
                 std::env::current_exe()
                     .ok()

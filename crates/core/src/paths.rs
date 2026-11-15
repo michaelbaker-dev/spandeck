@@ -44,12 +44,18 @@ impl Paths {
     /// station that has the login service and the usual state directory; a
     /// trial or a test under another directory keeps the image it runs.
     pub fn started_from(&self, running: &Path) -> PathBuf {
+        self.started_from_in(&home_dir(), running)
+    }
+
+    /// `started_from` for a given home directory. Whether the state directory
+    /// came from `SPANDECK_STATE_DIR` does not matter: a running daemon always
+    /// sets that for its children and for the image that replaces it, so
+    /// asking for it to be unset (as 0.4.1 did) meant this never applied.
+    pub fn started_from_in(&self, home: &Path, running: &Path) -> PathBuf {
         if !running.starts_with(&self.state_dir) {
             return running.to_path_buf();
         }
-        let home = home_dir();
-        let usual = sys::default_dirs(&home).0 == self.state_dir
-            && std::env::var_os("SPANDECK_STATE_DIR").is_none();
+        let usual = sys::default_dirs(home).0 == self.state_dir;
         let installed = if sys::WINDOWS {
             self.state_dir
                 .parent()
@@ -58,7 +64,7 @@ impl Paths {
             Some(home.join(".local/bin/spandeck"))
         };
         match installed {
-            Some(p) if usual && p.is_file() && crate::doctor::service_installed(&home) => p,
+            Some(p) if usual && p.is_file() && crate::doctor::service_installed(home) => p,
             _ => running.to_path_buf(),
         }
     }
@@ -326,4 +332,44 @@ pub fn new_id(prefix: &str) -> String {
         "{prefix}-{}",
         ulid::Ulid::generate().to_string().to_lowercase()
     )
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// The bug that happened (15 Nov 2026): LLM-Server was updated from a
+    /// release and kept naming the unpacked release as its program, so the
+    /// program started at login was never replaced. The daemon always runs
+    /// with SPANDECK_STATE_DIR set, and the rule had asked for it to be unset.
+    #[test]
+    fn a_station_updated_from_a_release_still_names_the_program_it_starts_from() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let paths = Paths {
+            state_dir: sys::default_dirs(home).0,
+            config_dir: sys::default_dirs(home).1,
+        };
+        let release = paths.state_dir.join("releases/v9/spandeck-v9/spandeck");
+        let installed = home.join(".local/bin/spandeck");
+        // No program installed, no login service: a trial keeps its image.
+        assert_eq!(paths.started_from_in(home, &release), release);
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, "").unwrap();
+        assert_eq!(paths.started_from_in(home, &release), release);
+        let service = crate::doctor::service_definition(Path::new("spandeck"), home).0;
+        std::fs::create_dir_all(service.parent().unwrap()).unwrap();
+        std::fs::write(&service, "").unwrap();
+        assert_eq!(paths.started_from_in(home, &release), installed);
+        // A program outside the state directory is what it says it is.
+        let built = home.join("code/target/release/spandeck");
+        assert_eq!(paths.started_from_in(home, &built), built);
+        // A station kept somewhere else is a trial or a test.
+        let other = Paths {
+            state_dir: home.join("elsewhere"),
+            config_dir: home.join("elsewhere-config"),
+        };
+        let image = other.state_dir.join("releases/v9/spandeck");
+        assert_eq!(other.started_from_in(home, &image), image);
+    }
 }
