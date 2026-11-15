@@ -231,9 +231,15 @@ impl Daemon {
         let vault = self.vault_view();
         if stop {
             let d = self.clone();
+            // Only a station that had the login service takes it out of the
+            // system: the service's name is one per user, so a second daemon
+            // under another home (a test, a trial) must leave it alone.
+            let had_service = service["installed"] == json!(true);
             tokio::spawn(async move {
                 tokio::time::sleep(QUIT_AFTER).await;
-                d.service_remove_last();
+                if had_service {
+                    d.service_remove_last();
+                }
                 d.quit.notify_one();
             });
         } else {
