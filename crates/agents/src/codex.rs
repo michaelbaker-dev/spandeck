@@ -79,4 +79,8 @@ impl Adapter for Codex {
     fn detect_screen(&self, lines: &[String]) -> Option<AgentState> {
         detect::detect(detect::CODEX_RULES, lines)
     }
+
+    fn detect_screen_why(&self, lines: &[String]) -> Option<(AgentState, Option<String>)> {
+        detect::detect_why(detect::CODEX_RULES, lines)
+    }
 }

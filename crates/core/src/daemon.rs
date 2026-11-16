@@ -244,6 +244,10 @@ pub struct PaneEntry {
     pub meta: Mutex<PaneMeta>,
     /// Whose turn it is to look at this pane's mail (wake.rs).
     pub wake: crate::wake::PaneWake,
+    /// "Needs you" as its screen said it (`detect_screens`): the state the
+    /// pane had before, and the reason given, so that it is taken back
+    /// when the screen no longer shows it and nothing else has spoken.
+    pub screen_needs: Mutex<Option<(AgentState, String)>>,
 }
 
 impl PaneEntry {
@@ -1244,6 +1248,7 @@ impl Daemon {
             tx,
             meta: Mutex::new(meta),
             wake: Default::default(),
+            screen_needs: Default::default(),
         });
         panes.insert(id.clone(), entry.clone());
         drop(panes);
@@ -1505,28 +1510,77 @@ impl Daemon {
         );
     }
 
-    /// Fallback observer for agent panes whose hooks have not reported.
+    /// The observer of screens. For an agent's pane whose hooks have not
+    /// reported it is the fallback for every state. For one whose hooks do
+    /// report it says one thing only: that the program sits at a screen
+    /// this adapter knows by name and that no hook tells of (a sign-in, a
+    /// trust question, a question asked in the terminal, a permission
+    /// prompt of the program's own). It only observes, and answers none.
     fn detect_screens(&self) {
         for p in self.list_panes() {
-            let (agent, hooks_seen, exited) = {
+            let (agent, hooks_seen, exited, state, reason) = {
                 let m = p.meta.lock().unwrap();
-                (m.agent, m.hooks_seen, m.exit.is_some())
+                (
+                    m.agent,
+                    m.hooks_seen,
+                    m.exit.is_some(),
+                    m.state,
+                    m.needs_reason.clone(),
+                )
             };
-            if exited || hooks_seen {
+            if exited {
                 continue;
             }
             let Some(a) = adapter(agent) else { continue };
-            let lines = p.term.lines();
-            match a.detect_screen(&lines) {
-                Some(state) => {
-                    let reason =
-                        (state == AgentState::NeedsYou).then(|| "waiting at a prompt".to_string());
-                    self.set_state(&p, state, reason);
+            let seen = a.detect_screen_why(&p.term.lines());
+            let quiet = now_ms().saturating_sub(p.term.last_output_ms()) > 1500;
+            let mut said = p.screen_needs.lock().unwrap();
+            // Something else has spoken since the screen did: a hook, the
+            // owner's answer. What the screen said is forgotten.
+            if said.as_ref().is_some_and(|(_, why)| {
+                state != AgentState::NeedsYou || reason.as_ref() != Some(why)
+            }) {
+                *said = None;
+            }
+            if hooks_seen {
+                match seen {
+                    Some((AgentState::NeedsYou, Some(why))) => {
+                        if state != AgentState::NeedsYou {
+                            *said = Some((state, why.clone()));
+                            drop(said);
+                            self.set_state(&p, AgentState::NeedsYou, Some(why));
+                        }
+                    }
+                    // The screen is gone and no hook has said what came
+                    // next: the pane is what it was before.
+                    _ if quiet => {
+                        if let Some((before, _)) = said.take() {
+                            drop(said);
+                            self.set_state(&p, before, None);
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            match seen {
+                Some((now, why)) => {
+                    let why = (now == AgentState::NeedsYou)
+                        .then(|| why.unwrap_or_else(|| "waiting at a prompt".to_string()));
+                    if let (Some(why), true) = (&why, state != AgentState::NeedsYou) {
+                        *said = Some((AgentState::Idle, why.clone()));
+                    }
+                    drop(said);
+                    self.set_state(&p, now, why);
                 }
                 None => {
-                    // Screen shows nothing recognisable: working -> done.
-                    let was_working = p.meta.lock().unwrap().state == AgentState::Working;
-                    if was_working && now_ms().saturating_sub(p.term.last_output_ms()) > 1500 {
+                    // Screen shows nothing recognisable: working -> done,
+                    // and a prompt that is gone no longer needs the owner.
+                    let gone = quiet && said.take().is_some();
+                    drop(said);
+                    if gone {
+                        self.set_state(&p, AgentState::Idle, None);
+                    } else if state == AgentState::Working && quiet {
                         self.set_state(&p, AgentState::Done, None);
                     }
                 }
@@ -2235,6 +2289,7 @@ impl Daemon {
                         tx,
                         meta: Mutex::new(meta.clone()),
                         wake: Default::default(),
+                        screen_needs: Default::default(),
                     });
                     self.panes.write().unwrap().insert(h.id.clone(), entry);
                     self.record(
@@ -2567,6 +2622,7 @@ impl Daemon {
                         tx,
                         meta: Mutex::new(hp.meta),
                         wake: Default::default(),
+                        screen_needs: Default::default(),
                     });
                     self.panes.write().unwrap().insert(id, entry.clone());
                     self.save_pane(&entry);
@@ -2633,6 +2689,7 @@ impl Daemon {
                     tx,
                     meta: Mutex::new(hp.meta),
                     wake: Default::default(),
+                    screen_needs: Default::default(),
                 });
                 self.panes.write().unwrap().insert(id, entry);
             }

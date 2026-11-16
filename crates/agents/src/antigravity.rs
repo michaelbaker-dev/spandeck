@@ -154,6 +154,10 @@ impl Adapter for Antigravity {
     fn detect_screen(&self, lines: &[String]) -> Option<AgentState> {
         detect::detect(detect::ANTIGRAVITY_RULES, lines)
     }
+
+    fn detect_screen_why(&self, lines: &[String]) -> Option<(AgentState, Option<String>)> {
+        detect::detect_why(detect::ANTIGRAVITY_RULES, lines)
+    }
 }
 
 #[cfg(test)]

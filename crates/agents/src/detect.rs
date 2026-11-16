@@ -11,6 +11,12 @@ pub struct Rule {
     /// Any of these substrings, in the bottom `window` lines.
     pub any: &'static [&'static str],
     pub window: usize,
+    /// For a screen that is known: what it is waiting for, in plain words
+    /// for the owner. `{rest}` stands for what follows the matched words
+    /// on their line (a time, say). Such a screen is believed even when
+    /// the agent's hooks are reporting: no hook says that a program sits
+    /// at a sign-in screen. spandeck never answers any of them.
+    pub reason: Option<&'static str>,
 }
 
 pub const CLAUDE_RULES: &[Rule] = &[
@@ -30,15 +36,42 @@ pub const CLAUDE_RULES: &[Rule] = &[
             "Run /login",
         ],
         window: 16,
+        reason: None,
     },
     Rule {
         state: AgentState::Working,
         any: &["esc to interrupt", "ctrl+c to interrupt"],
         window: 8,
+        reason: None,
     },
 ];
 
 pub const CODEX_RULES: &[Rule] = &[
+    // Seen on a real Codex 0.169.0 (16 Nov 2026). At its plan-mode
+    // question the screen says "Question 1/1 (1 unanswered)" and, at the
+    // bottom, "tab to add notes | enter to submit answer | esc to
+    // interrupt": the last words are the Working rule's, so this rule
+    // stands before it. The pane was shown as working while it waited.
+    Rule {
+        state: AgentState::NeedsYou,
+        any: &["enter to submit answer"],
+        window: 16,
+        reason: Some("asks you a question, in the terminal"),
+    },
+    // "Hooks need review / N hooks are new or changed … 1. Review hooks
+    // 2. Trust all and continue 3. Continue without trusting (hooks won't
+    // run)": Codex skips hooks whose definition changed until the owner
+    // trusts them again.
+    Rule {
+        state: AgentState::NeedsYou,
+        any: &[
+            "Hooks need review",
+            "Trust all and continue",
+            "Continue without trusting",
+        ],
+        window: 16,
+        reason: Some("asks you to trust spandeck's hooks: answer in the terminal (run /hooks)"),
+    },
     Rule {
         state: AgentState::NeedsYou,
         any: &[
@@ -49,58 +82,123 @@ pub const CODEX_RULES: &[Rule] = &[
             "Approve?",
         ],
         window: 16,
+        reason: None,
     },
     Rule {
         state: AgentState::Working,
         any: &["esc to interrupt", "Esc to interrupt", "Working ("],
         window: 8,
+        reason: None,
     },
 ];
 
-/// From the words in OpenCode 2.3.0's program text; not yet seen on a live
-/// screen, so treat a wrong guess here as a rule to fix, not a mystery.
+/// From the words in OpenCode 2.3.0's program text, and (the first three)
+/// from a real 2.3.0 screen on 16 Nov 2026; treat a wrong guess here as a
+/// rule to fix, not a mystery.
 pub const OPENCODE_RULES: &[Rule] = &[
+    // "You've used today's free messages. They reset at 12:00 AM ·
+    // 11/17/2026.": the program takes no turn, and read as idle, so it
+    // was nudged about its mail for ever.
+    Rule {
+        state: AgentState::NeedsYou,
+        any: &["free messages. They reset at "],
+        window: 16,
+        reason: Some("out of free messages until {rest}"),
+    },
+    Rule {
+        state: AgentState::NeedsYou,
+        any: &["You've used today's free messages"],
+        window: 16,
+        reason: Some("out of free messages"),
+    },
+    // The sign-in dialog: "OpenCode Console account … Enter code: …
+    // Waiting for authorization…".
+    Rule {
+        state: AgentState::NeedsYou,
+        any: &["Waiting for authorization"],
+        window: 16,
+        reason: Some("asks you to sign in"),
+    },
     Rule {
         state: AgentState::NeedsYou,
         any: &["Permission required", "Allow once"],
         window: 16,
+        reason: None,
     },
     Rule {
         state: AgentState::Working,
         any: &["esc interrupt", "esc to interrupt"],
         window: 8,
+        reason: None,
     },
 ];
 
 /// A fallback only: Antigravity reports its state over OSC 7501. The sign-in
 /// screen was seen live on 1.5.9; the rest is from the program's text.
 pub const ANTIGRAVITY_RULES: &[Rule] = &[
+    // Seen on a real 1.5.9 (16 Nov 2026): "Do you trust the contents of
+    // this project? … Yes, I trust this folder / No, exit" in a folder it
+    // has not been run in, and "Allow calling this tool?" before a call
+    // of an MCP server's tool (spandeck's own among them).
+    Rule {
+        state: AgentState::NeedsYou,
+        any: &[
+            "Do you trust the contents of this project?",
+            "Yes, I trust this folder",
+        ],
+        window: 16,
+        reason: Some("asks whether to trust this folder"),
+    },
+    Rule {
+        state: AgentState::NeedsYou,
+        any: &["Allow calling this tool?"],
+        window: 16,
+        reason: Some("asks permission for a tool call"),
+    },
     Rule {
         state: AgentState::NeedsYou,
         any: &["You are currently not signed in", "Do you want to proceed?"],
         window: 16,
+        reason: None,
     },
     Rule {
         state: AgentState::Working,
         any: &["esc to interrupt", "Esc to cancel", "esc to cancel"],
         window: 8,
+        reason: None,
     },
 ];
 
 pub const FAKE_RULES: &[Rule] = &[
+    // A screen that is known, as the real agents have: believed over hooks.
+    Rule {
+        state: AgentState::NeedsYou,
+        any: &["[fake] sign in: "],
+        window: 6,
+        reason: Some("asks you to sign in ({rest})"),
+    },
     Rule {
         state: AgentState::NeedsYou,
         any: &["[fake] permission?"],
         window: 6,
+        reason: None,
     },
     Rule {
         state: AgentState::Working,
         any: &["[fake] working"],
         window: 3,
+        reason: None,
     },
 ];
 
 pub fn detect(rules: &[Rule], lines: &[String]) -> Option<AgentState> {
+    detect_why(rules, lines).map(|(state, _)| state)
+}
+
+/// `detect`, with the rule's reason when it has one. What `{rest}` is
+/// filled with comes off the program's screen: it is data, kept short,
+/// with no control characters, and shown as text.
+pub fn detect_why(rules: &[Rule], lines: &[String]) -> Option<(AgentState, Option<String>)> {
     // Ignore trailing blank rows so "the bottom lines" means the content.
     let end = lines
         .iter()
@@ -110,11 +208,18 @@ pub fn detect(rules: &[Rule], lines: &[String]) -> Option<AgentState> {
     let lines = &lines[..end];
     for rule in rules {
         let start = lines.len().saturating_sub(rule.window);
-        if lines[start..]
-            .iter()
-            .any(|l| rule.any.iter().any(|needle| l.contains(needle)))
-        {
-            return Some(rule.state);
+        let found = lines[start..].iter().find_map(|l| {
+            rule.any
+                .iter()
+                .find_map(|needle| l.find(needle).map(|at| &l[at + needle.len()..]))
+        });
+        if let Some(rest) = found {
+            let reason = rule.reason.map(|r| {
+                let rest: String = rest.chars().filter(|c| !c.is_control()).take(40).collect();
+                let rest = rest.trim().trim_end_matches(['.', '…', '│', '|', ' ']);
+                r.replace("{rest}", rest)
+            });
+            return Some((rule.state, reason));
         }
     }
     None
@@ -172,6 +277,90 @@ mod tests {
             Some(AgentState::Working)
         );
         assert_eq!(detect(CLAUDE_RULES, &lines("> \n")), None);
+    }
+
+    /// Found with the real programs on 16 Nov 2026 (the owner's matrix
+    /// run; the screens below are written by hand from the words that
+    /// were seen, and nothing else). Each of these screens waited for the
+    /// owner and spandeck showed the pane as idle or working: OpenCode
+    /// out of quota and at its sign-in dialog read as idle and was nudged
+    /// about its mail for ever; Codex at its plan-mode question read as
+    /// working, because the question's footer ends in "esc to interrupt".
+    #[test]
+    fn the_screens_that_wait_for_the_owner_say_so_and_say_why() {
+        let why = |rules: &[Rule], screen: &str| detect_why(rules, &lines(screen));
+        let needs = |reason: &str| Some((AgentState::NeedsYou, Some(reason.to_string())));
+
+        assert_eq!(
+            why(
+                OPENCODE_RULES,
+                "\n  You've used today's free messages. They reset at 12:00 AM · 11/17/2026.\n\n"
+            ),
+            needs("out of free messages until 12:00 AM · 11/17/2026")
+        );
+        // The same words broken over two lines by a narrow pane.
+        assert_eq!(
+            why(
+                OPENCODE_RULES,
+                "  You've used today's free messages. They\n  reset at 12:00 AM · 11/17/2026.\n"
+            ),
+            needs("out of free messages")
+        );
+        assert_eq!(
+            why(
+                OPENCODE_RULES,
+                "  OpenCode Console account\n\n  Enter code: \n\n  Waiting for authorization…\n"
+            ),
+            needs("asks you to sign in")
+        );
+
+        assert_eq!(
+            why(
+                CODEX_RULES,
+                "  Question 1/1 (1 unanswered)\n\n\n  tab to add notes | enter to submit answer | esc to interrupt\n"
+            ),
+            needs("asks you a question, in the terminal")
+        );
+        assert_eq!(
+            why(
+                CODEX_RULES,
+                "  Hooks need review\n  3 hooks are new or changed\n\n  1. Review hooks\n  2. Trust all and continue\n  3. Continue without trusting (hooks won't run)\n"
+            ),
+            needs("asks you to trust spandeck's hooks: answer in the terminal (run /hooks)")
+        );
+        // An ordinary turn is still a turn.
+        assert_eq!(
+            why(CODEX_RULES, "• Working (12s • esc to interrupt)\n"),
+            Some((AgentState::Working, None))
+        );
+
+        assert_eq!(
+            why(
+                ANTIGRAVITY_RULES,
+                "  Do you trust the contents of this project?\n\n  > Yes, I trust this folder\n    No, exit\n"
+            ),
+            needs("asks whether to trust this folder")
+        );
+        assert_eq!(
+            why(
+                ANTIGRAVITY_RULES,
+                "  spandeck_spandeck/inbox\n\n  Allow calling this tool?\n"
+            ),
+            needs("asks permission for a tool call")
+        );
+        // What is taken off a screen for a reason is short, plain text.
+        let long = format!(
+            "free messages. They reset at {}\x1b[31m{}",
+            "9".repeat(30),
+            "8".repeat(60)
+        );
+        let (_, reason) = why(OPENCODE_RULES, &long).unwrap();
+        let reason = reason.unwrap();
+        assert!(
+            reason.len() <= "out of free messages until ".len() + 40,
+            "{reason}"
+        );
+        assert!(!reason.contains('\x1b'));
     }
 
     #[test]
