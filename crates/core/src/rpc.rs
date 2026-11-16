@@ -166,6 +166,9 @@ const READ_METHODS: &[&str] = &[
     "prefs.get",
     "vault.status",
     "trust.status",
+    // The lists above that a Control Deck shows of a station, in one
+    // answer (snapshot.rs). Not on the agents' list.
+    "deck.snapshot",
 ];
 
 /// Changes that are only worth making if they are stored: refused while
@@ -1635,6 +1638,11 @@ impl Daemon {
             // alone: neither the agents' list nor the peers' has a method
             // that changes them.
             "deck.get" => json!(self.deck()),
+            // The switch `deck_snapshot` off: this station answers as one
+            // from before the call does, and a deck asks it the seven lists.
+            "deck.snapshot" if self.flag_on(crate::snapshot::CAP, true) => {
+                self.deck_snapshot(&params)
+            }
             "deck.layout.save" => {
                 let layout: crate::project::Layout = p(params
                     .get("layout")

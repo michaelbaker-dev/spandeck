@@ -11,13 +11,19 @@ const DAY = 86400000;
 // ---- what this browser measures (its own; sent nowhere) ----
 
 const keep = (list, v, max = 200) => { list.push(v); if (list.length > max) list.shift(); };
-export const mine = { echo: [], refresh: [], asked: new Map() };
+export const mine = { echo: [], refresh: [], asked: new Map(), calls: [], corrections: 0, corrected: [] };
 const typed = new WeakMap();
 // A key was typed into a pane this browser controls; the next output of that
 // pane is taken as its echo. A pane that is printing anyway reads too short.
 export function keyTyped(term) { const t = typed.get(term); if (t === undefined || performance.now() - t > 2000) typed.set(term, performance.now()); }
 export function paneWrote(term) { const t = typed.get(term); if (t !== undefined) { typed.delete(term); keep(mine.echo, performance.now() - t); } }
 export const refreshTook = (ms) => keep(mine.refresh, ms, 50);
+// A question the page's refresh asked of a station (when: to count a minute's).
+export const refreshAsked = () => { const now = Date.now(); mine.calls.push(now); while (mine.calls.length && now - mine.calls[0] > 60000) mine.calls.shift(); };
+export const askedLastMinute = (now = Date.now()) => mine.calls.filter(t => now - t <= 60000).length;
+// The check found the page holding a section that its station had changed
+// without the page being sent it. It was repaired; it should never happen.
+export const refreshCorrected = (station, section) => { mine.corrections += 1; keep(mine.corrected, `${section} of ${station}`, 5); };
 
 const pct = (list, p) => { if (!list.length) return null; const s = list.slice().sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.ceil(s.length * p) - 1)]; };
 
@@ -225,7 +231,7 @@ function stationFacts(data, row) {
     f('Look at the fleet', r ? stat(r.look) : na, r ? statTitle(r.look, 'One look at every station, every 10 seconds') : ''),
     f('Repaints', r ? `${num(r.terminal?.resyncs?.last_5m) ?? 0} (${num(r.terminal?.resyncs?.since_start) ?? 0} since start)` : na, 'A client that fell behind a pane and was sent the whole screen again'),
     f('Messages', r ? `there ${stat(r.messages?.received, '—')} · told ${stat(r.messages?.woken, '—')}` + ((r.messages?.waiting || []).length ? ` · ${r.messages.waiting.reduce((a, w) => a + (num(w.count) || 0), 0)} waiting` : '') : na,
-      r ? statTitle(r.messages?.received, 'From sent here to stored at another station') + '\n' + statTitle(r.messages?.woken, 'From stored here to the agent being told') + (r.messages?.waiting || []).map(w => `\n${w.count} waiting for ${w.station}, the oldest for ${span(w.oldest_ms)}`).join('') : ''),
+      r ? statTitle(r.messages?.received, 'From sent here to stored at another station') + '\n' + statTitle(r.messages?.woken, 'From stored here to the agent being told') + (r.messages?.waiting || []).map(w => `\n${w.count} waiting for ${w.station}, the oldest for ${span(w.oldest_ms)}` + (num(w.failed_in_a_row) ? `; ${num(w.failed_in_a_row)} tries in a row not answered, the next in ${span(num(w.next_try_in_ms) || 0)}` : '')).join('') + (r.messages?.push === false ? '\nSent by the half-second pump only (relay_push is off)' : '') : ''),
     f('Tailscale key', key ? key.text : r && r.tailnet && !r.tailnet.read ? 'not read here' : 'not known', key ? '' : 'A station reads its key when it finds stations through Tailscale (discovery).'),
   ], key };
 }
@@ -255,7 +261,7 @@ export function asText(data, facts) {
   for (const x of facts) { out.push('', `${x.s.station}: ${x.v.text}`); for (const f of x.facts) out.push(`  ${f.label}: ${f.value}`); }
   out.push('', 'Links (from → to):');
   for (const a of data.rows) for (const b of data.rows) if (a !== b) { const l = linkOf(a, b.s.station); out.push(`  ${a.s.station} → ${b.s.station}: ` + (l ? `${l.state}, ${ms(l.rtt_now_ms)} now, p95 ${ms(l.rtt?.p95_ms)}, ${l.path || 'path not known'}, ${num(l.failures?.last_5m) || 0} failed` + (l.clock ? `, clock ${l.clock.diff_ms} ms` : '') : 'not reported')); }
-  out.push('', `This browser: echo p50 ${ms(pct(mine.echo, 0.5))} p95 ${ms(pct(mine.echo, 0.95))} (${mine.echo.length} keys); refresh p95 ${ms(pct(mine.refresh, 0.95))}`);
+  out.push('', `This browser: echo p50 ${ms(pct(mine.echo, 0.5))} p95 ${ms(pct(mine.echo, 0.95))} (${mine.echo.length} keys); refresh p95 ${ms(pct(mine.refresh, 0.95))}; ${askedLastMinute()} refresh questions in the last minute; ${mine.corrections} corrections`);
   return out.join('\n');
 }
 
@@ -325,5 +331,7 @@ export function perfPage(ctx) {
         h('div', { class: 'fact', title: 'From a key typed into a pane this browser controls to the next thing that pane printed. A pane that is printing anyway reads too short.' }, h('span', { class: 'muted' }, 'Key to echo (p50 / p95)'), h('b', {}, echo.length ? `${ms(pct(echo, 0.5))} / ${ms(pct(echo, 0.95))}` : 'nothing typed yet'), h('span', { class: 'muted' }, `${echo.length} keys`)),
         h('div', { class: 'fact' }, h('span', { class: 'muted' }, 'Reconnects'), h('b', {}, String(api.reconnects || 0)), h('span', { class: 'muted' }, api.lastReconnect ? `last ${ago(api.lastReconnect)} ago` : 'none since the page opened')),
         h('div', { class: 'fact', title: 'One round of the questions this page asks every station, every 2.5 seconds' }, h('span', { class: 'muted' }, 'Refresh (last / p95)'), h('b', {}, mine.refresh.length ? `${ms(mine.refresh[mine.refresh.length - 1])} / ${ms(pct(mine.refresh, 0.95))}` : 'not yet')),
+        h('div', { class: 'fact', title: 'Questions this page asked to keep itself up to date, in the last minute: one for the list of stations and one for each station at every round (seven for a station on 0.4.5 or earlier), and one for a station when something happens there. Before, every round was 34 questions for four stations.' }, h('span', { class: 'muted' }, 'Refresh questions'), h('b', {}, `${askedLastMinute()} a minute`)),
+        h('div', { class: 'fact', title: 'Every fourth round the page asks each station for everything and compares it with what it holds. A correction is a part the page held that had changed at the station without the page being sent it: repaired, and counted here. It should stay 0.' + (mine.corrected.length ? '\nLast: ' + mine.corrected.join(', ') : '') }, h('span', { class: 'muted' }, 'Corrections'), h('b', {}, String(mine.corrections))),
         asked.map(([st, list]) => h('div', { class: 'fact', title: `A question to ${st} and its answer, through ${api.station}` }, h('span', { class: 'muted' }, `Asking ${st}`), h('b', {}, `${ms(list[list.length - 1])}`), h('span', { class: 'muted' }, `p95 ${ms(pct(list, 0.95))}`))))));
 }

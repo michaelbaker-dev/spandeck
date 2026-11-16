@@ -61,6 +61,12 @@ days, not hours.
   and search history; they never get a call that administers a station. Text from agents,
   other stations and session history is shown as text and labelled as quoted, never run
   as markup.
+- **One answer for what a deck shows of a station** (`deck.snapshot`, 15 Nov 2026) gives
+  nothing that was not already given: it is the seven lists a deck read before, by the
+  same functions, and for the station serving the deck four documents it also read
+  before, all of them on the read-only list. No agent can ask it. The versions in it are
+  short hashes of that same content, used only to say "unchanged"; nothing is decided by
+  one, and a caller that sends a wrong one is only sent the section again.
 - **A stopped agent stays stopped, and only you release it.** An agent you stopped, and
   one spandeck started again after a restart, gets no messages from other agents until
   you release it: by typing into its pane, with Release, or with
@@ -207,6 +213,14 @@ days, not hours.
   file described above. Known limit: a second try is believed about how long ago its
   first was made; a caller that lies about it can only cause its own change to be made
   twice, which it could do by asking twice.
+- A station tells the sender of a message when another station refused it for good
+  (15 Nov 2026): a note in the sender's own inbox, from `spandeck@<station>`, and a
+  notice to you. The reason in it is the other station's words: it is cut to 200
+  characters, stripped of control characters, and stored and shown as text. The note
+  gives an agent nothing: it is a message like any other, which agents are told to
+  weigh and not to obey, and it names only a message that agent itself sent. Known
+  limit: a pane can be named `spandeck`, so the name alone does not prove a note is the
+  station's; nothing is decided by it.
 - `remote_start = true` lets a station run a start command on your other machines over
   Tailscale SSH. It is off by default; what it may do there is governed by your
   Tailscale SSH rules, not by spandeck.

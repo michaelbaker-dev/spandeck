@@ -1161,6 +1161,38 @@ fn a_link_between_stations_is_known_on_both_and_carries_messages_and_findings() 
         status,
         "refused: project ledger is not linked with deck; only the owner can link two projects"
     );
+    // A refusal used to be marked and nothing said (audit, gap 8). The
+    // agent that sent it is told in its own inbox, in the same thread,
+    // once; the owner gets a notice, and the ship's log an entry.
+    let inbox = a
+        .call_as_pane(&pilot, "msg.inbox", json!({"peek": true, "all": true}))
+        .unwrap();
+    let told: Vec<&Value> = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["thread"] == sent["thread"])
+        .collect();
+    assert_eq!(told.len(), 1, "{inbox}");
+    assert_eq!(told[0]["from"], json!("spandeck@alpha"), "{inbox}");
+    let words = told[0]["body"].as_str().unwrap();
+    assert!(
+        words.starts_with("Not delivered to clerk@bravo: project ledger is not linked with deck")
+            && words.contains("what is in the ledger?"),
+        "{words}"
+    );
+    let notices = a.call("notify.list", json!({"limit": 20}));
+    assert_eq!(
+        notices
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n["title"] == json!("Not delivered to clerk@bravo"))
+            .count(),
+        1,
+        "{notices}"
+    );
+    assert_eq!(a.log("msg.refused").len(), 1);
 
     // A finding posted on bravo is found from alpha.
     b.call_as_pane(

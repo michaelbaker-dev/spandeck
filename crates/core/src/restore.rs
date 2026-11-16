@@ -441,6 +441,10 @@ impl Daemon {
         // `request_ids = false`: no id is kept and none is announced, so
         // no change is tried again by its id at this station (rids.rs).
         self.rids.set_on(self.flag_on(crate::rids::FLAG, true));
+        // `relay_push = false`: a message for another station waits for
+        // the half-second pump, one per station each time (relay.rs).
+        self.relay
+            .set_push(self.flag_on(crate::relay::SWITCH, true));
     }
 
     /// A switch as it stands now, if the config or the owner set it.

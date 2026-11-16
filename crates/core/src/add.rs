@@ -633,9 +633,30 @@ impl Daemon {
             ));
         }
         // Where to connect is settled before the station is forgotten.
-        let (peer, address, os) = self.station_target(station)?;
+        let (in_fleet, address, os) = match self.station_target(station) {
+            Ok((peer, address, os)) => (peer.state != "not_linked", address, os),
+            // The try before this one took the station out of the fleet and
+            // forgot it, and then asked for a password: until the next look
+            // lists that machine again, nothing is known of it here. The
+            // password is for that job, so this try goes to the address that
+            // one had, which was checked then. (Found when the deck began to
+            // show the password box at once: a password entered within a
+            // fraction of a second was refused with "no station called X is
+            // known here".)
+            Err(unknown) => {
+                let asked = self.adding.job.lock().unwrap();
+                match asked.as_ref().filter(|j| {
+                    j.kind == "uninstall"
+                        && j.stage == "needs_password"
+                        && j.station.as_deref() == Some(station)
+                }) {
+                    Some(j) => (false, j.address.clone(), j.os.clone()),
+                    None => return Err(unknown),
+                }
+            }
+        };
         self.add_slot_free()?;
-        let removed = if peer.state != "not_linked" {
+        let removed = if in_fleet {
             Some(self.fleet_remove(station, false, caller).await?)
         } else {
             None

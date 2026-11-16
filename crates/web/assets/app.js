@@ -18,7 +18,7 @@ import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from 
 import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners } from './look.js';
 import { lookEditor } from './lookedit.js';
 import { phoneLook } from './phonelook.js';
-import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook } from './perf.js';
+import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook, refreshAsked, refreshCorrected } from './perf.js';
 import { qrSvg } from './qr.js';
 import { initChat, conversation, faceOf, chatToggle, termBox, chatBeforeRender, chatAfterRender, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
 
@@ -33,7 +33,7 @@ const S = {
   route: { view: 'fleet' },
   fleet: { stations: [], stops: [] },
   panes: new Map(),      // station -> [pane]
-  busy: new Map(),       // station -> since when its answers have not come and no more is asked of it
+  busy: new Map(),       // station -> what is shown of it is from before: as of when (its last answer)
   tasks: new Map(),      // station -> [active task]
   msgs: new Map(),       // station -> [recent message]
   projects: new Map(),   // station -> [project]
@@ -86,29 +86,150 @@ const linkedText = (st, pr) => { const ls = linksOf(pr); return ls.length ? 'Lin
 const linkedChip = (st, pr, short) => linksOf(pr).length ? h('span', { class: 'chip linked', 'aria-label': linkedText(st, pr), title: `Linked: agents in ${pr.name} can message agents in ${linksOf(pr).map(l => linkName(st, l)).join(', ')}, and they share their findings boards. Files, history and keys stay separate.` },
   short ? '⇄ ' + linksOf(pr)[0].with + (linksOf(pr).length > 1 ? ` +${linksOf(pr).length - 1}` : '') : linkedText(st, pr)) : null;
 
-async function refreshStation(st) {
-  try {
-    const [panes, projects, tasks, msgs] = await Promise.all([api.on(st, 'pane.list'), api.on(st, 'project.list'),
-      api.on(st, 'task.list', { active: true, limit: 100 }).catch(() => []), api.on(st, 'msg.recent', { limit: 60 }).catch(() => [])]);
-    S.panes.set(st, panes);
-    S.projects.set(st, projects);
-    S.tasks.set(st, tasks);
-    S.msgs.set(st, msgs);
-    S.busy.delete(st);
-  } catch (e) {
-    // Unreachable: the fleet view says so. `busy`: the serving station still
-    // waits for this station's answers to earlier questions and took no more
-    // (it answers so at once); what is shown of it is from before.
-    if (e.code === 'busy' || e.code === 'not_answering') S.busy.set(st, S.busy.get(st) || Date.now()); else S.busy.delete(st);
+// ---- what the deck holds of each station, and how it is asked ----
+//
+// The owner's rule (15 Nov 2026): "the slow or absent station has to be fixed
+// with the right architecture for a system like this, never to slow everyone
+// else down." So each station is asked by itself, and its answer is put on
+// the page when it comes: no station's answer waits for another station's,
+// and the page waits for none. A station is never asked while its last
+// question is unanswered (one more is asked when that ends, if something
+// asked meanwhile), so questions for a station that is slow do not pile up.
+// What is shown of a station whose answer is late, or did not come, stays,
+// and is marked as from before (S.busy: as of when).
+//
+// A station that says it can (`deck_snapshot` in its caps) is asked one
+// question, `deck.snapshot`, with the versions of what the page holds:
+// sections that have not changed come back empty. A station from before
+// (0.4.5 and earlier) is asked the seven lists.
+const SECTIONS = ['panes', 'projects', 'tasks', 'msgs', 'approvals', 'notes', 'stops'];
+const DOCS = ['trust', 'deck', 'look', 'prefs'];
+const held = new Map(); // station -> { v, raw, sig, got, at, asking, askedAt, next, failed, old }
+const slot = (st) => held.get(st) || held.set(st, { v: {}, raw: {}, sig: {}, got: {}, at: 0, asking: null, askedAt: 0, next: null, failed: false, old: false }).get(st);
+const canSnapshot = (st) => !slot(st).old && (S.fleet.stations.find(s => s.station === st)?.caps || []).includes('deck_snapshot');
+// A question of the refresh, counted for the Performance page.
+// (`data-asked` and `data-corrections` are read by nothing in the deck: a
+// test counts with them.)
+let askedTotal = 0, correctedTotal = 0;
+const ask = (st, method, params) => { refreshAsked(); root.dataset.asked = String(++askedTotal); return api.on(st, method, params); };
+const corrected = (st, name) => { refreshCorrected(st, name); root.dataset.corrections = String(++correctedTotal); };
+// What a section says, for comparing two copies of it: without the two
+// fields that change with the clock alone (the station leaves them out of
+// the version too).
+const SKIP = { panes: 'last_output_ms', stops: 'age_ms' };
+const sigOf = (name, value) => JSON.stringify(value, SKIP[name] ? (k, v) => (k === SKIP[name] ? undefined : v) : undefined);
+
+function take(st, k, name, value) {
+  // The first list of notices from a station is what it held already.
+  if (name === 'notes' && !k.raw.notes) for (const n of value) announced.add(`${st}/${n.id}`);
+  k.raw[name] = value;
+  k.sig[name] = sigOf(name, value);
+  k.got[name] = Date.now();
+  if (name === 'panes') S.panes.set(st, value);
+  else if (name === 'projects') S.projects.set(st, value);
+  else if (name === 'tasks') S.tasks.set(st, value);
+  else if (name === 'msgs') S.msgs.set(st, value);
+  else if (name === 'trust') S.trust = value;
+  else if (name === 'deck') S.deck = value;
+  else if (name === 'look') lookTaken(value);
+  else if (name === 'prefs') prefsTaken(value);
+}
+
+// One question. `full`: the check, every fourth round: everything is asked
+// for, whatever the page holds, and compared with it. A section that came
+// back different under the version the page holds is a correction: the page
+// would have gone on showing the old one. It is repaired and counted
+// (Performance page, "this browser"); it should stay 0.
+async function askSnapshot(st, k, full) {
+  const docs = st === api.station;
+  let r;
+  try { r = await ask(st, 'deck.snapshot', { have: full ? {} : k.v, docs }); } catch (e) {
+    // It turned out not to know the question after all: the seven, from now on.
+    if (/method deck\.snapshot/.test(e.message || '')) { k.old = true; return askLists(st, k); }
+    throw e;
+  }
+  const v = r && typeof r.v === 'object' && r.v ? r.v : {};
+  for (const name of [...SECTIONS, ...(docs ? DOCS : [])]) {
+    if (r[name] === null || r[name] === undefined) continue;
+    if (full && k.v[name] !== undefined && k.v[name] === v[name] && k.sig[name] !== sigOf(name, r[name])) corrected(st, name);
+    take(st, k, name, r[name]);
+    k.v[name] = v[name];
   }
 }
 
-async function refresh() {
-  if (!api.connected) return;
-  const began = performance.now();
-  try { S.fleet = await api.call('fleet.view'); } catch (e) { return; }
-  const stations = S.fleet.stations.filter(s => s.state === 'online').map(s => s.station);
-  await Promise.all(stations.map(refreshStation));
+// A station from before `deck.snapshot`: the seven lists, as the deck always
+// asked them. A list that fails is kept as it was; the station's panes and
+// projects failing is the station not answering.
+async function askLists(st, k) {
+  k.v = {};
+  const keep = (name) => () => k.raw[name];
+  const [panes, projects, tasks, msgs, approvals, notes, stops] = await Promise.all([ask(st, 'pane.list'), ask(st, 'project.list'),
+    ask(st, 'task.list', { active: true, limit: 100 }).catch(() => []), ask(st, 'msg.recent', { limit: 60 }).catch(() => []),
+    ask(st, 'approval.list').catch(keep('approvals')), ask(st, 'notify.list', { limit: 60 }).catch(keep('notes')), ask(st, 'stop.list').catch(keep('stops'))]);
+  const lists = { panes, projects, tasks, msgs, approvals, notes, stops };
+  for (const name of SECTIONS) if (lists[name] !== undefined) take(st, k, name, lists[name]);
+  if (st !== api.station) return;
+  // The station serving the deck, with its switch off: what it alone is asked.
+  for (const [name, method] of [['trust', 'trust.status'], ['deck', 'deck.get'], ['look', 'look.get'], ['prefs', 'prefs.get']]) {
+    try { take(st, k, name, await ask(st, method)); } catch (e) { /* keep */ }
+  }
+}
+
+// Ask one station, unless it is being asked. `timer`: the 2.5 s round, which
+// does not queue a second question behind one that is late; it marks the
+// station as shown from before. Anything else that asks meanwhile gets one
+// more question when this one ends, and is answered by that.
+function askStation(st, { full = false, timer = false } = {}) {
+  const k = slot(st);
+  if (k.asking) {
+    if (Date.now() - k.askedAt > 2000) stale(st, k);
+    if (timer) return k.asking;
+    if (!k.next) { let done; k.next = new Promise((r) => { done = r; }); k.next.done = done; }
+    return k.next;
+  }
+  k.askedAt = Date.now();
+  k.asking = (canSnapshot(st) ? askSnapshot(st, k, full) : askLists(st, k))
+    .then(() => { k.at = Date.now(); k.failed = false; S.busy.delete(st); }, () => { k.failed = true; stale(st, k); })
+    .then(() => {
+      k.asking = null;
+      settled();
+      const next = k.next;
+      k.next = null;
+      if (next) askStation(st).then(next.done);
+    });
+  return k.asking;
+}
+function stale(st, k) {
+  if (!S.busy.has(st)) { S.busy.set(st, k.at || k.askedAt); settled(); }
+}
+
+// The fleet's list, from the station serving the deck: one question at a
+// time, like every station's.
+let fleetAsking = null, fleetNext = null;
+function askFleet() {
+  if (fleetAsking) { fleetNext ||= fleetAsking.then(() => askFleet()); return fleetNext; }
+  fleetAsking = ask(null, 'fleet.view').then((v) => {
+    S.fleet = v;
+    // What was held of a station that is no longer listed is let go.
+    for (const st of held.keys()) if (!v.stations.some(s => s.station === st)) { held.delete(st); S.busy.delete(st); for (const m of [S.panes, S.projects, S.tasks, S.msgs]) m.delete(st); }
+    for (const s of v.stations) if (s.state !== 'online') S.busy.delete(s.station);
+  }, () => {}).then(() => { fleetAsking = null; fleetNext = null; });
+  return fleetAsking;
+}
+// A machine being added from this station: asked when the deck opens, when
+// the station says it changed, and at every round while one is being added.
+// One question at a time, so that an older answer never comes after a newer.
+let addAsking = null, addAgain = false;
+function askAdding() {
+  if (addAsking) { addAgain = true; return addAsking; }
+  addAsking = ask(null, 'fleet.add_status').then((a) => { S.adding = a; addChanged(); }, () => {})
+    .then(() => { addAsking = null; if (addAgain) { addAgain = false; askAdding(); } });
+  return addAsking;
+}
+
+// Put together what the stations said. Run when any of them answers.
+function merged() {
+  const on = onlineStations();
   // How many agents are working or waiting on a station is counted from the
   // pane list it has just given, as "needs you" in the top bar is. What the
   // serving station last heard of another one can be ten seconds old, and
@@ -117,25 +238,57 @@ async function refresh() {
     const live = s.state === 'online' && S.panes.has(s.station) ? liveAgents(s.station) : null;
     if (live) Object.assign(s, { working: live.filter(p => p.state === 'working').length, needs_you: live.filter(p => p.state === 'needs_you').length });
   }
-  const lists = await Promise.all(stations.map(st => api.on(st, 'approval.list').catch(() => [])));
-  S.approvals = lists.flat();
-  await loadNotes(stations);
-  // Stops are on the fleet view and the phone's: asked for where they show.
-  if (S.route.view === 'fleet' || isPhone()) await loadStops(stations);
-  try { S.trust = await api.call('trust.status'); } catch (e) { /* keep */ }
-  try { S.adding = await api.call('fleet.add_status'); addChanged(); } catch (e) { /* keep */ }
-  // Always from the station the deck was opened on: every station has the same copy.
-  try { S.deck = await api.call('deck.get'); } catch (e) { /* keep */ }
-  await loadLook();
-  await loadPrefs();
-  refreshTook(performance.now() - began);
-  loadPerf();
-  loadSignIn();
-  S.loaded = true;
-  update();
-  vaultAtOpen();
-  migrateWorkspaces();
-  bindGlobalLeaves();
+  const of = (st, name) => held.get(st)?.raw[name] || [];
+  S.approvals = on.flatMap(st => of(st, 'approvals'));
+  mergeNotes(on);
+  // A stop is kept by the station it was issued at, which is also the one
+  // that delivers it to a station that was away. The deck shows the stops of
+  // every station that answers, so the same ones wherever it is opened.
+  // `got`: when this page was told, to count each stop's age on from.
+  const seen = new Set();
+  const stops = on.flatMap(st => of(st, 'stops').map(x => ({ from: st, ...x, got: held.get(st).got.stops })));
+  if (on.some(st => held.get(st)?.raw.stops)) S.stops = stops.filter(x => !seen.has(x.id) && seen.add(x.id)).sort((a, b) => b.issued_ms - a.issued_ms);
+}
+
+// An answer arrived (or was given up on): the page is drawn with it. Several
+// that arrive together are drawn once.
+let settleTimer = null, afterTimer = null, afterRan = false;
+function settled() {
+  if (settleTimer) return;
+  settleTimer = setTimeout(() => {
+    settleTimer = null;
+    merged();
+    // The page has loaded when the station serving it has answered. A view
+    // of another station says "Loading…" until that station has (`heard`).
+    if (held.get(api.station)?.at) S.loaded = true;
+    update();
+    // What follows new data, once the serving station's documents are here:
+    // at once the first time, then at most every 200 ms.
+    if (!S.loaded) return;
+    clearTimeout(afterTimer);
+    afterTimer = setTimeout(() => { loadPerf(); loadSignIn(); vaultAtOpen(); migrateWorkspaces(); bindGlobalLeaves(); }, afterRan ? 200 : 0);
+    afterRan = true;
+  }, 15);
+}
+const heard = (st) => S.panes.has(st);
+// What a view of a station says while it has nothing of it to show.
+const waitWords = (st) => (S.busy.has(st) ? `${st} is not answering yet.` : 'Loading…');
+
+// Everything: the fleet's list, then every station that is on, each by
+// itself. Resolves when each has answered or been given up on, or after two
+// seconds, whichever is first: a caller that waits for the page to be up to
+// date does not wait for a station that is slow.
+let rounds = 0, firstRound = true;
+async function refresh({ timer = false } = {}) {
+  if (!api.connected) return;
+  const began = performance.now();
+  const full = timer && ++rounds % 4 === 0;
+  await askFleet();
+  const asked = onlineStations().map(st => askStation(st, { full, timer }));
+  if (firstRound || full || addActive() || addDlg) askAdding();
+  firstRound = false;
+  const all = Promise.all(asked).then(() => { if (timer) refreshTook(performance.now() - began); });
+  await Promise.race([all, new Promise(r => setTimeout(r, 2000))]);
 }
 
 // The Performance page's numbers, and Tailscale key expiry for the tiles.
@@ -230,13 +383,11 @@ function ownKey() {
 // is one entry that names them all.
 const fleetAway = () => S.fleet.stations.filter(s => s.state !== 'online' && s.state !== 'not_linked').map(s => s.station);
 const announced = new Set();
-let notesSeeded = false;
-async function loadNotes(stations) {
-  const failed = [];
-  const lists = await Promise.all(stations.map(st => api.on(st, 'notify.list', { limit: 60 })
-    .then(list => list.map(n => ({ ...n, station: st })))
-    // What it last said is kept on screen; it is named as not counted.
-    .catch(() => { failed.push(st); return S.notes.flatMap(n => n.at.filter(a => a.station === st).map(a => ({ ...n, ...a }))); })));
+function mergeNotes(stations) {
+  // A station that is on and has not answered, or whose last question
+  // failed: what it last said is kept on screen; it is named as not counted.
+  const failed = stations.filter(st => !held.get(st)?.raw.notes || held.get(st).failed || S.busy.has(st));
+  const lists = stations.map(st => (held.get(st)?.raw.notes || []).map(n => ({ ...n, station: st })));
   const merged = new Map();
   for (const n of lists.flat().sort((a, b) => b.ts - a.ts)) {
     const key = n.pane ? `${n.station}/${n.id}` : `${n.kind}\n${n.title}\n${n.body}`;
@@ -247,21 +398,13 @@ async function loadNotes(stations) {
   S.notes = [...merged.values()].slice(0, 120);
   S.notesAway = [...new Set([...fleetAway(), ...failed])].sort();
   // A notice from a station that does not tell the others (one from before
-  // it could) is announced when it first shows in the list.
+  // it could) is announced when it first shows in the list. What a station
+  // held when this page first heard from it is not news (`take`).
   for (const n of S.notes) {
     const fresh = n.at.filter(a => !announced.has(`${a.station}/${a.id}`));
     for (const a of n.at) announced.add(`${a.station}/${a.id}`);
-    if (notesSeeded && !n.read && fresh.length === n.at.length) notifyBrowser(n);
+    if (!n.read && fresh.length === n.at.length) notifyBrowser(n);
   }
-  notesSeeded = true;
-}
-// A stop is kept by the station it was issued at, which is also the one
-// that delivers it to a station that was away. The deck shows the stops of
-// every station that answers, so the same ones wherever it is opened.
-async function loadStops(stations) {
-  const lists = await Promise.all(stations.map(st => api.on(st, 'stop.list').then(list => list.map(s => ({ from: st, ...s }))).catch(() => (S.stops || []).filter(s => s.from === st))));
-  const seen = new Set();
-  S.stops = lists.flat().filter(s => !seen.has(s.id) && seen.add(s.id)).sort((a, b) => b.issued_ms - a.issued_ms);
 }
 // Mark a notice read at every station that holds it.
 const readNote = (n) => Promise.all(n.at.map(a => api.on(a.station, 'notify.read', { id: a.id }).catch(() => {})));
@@ -269,7 +412,12 @@ const readNote = (n) => Promise.all(n.at.map(a => api.on(a.station, 'notify.read
 // The look document: themes, and what the deck, a layout or a pane uses. Like
 // the deck document it is asked of the station the deck was opened on.
 async function loadLook() {
-  try { setDoc(await api.call('look.get')); } catch (e) { return; }
+  try { lookTaken(await api.call('look.get')); } catch (e) { /* keep */ }
+}
+// The look document arrived (with the serving station's answer, or asked for
+// by the Appearance editor).
+function lookTaken(doc) {
+  setDoc(doc);
   // What is being tried in the editor is not what to open with next time.
   if (!lookState.preview) rememberPage(pageLook(null));
   // The fonts the owner uploaded. Not waited for: a terminal shows in the
@@ -312,10 +460,34 @@ function appearance(level, scope = {}) {
 }
 const paneLookKey = (st, p) => `${st}/${p.id}`;
 
+// Everything, soon; or one station, soon. The round every 2.5 s is the
+// repair for whatever no event told this page of (and every fourth one is
+// the check: see askSnapshot).
 let refreshTimer = null;
 function refreshSoon(ms = 120) { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, ms); }
-setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, 2500);
+const stationTimers = new Map();
+function stationSoon(st, ms = 120) {
+  if (!online(st)) return refreshSoon(ms);
+  // One that is due sooner stands: events that keep coming do not put the
+  // question off.
+  const due = Date.now() + ms, had = stationTimers.get(st);
+  if (had && had.due <= due) return;
+  if (had) clearTimeout(had.timer);
+  stationTimers.set(st, { due, timer: setTimeout(() => { stationTimers.delete(st); if (api.connected) askStation(st); }, ms) });
+}
+setInterval(() => { if (document.visibilityState === 'visible') refresh({ timer: true }); }, 2500);
 
+// A pane's strip changed, and the event says how: the pane is brought up to
+// date from the event and nothing is asked. If its station's answer is on
+// its way, one more is asked after it, since that answer may be older than
+// the event.
+function panePatched(id, change) {
+  const p = panesOf(api.station).find(x => x.id === id);
+  if (!p) return stationSoon(api.station);
+  Object.assign(p, change);
+  if (slot(api.station).asking) askStation(api.station);
+  settled();
+}
 api.onEvent((ev) => {
   // This station's panes. A pane on another station hears of its resizes on
   // its own channel, through the gateway (term.js, onResized).
@@ -328,7 +500,23 @@ api.onEvent((ev) => {
   // Raised here, or at another station of the fleet, which told this one.
   if (ev.kind === 'notify.new') { announced.add(`${ev.data.station}/${ev.data.id}`); notifyBrowser(ev.data); }
   if (ev.kind === 'connection.restored') { for (const t of S.terms.values()) t.attach(); }
-  if (/^(pane|agent|approval|project|fleet|stop|notify|task|recipe|msg|station|connection|events|vault|trust|deck|look|prefs)\./.test(ev.kind)) refreshSoon();
+  // The strip: from the event itself.
+  if (ev.kind === 'agent.tool_start' && ev.pane) return panePatched(ev.pane, { tool: ev.data?.tool ?? null, tool_since_ms: ev.ts });
+  if (ev.kind === 'agent.tool' && ev.pane) return panePatched(ev.pane, { tool: null });
+  // New numbers for a pane (the event carries none): its station is asked,
+  // twice a second at most however many agents are working.
+  if (ev.kind === 'pane.usage') return stationSoon(api.station, 500);
+  if (ev.kind.startsWith('fleet.add.')) askAdding();
+  // Events may have been missed, or what the list of stations says changed
+  // (who is in the fleet; a station's vault): everything.
+  if (/^(fleet|station|connection|events|trust|vault)\./.test(ev.kind)) return refreshSoon();
+  // Anything else is this station's (its events are the ones this page
+  // hears), and that of a station the event names: only they are asked.
+  if (/^(pane|agent|approval|project|stop|notify|task|recipe|msg|deck|look|prefs)\./.test(ev.kind)) {
+    stationSoon(api.station);
+    const other = ev.data && typeof ev.data.station === 'string' ? ev.data.station : null;
+    if (other && other !== api.station && online(other)) stationSoon(other);
+  }
 });
 
 const lastSaid = new Map(); // what was announced -> when, so one thing every station raised is said once
@@ -355,7 +543,11 @@ function touch() {
 addEventListener('keydown', touch, true);
 addEventListener('mousedown', touch, true);
 
-const rpc = (st, method, params) => api.on(st, method, params).then((r) => { refreshSoon(60); return r; }).catch((e) => { toast(e.message, 'error'); throw e; });
+// A change the owner made: its station is asked again at once. One that
+// can change more than its station (a stop for the fleet, the fleet's
+// members) asks everything.
+const ONE_STATION = /^(pane|task|msg|approval|notify|recipe|signoff|note|agents)\./;
+const rpc = (st, method, params) => api.on(st, method, params).then((r) => { if (ONE_STATION.test(method)) stationSoon(st || api.station, 60); else refreshSoon(60); return r; }).catch((e) => { toast(e.message, 'error'); throw e; });
 
 // ------------------------------------------------------------- pane menus
 
@@ -544,10 +736,8 @@ function setPref(key, value) {
   prefSaving += 1;
   api.call('prefs.set', { key, value }).catch(() => {}).then(() => { prefSaving -= 1; });
 }
-async function loadPrefs() {
-  let doc;
-  try { doc = await api.call('prefs.get'); } catch (e) { S.prefs = null; return; }
-  if (prefSaving) return; // a change of this page's is on its way: not undone by an older answer
+function prefsTaken(doc) {
+  if (prefSaving || !doc) return; // a change of this page's is on its way: not undone by an older answer
   doc.values ||= {};
   S.prefs = doc;
   for (const key of Object.keys(PREF_LOCAL)) {
@@ -1350,9 +1540,14 @@ function stopRows() {
   // How long ago a stop was issued is what its station says (`age_ms`, by
   // its own clock), not this browser's clock against that station's. A
   // station from before it said so is read the old way.
-  const age = (s) => s.age_ms ?? Date.now() - s.issued_ms;
+  // The page is told a stop's age when the stop changes, not at every round:
+  // it counts on from when it was told (`got`), by its own clock's passing.
+  const age = (s) => (s.age_ms != null ? s.age_ms + (s.got ? Date.now() - s.got : 0) : Date.now() - s.issued_ms);
   const recent = (S.stops || S.fleet.stops || []).filter(s => age(s) < 10 * 60 * 1000 || s.status !== 'confirmed').slice(0, 6);
   const away = S.notesAway || [];
+  // A station that is on and not answering: what it last said is still shown.
+  const before = away.filter(st => S.busy.has(st) && held.get(st)?.raw.stops);
+  const gone = away.filter(st => !before.includes(st));
   if (!recent.length) return null;
   // `saved: false`: the issuing station holds the stop in memory only (its
   // database did not take it). Said for a stop that is still to be delivered:
@@ -1360,7 +1555,8 @@ function stopRows() {
   const unsaved = (s) => s.saved === false && s.status !== 'confirmed';
   return h('div', { class: 'stops' }, h('b', {}, 'Stop requests'), recent.map(s => h('span', { class: 'stop ' + s.status, title: `issued ${ago(Date.now() - age(s))} ago${s.from ? ' at ' + s.from : ''}${unsaved(s) ? `. ${s.from} has not been able to write this stop to its database yet; it keeps trying. If spandeck on ${s.from} restarts before it is written, the stop is not delivered to ${s.station}.` : ''}` },
     `${s.station}: ${s.label}`, s.status === 'confirmed' ? ` (${s.result?.stopped?.length ?? 0} stopped${s.result?.not_reading?.length ? `, ${s.result.not_reading.length} not reading input and not stopped: use Kill` : ''})` : unsaved(s) ? ` — waiting for ${s.station} · not yet saved on ${s.from}` : s.status === 'unreachable' ?` — will be delivered when it is back${s.from && !online(s.from) ? `, once ${s.from} is on too` : ''}` : '')),
-    away.length ? h('span', { class: 'muted small' }, `Stops issued at ${away.join(', ')} are not shown: not reachable.`) : null);
+    gone.length ? h('span', { class: 'muted small' }, `Stops issued at ${gone.join(', ')} are not shown: not reachable.`) : null,
+    before.length ? h('span', { class: 'muted small' }, `Stops issued at ${before.join(', ')} are shown as they were: ${before.length === 1 ? 'it is' : 'they are'} not answering.`) : null);
 }
 
 // ---- from one station's Control Deck to another's, with no second approval
@@ -1594,7 +1790,7 @@ function stationTile(s) {
     up ? h('div', { class: 'tile-stats' },
       h('span', {}, h('b', {}, s.working ?? 0), ' working'), h('span', { class: s.needs_you ? 'needs' : '' }, h('b', {}, s.needs_you ?? 0), ' need you'),
       s.load != null ? h('span', { class: 'muted' }, 'load ' + Number(s.load).toFixed(1)) : null, s.keep_awake ? h('span', { class: 'chip' }, 'kept awake') : null,
-      S.busy.has(s.station) ? h('span', { class: 'chip warn', title: `${api.station} is still waiting for ${s.station} to answer what this page asked before, and asks it no more until it does. What is shown here is from ${ago(S.busy.get(s.station))} ago. Everything else on this page is unaffected.` }, 'not answering: shown from before') : null,
+      S.busy.has(s.station) ? h('span', { class: 'chip warn', title: `${s.station} has not answered what this page last asked of it. What is shown of it here is as of ${ago(S.busy.get(s.station))} ago. It is asked again by itself, one question at a time; everything else on this page is unaffected.` }, `not answering: as of ${ago(S.busy.get(s.station))} ago`) : null,
       s.codex_sandbox_blocked ? h('span', { class: 'chip warn', title: 'Codex cannot run commands on this station: the system blocks its sandbox. On the station, run "spandeck doctor --fix" once. It asks for your password.' }, 'Codex blocked') : null,
       s.service === false ? h('span', { class: 'chip warn', title: 'spandeck does not start at login on this station. After a reboot it stays down until someone starts it. Run "spandeck service --install" there.' }, 'not started at login') : null, vaultChip(s), keyChip(s.station))
       : h('div', { class: 'tile-stats warn-text' }, s.state === 'update_needed' ? 'Needs an update before it can be controlled' : awayWhy(s) ? [awayWhy(s), ' ', s.why === 'clock' ? null : keyChip(s.station)] : s.state === 'unreachable' ? [`Unreachable · last seen ${ago(s.last_seen_ms)} ago. Right-click to wake or start it. `, keyChip(s.station)] : s.state === 'not_linked' ? ['Not in this fleet. ', h('button', { class: 'mini add-station', onclick: (e) => { e.preventDefault(); e.stopPropagation(); addMachineDialog({ station: s.station, kind: 'join' }); } }, `Add ${s.station} to this fleet…`)] : `Unreachable · last seen ${ago(s.last_seen_ms)} ago`),
@@ -2200,7 +2396,7 @@ const leafCandidates = (n) => onlineStations().filter(st => n.id !== undefined ?
 const bindTried = new Set(); // a save that failed is not tried again by itself
 function bindGlobalLeaves() {
   if (!S.loaded) return;
-  const allHere = !fleetAway().length && onlineStations().every(st => S.panes.has(st) && S.projects.has(st));
+  const allHere = !fleetAway().length && !S.busy.size && onlineStations().every(st => S.panes.has(st) && S.projects.has(st));
   for (const def of S.deck.layouts || []) {
     const lay = findLayout('global:' + def.name);
     if (!lay || lay.cache.dirty || bindTried.has(JSON.stringify(def))) continue;
@@ -2328,7 +2524,7 @@ function dropDeadHidden(lay, ctx) {
   if (!S.loaded || lay.cache.dirty) return;
   const dead = leaves(lay.cache.tree).filter((n) => {
     const st = ctx.stationOf(n);
-    if (!n.hidden || !online(st) || !S.panes.has(st) || !S.projects.has(st) || ctx.resolve(n)) return false;
+    if (!n.hidden || !online(st) || S.busy.has(st) || !S.panes.has(st) || !S.projects.has(st) || ctx.resolve(n)) return false;
     if (n.id !== undefined) return true;
     const pr = S.projects.get(st).find(x => x.name === (n.project || lay.project));
     return !pr || !(pr.definition?.pane || []).some(x => x.name === n.pane);
@@ -2649,6 +2845,8 @@ async function migrateWorkspaces() {
       const st = key.slice(PREFIX.length);
       const info = S.fleet.stations.find(s => s.station === st);
       if (info && info.state !== 'online') continue;
+      // Its panes are not known yet, or are from before: tried again later.
+      if (info && (!heard(st) || S.busy.has(st))) continue;
       let old = null;
       try { old = JSON.parse(localStorage.getItem(key)); } catch (e) { /* not ours: dropped below */ }
       for (const tab of info && Array.isArray(old?.tabs) ? old.tabs : []) {
@@ -2702,7 +2900,7 @@ function stationView(st) {
   const live = liveAgents(st).sort(byState);
   loadThumbs(st, live);
   return shell(h('main', { class: 'station-main' }, h('div', { class: 'deck' },
-    live.length ? h('div', { class: 'tiles' }, live.map(p => paneTile(st, p))) : h('div', { class: 'empty' }, S.loaded ? 'Nothing is running here. Start a pane or a project from the left.' : 'Loading…'))));
+    live.length ? h('div', { class: 'tiles' }, live.map(p => paneTile(st, p))) : h('div', { class: 'empty' }, S.loaded && heard(st) ? 'Nothing is running here. Start a pane or a project from the left.' : waitWords(st)))));
 }
 
 // A layout: its name and where it is saved, Arrange and Lines, then the panes.
@@ -2782,13 +2980,13 @@ function watchPage(st, project) {
   const head = h('div', { class: 'lay-head' }, h('span', { class: 'ico-wrap' }, watchIcon()), h('b', { class: 'lay-name' }, 'Watch'),
     h('span', { class: 'muted lay-saved' }, `Every agent in ${project} on ${st}, and who is talking to whom`), linkedChip(st, pr));
   const body = info && info.state !== 'online' ? h('div', { class: 'empty' }, awayText(st, info))
-    : !pr ? h('div', { class: 'empty' }, S.loaded ? `There is no project ${project} on ${st}.` : 'Loading…') : watchView(st, project);
+    : !pr ? h('div', { class: 'empty' }, S.loaded && heard(st) ? `There is no project ${project} on ${st}.` : waitWords(st)) : watchView(st, project);
   return shell(h('main', { class: 'station-main' }, head, body));
 }
 
 function paneView(st, id) {
   const p = findPane(st, id);
-  if (!p) return shell(h('main', { class: 'station-main' }, h('div', { class: 'empty' }, !S.loaded ? 'Loading…' : online(st) ? 'That pane is not on this station any more.' : `${st} is unreachable.`)));
+  if (!p) return shell(h('main', { class: 'station-main' }, h('div', { class: 'empty' }, !online(st) && S.loaded ? `${st} is unreachable.` : S.loaded && heard(st) ? 'That pane is not on this station any more.' : waitWords(st))));
   if (faceOf(st, p) === 'chat') return shell(h('main', { class: 'station-main zoomed' }, conversation(st, p, 'zoom').frame()));
   const t = getTerm(st, p, 'zoom', 'control');
   // The terminal takes the keyboard when the view opens, and keeps it across

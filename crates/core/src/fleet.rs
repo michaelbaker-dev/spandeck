@@ -658,6 +658,8 @@ impl Daemon {
     /// it was listed as away, or was being asked less often, its round
     /// begins now.
     pub(crate) fn heard_from(&self, station: &str) {
+        // What waits for it is sent now, not when its wait is over.
+        self.relay.back(station);
         if let Some(addr) = self.fleet.addr_of(station) {
             if self.rounds.heard(&addr) {
                 self.rounds.kick(self, Select::Due);
@@ -971,6 +973,11 @@ impl Daemon {
                     }
                 }
             }
+        }
+        // It answers: messages waiting for it are sent now, not when the
+        // wait after the last failed try is over (relay.rs).
+        if let Some(peer) = &member {
+            self.relay.back(&peer.station);
         }
         // The roster of the fleet's members is the same on every station.
         if let Some(peer) = &member {

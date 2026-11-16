@@ -22,7 +22,7 @@ fn not_linked(own: &str, other: &str) -> Error {
 
 impl Daemon {
     pub fn mail(&self) -> MessageStore {
-        MessageStore::with_retries(self.db.clone(), &self.station, self.relay_retries.clone())
+        MessageStore::new(self.db.clone(), &self.station)
     }
 
     /// Every name a pane answers to on this station.
@@ -160,6 +160,12 @@ impl Daemon {
                 mark,
             )
             .map_err(invalid)?;
+        // Stored: it goes now, by that station's own sender. Nothing here
+        // waits for it, and nothing depends on this line (relay.rs).
+        if remote {
+            self.relay
+                .push(&Timed(self.clone()), station.unwrap_or_default());
+        }
         // The ship's log keeps who talked to whom, not what was said.
         self.record(
             "msg.sent",
@@ -408,16 +414,11 @@ impl Daemon {
         }
     }
 
-    /// Carry queued messages to other stations, and tell the UI about arrivals.
-    pub(crate) async fn pump_relay(&self, _n: u64) {
-        let mail = self.mail();
-        if mail.queued() == 0 {
-            return;
-        }
-        let delivered = mail.pump(&Timed(self), now_ms()).await;
-        if delivered > 0 {
-            self.emit("msg.relayed", None, None, json!({"delivered": delivered}));
-        }
+    /// The safety net of the message relay, every half second: every
+    /// station something waits for has a sender (relay.rs). It starts
+    /// tasks and waits for no station.
+    pub(crate) fn pump_relay(&self) {
+        self.relay.pump(&Timed(self.clone()));
     }
 
     /// For the Performance page: how long a message stored here waited
@@ -503,9 +504,56 @@ impl Daemon {
 /// The station link, timed for the Performance page: from a message being
 /// sent here to its being stored at the other station, on this station's
 /// clock throughout. A duplicate (a retry after a lost reply) is not counted.
-struct Timed<'a>(&'a Daemon);
+#[derive(Clone)]
+struct Timed(Daemon);
 
-impl crate::relay::Transport for Timed<'_> {
+impl crate::relay::Link for Timed {
+    /// The decks are told (the sender's list shows "delivered").
+    fn arrived(&self, dest: &str, count: usize) {
+        self.0.emit(
+            "msg.relayed",
+            None,
+            None,
+            json!({"delivered": count, "station": dest}),
+        );
+    }
+
+    /// The other station refused a message for good. Its sender has the
+    /// note in its inbox already (relay.rs); the owner gets a notice, and
+    /// the ship's log an entry. The reason is that station's words: data,
+    /// kept as text.
+    fn refused(
+        &self,
+        dest: &str,
+        env: &crate::relay::Envelope,
+        why: &str,
+        note: &crate::relay::Envelope,
+    ) {
+        let d = &self.0;
+        let pane = d
+            .pane(split_address(&env.sender).0)
+            .ok()
+            .map(|p| p.meta.lock().unwrap().id.clone());
+        d.record(
+            "msg.refused",
+            pane.as_deref(),
+            env.project.as_deref(),
+            env.task.as_deref(),
+            Some(dest),
+            json!({"id": env.id, "thread": env.thread, "from": env.sender, "to": env.recipient,
+                   "kind": env.kind, "why": truncate(why, 200), "note": note.id}),
+        );
+        d.notify(
+            "message",
+            pane.as_deref(),
+            env.project.as_deref(),
+            &format!("Not delivered to {}", env.recipient),
+            &truncate(&note.body, 400),
+        );
+    }
+}
+
+impl crate::relay::Transport for Timed {
     fn deliver<'a>(
         &'a self,
         station: &'a str,

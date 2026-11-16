@@ -845,7 +845,22 @@ impl Daemon {
         // The database's writer: what waits, what was dropped, whether it
         // can write (db.rs).
         v["database"] = json!(self.db.stats());
-        v["messages"]["waiting"] = json!(self.messages_waiting());
+        // Per station: how many wait and for how long, and what that
+        // station's own sender is doing (relay.rs).
+        let relay = self.relay.view();
+        let mut waiting = self.messages_waiting();
+        for w in &mut waiting {
+            let sender = relay["senders"]
+                .as_array()
+                .and_then(|l| l.iter().find(|s| s["station"] == w["station"]));
+            let of = |key: &str| sender.map_or(0, |s| s[key].as_u64().unwrap_or(0));
+            w["sender"] = json!(sender.is_some_and(|s| s["sender"] == json!(true)));
+            w["failed_in_a_row"] = json!(of("failed_in_a_row"));
+            w["next_try_in_ms"] = json!(of("next_try_in_ms"));
+        }
+        v["messages"]["waiting"] = json!(waiting);
+        v["messages"]["push"] = relay["push"].clone();
+        v["messages"]["senders_restarted"] = relay["restarted"].clone();
         v["panes"] = json!(self
             .list_panes()
             .iter()

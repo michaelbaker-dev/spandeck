@@ -223,3 +223,130 @@ fn a_frozen_station_and_a_slow_one_delay_nobody_else() {
     assert!(silent("bravo") > Some(0), "{perf}");
     assert_eq!(silent("delta"), Some(0), "{perf}");
 }
+
+/// Unit 08a of the performance plan: a message for another station goes at
+/// once, by that station's own sender. Measured before (15 Nov 2026):
+/// sent to received 330 ms at the median with no delay on the link, one
+/// message per station each half second (a burst of ten arrived at 0.5,
+/// 1.0 … 5.0 s), and with a station frozen a message for a healthy one took
+/// up to 5.2 s. The brief's bounds, with `r` the link's round trip: sent to
+/// received within r + 20 ms at the 95th percentile, and a hundred queued
+/// messages there within 100 × (r + 5 ms); here with a station frozen and
+/// messages waiting for it, which may cost the healthy one nothing.
+#[test]
+#[ignore = "nightly: three stations, and it asserts on measured times"]
+fn a_message_goes_at_once_and_a_frozen_station_delays_only_its_own() {
+    let ports: Vec<u16> = (0..3).map(|_| free_port()).collect();
+    // alpha reaches charlie through a link that takes 10 ms each way.
+    let delay = Arc::new(AtomicU64::new(10));
+    let slow = slow_link(ports[2], delay.clone());
+    let key = "5b".repeat(32);
+    let names = ["alpha", "bravo", "charlie"];
+    let stations: Vec<Station> = (0..3)
+        .map(|i| {
+            let others: Vec<String> = (0..3)
+                .filter(|j| *j != i)
+                .map(|j| {
+                    let port = if (i, j) == (0, 2) { slow } else { ports[j] };
+                    format!("\"127.0.0.1:{port}\"")
+                })
+                .collect();
+            Station::start_keyed(
+                names[i],
+                ports[i],
+                &format!("peers = [{}]\n", others.join(", ")),
+                Some(&key),
+            )
+        })
+        .collect();
+    let (alpha, bravo, charlie) = (&stations[0], &stations[1], &stations[2]);
+    wait_for("alpha to see the other two", 30, || {
+        let v = alpha.call("fleet.refresh", json!({}));
+        let on = |x: &&Value| x["state"] == json!("online");
+        (v["stations"].as_array().unwrap().iter().filter(on).count() == 3).then_some(())
+    });
+    // The link's round trip, as a call over it takes.
+    let mut trips: Vec<f64> = (0..15)
+        .map(|_| {
+            let began = Instant::now();
+            alpha.call(
+                "peer.call",
+                json!({"station": "charlie", "method": "station.info", "params": {}}),
+            );
+            began.elapsed().as_secs_f64() * 1000.0
+        })
+        .collect();
+    trips.sort_by(|a, b| a.total_cmp(b));
+    let r = trips[trips.len() / 2];
+    let waiting_for = |station: &str| {
+        alpha.call("perf.get", json!({}))["messages"]["waiting"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["station"] == json!(station))
+            .map_or(0, |w| w["count"].as_u64().unwrap())
+    };
+    let received = |s: &Station| -> Vec<String> {
+        s.call("log.query", json!({"kind": "msg.received", "limit": 500}))
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["data"]["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let send = |to: &str, body: &str| -> String {
+        alpha.call("msg.send", json!({"to": to, "body": body, "kind": "note"}))["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    // bravo stops answering, with messages waiting for it.
+    bravo.signal(SIGSTOP);
+    bravo.wait_frozen();
+    for i in 0..3 {
+        send("nobody@bravo", &format!("waits for bravo {i}"));
+    }
+    std::thread::sleep(Duration::from_millis(1200));
+
+    // One at a time: the station's own figure, from sent here to stored
+    // there.
+    for i in 0..40 {
+        send("nobody@charlie", &format!("one {i}"));
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    wait_for("the forty to arrive", 20, || {
+        (waiting_for("charlie") == 0).then_some(())
+    });
+    let there = alpha.call("perf.get", json!({}))["messages"]["received"].clone();
+    // A hundred at once.
+    let began = Instant::now();
+    let sent: Vec<String> = (0..100)
+        .map(|i| send("nobody@charlie", &format!("burst {i}")))
+        .collect();
+    wait_for("the hundred to arrive", 60, || {
+        (waiting_for("charlie") == 0).then_some(())
+    });
+    let burst = began.elapsed().as_secs_f64() * 1000.0;
+    let at_charlie = received(charlie);
+    println!(
+        "round trip {r:.1} ms | sent to received (40, one at a time, bravo frozen): p50 {} ms, p95 {} ms, worst {} ms | 100 at once: all there after {burst:.0} ms | still waiting for bravo: {}",
+        there["p50_ms"], there["p95_ms"], there["max_ms"], waiting_for("bravo"),
+    );
+    assert_eq!(there["count"], json!(40), "{there}");
+    assert!(there["p95_ms"].as_f64().unwrap() <= r + 20.0, "{there}");
+    // The loop that looks is 40 ms coarse: the brief's bound, and that.
+    assert!(burst <= 100.0 * (r + 5.0) + 100.0, "{burst} ms, r {r} ms");
+    assert!(
+        sent.iter().all(|id| at_charlie.contains(id)),
+        "every one of the hundred is there"
+    );
+    assert_eq!(waiting_for("bravo"), 3, "bravo's wait, for bravo alone");
+
+    // bravo is back: its own arrive without anyone asking.
+    bravo.signal(SIGCONT);
+    wait_for("bravo's three to arrive", 45, || {
+        (waiting_for("bravo") == 0).then_some(())
+    });
+    assert_eq!(received(bravo).len(), 3);
+}
