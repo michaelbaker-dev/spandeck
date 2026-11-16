@@ -72,6 +72,7 @@ pub mod rounds;
 pub mod rpc;
 pub mod server;
 pub mod setup;
+pub mod snapshot;
 pub mod stops;
 pub mod sync;
 pub mod tailnet;

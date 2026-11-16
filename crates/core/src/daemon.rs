@@ -2609,6 +2609,10 @@ impl Daemon {
     /// ability only towards a station that announces it.
     pub fn caps(&self) -> Vec<&'static str> {
         let mut caps = vec!["task_continue", "station_flags"];
+        // One answer for everything a deck shows of this station.
+        if self.flag_on(crate::snapshot::CAP, true) {
+            caps.push(crate::snapshot::CAP);
+        }
         // Holds, and `pane.release`: offered by a deck only for a station
         // that says so.
         if self.flag_on("holds", true) {

@@ -40,6 +40,11 @@ jobs:
       # four healthy, and printed.
       - name: A frozen station and a slow one delay nobody else
         run: cargo test -p spandeck --test isolation -- --ignored --nocapture
+      # The deck's refresh in a real browser: a station frozen and one that
+      # answers as 0.4.5 did; and what an idle deck asks, counted against
+      # the 816 calls a minute of before.
+      - name: The deck asks each station one question (a frozen station, one from before, an idle count)
+        run: cargo test -p spandeck --test refresh -- --ignored --nocapture
   build:
     strategy:
       fail-fast: false

@@ -61,6 +61,12 @@ days, not hours.
   and search history; they never get a call that administers a station. Text from agents,
   other stations and session history is shown as text and labelled as quoted, never run
   as markup.
+- **One answer for what a deck shows of a station** (`deck.snapshot`, 15 Nov 2026) gives
+  nothing that was not already given: it is the seven lists a deck read before, by the
+  same functions, and for the station serving the deck four documents it also read
+  before, all of them on the read-only list. No agent can ask it. The versions in it are
+  short hashes of that same content, used only to say "unchanged"; nothing is decided by
+  one, and a caller that sends a wrong one is only sent the section again.
 - **A stopped agent stays stopped, and only you release it.** An agent you stopped, and
   one spandeck started again after a restart, gets no messages from other agents until
   you release it: by typing into its pane, with Release, or with
