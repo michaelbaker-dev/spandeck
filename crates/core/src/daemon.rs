@@ -24,6 +24,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Bumped when stations can no longer talk to an older peer.
 pub const PROTOCOL: u32 = 2;
 
+/// Enter follows a paste, and the mail nudge, this long after the text:
+/// agents that detect pastes need the Enter as a write of its own, a
+/// moment later.
+pub const PASTE_ENTER: Duration = Duration::from_millis(60);
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("no such pane: {0}")]
@@ -1742,7 +1747,7 @@ impl Daemon {
         p.term.send(Item {
             kind: InputKind::Paste { bracketed },
             bytes,
-            enter_after: enter.then_some(Duration::from_millis(60)),
+            enter_after: enter.then_some(PASTE_ENTER),
             from: from.map(String::from),
         })?;
         Ok(())

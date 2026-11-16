@@ -134,6 +134,45 @@ fn a_working_agent_gets_mail_through_its_hooks_not_its_keyboard() {
     );
 }
 
+/// Found with a real Codex on 16 Nov 2026: the nudge was typed as plain
+/// text with Enter 30 ms later, and one time in five Codex did not take
+/// the Enter, so the nudge sat in its input box until the next one a
+/// minute later; a paste (marked as one, Enter after 60 ms) never failed.
+/// So the nudge goes the way a paste goes to a program that asked for
+/// pastes to be marked; and when its Enter is not taken, Enter is pressed
+/// once more two seconds on. The agent here asks for marked pastes and
+/// does not take the first Enter.
+#[test]
+fn the_nudge_is_sent_as_a_paste_and_an_enter_that_was_not_taken_is_pressed_again() {
+    let s = Station::start("alpha");
+    let mut script = reads_mail();
+    script["paste"] = json!(true);
+    script["drop_enters"] = json!(1);
+    let pane = s.fake(script, json!({"name": "codexlike"}));
+    s.wait_text(&pane, "[fake] session");
+    s.call(
+        "msg.send",
+        json!({"to": "codexlike", "body": "is the egret count right?"}),
+    );
+    let screen = s.wait_text(&pane, "is the egret count right?");
+    assert!(
+        screen.contains("[fake] (that line was pasted)"),
+        "the nudge came as a marked paste: {screen}"
+    );
+    // Once as it was typed at the prompt, once as the line that was taken.
+    assert_eq!(
+        screen.matches("You have 1 new spandeck message").count(),
+        2,
+        "typed once, not once and again on top: {screen}"
+    );
+    let enters = s
+        .log("msg.nudge_enter")
+        .iter()
+        .filter(|e| e["pane"] == json!(pane))
+        .count();
+    assert_eq!(enters, 1, "one more Enter, once");
+}
+
 #[test]
 fn a_paused_agent_is_not_given_new_work_until_it_is_unpaused() {
     let s = Station::start("alpha");

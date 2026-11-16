@@ -436,6 +436,43 @@ impl Daemon {
             Wake::Now => {}
             other => return other,
         }
+        // The nudge typed last, if nothing shows the agent took it: the
+        // pane has not changed state since, and the line is still on its
+        // screen, in the input box. It is never typed a second time on
+        // top of itself; Enter is pressed instead (wake.rs).
+        let since = p.meta.lock().unwrap().state_since_ms;
+        if turn.typed.is_some_and(|t| t.state_since_ms != since) {
+            turn.typed = None;
+        }
+        let shown = turn.typed.is_some() && crate::wake::on_screen(&p.term.lines(), MAIL_LINE_MARK);
+        let unsent = crate::wake::unsent(turn.typed.as_ref(), since, shown);
+        let enter = |p: &Arc<PaneEntry>| {
+            let sent = p.term.send_if(
+                spandeck_terminal::Item {
+                    kind: spandeck_terminal::InputKind::Nudge,
+                    bytes: b"\r".to_vec(),
+                    enter_after: None,
+                    from: None,
+                },
+                || wakeable() == Wake::Now,
+            );
+            matches!(sent, Ok(Some(_)))
+        };
+        // Its Enter was not taken (Codex, one time in five): once more,
+        // two seconds on, while its mail is still unread.
+        if crate::wake::enter_again(turn.typed.as_ref(), since, shown, now)
+            && !self
+                .mail()
+                .unannounced(&self.pane_names(&p.id), i64::MAX as u64)
+                .is_empty()
+            && enter(p)
+        {
+            if let Some(t) = turn.typed.as_mut() {
+                t.entered_again = true;
+            }
+            self.record("msg.nudge_enter", Some(&p.id), None, None, None, json!({}));
+        }
+        let mut typed_now = false;
         let told = announce(
             &self.mail(),
             &self.pane_names(&p.id),
@@ -443,7 +480,20 @@ impl Daemon {
             now.saturating_sub(self.cfg.nudge_secs * 1000),
             &mut turn,
             |count, senders| {
+                if unsent {
+                    return enter(p);
+                }
                 let nudge = mail_line(count, senders);
+                // Sent the way a paste is (`paste_from`): marked as one
+                // when the program asked for pastes to be marked, with
+                // Enter 60 ms after. As raw text with Enter 30 ms after,
+                // a real Codex left it in its input box once in five; a
+                // paste never failed (16 Nov 2026).
+                let bytes = if p.term.bracketed_paste() {
+                    format!("\x1b[200~{nudge}\x1b[201~")
+                } else {
+                    nudge
+                };
                 // The marks are looked at once more with the pane's input
                 // locked, and whatever sets one takes back a nudge not yet
                 // typed: this look and the typing cannot pass a Pause or a
@@ -452,16 +502,24 @@ impl Daemon {
                 let sent = p.term.send_if(
                     spandeck_terminal::Item {
                         kind: spandeck_terminal::InputKind::Nudge,
-                        bytes: nudge.into_bytes(),
-                        enter_after: Some(std::time::Duration::from_millis(30)),
+                        bytes: bytes.into_bytes(),
+                        enter_after: Some(crate::daemon::PASTE_ENTER),
                         from: None,
                     },
                     || wakeable() == Wake::Now,
                 );
-                matches!(sent, Ok(Some(_)))
+                typed_now = matches!(sent, Ok(Some(_)));
+                typed_now
             },
             |ids| self.note_woken(ids, now),
         );
+        if typed_now {
+            turn.typed = Some(crate::wake::Typed {
+                at_ms: now,
+                state_since_ms: since,
+                entered_again: false,
+            });
+        }
         if told > 0 {
             self.record(
                 "msg.nudged",
@@ -469,7 +527,7 @@ impl Daemon {
                 None,
                 None,
                 None,
-                json!({"count": told}),
+                json!({"count": told, "typed": typed_now}),
             );
         }
         Wake::Now

@@ -106,6 +106,58 @@ pub struct PaneWake {
 #[derive(Default)]
 pub struct Turn {
     pub last_nudge_ms: Option<u64>,
+    /// The nudge last typed into this pane, while nothing shows that the
+    /// agent took it.
+    pub typed: Option<Typed>,
+}
+
+/// A nudge as it was typed: when, and the pane's `state_since_ms` at that
+/// moment. An agent that takes the nudge starts a turn, which changes its
+/// state; one whose state has not changed since has not been seen to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Typed {
+    pub at_ms: u64,
+    pub state_since_ms: u64,
+    /// Enter was pressed once more for it.
+    pub entered_again: bool,
+}
+
+/// A nudge whose Enter the program did not take is given one more Enter
+/// this long after it was typed (found 16 Nov 2026: Codex left the nudge
+/// in its input box once in five, and it sat there for the full minute
+/// until the next nudge).
+pub const ENTER_AGAIN_MS: u64 = 2000;
+
+/// How many of the bottom lines of a pane's screen an agent's input box
+/// is looked for in.
+const BOX_LINES: usize = 10;
+
+/// Is the typed nudge on the pane's screen, near the bottom, where an
+/// agent's input box is? `mark`: what every nudge has in it.
+pub fn on_screen(lines: &[String], mark: &str) -> bool {
+    let end = lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    lines[end.saturating_sub(BOX_LINES)..end]
+        .iter()
+        .any(|l| l.contains(mark))
+}
+
+/// Is the nudge last typed still sitting in the program's input, unsent?
+/// It is taken to be when the pane has not changed state since it was
+/// typed (no turn began) and its text is still on the screen. Then a
+/// second copy is never typed on top of it (found 16 Nov 2026: OpenCode's
+/// input box held five nudges after five minutes): Enter is pressed.
+pub fn unsent(typed: Option<&Typed>, state_since_ms: u64, shown: bool) -> bool {
+    shown && typed.is_some_and(|t| t.state_since_ms == state_since_ms)
+}
+
+/// Is it time for the one more Enter?
+pub fn enter_again(typed: Option<&Typed>, state_since_ms: u64, shown: bool, now: u64) -> bool {
+    unsent(typed, state_since_ms, shown)
+        && typed.is_some_and(|t| !t.entered_again && now >= t.at_ms + ENTER_AGAIN_MS)
 }
 
 /// One look at one pane's mail, with its turn held: if mail waits that the
@@ -252,6 +304,47 @@ mod tests {
             decide(&idle_since(now - 2000), Some(now - 2500), now),
             Wake::Now
         );
+    }
+
+    /// Found with real agents on 16 Nov 2026. Codex did not take the
+    /// nudge's Enter once in five: the line sat in its input box for a
+    /// minute. OpenCode, which could not take a turn, had five copies of
+    /// the nudge in its input box after five minutes. So: a nudge that is
+    /// still on the screen of a pane that has not changed state since is
+    /// unsent; it gets one more Enter after two seconds, once; and while
+    /// it is unsent no second copy is typed.
+    #[test]
+    fn an_unsent_nudge_gets_one_more_enter_and_never_a_second_copy() {
+        let mark = "new spandeck message";
+        let screen = |text: &str| -> Vec<String> { text.lines().map(String::from).collect() };
+        let in_box = screen("codex\n\n> You have 1 new spandeck message from a@x. Read it\n  with the spandeck inbox tool\n\n  ? for shortcuts\n\n\n");
+        assert!(on_screen(&in_box, mark));
+        assert!(!on_screen(&screen("> \n"), mark));
+        // Scrolled far up the screen, it is history, not the input box.
+        let mut old = vec!["> You have 1 new spandeck message from a@x.".to_string()];
+        old.extend((0..12).map(|n| format!("line {n}")));
+        assert!(!on_screen(&old, mark));
+
+        let typed = Typed {
+            at_ms: 10_000,
+            state_since_ms: 4_000,
+            entered_again: false,
+        };
+        // Nothing typed, or a turn since (the state changed), or no longer
+        // on the screen: not unsent.
+        assert!(!unsent(None, 4_000, true));
+        assert!(!unsent(Some(&typed), 10_050, true));
+        assert!(!unsent(Some(&typed), 4_000, false));
+        assert!(unsent(Some(&typed), 4_000, true));
+        // One more Enter: not before two seconds, and once.
+        assert!(!enter_again(Some(&typed), 4_000, true, 11_999));
+        assert!(enter_again(Some(&typed), 4_000, true, 12_000));
+        let again = Typed {
+            entered_again: true,
+            ..typed
+        };
+        assert!(!enter_again(Some(&again), 4_000, true, 60_000));
+        assert!(unsent(Some(&again), 4_000, true), "and still no second copy");
     }
 
     fn store() -> MessageStore {
