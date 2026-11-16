@@ -72,7 +72,7 @@ const idOrder = (id) => { const [a, b] = String(id).split('.'); return [Number(a
 
 // Put `kids` in `parent` in this order, moving only what is out of place: a
 // node that stays keeps its scroll position, its focus and what is typed in it.
-function sync(parent, kids) {
+export function sync(parent, kids) {
   let at = parent.firstChild;
   for (const k of kids) {
     if (k === at) at = at.nextSibling;
@@ -208,7 +208,8 @@ class Conv {
     if (this.session) { params.session = this.session; params.after = this.cursor; }
     try {
       const r = await api.call('pane.conversation.watch', params);
-      if (this.disposed) { api.send('pane.conversation.unwatch', { chan: r.chan }); return; }
+      // Let go of, or stepped away from, while the station was answering.
+      if (this.disposed || this.parked) { api.send('pane.conversation.unwatch', { chan: r.chan }); this.state = 'off'; return; }
       this.chan = r.chan;
       api.chans.set(r.chan, {
         onConversation: (a) => this.apply(a),
@@ -221,7 +222,7 @@ class Conv {
       this.apply(r);
     } catch (e) {
       this.state = 'off';
-      if (this.disposed) return;
+      if (this.disposed || this.parked) return;
       // A station from before the conversation view has no such call.
       if (e.code === 'not_found' && /method/i.test(e.message || '')) {
         this.old = true;
@@ -254,7 +255,18 @@ class Conv {
   }
 
   // The connection came back: ask for what came after the cursor, no more.
-  restored() { this.chan = null; this.state = 'off'; this.watch(); }
+  restored() { this.chan = null; this.state = 'off'; if (!this.parked) this.watch(); }
+
+  // Stepped away from, in a phone's layout: nothing is watched and nothing
+  // runs, and what was read, where it was scrolled to and what was being
+  // written are kept for when the owner steps back. Watching again asks only
+  // for what came after the cursor.
+  park() {
+    clearTimeout(this.retry);
+    this.retry = null;
+    if (this.state === 'watching') this.unwatch();
+    this.stopTalking();
+  }
 
   put(it) {
     if (!it || typeof it.id !== 'string') return;
@@ -1090,6 +1102,7 @@ export function conversation(st, p, where) {
   c.p = p;
   c.where = where;
   c.used = true;
+  c.parked = false;
   if (c.state === 'off' && !c.retry && !c.old) c.watch();
   c.drawBar();
   c.drawDock();
@@ -1102,8 +1115,17 @@ export function chatBeforeRender() { for (const c of convs.values()) c.used = fa
 export function chatAfterRender() {
   for (const c of [...convs.values()]) {
     if (!c.used) c.dispose();
+    else if (c.parked) c.park();
     else c.placed();
   }
+}
+
+// A pane of the layout a phone is stepping through, while another of its
+// panes is the one on screen: its conversation is kept (what was read, where,
+// and the draft) and not watched. It is let go of with the layout's view.
+export function chatPark(st, p) {
+  const c = convs.get(keyOf(st, p));
+  if (c) { c.p = p; c.used = true; c.parked = true; }
 }
 
 // ---- the phone's list of sessions ----
