@@ -76,6 +76,21 @@ fn took(s: &Station, name: &str, n: u32) -> Duration {
     at("done").duration_since(at("go")).unwrap_or_default()
 }
 
+/// The agent's `n`th call is over, its last hook included. "ran Bash" is on
+/// the screen before the hook that reports the call's end has been
+/// answered, and that hook waits three seconds for a daemon that is away
+/// and then gives up, as every hook that cannot block does. A test that
+/// ends the daemon again in that moment reads the hook's failure as one
+/// too many (on a Mac, 16 Nov 2026: the daemon was back 0.7 s before the
+/// hook's time was up and was ended for the next step 80 ms later, between
+/// two of the hook's tries).
+fn settled(s: &Station, name: &str, n: u32) {
+    let done = s.root.join("home").join(format!("{name}.done{n}"));
+    wait_for("the call and its hooks to be over", 20, || {
+        done.exists().then_some(())
+    });
+}
+
 fn guard(s: &Station, pane: &str) -> Value {
     wait_for("the pane's guard", 15, || {
         let text =
@@ -125,6 +140,7 @@ fn rules_hold_while_spandeck_is_away() {
         go(s, "agent", 1);
     });
     s.wait_text(&agent, "[fake] ran Bash (ok)");
+    settled(&s, "agent", 1);
     assert!(!s.text(&agent).contains("hook error"), "{}", s.text(&agent));
     assert_eq!(s.log("pane.kept").len(), 1, "the agent outlived the daemon");
 
@@ -137,8 +153,12 @@ fn rules_hold_while_spandeck_is_away() {
     wait_for("the second call to go ahead", 15, || {
         (count(&s, &agent, "[fake] ran Bash (ok)") == 2).then_some(())
     });
-    assert_eq!(count(&s, &agent, "hook error"), 1, "{}", s.text(&agent));
     assert!(began.elapsed() > Duration::from_secs(4));
+    // The hook that reports the call's end began while the daemon was
+    // still away, and is answered by the daemon that came back: the one
+    // failure on the screen is the tool call's own hook.
+    settled(&s, "agent", 2);
+    assert_eq!(count(&s, &agent, "hook error"), 1, "{}", s.text(&agent));
     assert!(!s.text(&agent).contains("BLOCKED"));
 
     // The owner makes a rule. It is in every pane's guard within ten
@@ -187,10 +207,12 @@ fn rules_hold_while_spandeck_is_away() {
         let screen = s.wait_text(pane, "BLOCKED Bash: Blocked by a spandeck standing order");
         assert!(!screen.contains("spandeck is not running"), "{screen}");
     }
+    settled(&s, "agent", 3);
+    settled(&s, "old", 1);
     // No hook went unanswered this time (the one before is still on the
     // first agent's screen).
-    assert_eq!(count(&s, &agent, "hook error"), 1);
-    assert_eq!(count(&s, &old, "hook error"), 0);
+    assert_eq!(count(&s, &agent, "hook error"), 1, "{}", s.text(&agent));
+    assert_eq!(count(&s, &old, "hook error"), 0, "{}", s.text(&old));
     assert_eq!(s.log("order.blocked").len(), 2);
 
     // Away for longer than either hook has: refused, in so many words, and
