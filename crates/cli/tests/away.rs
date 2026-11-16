@@ -18,6 +18,10 @@ use std::time::{Duration, Instant};
 use common::*;
 use serde_json::{json, Value};
 
+// The numbers differ between Linux and macOS.
+const SIGSTOP: i32 = if cfg!(target_os = "macos") { 17 } else { 19 };
+const SIGCONT: i32 = if cfg!(target_os = "macos") { 19 } else { 18 };
+
 /// How the refusal begins on the agent's screen, and how it ends.
 const DOWN: &str = "BLOCKED Bash: Blocked by spandeck: spandeck is not running on this station";
 const DOWN_END: &str = "stop and wait for the owner.";
@@ -333,7 +337,7 @@ fn an_approval_survives_a_restart_and_is_answered_once() {
     // started, the owner denies, and only then does the hook reconnect.
     go(&s, "asker", 2);
     let second = wait_for("the second approval", 15, || waiting(&s).first().cloned());
-    kill_pid(pid, 19); // SIGSTOP
+    kill_pid(pid, SIGSTOP);
     away_for(&mut s, Duration::from_millis(300), |_| {});
     let listed = waiting(&s);
     assert_eq!(listed.len(), 1, "{listed:?}");
@@ -359,7 +363,7 @@ fn an_approval_survives_a_restart_and_is_answered_once() {
             json!({"id": second["id"], "allow": true})
         )
         .is_err());
-    kill_pid(pid, 18); // SIGCONT
+    kill_pid(pid, SIGCONT);
     s.wait_text(&asker, "[fake] permission: deny");
     assert_eq!(status(&s, &second["id"]), json!("denied"));
     assert_eq!(s.log("approval.collected").len(), 1);
@@ -375,7 +379,7 @@ fn an_approval_survives_a_restart_and_is_answered_once() {
     // falls through to the agent's own prompt.
     go(&s, "asker", 3);
     let third = wait_for("the third approval", 15, || waiting(&s).first().cloned());
-    kill_pid(pid, 19);
+    kill_pid(pid, SIGSTOP);
     away_for(&mut s, Duration::from_millis(300), |_| {});
     assert_eq!(waiting(&s).len(), 1);
     wait_for(
@@ -384,7 +388,7 @@ fn an_approval_survives_a_restart_and_is_answered_once() {
         || waiting(&s).is_empty().then_some(()),
     );
     assert_eq!(status(&s, &third["id"]), json!("expired"));
-    kill_pid(pid, 18);
+    kill_pid(pid, SIGCONT);
     s.wait_text(&asker, "[fake] permission: none");
     assert_eq!(
         s.log("approval.requested").len(),
