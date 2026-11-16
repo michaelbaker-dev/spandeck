@@ -1533,6 +1533,11 @@ fn answered_in_place_on(
     let screen: String = s.text(surveyor).split_whitespace().collect();
     let answers = "\"answers\":{\"Whichheronscount?\":\"<imgsrc=xonerror=\\\"window.__hit=2\\\">Allherons\",\"Whichrivers?\":\"Avon,Dart\"}";
     assert_eq!(screen.matches(answers).count(), 1, "{screen}");
+    // (Written after the agent has its answer: asked at once, it was not
+    // there yet on a CI runner.)
+    wait_for("the answer in the ship's log", 10, || {
+        (!s.log("question.answered").is_empty()).then_some(())
+    });
     assert_eq!(s.log("question.answered").len(), 1);
 
     // The plan takes its place: markdown, drawn as text; sent back with a
@@ -3040,7 +3045,16 @@ fn a_station_that_joins_another_fleet_brings_its_fleet_mates_with_it() {
         json!(["bravo", "delta"]),
         "{waiting}"
     );
-    let notes = c.call("notify.list", json!({})).to_string();
+    // (The notice follows the request by a moment, on a loaded machine.)
+    let notes = wait_for_or(
+        "the notice of the request",
+        10,
+        || c.call("notify.list", json!({})).to_string(),
+        || {
+            let notes = c.call("notify.list", json!({})).to_string();
+            notes.contains("ask to join this fleet").then_some(notes)
+        },
+    );
     assert!(
         notes.contains("Station alpha and 2 other stations (bravo, delta) ask to join this fleet"),
         "{notes}"
