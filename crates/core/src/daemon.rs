@@ -1559,6 +1559,7 @@ impl Daemon {
 
     /// Change a pane's agent state. Returns true when it changed.
     pub fn set_state(&self, p: &PaneEntry, state: AgentState, reason: Option<String>) -> bool {
+        let worked_ms;
         let (old, meta) = {
             let mut m = p.meta.lock().unwrap();
             if m.exit.is_some() {
@@ -1568,6 +1569,7 @@ impl Daemon {
                 return false;
             }
             let old = m.state;
+            worked_ms = now_ms().saturating_sub(m.state_since_ms);
             m.state = state;
             m.needs_reason = reason.clone();
             if old != state {
@@ -1588,6 +1590,18 @@ impl Daemon {
             None,
             json!({"state": state, "from": old, "reason": reason, "name": meta.name}),
         );
+        // An agent's turn ended, and no transcript of its own says so: said
+        // in the conversation made from its screen (screentalk.rs). A
+        // state that only flickered is no turn.
+        if old == AgentState::Working
+            && matches!(state, AgentState::Idle | AgentState::Done)
+            && meta.agent.is_agent()
+            && meta.transcript_path.is_none()
+            && self.found_session(&p.id).is_none()
+            && worked_ms >= 1000
+        {
+            self.screen_turn_ended(p, worked_ms);
+        }
         if old != state {
             // An agent that has just gone idle is looked at again the
             // moment it has been idle long enough to be told of its mail.

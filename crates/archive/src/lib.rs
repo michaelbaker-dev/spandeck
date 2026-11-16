@@ -7,6 +7,7 @@
 pub mod conversation;
 pub mod normalize;
 pub mod scrub;
+pub mod stores;
 pub mod usage;
 
 use std::fs::File;
@@ -39,7 +40,14 @@ pub struct Archive {
     last_reply: Mutex<std::collections::HashMap<String, u64>>,
     /// Where each conversation's items are (conversation.rs). Memory only.
     convs: conversation::Cache,
+    /// OpenCode's database as last seen for each session followed in it,
+    /// and when: it is opened again only when it has changed.
+    stores_seen: Mutex<std::collections::HashMap<String, (StoreStamp, std::time::Instant)>>,
 }
+
+/// A database file and its write-ahead log: length and modified time.
+type FileStamp = Option<(u64, std::time::SystemTime)>;
+type StoreStamp = (FileStamp, FileStamp);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -121,6 +129,7 @@ impl Archive {
             poll_lock: Mutex::new(()),
             last_reply: Mutex::new(Default::default()),
             convs: Default::default(),
+            stores_seen: Mutex::new(Default::default()),
         })
     }
 
@@ -249,6 +258,9 @@ impl Archive {
         lines: u64,
         commit: Option<&str>,
     ) -> u64 {
+        if agent == "opencode" {
+            return self.poll_opencode(id, path, offset as i64, lines, commit);
+        }
         let Ok(mut file) = File::open(path) else {
             return 0;
         };
@@ -270,21 +282,88 @@ impl Archive {
             return 0;
         };
         let complete = &buf[..=last_nl];
+        let new: Vec<std::borrow::Cow<str>> = complete
+            .split(|b| *b == b'\n')
+            .filter(|raw| !raw.is_empty())
+            .map(String::from_utf8_lossy)
+            .collect();
+        self.store_lines(
+            id,
+            agent,
+            new.iter().map(|l| l.as_ref()),
+            lines,
+            offset + complete.len() as u64,
+            commit,
+        )
+    }
+
+    /// OpenCode keeps a conversation in its database, not in a file: its
+    /// settled messages after the last one taken become this session's
+    /// next lines (stores.rs). `seq`: the last message taken, kept where a
+    /// file's offset is. The database is opened only when it or its
+    /// write-ahead log has changed, or half a minute has passed.
+    fn poll_opencode(
+        &self,
+        id: &str,
+        path: &str,
+        seq: i64,
+        lines: u64,
+        commit: Option<&str>,
+    ) -> u64 {
+        const RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
+        let stamp = |p: &str| {
+            Path::new(p)
+                .metadata()
+                .ok()
+                .map(|m| (m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH)))
+        };
+        let now = (stamp(path), stamp(&format!("{path}-wal")));
+        {
+            let mut seen = self.stores_seen.lock().unwrap();
+            if seen
+                .get(id)
+                .is_some_and(|(was, at)| *was == now && at.elapsed() < RECHECK)
+            {
+                return 0;
+            }
+            seen.insert(id.to_string(), (now, std::time::Instant::now()));
+        }
+        let new = stores::opencode_messages(Path::new(path), id, seq, 500);
+        let Some(last) = new.last().map(|m| m.0) else {
+            return 0;
+        };
+        self.store_lines(
+            id,
+            "opencode",
+            new.iter().map(|m| m.1.as_str()),
+            lines,
+            last as u64,
+            commit,
+        )
+    }
+
+    /// Keep new lines of a session: raw, and normalised and scrubbed for
+    /// search. `offset`: where the next look begins.
+    fn store_lines<'a>(
+        &self,
+        id: &str,
+        agent: &str,
+        new: impl Iterator<Item = &'a str>,
+        lines: u64,
+        offset: u64,
+        commit: Option<&str>,
+    ) -> u64 {
         let mut conn = self.conn.lock().unwrap();
         let Ok(tx) = conn.transaction() else { return 0 };
         let mut line_no = lines;
         let mut replied = None;
-        for raw in complete.split(|b| *b == b'\n') {
-            if raw.is_empty() {
-                continue;
-            }
-            let raw = String::from_utf8_lossy(raw);
+        for raw in new {
             line_no += 1;
             let _ = tx.execute(
                 "INSERT OR REPLACE INTO raw(session,line,raw) VALUES(?1,?2,?3)",
-                params![id, line_no as i64, raw.as_ref()],
+                params![id, line_no as i64, raw],
             );
-            for e in normalize::normalize(agent, &raw) {
+            for e in normalize::normalize(agent, raw) {
                 for (_, value) in find_keys(&e.text) {
                     let mut found = self.found.lock().unwrap();
                     if found.len() < 200 && !found.iter().any(|(_, v)| *v == value) {
@@ -321,7 +400,7 @@ impl Archive {
         let added = line_no - lines;
         let _ = tx.execute(
             "UPDATE sessions SET offset=?2, lines=?3 WHERE id=?1",
-            params![id, (offset + complete.len() as u64) as i64, line_no as i64],
+            params![id, offset as i64, line_no as i64],
         );
         let _ = tx.commit();
         drop(conn);
@@ -429,14 +508,21 @@ impl Archive {
     /// Put a session file back where the agent expects it (after the vendor
     /// deleted it), so the conversation can be resumed.
     pub fn restore(&self, session: &str) -> anyhow::Result<String> {
-        let path: Option<String> = {
+        let row: Option<(String, String)> = {
             let conn = self.conn.lock().unwrap();
-            conn.query_row("SELECT path FROM sessions WHERE id=?1", [session], |r| {
-                r.get(0)
-            })
+            conn.query_row(
+                "SELECT path, agent FROM sessions WHERE id=?1",
+                [session],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .optional()?
         };
-        let path = path.ok_or_else(|| anyhow::anyhow!("no archived session {session}"))?;
+        let (path, agent) = row.ok_or_else(|| anyhow::anyhow!("no archived session {session}"))?;
+        // Its lines here are a copy of rows of OpenCode's database, which
+        // is not a file of lines and is never written by spandeck.
+        if agent == "opencode" {
+            anyhow::bail!("OpenCode keeps its conversations in its own database: there is no session file to put back");
+        }
         if Path::new(&path).exists() {
             anyhow::bail!("{path} still exists; not overwriting it");
         }

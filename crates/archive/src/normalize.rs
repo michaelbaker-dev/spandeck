@@ -233,9 +233,119 @@ pub fn codex_line(raw: &str) -> Vec<Entry> {
     out.into_iter().filter(|e| !e.text.is_empty()).collect()
 }
 
+/// A row of OpenCode's database as the archive keeps it (stores.rs).
+pub fn opencode_line(raw: &str) -> Vec<Entry> {
+    let Ok(v) = serde_json::from_str::<Value>(raw) else {
+        return vec![];
+    };
+    let data = &v["data"];
+    let mk =
+        |role: &str, kind: &str, text: String, tool: Option<String>, files: Vec<String>| Entry {
+            ts: None,
+            role: role.into(),
+            kind: kind.into(),
+            text,
+            tool,
+            files,
+        };
+    let out: Vec<Entry> = match v["type"].as_str().unwrap_or("") {
+        "user" => vec![mk("user", "prompt", text_of(&data["text"]), None, vec![])],
+        "assistant" => data["content"]
+            .as_array()
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| match p["type"].as_str() {
+                        Some("text") => {
+                            Some(mk("assistant", "reply", text_of(&p["text"]), None, vec![]))
+                        }
+                        Some("tool") => {
+                            let name = p["name"].as_str().unwrap_or("tool");
+                            let input = &p["state"]["input"];
+                            Some(mk(
+                                "assistant",
+                                "tool_call",
+                                tool_text(name, input),
+                                Some(name.to_string()),
+                                files_of(input),
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => vec![],
+    };
+    out.into_iter().filter(|e| !e.text.is_empty()).collect()
+}
+
+/// A step of the Antigravity CLI's transcript (`agy` 1.5.9).
+pub fn antigravity_line(raw: &str) -> Vec<Entry> {
+    let Ok(v) = serde_json::from_str::<Value>(raw) else {
+        return vec![];
+    };
+    let ts = v["created_at"].as_str().map(String::from);
+    let mk =
+        |role: &str, kind: &str, text: String, tool: Option<String>, files: Vec<String>| Entry {
+            ts: ts.clone(),
+            role: role.into(),
+            kind: kind.into(),
+            text,
+            tool,
+            files,
+        };
+    let content = v["content"].as_str().unwrap_or("");
+    let mut out = vec![];
+    match v["type"].as_str().unwrap_or("") {
+        "USER_INPUT" => {
+            // The owner's words are between the program's own tags.
+            let said = content
+                .split_once("<USER_REQUEST>")
+                .and_then(|(_, rest)| rest.split_once("</USER_REQUEST>"))
+                .map_or(content, |(said, _)| said);
+            out.push(mk("user", "prompt", said.trim().to_string(), None, vec![]));
+        }
+        "PLANNER_RESPONSE" => {
+            out.push(mk(
+                "assistant",
+                "reply",
+                content.trim().to_string(),
+                None,
+                vec![],
+            ));
+            for call in v["tool_calls"].as_array().into_iter().flatten() {
+                let name = call["name"].as_str().unwrap_or("tool");
+                let args = &call["args"];
+                let text = match args["CommandLine"].as_str() {
+                    Some(cmd) => format!("{name}: {cmd}"),
+                    None => format!("{name}: {args}"),
+                };
+                let files = args["Path"]
+                    .as_str()
+                    .map(String::from)
+                    .into_iter()
+                    .collect();
+                out.push(mk(
+                    "assistant",
+                    "tool_call",
+                    text,
+                    Some(name.to_string()),
+                    files,
+                ));
+            }
+        }
+        "GENERIC" => out.push(mk("tool", "tool_result", content.to_string(), None, vec![])),
+        _ => {}
+    }
+    out.into_iter().filter(|e| !e.text.is_empty()).collect()
+}
+
 pub fn normalize(agent: &str, raw: &str) -> Vec<Entry> {
     match agent {
         "codex" => codex_line(raw),
+        "opencode" => opencode_line(raw),
+        "antigravity" => antigravity_line(raw),
         // Claude Code and the fake agent share a format.
         _ => claude_line(raw),
     }

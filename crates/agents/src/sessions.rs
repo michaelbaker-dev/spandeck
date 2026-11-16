@@ -11,8 +11,10 @@
 //!   real file, 15 Nov 2026).
 //! - OpenCode keeps its sessions in a database: see
 //!   `spandeck_archive::usage::opencode_last`.
-//! - Antigravity: no dependable record of which folder a conversation
-//!   belongs to is known, so none is ever found.
+//! - Antigravity keeps a transcript for each conversation and a database
+//!   that says which folder each belongs to (`spandeck_archive::stores`).
+//!   A pane's own conversation is found there; "the last one for a folder"
+//!   is not offered for it.
 //!
 //! Everything here only reads.
 

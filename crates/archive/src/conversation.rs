@@ -53,6 +53,10 @@ const CHUNK_BYTES: usize = 8 << 20;
 pub enum Dialect {
     Claude,
     Codex,
+    /// Rows of OpenCode's database, as the archive keeps them (stores.rs).
+    OpenCode,
+    /// The Antigravity CLI's transcript of a conversation.
+    Antigravity,
 }
 
 impl Dialect {
@@ -62,6 +66,8 @@ impl Dialect {
         match agent {
             "claude" | "fake" => Some(Dialect::Claude),
             "codex" => Some(Dialect::Codex),
+            "opencode" => Some(Dialect::OpenCode),
+            "antigravity" => Some(Dialect::Antigravity),
             _ => None,
         }
     }
@@ -950,10 +956,227 @@ fn codex_input(p: &Value) -> Value {
         .unwrap_or(Value::Null)
 }
 
+// --------------------------------------------------------------- OpenCode
+
+/// What an OpenCode tool call was given, in one line.
+fn first_words(input: &Value) -> String {
+    let said = summary_of(input);
+    if !said.is_empty() {
+        return said;
+    }
+    input
+        .as_object()
+        .and_then(|o| o.values().find_map(|v| v.as_str()))
+        .map(|s| one_line(s, SUMMARY_CAP))
+        .unwrap_or_default()
+}
+
+/// What an OpenCode tool part holds as its result.
+fn opencode_output(part: &Value) -> String {
+    text_of(&part["state"]["content"])
+}
+
+/// A row of OpenCode's `session_message`, as the archive keeps it
+/// (stores.rs): `{type, id, seq, ts, data}`, `data` being OpenCode's own.
+/// Seen on 2.3.0.
+fn opencode_line(line: u64, raw: &str) -> Parsed {
+    let mut out = Parsed::default();
+    let Ok(v) = serde_json::from_str::<Value>(raw) else {
+        out.unknown = Some("not-json".into());
+        return out;
+    };
+    let ts = v["ts"].as_u64();
+    let data = &v["data"];
+    match v["type"].as_str().unwrap_or("") {
+        "user" => {
+            let said = data["text"].as_str().unwrap_or("").trim();
+            if !said.is_empty() {
+                let mut item = Item::new(line, 0, "user", ts).with_text(said);
+                item.origin = Some("you");
+                out.items.push(item);
+            }
+        }
+        "assistant" => {
+            let parts = data["content"].as_array().map_or(&[][..], |p| p.as_slice());
+            for (block, part) in parts.iter().enumerate() {
+                let span = |from: &str, to: &str| {
+                    let (a, b) = (part["time"][from].as_u64()?, part["time"][to].as_u64()?);
+                    b.checked_sub(a)
+                };
+                match part["type"].as_str().unwrap_or("") {
+                    "text" => {
+                        let said = part["text"].as_str().unwrap_or("").trim();
+                        if !said.is_empty() {
+                            out.items
+                                .push(Item::new(line, block, "text", ts).with_text(said));
+                        }
+                    }
+                    "reasoning" => {
+                        let mut item = Item::new(line, block, "thinking", ts);
+                        item.duration_ms = span("created", "completed");
+                        out.items.push(item);
+                    }
+                    "tool" => {
+                        let mut item = Item::new(line, block, "tool", ts);
+                        item.name = Some(one_line(part["name"].as_str().unwrap_or("tool"), 120));
+                        item.summary = Some(first_words(&part["state"]["input"]));
+                        // The row holds the call and what came back: it is
+                        // taken only once the call is over (stores.rs).
+                        let exit = part
+                            .pointer("/state/metadata/exit")
+                            .and_then(|e| e.as_i64());
+                        item.status = Some(match (part["state"]["status"].as_str(), exit) {
+                            (Some("completed"), Some(0)) => "ok",
+                            (Some("completed"), Some(_)) | (Some("error"), _) => "error",
+                            (Some("completed"), None) => "done",
+                            _ => "interrupted",
+                        });
+                        item.duration_ms =
+                            span("ran", "completed").or(span("created", "completed"));
+                        out.items.push(item);
+                    }
+                    other => out.unknown = Some(kind_name("assistant:", other)),
+                }
+            }
+            if let Some(why) = data["error"]["message"].as_str() {
+                out.items
+                    .push(Item::notice(line, parts.len(), "error", ts).with_text(why));
+            }
+        }
+        "idle" => match data["outcome"].as_str().unwrap_or("") {
+            "succeeded" => {
+                let mut item = Item::notice(line, 0, "turn_ended", ts);
+                item.duration_ms = v["turn_ms"].as_u64();
+                out.items.push(item);
+            }
+            // Why it failed was said by the message before it, when that
+            // message has it.
+            "failed" => {
+                let why = data["error"]["message"]
+                    .as_str()
+                    .unwrap_or("the turn failed");
+                if v["error_said"] != json!(true) {
+                    out.items
+                        .push(Item::notice(line, 0, "error", ts).with_text(why));
+                }
+            }
+            other => out.unknown = Some(kind_name("idle:", other)),
+        },
+        other => out.unknown = Some(kind_name("", other)),
+    }
+    out
+}
+
+// ------------------------------------------------------------ Antigravity
+
+/// The lines a tool's result begins with, which are the program's own.
+fn antigravity_output(content: &str) -> &str {
+    let mut rest = content;
+    while let Some((first, after)) = rest.split_once('\n') {
+        if first.starts_with("Created At: ") || first.starts_with("Completed At: ") {
+            rest = after;
+        } else {
+            break;
+        }
+    }
+    rest
+}
+
+/// What the owner wrote, out of a `USER_INPUT` step: the program wraps it in
+/// `<USER_REQUEST>` and adds notes of its own beside it (the time, a
+/// setting that changed), which nobody said.
+fn antigravity_said(content: &str) -> &str {
+    tagged(content, "USER_REQUEST").unwrap_or(content).trim()
+}
+
+/// The result of the call a `PLANNER_RESPONSE` made is the step after it,
+/// one step for each call, in order (so in ten real transcripts): a call is
+/// tied to its result by the step that will hold it.
+fn antigravity_call(step: u64) -> String {
+    format!("step:{step}")
+}
+
+/// One step of the Antigravity CLI's transcript (`agy` 1.5.9):
+/// `{step_index, type, source, status, created_at, content?, thinking?,
+/// tool_calls?: [{name, args}], error?}`.
+fn antigravity_line(line: u64, raw: &str) -> Parsed {
+    let mut out = Parsed::default();
+    let Ok(v) = serde_json::from_str::<Value>(raw) else {
+        out.unknown = Some("not-json".into());
+        return out;
+    };
+    let ts = v["created_at"].as_str().and_then(ts_ms);
+    let step = v["step_index"].as_u64();
+    let content = v["content"].as_str().unwrap_or("");
+    match v["type"].as_str().unwrap_or("") {
+        "USER_INPUT" if v["source"] == json!("USER_EXPLICIT") => {
+            let said = antigravity_said(content);
+            if !said.is_empty() {
+                let mut item = Item::new(line, 0, "user", ts).with_text(said);
+                item.origin = Some("you");
+                out.items.push(item);
+            }
+        }
+        "PLANNER_RESPONSE" => {
+            if v["thinking"].as_str().is_some_and(|t| !t.trim().is_empty()) {
+                out.items.push(Item::new(line, 0, "thinking", ts));
+            }
+            if !content.trim().is_empty() {
+                out.items
+                    .push(Item::new(line, 1, "text", ts).with_text(content.trim()));
+            }
+            let calls = v["tool_calls"].as_array().map_or(&[][..], |c| c.as_slice());
+            for (n, call) in calls.iter().enumerate() {
+                let mut item = Item::new(line, 2 + n, "tool", ts);
+                item.name = Some(one_line(call["name"].as_str().unwrap_or("tool"), 120));
+                let args = &call["args"];
+                let said = ["toolSummary", "CommandLine", "Path", "query", "ToolName"]
+                    .iter()
+                    .find_map(|k| args[*k].as_str())
+                    .map(|s| one_line(s, SUMMARY_CAP));
+                item.summary = Some(said.unwrap_or_else(|| first_words(args)));
+                item.status = Some("running");
+                item.tool_id = step.map(|s| antigravity_call(s + 1 + n as u64));
+                out.items.push(item);
+            }
+            if let Some(why) = v["error"]
+                .as_str()
+                .filter(|_| v["status"] == json!("ERROR"))
+            {
+                out.items
+                    .push(Item::notice(line, 2 + calls.len(), "error", ts).with_text(why));
+            } else if calls.is_empty() && !content.trim().is_empty() {
+                // An answer that calls no tool is the last of its turn (the
+                // program's hooks guide: a turn stops with `NO_TOOL_CALL`).
+                out.items.push(Item::notice(line, 2, "turn_ended", ts));
+            }
+        }
+        // What a tool call brought back.
+        "GENERIC" if v["source"] == json!("MODEL") => {
+            if let Some(step) = step {
+                out.results.push(ToolResult {
+                    tool_id: antigravity_call(step),
+                    status: if v["status"] == json!("ERROR") {
+                        "error"
+                    } else {
+                        "done"
+                    },
+                    ts_ms: ts,
+                    ..Default::default()
+                });
+            }
+        }
+        other => out.unknown = Some(kind_name("", other)),
+    }
+    out
+}
+
 pub fn parse_line(dialect: Dialect, line: u64, raw: &str) -> Parsed {
     match dialect {
         Dialect::Claude => claude_line(line, raw),
         Dialect::Codex => codex_line(line, raw),
+        Dialect::OpenCode => opencode_line(line, raw),
+        Dialect::Antigravity => antigravity_line(line, raw),
     }
 }
 
@@ -1131,6 +1354,26 @@ fn detail_of(
                     },
                 },
                 Dialect::Codex => codex_text(&call["payload"]["content"]),
+                Dialect::OpenCode => match call["type"].as_str() {
+                    Some("user") => call["data"]["text"].as_str().unwrap_or("").to_string(),
+                    Some("idle") => call["data"]["error"]["message"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                    _ => call["data"]["content"][block]["text"]
+                        .as_str()
+                        .or(call["data"]["error"]["message"].as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                },
+                Dialect::Antigravity => {
+                    let content = call["content"].as_str().unwrap_or("");
+                    match (call["type"].as_str(), item.kind) {
+                        (Some("USER_INPUT"), _) => antigravity_said(content).to_string(),
+                        (_, "notice") => call["error"].as_str().unwrap_or("").to_string(),
+                        _ => content.to_string(),
+                    }
+                }
             };
             out["text"] = paged(&clean(full.trim()), offset);
             return out;
@@ -1142,6 +1385,14 @@ fn detail_of(
             .cloned()
             .unwrap_or(Value::Null),
         Dialect::Codex => codex_input(&call["payload"]),
+        Dialect::OpenCode => call["data"]["content"][block]["state"]
+            .get("input")
+            .cloned()
+            .unwrap_or(Value::Null),
+        Dialect::Antigravity => call["tool_calls"][block.saturating_sub(2)]
+            .get("args")
+            .cloned()
+            .unwrap_or(Value::Null),
     };
     if item.kind == "plan" {
         // The plan that was approved, when the result has it; else what
@@ -1158,6 +1409,14 @@ fn detail_of(
         return out;
     }
     out["input"] = input_fields(&input);
+    // OpenCode keeps what came back with the call, in the same row.
+    if dialect == Dialect::OpenCode {
+        out["output"] = paged(
+            &clean(&opencode_output(&call["data"]["content"][block])),
+            offset,
+        );
+        return out;
+    }
     let Some(result) = result_raw.and_then(|r| serde_json::from_str::<Value>(r).ok()) else {
         return out;
     };
@@ -1207,6 +1466,10 @@ fn detail_of(
                     .unwrap_or_default(),
             }
         }
+        Dialect::Antigravity => {
+            antigravity_output(result["content"].as_str().unwrap_or("")).to_string()
+        }
+        Dialect::OpenCode => String::new(),
     };
     out["output"] = paged(&clean(&full), offset);
     if images > 0 {
@@ -1669,6 +1932,7 @@ mod tests {
 
     const CLAUDE: &str = include_str!("../fixtures/claude-2.1.325.jsonl");
     const CODEX: &str = include_str!("../fixtures/codex-0.169.0.jsonl");
+    const ANTIGRAVITY: &str = include_str!("../fixtures/antigravity-1.5.9.jsonl");
 
     /// An archive following a file that holds the first `lines` lines of a
     /// fixture, as an agent that has written that much.
@@ -1969,6 +2233,234 @@ mod tests {
         assert_eq!(d["output"]["text"], json!("7\nexit 0"));
     }
 
+    /// The owner's report of 16 Nov 2026 ("Antigravity chat ... look
+    /// different in chat and should be the same"): Antigravity's Chat was
+    /// its screen. Its transcript becomes the same items as Claude Code's.
+    /// The fixture has the field layout of ten real `agy` 1.5.9
+    /// transcripts, with made-up words.
+    #[test]
+    fn an_antigravity_transcript_becomes_items_and_says_what_it_did_not_understand() {
+        let (a, dir) = following("antigravity", ANTIGRAVITY, usize::MAX);
+        let page = a.conversation("s1", Range::Tail, 200).unwrap();
+        assert_eq!(
+            kinds(&page.items),
+            vec![
+                "user",
+                "thinking",
+                "tool",
+                "tool",
+                "text",
+                "turn_ended",
+                "user",
+                "tool"
+            ],
+            "{:#?}",
+            page.items
+        );
+        let i = &page.items;
+        // What the owner wrote, without what the program wrapped round it.
+        assert_eq!(
+            i[0].text.as_deref(),
+            Some("How many herons nest by the weir?")
+        );
+        assert_eq!(i[1].text, None);
+        // A call is tied to the step that holds its result, in order.
+        assert_eq!(
+            (i[2].name.as_deref(), i[2].summary.as_deref(), i[2].status),
+            (Some("read_file"), Some("/w/weir/survey.md"), Some("done"))
+        );
+        assert_eq!(
+            (i[3].name.as_deref(), i[3].summary.as_deref(), i[3].status),
+            (
+                Some("run_command"),
+                Some("grep -c heron survey.md"),
+                Some("error")
+            )
+        );
+        assert!(i[4]
+            .text
+            .as_deref()
+            .unwrap()
+            .starts_with("### Herons by the weir"));
+        // The last call has no result yet.
+        assert_eq!(i[7].status, Some("running"));
+        assert_eq!(page.not_understood, 0);
+        let all = serde_json::to_string(&page).unwrap();
+        assert!(
+            !all.contains("local time") && !all.contains("Model Selection"),
+            "{all}"
+        );
+        let d = a.conversation_detail("s1", &i[2].id, 0).unwrap();
+        assert_eq!(d["input"]["fields"]["Path"], json!("/w/weir/survey.md"));
+        assert_eq!(
+            d["output"]["text"],
+            json!("Showing lines 1-3 of 3\n# Survey\nherons: nine nests\nvoles: none seen")
+        );
+        assert_eq!(a.last_reply_line("s1"), 5);
+        // A kind of step this version does not know is left out and counted.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("session.jsonl"))
+            .unwrap();
+        writeln!(f, "{}", json!({"step_index": 7, "source": "SYSTEM", "type": "TIDE_TABLE", "status": "DONE", "created_at": "2026-11-16T12:01:03Z"})).unwrap();
+        let more = a
+            .conversation("s1", Range::After(page.cursor), 200)
+            .unwrap();
+        assert_eq!(
+            (more.items.len(), more.not_understood_kinds),
+            (0, vec![("TIDE_TABLE".to_string(), 1)])
+        );
+    }
+
+    /// The same report, for OpenCode ("Shouldn't chat be the same code base
+    /// for every chat?"): its conversation is read from its database
+    /// (stores.rs) and becomes the same items. Rows in the shape of
+    /// OpenCode 2.3.0, with made-up words.
+    #[test]
+    fn an_opencode_conversation_becomes_items_as_its_messages_settle() {
+        use crate::stores::tests::{opencode_db, opencode_say};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("opencode.db");
+        let conn = opencode_db(&db);
+        opencode_say(
+            &conn,
+            "ses_w",
+            1,
+            "user",
+            1000,
+            json!({"text": "count the reeds", "files": [], "agents": [], "time": {"created": 1000}}),
+        );
+        opencode_say(
+            &conn,
+            "ses_w",
+            2,
+            "assistant",
+            1100,
+            json!({"agent": "build", "finish": "tool-calls",
+            "content": [
+                {"type": "reasoning", "text": "look first", "time": {"created": 1100, "completed": 1400}},
+                {"type": "text", "text": "I will count them."},
+                {"type": "tool", "id": "call_1", "name": "shell", "time": {"created": 1500, "ran": 1600, "completed": 2600},
+                 "state": {"status": "completed", "input": {"command": "wc -l reeds.txt"},
+                           "content": [{"type": "text", "text": "41 reeds.txt"}], "metadata": {"exit": 0}}}],
+            "time": {"created": 1100, "completed": 2700}}),
+        );
+        let a = Archive::memory().unwrap();
+        a.follow("ses_w", "opencode", db.to_str().unwrap(), None, Some("p1"));
+        let page = a.conversation("ses_w", Range::Tail, 200).unwrap();
+        assert_eq!(
+            kinds(&page.items),
+            vec!["user", "thinking", "text", "tool"],
+            "{:#?}",
+            page.items
+        );
+        let i = &page.items;
+        assert_eq!(
+            (i[0].text.as_deref(), i[0].origin),
+            (Some("count the reeds"), Some("you"))
+        );
+        assert_eq!((i[1].text.as_deref(), i[1].duration_ms), (None, Some(300)));
+        assert_eq!(
+            (
+                i[3].name.as_deref(),
+                i[3].summary.as_deref(),
+                i[3].status,
+                i[3].duration_ms
+            ),
+            (
+                Some("shell"),
+                Some("wc -l reeds.txt"),
+                Some("ok"),
+                Some(1000)
+            )
+        );
+        let d = a.conversation_detail("ses_w", &i[3].id, 0).unwrap();
+        assert_eq!(d["input"]["fields"]["command"], json!("wc -l reeds.txt"));
+        assert_eq!(d["output"]["text"], json!("41 reeds.txt"));
+        // The answer is being written: nothing of it is shown. Then it is
+        // whole, the turn ends, and the next turn fails.
+        opencode_say(
+            &conn,
+            "ses_w",
+            3,
+            "assistant",
+            3000,
+            json!({"content": [{"type": "text", "text": "There are"}], "time": {"created": 3000}}),
+        );
+        let none = a
+            .conversation("ses_w", Range::After(page.cursor), 200)
+            .unwrap();
+        assert_eq!(none.items.len(), 0);
+        opencode_say(
+            &conn,
+            "ses_w",
+            3,
+            "assistant",
+            3000,
+            json!({"finish": "stop",
+            "content": [{"type": "text", "text": "There are **41** reeds."}], "time": {"created": 3000, "completed": 3500}}),
+        );
+        opencode_say(
+            &conn,
+            "ses_w",
+            4,
+            "idle",
+            4000,
+            json!({"outcome": "succeeded", "time": {"created": 4000}}),
+        );
+        opencode_say(
+            &conn,
+            "ses_w",
+            5,
+            "user",
+            5000,
+            json!({"text": "and the rushes", "time": {"created": 5000}}),
+        );
+        opencode_say(
+            &conn,
+            "ses_w",
+            6,
+            "assistant",
+            5100,
+            json!({"content": [], "finish": "error",
+            "error": {"type": "provider.free-limit", "message": "No more free messages today."}, "time": {"created": 5100}}),
+        );
+        opencode_say(
+            &conn,
+            "ses_w",
+            7,
+            "idle",
+            5200,
+            json!({"outcome": "failed",
+            "error": {"type": "provider.free-limit", "message": "No more free messages today."}, "time": {"created": 5200}}),
+        );
+        opencode_say(&conn, "ses_w", 8, "tide", 5300, json!({}));
+        a.stores_seen.lock().unwrap().clear();
+        let more = a
+            .conversation("ses_w", Range::After(page.cursor), 200)
+            .unwrap();
+        assert_eq!(
+            kinds(&more.items),
+            vec!["text", "turn_ended", "user", "error"],
+            "{:#?}",
+            more.items
+        );
+        assert_eq!(more.items[1].duration_ms, Some(3000));
+        assert_eq!(
+            more.items[3].text.as_deref(),
+            Some("No more free messages today.")
+        );
+        assert_eq!(more.not_understood_kinds, vec![("tide".to_string(), 1)]);
+        // What "unread" is measured from, and no file is ever put back
+        // where OpenCode's database is.
+        assert_eq!(a.last_reply_line("ses_w"), 3);
+        assert!(a
+            .restore("ses_w")
+            .unwrap_err()
+            .to_string()
+            .contains("its own database"));
+    }
+
     /// Phase M1: "the cursor returns no duplicate and no gap across a file
     /// that grows". Reading a session a few lines at a time, whatever the
     /// page size, gives exactly what reading it whole gives, and a call
@@ -2119,7 +2611,7 @@ mod tests {
     /// caller is told so and shows the terminal.
     #[test]
     fn an_agent_whose_file_is_not_understood_has_no_conversation() {
-        let (a, _dir) = following("antigravity", CLAUDE, usize::MAX);
+        let (a, _dir) = following("an-agent-not-read", CLAUDE, usize::MAX);
         assert!(a.conversation("s1", Range::Tail, 10).is_none());
         assert!(a.conversation("never-followed", Range::Tail, 10).is_none());
     }

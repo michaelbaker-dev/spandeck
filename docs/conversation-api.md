@@ -13,6 +13,13 @@ the station can read it (`source: "transcript"`), else one made from the pane's 
 among Codex's own files when no hook has named it (`crates/core/src/discover.rs`). See
 "From the screen" and "How a pane's session is found", below.
 
+**One chat for every pane (16 Nov 2026; `DECISIONS.md`).** OpenCode's and Antigravity's own
+conversations are read too (`crates/archive/src/stores.rs`): their panes answer
+`source: "transcript"` with the same items as Claude Code's. What an agent printed on its
+screen is served as parts to read (`parts`; `crates/core/src/reflow.rs`), and a turn's end as
+a `notice`, so the screen's conversation is drawn by the same code as any other. Nothing was
+added to the calls, and there is no `caps` entry: an answer says what it holds.
+
 ## Rules that hold for every call
 
 - **The owner's only.** A pane's token (an agent) is refused, and so is the read-only caller.
@@ -109,8 +116,8 @@ answer is as fresh as the file whoever asks.
 
 | Field | Meaning |
 |---|---|
-| `source` | `transcript`: the items are the agent's own conversation, read from its session file. `screen`: they are made from the pane's terminal (below). A station from before 16 Nov 2026 sends no `source`: it is `transcript`. |
-| `session_from` | How the session is known. `hooks`: the agent's hooks named it. `resume`: the pane was started into it. `files`: found among the program's own session files, because no hook has named one (below). Absent with `source: "screen"`. |
+| `source` | `transcript`: the items are the agent's own conversation, read from its session file (Claude Code, Codex), its transcript (Antigravity) or its database (OpenCode). `screen`: they are made from the pane's terminal (below). A station from before 16 Nov 2026 sends no `source`: it is `transcript`. |
+| `session_from` | How the session is known. `hooks`: the agent's hooks named it. `resume`: the pane was started into it (for OpenCode: under the id spandeck chose at launch). `files`: found in the program's own store, because no hook has named one (below). Absent with `source: "screen"`. |
 | `items` | The items asked for, oldest first. |
 | `updated` | Only with `after`: items you were sent before (their line is at or before the `after` you gave) that a line since has changed, which is a call that got its result, or a call the turn left behind. Replace the one you hold by `id`. An item in `items` is already complete as far as the file goes; the same item may come again later in `updated`, and replacing is always right. |
 | `cursor` | The session line this answer reaches. Ask `after` it for what comes next. Keep it with `session`. In an answer to `before` it is the line of the last item of that older page: do not take it as your place in the stream. |
@@ -142,7 +149,10 @@ answers from its screen, with the same `reason` ("From the screen", below). The 
 | Pane | Reason ends |
 |---|---|
 | A shell, or a program spandeck does not know | `it runs a shell, not an agent` |
-| OpenCode, Antigravity | `<Agent> keeps its conversation where spandeck cannot read it yet` |
+| OpenCode, before anything was said in the pane | `OpenCode does not say which conversation it is in (it has no hooks), and no conversation of OpenCode's for this folder has appeared since the pane started (OpenCode begins one with its first message)` |
+| Antigravity with no hook yet and no conversation since the pane started | `Antigravity has not said which session it is in yet (nothing has come from its hooks), and no conversation of Antigravity's for this folder has appeared since the pane started (Antigravity begins one with its first message)` |
+| Antigravity whose hook named a conversation that has no transcript yet | `the transcript of the conversation Antigravity named is not there yet (Antigravity begins one with its first message)` |
+| OpenCode or Antigravity, and another such pane in the same folder, or several conversations at once | The two reasons below, with "conversation" where they say "session file" |
 | Claude Code before its first hook | `Claude Code has not said which session it is in yet (nothing has come from its hooks)` |
 | Codex with no hook yet and no session file since the pane started (every Codex pane before its first message) | `Codex has not said which session it is in yet (nothing has come from its hooks), and no session file of Codex's for this folder has appeared since the pane started (Codex begins one with its first message)` |
 | Codex with no hook, and another hookless Codex pane in the same folder | `…, and another pane runs Codex in this folder and reports nothing either, so a session file begun since both started could be either pane's: spandeck does not guess` |
@@ -179,8 +189,13 @@ The answer to a caller that sent `screen: true`, for a pane with no transcript:
   not an agent"), where "Terminal only" was said.
 - **Items.** `user`: something sent to the pane through `pane.paste` or `pane.send_text`
   (`origin`: `you`, or `agent` with `from`, the sending pane's name), and the first message a
-  pane was started with. `screen`: what the pane printed after it, as plain text in the
-  terminal's own layout (show it in a fixed-width font; lines are not wrapped).
+  pane was started with. `screen`: what the pane printed after it. For a shell that is its
+  rows, in the terminal's own layout (`text`: show it in a fixed-width font, never wrapped,
+  scrolling sideways inside its own block). For an agent it is also given as parts to read
+  (`parts`, below): draw those, and not `text`. `notice` with `what: "turn_ended"` and
+  `duration_ms`: the station saw the agent's turn end here (its state went from working to
+  idle or done, having worked for at least a second); the block printed in that turn is
+  frozen before it. A turn the station did not see end has no notice.
 
 | `screen` field | Meaning |
 |---|---|
@@ -188,8 +203,23 @@ The answer to a caller that sent `screen: true`, for a pane with no transcript:
 | `lines` | How many lines the block has. |
 | `more` | `text` is not all of it: `pane.conversation.detail` has the rest (a frozen block: its last 256 KB; the one being printed: its last 4,000 lines, read from the terminal then). |
 | `open` | This is the block being printed now: it comes again in `updated` as it grows. When the next message is sent it is frozen: it comes once more without `open`, and never changes again. |
+| `parts` | An agent's pane only (never a shell's): the same end of the block as parts to read, in order: `[{"prose": true, "text": "…"}, {"prose": false, "text": "…"}]`. `prose`: markdown source, to be drawn exactly as a `text` item is. Otherwise rows whose layout is their meaning (columns, a drawing): fixed-width, never wrapped, scrolling sideways inside its own block. An empty list: there is nothing to read (only the program's own frame and message box); show nothing for a frozen block. A caller that does not know `parts` shows `text`, as before. `pane.conversation.detail` gives `text` only: a block shown in full is shown as its rows. |
 | `whole` | The block is the whole screen as it was at that moment, not what was printed since the message: the program draws its screen itself (a full-screen program, or one that redrew over the place the message was sent at), or the place has left the terminal's history. |
 
+- **How `parts` are made** (`crates/core/src/reflow.rs`), from the rows and from nothing else:
+  a row the terminal wrapped at its right edge goes on in the next (the screen model says
+  which; nothing is guessed from the pane's width); a row made only of rule characters is the
+  program's frame and is left out, and a row between two bars keeps what is between them; on
+  a `whole` screen the frame the cursor is in is the program's message box and up to three
+  rows under it are its status row, left out (with more rows under it, or a cursor on a row
+  with no frame, they stay); the margin every row has is dropped; a bullet the program drew
+  (`•`, `●`) is a list item; on a `whole` screen a row of a paragraph goes on from the row
+  above it, as a paragraph's lines do in markdown, since the rows are the program's own
+  wrapping (a heading, a list item, a quote, a table row and a code fence each still begin
+  their own; in a log every line the program ended stays a line); and a block (rows with no
+  empty row between them) in which a row has box-drawing characters or three blanks between
+  two words is not prose. No word is changed. A `whole` screen that differs from the one
+  frozen last only in what is left out (a status row that ticks) is not said again.
 - **`cursor` is a count of changes, not a line.** Send it back as `after`, with `session`, and
   do nothing else with it. `first` and `before` are an item's `line`, as always. `line` and
   `id` (`<line>.0`) only ever grow, and a block keeps its from its first line to frozen.
@@ -209,24 +239,57 @@ The answer to a caller that sent `screen: true`, for a pane with no transcript:
 ### How a pane's session is found
 
 In order: **the session its hooks named** (always, and it takes the place of anything below);
-**the session the pane was started into** (`resume`; for Codex its file is found by the id in
-the file's name, checked against the file's first line); and, for Codex only, **a session file
-found for the pane** (`session_from: "files"`):
+**the session the pane was started into** (`resume`; its file is found by the session's id);
+and, for Codex, OpenCode and Antigravity, **a conversation found for the pane in the program's
+own store** (`session_from: "files"`). The rule is one (`choose`, `crates/core/src/discover.rs`):
 
-- the file is under `<CODEX_HOME or ~/.codex>/sessions/YYYY/MM/DD/`, named `rollout-*.jsonl`;
-  its first line is `session_meta` with an `id`, a `cwd` that is the pane's working folder,
-  a `timestamp` at or after the moment the pane's program was started, and a `source` that is
-  not an object (an object marks a conversation Codex began itself, for a sub-agent);
-- no other pane on the station is in that session;
-- no other pane that runs Codex in that folder and has had no hook either was already
-  started at the file's `timestamp`;
+- it is one of the program's own conversations (not one it began itself, for a sub-agent), it
+  records the pane's working folder, and it was begun at or after the moment the pane's
+  program was started;
+- no other pane on the station is in it;
+- no other pane that runs the same program in that folder and has had no hook either was
+  already started when it was begun;
 - of those left, the newest, provided every older one was last written to before it began.
-  Otherwise none.
+  Otherwise none, and the reason says why.
+
+Where each program keeps them, and what is read (read-only, always):
+
+| Program | Store | A conversation's folder, start and last write |
+|---|---|---|
+| Codex 0.169.0 | `<CODEX_HOME or ~/.codex>/sessions/YYYY/MM/DD/rollout-*.jsonl` | Its first line, `session_meta`: `id`, `cwd`, `timestamp`, and a `source` that is not an object (an object marks a sub-agent's). The file's modified time. |
+| OpenCode 2.3.0 | One SQLite database, `<XDG_DATA_HOME or ~/.local/share>/opencode/opencode.db` | Table `session_v2`: `id`, `directory`, `time_created`, `time_updated`; not a row with a `parent_id` or a `time_archived`. |
+| Antigravity CLI 1.5.9 | `~/.gemini/antigravity-cli/brain/<conversation id>/.system_generated/logs/transcript_full.jsonl` (else `transcript.jsonl`, the same with long fields cut at 4 KB) | `conversation_summaries.db` beside `brain/`: `conversation_id`, `workspace_uris` (a JSON list of `file://` addresses), no `parent_conversation_id`. Its start is its transcript's first line (`created_at`, to the second: a conversation begun in the same second as the pane, before it, is not taken); its last write is the transcript's modified time. |
+
+- **Antigravity's hooks name the conversation** (`conversationId`) and its transcript
+  (`transcriptPath`). The transcript read is the one found by the id in the layout above, else
+  the file the hook named; the whole one where there is one; and once lines of one file were
+  read the session stays with that file.
+- **OpenCode has no hooks.** spandeck starts it under a session id of its own choosing
+  (`--session ses_…`), which OpenCode leaves with `/new`. So its database is looked through
+  as for a pane that named none, and what is found wins (`files`); when nothing is found (a
+  second OpenCode pane in the folder, say) the id it was started under counts, if OpenCode
+  has such a conversation (`resume`).
+- **OpenCode's rows become lines.** Table `session_message` (`session_id`, `seq`, `type`,
+  `time_created`, `data`: a JSON object) has a row for each message. A row is rewritten while
+  its message is being made, so a row is taken only once it is settled (`time.completed` or
+  an `error`, and no tool part `pending` or `running`; or a later row exists), in `seq`
+  order, and nothing after an unsettled row is taken before it. Each becomes one line of the
+  archive: `{type, id, seq, ts, data}` with OpenCode's `data` untouched, plus `turn_ms` and
+  `error_said` on an `idle` row. So a reply appears whole, when it is finished. The database
+  is opened only when it or its write-ahead log has changed (or after half a minute), never
+  written and never checkpointed. `archive.restore` refuses such a session: there is no file
+  to put back.
 
 It is looked for when the pane's conversation is asked for: at most twice a second while none
 is found, every two seconds after, so a new session begun with `/new` is followed. It is only
 read: nothing is ever answered or sent to a session, only to a pane. Claude Code is given its
-hooks at launch and is never looked for; OpenCode and Antigravity have no reader.
+hooks at launch and is never looked for.
+
+**These stores hold the owner's conversations** and are the programs' own. They are read where
+a session file is read and go where its lines go: the station's archive, raw, served to the
+owner's browser only; `recall` and other stations see the scrubbed copy, as for any session.
+No fixture, test or log holds anything from a real one: the fixtures are made-up words in the
+layouts above.
 
 A pane that has no conversation now can have one a moment later (the agent starts and its first
 hook arrives). Ask again, or watch: the stream says when.
@@ -543,15 +606,17 @@ an item of another session), `unreachable` (the pane's station, through the gate
 
 ## What each agent program gets
 
-| | Claude Code | Codex | OpenCode, Antigravity | Shell |
-|---|---|---|---|---|
-| Conversation | Yes | Yes, read from 0.169.0 files; named by its hooks, else found among its files. Before its first message it has no session: the screen | From the screen (`screen: true`); else the reason, and the terminal | From the screen (`screen: true`); else the reason |
-| Title | Yes | No | | |
-| Tool status | `ok` / `error` / `denied` / `interrupted` | `done` (the file does not say) | | |
-| Tool duration | Yes | Yes, from the times of the two records | | |
-| Diff of an edit | Yes | No | | |
-| Thinking duration | Yes | No | | |
-| Question, plan | Shown, with the answer once given; held for the owner and answered with `question.answer` (sessions started after 16 Nov 2026) | Not in its files; what Codex asks is in its terminal | The terminal | |
-| Sub-agents as `tasks` | Yes | No (`live.subagents` still counts them from hooks) | | |
-| Compaction, turn end, interrupted, error | Yes | Turn end with duration; the others are written from Codex's public format and were not in the files read | | |
-| `live`, approvals, `unread` | Yes | Yes (approvals where Codex's hooks hold them) | `live` only | `live` only |
+| | Claude Code | Codex | OpenCode | Antigravity | Shell |
+|---|---|---|---|---|---|
+| Conversation | Yes | Yes, read from 0.169.0 files; named by its hooks, else found among its files. Before its first message it has no session: the screen | Yes, read from its database (2.3.0), a message once it is finished; found for the pane, else by the id it was started under. Before its first message: the screen | Yes, read from its transcript (1.5.9); named by its hooks, else found for the pane. Before its first message: the screen | From the screen (`screen: true`); else the reason |
+| Title | Yes | No | No | No | |
+| Tool status | `ok` / `error` / `denied` / `interrupted` | `done` (the file does not say) | `ok` / `error` by the exit code where there is one, else `done`; `error` | `done` / `error` | |
+| Tool duration | Yes | Yes, from the times of the two records | Yes | No | |
+| Tool input and output | Yes | Yes | Yes | Yes (the output without the two lines of times the program puts before it) | |
+| Diff of an edit | Yes | No | No | No | |
+| Thinking duration | Yes | No | Yes | No | |
+| Question, plan | Shown, with the answer once given; held for the owner and answered with `question.answer` (sessions started after 16 Nov 2026) | Not in its files; what Codex asks is in its terminal | The terminal | The terminal | |
+| Sub-agents as `tasks` | Yes | No (`live.subagents` still counts them from hooks) | No | No | |
+| Compaction, turn end, interrupted, error | Yes | Turn end with duration; the others are written from Codex's public format and were not in the files read | Turn end with duration (`idle`, `succeeded`); an error (a failed message, or a failed `idle` whose message did not say why) | Turn end, with no duration: an answer that calls no tool is the last of its turn (the program's own hooks guide: a turn stops with `NO_TOOL_CALL`); an error a step carries | From the screen: a turn's end when the station saw one |
+| What is left out | | Its notes to itself | Reasoning is a length of time, never its words | The program's wrapping of what the owner wrote (`<USER_REQUEST>`), its notes beside it (the time, a setting changed), and thinking's words | |
+| `live`, approvals, `unread` | Yes | Yes (approvals where Codex's hooks hold them) | `live` and `unread` (no hooks: its state is read from its screen, approvals are answered in its terminal) | `live` and `unread` (its hooks say working and done; it has no hook that holds an approval) | `live` only |

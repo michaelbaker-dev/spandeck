@@ -7,6 +7,9 @@
 //!
 //! Script: {"steps": [...], "on_input": [...]}. Steps:
 //!   {"say": "text"}                      print a line
+//!   {"raw": "bytes"}                     write these to the terminal as they are
+//!                                        (escape sequences: a program that
+//!                                        draws its screen itself)
 //!   {"sleep": ms}
 //!   {"prompt": "text"}                   UserPromptSubmit
 //!   {"tool": {"name":"Bash","command":"x","ok":true,"file":"p","run":false}}
@@ -376,6 +379,13 @@ impl Agent {
     fn append_transcript(&mut self, line: &Value) {
         // Codex's file has Codex's lines: what the owner said, and no other.
         if self.codex.is_some() {
+            // (And a record of Codex's own, given whole: a turn's end.)
+            if matches!(line["type"].as_str(), Some("event_msg" | "response_item")) {
+                let mut line = line.clone();
+                line["timestamp"] = json!(iso(spandeck_core::paths::now_ms()));
+                self.write_line(&line);
+                return;
+            }
             if let (Some("user"), Some(text)) = (
                 line["type"].as_str(),
                 line.pointer("/message/content").and_then(|c| c.as_str()),
@@ -480,6 +490,10 @@ impl Agent {
     fn step(&mut self, step: &Value) {
         if let Some(text) = step.get("say").and_then(|s| s.as_str()) {
             out(text);
+        } else if let Some(bytes) = step.get("raw").and_then(|s| s.as_str()) {
+            let mut o = std::io::stdout();
+            let _ = o.write_all(bytes.as_bytes());
+            let _ = o.flush();
         } else if let Some(ms) = step.get("sleep").and_then(|s| s.as_u64()) {
             std::thread::sleep(Duration::from_millis(ms));
         } else if let Some(text) = step.get("prompt").and_then(|s| s.as_str()) {

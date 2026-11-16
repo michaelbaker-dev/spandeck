@@ -44,13 +44,36 @@ impl Daemon {
                 meta.agent.display()
             ));
         }
-        let unsaid = format!(
-            "{} has not said which session it is in yet (nothing has come from its hooks)",
-            meta.agent.display()
-        );
+        // (OpenCode has no hooks: it never says.)
+        let unsaid = if meta.agent == spandeck_agents::AgentKind::OpenCode {
+            "OpenCode does not say which conversation it is in (it has no hooks)".to_string()
+        } else {
+            format!(
+                "{} has not said which session it is in yet (nothing has come from its hooks)",
+                meta.agent.display()
+            )
+        };
         // A session a hook named always wins. With none, the program's
         // own files are looked through, where that is known how.
+        let opencode = meta.agent == spandeck_agents::AgentKind::OpenCode;
         let (session, file, from) = match meta.session_id.clone() {
+            // OpenCode has no hook to name its session: the pane was
+            // started under an id spandeck chose, and OpenCode begins
+            // another with `/new`. So its database is looked through as
+            // for a pane that named none, and the id it was started under
+            // counts when nothing surer is found.
+            Some(started) if opencode => match self.find_session(meta) {
+                Some(Ok((session, file))) => (session, Some(file), "files"),
+                other => {
+                    let known = self.archive.session(&started).is_some()
+                        || self.session_file(meta, &started).is_some();
+                    match other {
+                        _ if known => (started, None, "resume"),
+                        Some(Err(why)) => return Err(format!("{unsaid}, and {why}")),
+                        _ => return Err(unsaid),
+                    }
+                }
+            },
             Some(session) => {
                 let from = if meta.hooks_seen { "hooks" } else { "resume" };
                 (session, None, from)
@@ -69,10 +92,13 @@ impl Daemon {
                 .or_else(|| meta.transcript_path.clone())
                 .or_else(|| self.session_file(meta, &session));
             let Some(path) = path else {
-                return Err(format!(
-                    "{} has not said where its session file is",
-                    meta.agent.display()
-                ));
+                return Err(match meta.agent {
+                    spandeck_agents::AgentKind::Antigravity => "the transcript of the conversation Antigravity named is not there yet (Antigravity begins one with its first message)".to_string(),
+                    _ => format!(
+                        "{} has not said where its session file is",
+                        meta.agent.display()
+                    ),
+                });
             };
             self.archive.follow(
                 &session,
@@ -113,11 +139,13 @@ impl Daemon {
     pub(crate) fn conversation_unread(&self, meta: &PaneMeta) -> bool {
         // A session found among the program's files counts once someone
         // has looked at the pane's conversation: nothing is read here.
-        let Some(session) = meta
-            .session_id
-            .clone()
-            .or_else(|| self.found_session(&meta.id))
-        else {
+        // (For OpenCode the one found comes first: see `conversation_session`.)
+        let found = self.found_session(&meta.id);
+        let session = match meta.agent {
+            spandeck_agents::AgentKind::OpenCode => found.or_else(|| meta.session_id.clone()),
+            _ => meta.session_id.clone().or(found),
+        };
+        let Some(session) = session else {
             return false;
         };
         if Dialect::of(meta.agent.as_str()).is_none() {

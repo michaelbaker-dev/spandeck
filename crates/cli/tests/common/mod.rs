@@ -456,6 +456,8 @@ impl Station {
             // Codex's settings are the throwaway home's, never the ones a
             // developer's own shell points at.
             .env_remove("CODEX_HOME")
+            // Nor is OpenCode's database: the throwaway home has its own.
+            .env_remove("XDG_DATA_HOME")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
@@ -1054,6 +1056,13 @@ pub mod browser {
                 Err(e) if e.contains("navigated or closed") || e.contains("context") => Value::Null,
                 Err(e) => panic!("js failed: {e}\n{expr}"),
             }
+        }
+
+        /// One call of the DevTools protocol, for what `js` cannot do (the
+        /// size of the window as a device has it).
+        pub fn protocol(&self, method: &str, params: Value) -> Value {
+            self.call(method, params)
+                .unwrap_or_else(|e| panic!("{method} failed: {e}"))
         }
 
         fn call(&self, method: &str, params: Value) -> Result<Value, String> {

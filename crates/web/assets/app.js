@@ -21,7 +21,7 @@ import { phoneLook } from './phonelook.js';
 import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook, refreshAsked, refreshCorrected } from './perf.js';
 import { qrSvg } from './qr.js';
 import { sendAct } from './typed.js';
-import { initChat, conversation, faceOf, setFace, chatToggle, termBox, chatBeforeRender, chatAfterRender, chatPark, sync as syncKids, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
+import { initChat, conversation, faceOf, setFace, chatToggle, termBox, chatBeforeRender, chatAfterRender, chatPark, chatResized, sync as syncKids, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
 
 // The page opens in the look this browser last had, before anything is asked.
 applyRemembered();
@@ -614,8 +614,15 @@ function paneMenu(e, st, p, where, term) {
   // In the layout on screen a pane can be hidden: it keeps running and keeps
   // its place, and stays in sight as a chip beside the layout's name.
   const leaf = inLay ? ctx.leafOf(st, p) : null, seen = ctx ? ctx.shown().length : 0;
+  const overTop = isPhone() && faceOf(st, p) === 'chat';
   showMenu(e.clientX, e.clientY, [
     { title: `${p.name} · ${p.address}` },
+    // On a phone a conversation has the screen to itself: the deck's top
+    // bar is not above it, and what that bar holds is here.
+    overTop && { label: 'Approvals', hint: S.approvals.length ? `${S.approvals.length} waiting` : 'none waiting', action: approvalsPanel },
+    overTop && { label: 'Inbox', action: inboxPanel },
+    overTop && { label: 'Stop all…', danger: true, action: () => stopAllMenu({ clientX: e.clientX, clientY: e.clientY }) },
+    overTop && '-',
     term && { label: 'Copy', hint: 'Cmd+C · Ctrl+Shift+C', disabled: !term.hasSelection(), action: () => term.copySelection() },
     term && alive && { label: 'Paste', hint: 'Cmd+V · Ctrl+Shift+V', action: () => pasteInto(term) },
     term && { label: 'Copy everything on screen', action: () => copyScreen(st, p) },
@@ -3931,20 +3938,34 @@ addEventListener('keydown', (e) => {
 }, false);
 
 // A phone's keyboard covers the bottom of the page without making the page
-// smaller. Size the app to what is actually visible, and while the keyboard
-// is up give the terminal the room: the bars above it step aside.
+// smaller, and the browser may slide what is in sight up the page to show
+// the box being typed in (iOS does). So the app is made to be exactly what
+// is in sight: as tall as the visual viewport, and placed where it is. Its
+// last row (a conversation's message box) is then directly above the
+// keyboard and its first (a pane's bar) at the top, wherever the browser
+// slid to; the page itself never scrolls (app.css: the body is fixed).
+// While the keyboard is up the bars that are not the pane's step aside.
+// (What the viewport is, is read each time: `window.visualViewport`.)
 if (window.visualViewport) {
-  const vv = window.visualViewport;
   const fit = () => {
-    const app = document.getElementById('app');
-    app.style.height = vv.height + 'px';
-    const keyboard = vv.height < window.innerHeight * 0.78;
+    const vv = window.visualViewport, app = document.getElementById('app');
+    // (Zoomed in with two fingers, what is in sight is a part of the page
+    // and no keyboard: the page stays as it is, to be looked over.)
+    const zoomed = (vv.scale || 1) > 1.01;
+    const top = zoomed ? 0 : Math.max(0, Math.round(vv.offsetTop || 0));
+    app.style.height = zoomed ? '' : vv.height + 'px';
+    app.style.top = top ? top + 'px' : '';
+    const keyboard = !zoomed && vv.height < window.innerHeight * 0.78;
     app.classList.toggle('kbd', keyboard);
     app.classList.toggle('kbd-term', keyboard && !!document.activeElement?.closest?.('.xterm'));
-    if (keyboard) window.scrollTo(0, 0);
+    if (window.scrollY || document.documentElement.scrollTop) window.scrollTo(0, 0);
+    // A conversation's log keeps its place in its new room, now.
+    chatResized();
   };
-  vv.addEventListener('resize', fit);
-  vv.addEventListener('scroll', fit);
+  window.visualViewport.addEventListener('resize', fit);
+  window.visualViewport.addEventListener('scroll', fit);
+  window.addEventListener('resize', fit);
+  window.addEventListener('scroll', fit, { passive: true });
   document.addEventListener('focusin', () => setTimeout(fit, 50));
   document.addEventListener('focusout', () => setTimeout(fit, 50));
   fit();

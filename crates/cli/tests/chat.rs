@@ -352,6 +352,436 @@ fn a_shell_pane_is_served_as_what_was_sent_and_what_it_printed() {
     assert_eq!(err.code, "denied");
 }
 
+/// OpenCode's database in a station's throwaway home, with the two tables
+/// of OpenCode 2.3.0 that are read (their columns as its own schema has
+/// them, the ones not read left out where it allows).
+#[cfg(unix)]
+fn opencode_store(s: &Station) -> rusqlite::Connection {
+    let dir = s.root.join("home/.local/share/opencode");
+    std::fs::create_dir_all(&dir).unwrap();
+    let conn = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_v2 (id text PRIMARY KEY, project_id text NOT NULL, parent_id text,
+            slug text NOT NULL, directory text NOT NULL, title text, version text NOT NULL,
+            cost real DEFAULT 0 NOT NULL, tokens_input integer DEFAULT 0 NOT NULL, tokens_output integer DEFAULT 0 NOT NULL,
+            tokens_cache_read integer DEFAULT 0 NOT NULL, tokens_cache_write integer DEFAULT 0 NOT NULL, model text,
+            time_created integer NOT NULL, time_updated integer NOT NULL, time_archived integer);
+         CREATE TABLE IF NOT EXISTS session_message (id text PRIMARY KEY, session_id text NOT NULL, type text NOT NULL,
+            seq integer NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL);",
+    )
+    .unwrap();
+    conn
+}
+
+#[cfg(unix)]
+fn opencode_session(conn: &rusqlite::Connection, id: &str, dir: &Path, at: u64) {
+    conn.execute(
+        "INSERT INTO session_v2(id, project_id, slug, directory, version, time_created, time_updated)
+         VALUES(?1, 'prj', 'slug', ?2, '2.3.0', ?3, ?3)",
+        rusqlite::params![id, dir.display().to_string(), at as i64],
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn opencode_message(conn: &rusqlite::Connection, session: &str, seq: i64, ty: &str, data: Value) {
+    let at = now() as i64;
+    conn.execute(
+        "INSERT OR REPLACE INTO session_message VALUES(?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+        rusqlite::params![
+            format!("msg_{session}_{seq}"),
+            session,
+            ty,
+            seq,
+            at,
+            data.to_string()
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE session_v2 SET time_updated = ?2 WHERE id = ?1",
+        rusqlite::params![session, at],
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+/// One conversation of Antigravity's in a station's throwaway home, as
+/// `agy` 1.5.9 keeps one: a row of its summaries that says which folder it
+/// belongs to, and its transcript, cut (`transcript.jsonl`) and whole.
+#[cfg(unix)]
+fn antigravity_conversation(s: &Station, id: &str, dir: &Path, steps: &[Value], whole: &[Value]) {
+    let agy = s.root.join("home/.gemini/antigravity-cli");
+    let logs = agy.join("brain").join(id).join(".system_generated/logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    let lines = |steps: &[Value]| steps.iter().map(|l| format!("{l}\n")).collect::<String>();
+    std::fs::write(logs.join("transcript.jsonl"), lines(steps)).unwrap();
+    std::fs::write(logs.join("transcript_full.jsonl"), lines(whole)).unwrap();
+    let conn = rusqlite::Connection::open(agy.join("conversation_summaries.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS conversation_summaries (conversation_id text PRIMARY KEY, title text NOT NULL DEFAULT '',
+            step_count integer NOT NULL DEFAULT 0, workspace_uris text NOT NULL, status text NOT NULL DEFAULT '',
+            parent_conversation_id text NOT NULL DEFAULT '')",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO conversation_summaries(conversation_id, workspace_uris) VALUES(?1, ?2)",
+        rusqlite::params![id, json!([format!("file://{}", dir.display())]).to_string()],
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn agy_step(n: u64, ty: &str, at: &str, extra: Value) -> Value {
+    let mut step = json!({"step_index": n, "type": ty, "status": "DONE", "created_at": at,
+        "source": if ty == "USER_INPUT" { "USER_EXPLICIT" } else { "MODEL" }});
+    step.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    step
+}
+
+/// What the owner wrote, as Antigravity wraps it.
+#[cfg(unix)]
+fn agy_asked(n: u64, at: &str, text: &str) -> Value {
+    agy_step(
+        n,
+        "USER_INPUT",
+        at,
+        json!({"content": format!("<USER_REQUEST>\n{text}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: {at}.\n</ADDITIONAL_METADATA>")}),
+    )
+}
+
+#[cfg(unix)]
+fn wait_transcript(s: &Station, pane: &str, has: &str) -> Value {
+    wait_for_or(
+        "the pane's own conversation",
+        15,
+        || conversation(s, pane, true).to_string(),
+        || {
+            let a = conversation(s, pane, true);
+            (a["source"] == json!("transcript") && a["items"].to_string().contains(has))
+                .then_some(a)
+        },
+    )
+}
+
+/// The owner's report of 16 Nov 2026, from a phone: "Antigravity chat ...
+/// look different in chat and should be the same. Shouldn't chat be the
+/// same code base for every chat?" Antigravity's and OpenCode's Chat was
+/// their screen. Each now has its own conversation, read from the
+/// program's own store (made here in the real layouts, with made-up
+/// words), and a pane is tied to one as strictly as a Codex pane is: begun
+/// in its folder since its program started, or named by its hook.
+#[test]
+#[cfg(unix)]
+fn opencode_and_antigravity_panes_get_their_own_conversations() {
+    let s = Station::start("alpha");
+    let quiet =
+        || json!({"no_hooks": true, "steps": [], "on_input": [{"say": "drawn on the screen"}]});
+
+    // OpenCode. A conversation from before the pane, in its folder, is not
+    // the pane's; until one is begun the screen is the conversation.
+    let fen = folder(&s, "fen");
+    let db = opencode_store(&s);
+    opencode_session(&db, "ses_before", &fen, 1000);
+    opencode_message(
+        &db,
+        "ses_before",
+        1,
+        "user",
+        json!({"text": "an older question", "time": {"created": 1000}}),
+    );
+    let oc = pane(&s, "opencode", "oc", &fen, quiet());
+    s.wait_text(&oc, "[fake] session");
+    let a = conversation(&s, &oc, true);
+    assert_eq!(a["source"], json!("screen"), "{a}");
+    assert_eq!(
+        a["reason"],
+        json!("no conversation for this pane: OpenCode does not say which conversation it is in (it has no hooks), and no conversation of OpenCode's for this folder has appeared since the pane started (OpenCode begins one with its first message)")
+    );
+    opencode_session(&db, "ses_mine", &fen, now());
+    opencode_message(
+        &db,
+        "ses_mine",
+        1,
+        "user",
+        json!({"text": "How many bitterns?", "files": [], "agents": [], "time": {"created": now()}}),
+    );
+    opencode_message(
+        &db,
+        "ses_mine",
+        2,
+        "assistant",
+        json!({"agent": "build", "content": [{"type": "text", "text": "Counting"}], "time": {"created": now()}}),
+    );
+    let a = wait_transcript(&s, &oc, "bitterns");
+    // The answer is still being written: nothing of it yet.
+    assert_eq!(
+        said(&a),
+        vec![("user".to_string(), "How many bitterns?".to_string())],
+        "{a}"
+    );
+    assert_eq!(
+        (&a["session"], &a["session_from"], &a["agent"]),
+        (&json!("ses_mine"), &json!("files"), &json!("opencode"))
+    );
+    opencode_message(
+        &db,
+        "ses_mine",
+        2,
+        "assistant",
+        json!({"agent": "build", "finish": "stop",
+            "content": [{"type": "tool", "id": "call_1", "name": "shell", "time": {"created": 1, "ran": 2, "completed": 900},
+                         "state": {"status": "completed", "input": {"command": "grep -c bittern fen.log"},
+                                   "content": [{"type": "text", "text": "4"}], "metadata": {"exit": 0}}},
+                        {"type": "text", "text": "There are **four** bitterns."}],
+            "time": {"created": now(), "completed": now()}}),
+    );
+    opencode_message(
+        &db,
+        "ses_mine",
+        3,
+        "idle",
+        json!({"outcome": "succeeded", "time": {"created": now()}}),
+    );
+    let more = wait_for("the settled answer", 15, || {
+        let n = s.call(
+            "pane.conversation",
+            json!({"pane": oc, "screen": true, "session": a["session"], "after": a["cursor"]}),
+        );
+        (n["items"].as_array().is_some_and(|i| i.len() == 3)).then_some(n)
+    });
+    let kinds: Vec<&str> = more["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, vec!["tool", "text", "notice"], "{more}");
+    assert_eq!(
+        (&more["items"][0]["status"], &more["items"][2]["what"]),
+        (&json!("ok"), &json!("turn_ended"))
+    );
+    assert_eq!(
+        more["items"][1]["text"],
+        json!("There are **four** bitterns.")
+    );
+    assert!(!more.to_string().contains("older question"));
+    assert_eq!(s.pane(&oc)["unread"], json!(true));
+    let detail = s.call(
+        "pane.conversation.detail",
+        json!({"pane": oc, "item": more["items"][0]["id"], "session": a["session"]}),
+    );
+    assert_eq!(detail["output"]["text"], json!("4"), "{detail}");
+
+    // Antigravity. One conversation from before the pane, in its folder:
+    // not the pane's. One begun since: the pane's, read from its whole
+    // transcript. Then a hook names another, and the hook wins.
+    let mere = folder(&s, "mere");
+    let before = [agy_asked(0, "2020-01-01T00:00:00Z", "an older question")];
+    antigravity_conversation(
+        &s,
+        "0aaaaaaa-0000-4000-8000-000000000001",
+        &mere,
+        &before,
+        &before,
+    );
+    let agy = pane(&s, "antigravity", "agy", &mere, quiet());
+    s.wait_text(&agy, "[fake] session");
+    let a = conversation(&s, &agy, true);
+    assert_eq!(a["source"], json!("screen"), "{a}");
+    assert!(
+        a["reason"].as_str().unwrap().ends_with("no conversation of Antigravity's for this folder has appeared since the pane started (Antigravity begins one with its first message)"),
+        "{a}"
+    );
+    let since = "2099-01-01T00:00:00Z";
+    let reply = "### Grebes\n\n1. two on the mere\n2. one in the reeds";
+    let cut = [
+        agy_asked(0, since, "How many grebes? (cut"),
+        agy_step(1, "PLANNER_RESPONSE", since, json!({"content": reply})),
+    ];
+    let whole = [
+        agy_asked(0, since, "How many grebes? (cut here by the program)"),
+        cut[1].clone(),
+    ];
+    antigravity_conversation(
+        &s,
+        "0aaaaaaa-0000-4000-8000-000000000002",
+        &mere,
+        &cut,
+        &whole,
+    );
+    let a = wait_transcript(&s, &agy, "grebes");
+    assert_eq!(
+        said(&a),
+        vec![
+            (
+                "user".to_string(),
+                "How many grebes? (cut here by the program)".to_string()
+            ),
+            ("text".to_string(), reply.to_string()),
+            ("notice".to_string(), String::new()),
+        ],
+        "{a}"
+    );
+    assert_eq!(
+        (&a["session_from"], &a["agent"]),
+        (&json!("files"), &json!("antigravity"))
+    );
+    assert!(!a.to_string().contains("local time") && !a.to_string().contains("older question"));
+    let named = "0aaaaaaa-0000-4000-8000-000000000003";
+    let other = folder(&s, "elsewhere");
+    let theirs = [agy_asked(
+        0,
+        "2020-01-01T00:00:00Z",
+        "What the hook's conversation holds",
+    )];
+    antigravity_conversation(&s, named, &other, &theirs, &theirs);
+    s.call_as_pane(
+        &agy,
+        "hook.ingest",
+        json!({"agent": "antigravity", "payload": {"hookEventName": "PreInvocation", "conversationId": named,
+            "transcriptPath": mere.join(".gemini/antigravity-cli/transcript.jsonl"), "cwd": mere, "lastUserInput": "x"}}),
+    )
+    .unwrap();
+    let b = wait_transcript(&s, &agy, "the hook's conversation");
+    assert_eq!(
+        (&b["session"], &b["session_from"]),
+        (&json!(named), &json!("hooks")),
+        "{b}"
+    );
+    assert!(!b.to_string().contains("grebes"));
+}
+
+/// A program that draws its screen itself, 120 columns wide, as the
+/// agent programs do: a title in a frame, what it answered (indented,
+/// wrapped by the program at its own width, markdown as it was
+/// written, bullets drawn as dots, a table), its message box with the
+/// cursor in it, and a status row.
+#[cfg(unix)]
+pub fn drawn_screen() -> String {
+    let rule = "─".repeat(112);
+    let mut rows = vec![
+        format!("  ╭{rule}╮"),
+        format!("  │ {:<110} │", "Tern Code 9.9 · ~/mere"),
+        format!("  ╰{rule}╯"),
+        String::new(),
+        "  ### Herons by the weir".into(),
+        String::new(),
+        "  The survey counts **nine nests** this year, three more than last spring. Most are high in the alders on the east".into(),
+        "  bank, where the water is slow and the fishing is easy.".into(),
+        String::new(),
+        "  1. six on the east bank".into(),
+        "  2. three on the island".into(),
+        String::new(),
+        "  ● they feed at dusk".into(),
+        "  ● `survey.md` has the dates".into(),
+        String::new(),
+        "  bank          nests     seen at dusk".into(),
+        "  east          6         yes".into(),
+        "  island        3         no".into(),
+    ];
+    rows.resize(31, String::new());
+    rows.push(format!("  ╭{rule}╮"));
+    rows.push(format!("  │ {:<110} │", "> "));
+    rows.push(format!("  ╰{rule}╯"));
+    rows.push("  tern-2-low · 12% context left · /help for commands".into());
+    // Drawn row by row, each at its place, and the cursor left in the box.
+    let mut out = String::from("\x1b[?1049h\x1b[2J");
+    for (n, row) in rows.iter().enumerate() {
+        out.push_str(&format!("\x1b[{};1H{row}", n + 1));
+    }
+    out.push_str("\x1b[33;5H");
+    out
+}
+
+/// A pane of `agent` whose program draws that screen, 120 columns by
+/// 36 rows, and draws it again after each message.
+#[cfg(unix)]
+pub fn drawn_pane(s: &Station, agent: &str, name: &str, dir: &Path) -> String {
+    let go = format!("go-{name}");
+    let id = pane(
+        s,
+        agent,
+        name,
+        dir,
+        json!({"no_hooks": true, "steps": [{"wait_file": go}, {"raw": drawn_screen()}], "on_input": [{"raw": drawn_screen()}]}),
+    );
+    s.wait_text(&id, "[fake] session");
+    s.call("pane.resize", json!({"pane": id, "cols": 120, "rows": 36}));
+    std::fs::write(dir.join(go), "").unwrap();
+    s.wait_text(&id, "tern-2-low");
+    id
+}
+
+/// The owner's report of 16 Nov 2026, with a picture of Antigravity's
+/// Chat: one box of terminal text, "lines running off the right edge and
+/// cut, wrapped fragments mixed with indentation, markdown shown raw". A
+/// program that draws its own screen, 120 columns wide, is served as parts
+/// to read: its paragraph one line again, its heading and its lists as
+/// they were written, its table as rows, and none of its frame, its
+/// message box or its status row; a long line that the terminal wrapped is
+/// one line. What the rows were is still served beside them, for a deck
+/// from before.
+#[test]
+#[cfg(unix)]
+fn what_an_agent_draws_on_its_screen_is_served_as_prose() {
+    let s = Station::start("alpha");
+    let tui = drawn_pane(&s, "opencode", "tui", &folder(&s, "mere"));
+    let a = conversation(&s, &tui, true);
+    assert_eq!(a["source"], json!("screen"), "{a}");
+    let item = a["items"].as_array().unwrap().last().unwrap();
+    assert_eq!(
+        (&item["kind"], &item["whole"], &item["open"]),
+        (&json!("screen"), &json!(true), &json!(true)),
+        "{a}"
+    );
+    assert_eq!(
+        item["parts"],
+        json!([
+            {"prose": true, "text": "Tern Code 9.9 · ~/mere\n\n### Herons by the weir\n\nThe survey counts **nine nests** this year, three more than last spring. Most are high in the alders on the east bank, where the water is slow and the fishing is easy.\n\n1. six on the east bank\n2. three on the island\n\n- they feed at dusk\n- `survey.md` has the dates"},
+            {"prose": false, "text": "bank          nests     seen at dusk\neast          6         yes\nisland        3         no"},
+        ]),
+        "{a}"
+    );
+    // The rows as they were drawn, for a deck that knows no parts.
+    let rows = item["text"].as_str().unwrap();
+    assert!(
+        rows.contains("╭──")
+            && rows.contains("  bank, where the water")
+            && rows.contains("tern-2-low"),
+        "{a}"
+    );
+
+    // A program that prints lines: one longer than the pane is wide is
+    // wrapped by the terminal, which says so, and is one line here; the
+    // lines the program ended stay lines.
+    let long = "The heron stood in the shallows for most of the morning ".repeat(6);
+    let log = pane(
+        &s,
+        "antigravity",
+        "log",
+        &folder(&s, "fen"),
+        json!({"no_hooks": true, "steps": [{"say": long.trim()}, {"say": "and then it flew"}]}),
+    );
+    s.wait_text(&log, "and then it flew");
+    let a = conversation(&s, &log, true);
+    let said = a["items"][0]["parts"][0]["text"].as_str().unwrap_or("");
+    assert_eq!(a["items"][0]["parts"][0]["prose"], json!(true), "{a}");
+    assert!(
+        said.contains(&format!("{}\nand then it flew", long.trim())),
+        "{a}"
+    );
+}
+
 /// What the two browser scenarios share: a Codex whose hooks never ran and
 /// a real shell, side by side in a layout, and a way to write pictures for
 /// a human to look at (`SPANDECK_SHOTS=/some/dir`).
@@ -424,7 +854,7 @@ mod in_a_browser {
             format!("[...document.querySelectorAll('.phone-layout > .chat-bar .chat-switch button')].find(b => b.innerText === '{to}')")
         };
         let src = "document.querySelector('.phone-layout .chat-src')?.innerText";
-        let blocks = "[...document.querySelectorAll('.phone-layout .chat-screen-text')].map(x => x.innerText).join('\\n')";
+        let blocks = "[...document.querySelectorAll('.phone-layout .chat-screen')].map(x => x.innerText).join('\\n')";
         let bubbles = "[...document.querySelectorAll('.phone-layout .chat-user .chat-bubble')].map(x => x.innerText)";
 
         // The Codex pane, before it has a session: Chat, made from its
@@ -438,9 +868,10 @@ mod in_a_browser {
             seen[1].as_str().unwrap().starts_with("From the screen: Codex has not said which session it is in yet (nothing has come from its hooks), and no session file of Codex's"),
             "{seen}"
         );
+        // (The keys are in the message box, out of the way until asked for.)
         assert_eq!(
             (&seen[2], &seen[3]),
-            (&json!(false), &json!(true)),
+            (&json!(false), &json!(false)),
             "{seen}"
         );
         shoot(&page, "phone-layout-codex-before-a-session");
@@ -460,7 +891,7 @@ mod in_a_browser {
         );
         let seen = page.wait(
             "Codex's own conversation",
-            &format!("[...document.querySelectorAll('.phone-layout .chat-text')].some(t => t.innerText.includes('counted what you asked')) && !document.querySelector('.phone-layout .chat-src') && [{bubbles}, document.querySelector('.phone-layout .chat-box').value, {switch}, document.querySelectorAll('.phone-layout .chat-screen-text').length]"),
+            &format!("[...document.querySelectorAll('.phone-layout .chat-text')].some(t => t.innerText.includes('counted what you asked')) && !document.querySelector('.phone-layout .chat-src') && [{bubbles}, document.querySelector('.phone-layout .chat-box').value, {switch}, document.querySelectorAll('.phone-layout .chat-screen').length]"),
         );
         assert_eq!(
             seen,
@@ -512,7 +943,7 @@ mod in_a_browser {
         );
         assert_eq!(
             seen,
-            json!([["echo reed-$((40+2)) '<b id=evil>bold</b>'"], false, true])
+            json!([["echo reed-$((40+2)) '<b id=evil>bold</b>'"], false, false])
         );
         shoot(&page, "phone-layout-shell-chat");
         // A key of the row reaches the pane: Ctrl-C ends a command.
@@ -521,7 +952,11 @@ mod in_a_browser {
             &say(".phone-layout", "sleep 300; echo slept"),
         );
         s.wait_text(&sh, "sleep 300");
-        page.js("[...document.querySelectorAll('.phone-layout .chat-keys .key')].find(b => b.innerText === '^C').click()");
+        page.js("document.querySelector('.phone-layout .chat-keys-btn').click()");
+        page.wait(
+            "the keys, asked for",
+            "!!document.querySelector('.phone-layout .chat-keys:not([hidden])') && ([...document.querySelectorAll('.phone-layout .chat-keys .key')].find(b => b.innerText === '^C').click(), true)",
+        );
         page.wait(
             "another command",
             &say(".phone-layout", "echo back-$((20+3))"),
@@ -544,7 +979,7 @@ mod in_a_browser {
         page.js("[...document.querySelectorAll('.chat-switch button')].find(b => b.innerText === 'Chat').click()");
         page.wait(
             "the shell's conversation by itself",
-            "[...document.querySelectorAll('.phone-chat .chat-screen-text')].some(x => x.innerText.includes('back-23'))",
+            "[...document.querySelectorAll('.phone-chat .chat-screen')].some(x => x.innerText.includes('back-23'))",
         );
         shoot(&page, "phone-shell-chat");
         page.goto(&format!("#/s/alpha/p/{codex}"));
@@ -601,7 +1036,7 @@ mod in_a_browser {
         s.wait_text(&codex, "[fake] got: How many otters?");
         let seen = page.wait(
             "what each printed, in its own cell",
-            &format!("[...document.querySelectorAll('{t} .chat-screen-text')].some(x => x.innerText.includes('reed-42')) && [...document.querySelectorAll('{c} .chat-text')].some(x => x.innerText.includes('counted what you asked')) && [[...document.querySelectorAll('{t} .chat-bubble')].map(x => x.innerText), [...document.querySelectorAll('{c} .chat-bubble')].map(x => x.innerText), !!document.querySelector('{c} .chat-src')]"),
+            &format!("[...document.querySelectorAll('{t} .chat-screen')].some(x => x.innerText.includes('reed-42')) && [...document.querySelectorAll('{c} .chat-text:not(.chat-screen)')].some(x => x.innerText.includes('counted what you asked')) && [[...document.querySelectorAll('{t} .chat-bubble')].map(x => x.innerText), [...document.querySelectorAll('{c} .chat-bubble')].map(x => x.innerText), !!document.querySelector('{c} .chat-src')]"),
         );
         assert_eq!(
             seen,
@@ -619,7 +1054,7 @@ mod in_a_browser {
         page.goto(&format!("#/s/alpha/p/{sh}"));
         page.wait(
             "the shell's conversation at full size",
-            "[...document.querySelectorAll('.zoomed .chat-screen-text')].some(x => x.innerText.includes('reed-42'))",
+            "[...document.querySelectorAll('.zoomed .chat-screen')].some(x => x.innerText.includes('reed-42'))",
         );
         shoot(&page, "desktop-shell-chat");
         page.goto(&format!("#/s/alpha/p/{codex}"));
@@ -628,5 +1063,529 @@ mod in_a_browser {
             "[...document.querySelectorAll('.zoomed .chat-text')].some(x => x.innerText.includes('counted what you asked'))",
         );
         shoot(&page, "desktop-codex-found-session");
+    }
+
+    // ---- one chat for every pane (the owner's report of 16 Nov 2026) ----
+
+    /// What every agent of the scene answers: a heading, a paragraph, a
+    /// numbered list, bullets, code. The same words, so that the pictures
+    /// can be laid side by side.
+    const REPLY: &str = "### Herons by the weir\n\nThe survey counts **nine nests** this year, three more than last spring. Most are high in the alders on the east bank, where the water is slow and the fishing is easy.\n\n1. six on the east bank\n2. three on the island\n\n- they feed at dusk\n- `survey.md` has the dates\n\n```sh\ngrep -c heron survey.md\n```";
+    const ASKED: [&str; 3] = [
+        "How many herons nest by the weir?",
+        "And last spring?",
+        "Where do they feed?",
+    ];
+
+    pub struct Chats {
+        pub s: Station,
+        /// A session file of Claude Code's kind, named by its hooks.
+        pub claude: String,
+        /// Codex's session file, found with no hook.
+        pub codex: String,
+        /// Antigravity's transcript, from its own store.
+        pub agy: String,
+        /// An agent with no conversation to read: its screen.
+        pub tui: String,
+        pub sh: String,
+    }
+
+    fn id_of(v: Value) -> String {
+        v["id"].as_str().unwrap().to_string()
+    }
+
+    /// One pane of each kind, each with the same three questions asked and
+    /// answered, where it is an agent.
+    pub fn chats() -> Chats {
+        let s = Station::start("alpha");
+        let dir = folder(&s, "mere");
+        let said = |text: &str| json!({"transcript": {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}});
+        let turn = |asked: &str| {
+            json!([
+                {"prompt": asked},
+                said("I will look at the survey notes."),
+                {"transcript": {"type": "assistant", "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": format!("toolu_{}", asked.len()), "name": "Bash", "input": {"command": "grep -c heron survey.md"}}]}}},
+                {"transcript": {"type": "user", "toolUseResult": {"stdout": "9", "stderr": ""}, "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": format!("toolu_{}", asked.len()), "content": "9"}]}}},
+                said(REPLY),
+                {"transcript": {"type": "system", "subtype": "turn_duration", "durationMs": 15000}},
+            ])
+        };
+        let mut steps: Vec<Value> = ASKED
+            .iter()
+            .flat_map(|a| turn(a).as_array().unwrap().clone())
+            .collect();
+        steps.push(json!({"turn_end": "ok"}));
+        let claude = pane(&s, "fake", "claude", &dir, json!({"steps": steps}));
+        let codex = pane(
+            &s,
+            "codex",
+            "codex",
+            &folder(&s, "weir"),
+            json!({"codex": true, "no_hooks": true, "steps": [], "on_input": [
+                {"codex_reply": REPLY},
+                {"transcript": {"type": "event_msg", "payload": {"type": "task_complete", "duration_ms": 15000}}}]}),
+        );
+        s.wait_text(&codex, "[fake] session");
+        for asked in ASKED {
+            send(&s, &codex, asked);
+        }
+        // Antigravity: nothing on its screen but the program; what was
+        // said is in its own store.
+        let fen = folder(&s, "fen");
+        let agy = drawn_pane(&s, "antigravity", "agy", &fen);
+        let at = "2099-01-01T00:00:00Z";
+        let steps: Vec<Value> = ASKED
+            .iter()
+            .enumerate()
+            .flat_map(|(n, asked)| {
+                let n = n as u64 * 4;
+                [
+                    agy_asked(n, at, asked),
+                    agy_step(n + 1, "PLANNER_RESPONSE", at, json!({"content": "I will look at the survey notes.",
+                        "tool_calls": [{"name": "run_command", "args": {"CommandLine": "grep -c heron survey.md"}}]})),
+                    agy_step(n + 2, "GENERIC", at, json!({"content": format!("Created At: {at}\nCompleted At: {at}\n9")})),
+                    agy_step(n + 3, "PLANNER_RESPONSE", at, json!({"content": REPLY})),
+                ]
+            })
+            .collect();
+        antigravity_conversation(
+            &s,
+            "0aaaaaaa-0000-4000-8000-00000000000a",
+            &fen,
+            &steps,
+            &steps,
+        );
+        // An agent whose conversation cannot be read: its screen.
+        let tui = drawn_pane(&s, "opencode", "tui", &dir);
+        send_quietly(&s, &tui, ASKED[0]);
+        let sh = id_of(s.call(
+            "pane.spawn",
+            json!({"program": "/bin/sh", "name": "shell", "cwd": dir}),
+        ));
+        s.call(
+            "pane.paste",
+            json!({"pane": sh, "text": "seq 1 40; printf '%s\\n' 'name          size     modified' 'survey.md     2 KB     today' 'a line that is much longer than a phone is wide, so that it has to be scrolled sideways inside its own block'", "enter": true}),
+        );
+        s.wait_text(&sh, "survey.md     2 KB");
+        s.call(
+            "deck.layout.save",
+            json!({"layout": {"name": "pair", "tree": {"dir": "row", "ratio": 500,
+                "a": {"id": claude, "station": "alpha"}, "b": {"id": tui, "station": "alpha"}}}}),
+        );
+        Chats {
+            s,
+            claude,
+            codex,
+            agy,
+            tui,
+            sh,
+        }
+    }
+
+    /// A message to a program that draws its own screen: nothing to wait
+    /// for but the screen drawn again.
+    fn send_quietly(s: &Station, pane: &str, text: &str) {
+        s.call(
+            "pane.paste",
+            json!({"pane": pane, "text": text, "enter": true}),
+        );
+        wait_for("the message taken", 10, || {
+            let a = conversation(s, pane, true);
+            a["items"]
+                .as_array()
+                .is_some_and(|i| i.iter().any(|x| x["kind"] == json!("user")))
+                .then_some(())
+        });
+    }
+
+    /// What makes a conversation the component it is: the classes and the
+    /// drawn type of the owner's bubble, an agent's prose, the marks under
+    /// it and the message box. Read from the page for the pane on screen.
+    const LOOK: &str = r#"(() => {
+        const root = document.querySelector('.phone-chat, .phone-layout, .zoomed .chat-pane');
+        const q = (s) => root.querySelector(s);
+        const css = (e, ...props) => { const c = getComputedStyle(e); return props.map(p => c[p]); };
+        const bubble = q('.chat-user:not(.other) .chat-bubble'), text = [...root.querySelectorAll('.chat-text')].find(t => t.querySelector('.md h5')), prose = text.querySelector('.md p');
+        const acts = text.querySelector('.chat-acts'), row = q('.chat-row');
+        return {
+            bubble: [bubble.className, bubble.parentNode.className, ...css(bubble, 'fontFamily', 'fontSize', 'borderTopLeftRadius', 'backgroundColor', 'color')],
+            prose: [text.classList.contains('chat-text'), prose.parentNode.className, ...css(prose, 'fontFamily', 'fontSize', 'lineHeight', 'color')],
+            heading: [text.querySelector('.md h5').className, ...css(text.querySelector('.md h5'), 'fontSize', 'fontWeight')],
+            lists: [text.querySelector('.md ol').className, text.querySelectorAll('.md ol > li').length, text.querySelectorAll('.md ul > li').length, !!text.querySelector('.md .md-code-in')],
+            acts: [acts.className, ...[...acts.children].map(b => b.className + ': ' + b.innerText), ...css(acts.firstChild, 'width', 'height')],
+            composer: [q('.chat-composer').tagName, row.className, ...css(row, 'borderTopLeftRadius', 'backgroundColor'), q('.chat-box').className, q('.chat-box').placeholder,
+                [...q('.chat-tools').children].map(b => b.className.replace(/ ?(on|danger|primary)\b/g, '').trim() + ': ' + b.innerText)],
+            keys: !!q('.chat-keys:not([hidden])'),
+            bar: [...root.querySelectorAll(':scope > .chat-bar > *, .chat-pane > .chat-bar > *')].map(e => e.className.replace(/ ?(working|idle|done|needs_you|error)\b/g, '')).filter(c => c !== 'chat-next'),
+        };
+    })()"#;
+
+    /// Where things are, and what can scroll, for the conversation on screen.
+    const PLACE: &str = r#"(() => {
+        const root = document.querySelector('.phone-chat, .phone-layout'), log = root.querySelector('.chat-log'), vv = window.visualViewport;
+        const box = (e) => { const r = e.getBoundingClientRect(); return { top: Math.round(r.top), bottom: Math.round(r.bottom) }; };
+        const last = [...log.children].filter(e => e.getBoundingClientRect().height > 0).pop();
+        // Everything that could be scrolled up or down: the log, and nothing else.
+        const scrollers = [document.scrollingElement, document.body, document.getElementById('app'), root, ...root.querySelectorAll('*')]
+            .filter(e => e.scrollHeight > e.clientHeight + 1 && (e === document.scrollingElement || ['auto', 'scroll'].includes(getComputedStyle(e).overflowY)))
+            .map(e => e.className || e.tagName);
+        const wide = [...root.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > window.innerWidth + 0.5 && !e.closest('pre, .md-table')).map(e => e.className || e.tagName);
+        window.scrollTo(0, 300);
+        return {
+            page: [document.scrollingElement.scrollTop, window.scrollY, document.documentElement.scrollWidth <= document.documentElement.clientWidth],
+            log: [log.scrollHeight > log.clientHeight, log.scrollWidth <= log.clientWidth, Math.round(log.scrollHeight - log.scrollTop - log.clientHeight)],
+            edge: Math.round(log.scrollTop + log.clientHeight),
+            scrollers, wide,
+            vv: [Math.round(vv.offsetTop), Math.round(vv.offsetTop + vv.height)],
+            app: box(document.getElementById('app')), bar: box(root.querySelector(':scope > .chat-bar')), dock: box(root.querySelector('.chat-dock')), row: box(root.querySelector('.chat-row')),
+            last: box(last), logBox: box(log), top: !!document.querySelector('#app > .topbar') && document.querySelector('#app > .topbar').getBoundingClientRect().height,
+            kbd: document.getElementById('app').classList.contains('kbd'),
+        };
+    })()"#;
+
+    /// The phone's keyboard, as the page is told of one: what is in sight
+    /// becomes `tall` high and begins `top` down the page (iOS slides the
+    /// page under what is in sight to show the box being typed in).
+    fn keyboard(page: &Page, tall: u32, top: u32) {
+        page.js(&format!(
+            "(() => {{ const real = window.__vv || (window.__vv = window.visualViewport); \
+               const now = {{ height: {tall}, width: window.innerWidth, offsetTop: {top}, offsetLeft: 0, pageTop: {top}, pageLeft: 0, scale: 1 }}; \
+               Object.defineProperty(window, 'visualViewport', {{ configurable: true, get: () => now }}); \
+               real.dispatchEvent(new Event('resize')); return true; }})()"
+        ));
+    }
+
+    /// The owner's report of 16 Nov 2026, from an iPhone, with five
+    /// pictures: "Antigravity chat just scrolls the entire pane and not
+    /// the text inside the pane. Also they look different in chat and
+    /// should be the same. Shouldn't chat be the same code base for every
+    /// chat?" and, with the keyboard up, a message box in the middle of the
+    /// screen over an empty gap, then at the very top with everything
+    /// under it blank.
+    ///
+    /// At a phone's size: a pane with a session file of Claude Code's
+    /// kind, a Codex pane, an Antigravity pane and an agent whose Chat is
+    /// made from its screen (a program that draws 120 columns itself) are
+    /// one component: the same bubble, prose, marks under it, turn marker
+    /// and message box, drawn in the same type. The log is the only thing
+    /// that scrolls, and nothing is wider than the phone. With the
+    /// keyboard up, the message box is directly above it and the pane's
+    /// bar at the top of what is in sight, wherever the browser slid the
+    /// page; the page itself has not moved; and the log keeps its place.
+    /// The same holds in a phone's layout view, and a cell of a layout on
+    /// a computer is the same component.
+    #[test]
+    #[ignore = "merge tier: a browser"]
+    fn every_pane_is_one_chat() {
+        let c = chats();
+        // A turn of the agent whose Chat is its screen: the station sees it end.
+        let say = |state: &str| {
+            c.s.call_as_pane(&c.tui, "pane.report_agent", json!({"state": state}))
+                .unwrap()
+        };
+        say("working");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        say("idle");
+
+        let page = Page::open(&c.s, 390, 844);
+        let open = |id: &str| {
+            page.goto(&format!("#/s/alpha/p/{id}"));
+            page.wait(
+                "the pane's conversation",
+                &format!("location.hash.endsWith('{id}') && !!document.querySelector('.phone-chat .chat-user .chat-bubble') && [...document.querySelectorAll('.phone-chat .chat-text')].some(t => t.querySelector('.md h5') && t.querySelector('.chat-acts')) && [...document.querySelectorAll('.phone-chat .chat-quiet')].some(e => e.innerText.startsWith('Turn ended'))"),
+            );
+        };
+        let mut looks = vec![];
+        for (name, id) in [
+            ("claude", &c.claude),
+            ("codex", &c.codex),
+            ("antigravity", &c.agy),
+            ("screen", &c.tui),
+        ] {
+            open(id);
+            let look = page.js(LOOK);
+            assert!(
+                look.is_object(),
+                "{name}: the page did not say how it looks"
+            );
+            let place = page.js(PLACE);
+            // The page cannot be scrolled, and has not been; the log can.
+            assert_eq!(place["page"], json!([0, 0, true]), "{name}: {place}");
+            // (The log scrolls where there is more than a screen of it.)
+            let scrollers = if place["log"][0] == json!(true) {
+                json!(["chat-log"])
+            } else {
+                json!([])
+            };
+            assert_eq!(place["scrollers"], scrollers, "{name}: {place}");
+            assert_eq!(place["wide"], json!([]), "{name}: {place}");
+            assert_eq!(place["log"][1], json!(true), "{name}: {place}");
+            // On a phone the conversation has the screen: its bar is at the top.
+            assert_eq!(
+                (&place["top"], &place["bar"]["top"]),
+                (&json!(0), &json!(0)),
+                "{name}: {place}"
+            );
+            assert_eq!(place["dock"]["bottom"], json!(844), "{name}: {place}");
+            shoot(&page, &format!("one-chat-{name}"));
+            looks.push((name, look, place));
+        }
+        // Three conversations read from three stores, and one made from a
+        // screen: one component.
+        for (name, look, _) in &looks[1..] {
+            assert_eq!(look, &looks[0].1, "{name} is not drawn as claude is");
+        }
+        assert_eq!(looks[0].1["keys"], json!(false));
+        assert_eq!(
+            looks[0].1["acts"],
+            json!([
+                "chat-acts",
+                "chat-act act-copy: Copy",
+                "chat-act act-speak: Read aloud",
+                "40px",
+                "36px"
+            ])
+        );
+        // The three with enough said have a log that scrolls.
+        for (name, _, place) in &looks[..3] {
+            assert_eq!(place["log"][0], json!(true), "{name}: {place}");
+        }
+        // What the screen's conversation is made of: prose and one block
+        // of rows that are a layout, which scrolls sideways inside itself;
+        // none of the program's frame, message box or status row.
+        let screen = page.js("(t => [t.innerText, [...t.querySelectorAll('.chat-mono pre')].map(p => [p.innerText, getComputedStyle(p).whiteSpace, getComputedStyle(p).overflowX]), [...document.querySelectorAll('.phone-chat .chat-quiet')].map(e => e.innerText).filter(x => x.startsWith('Turn ended'))])([...document.querySelectorAll('.phone-chat .chat-screen')].find(t => t.querySelector('.md h5')))");
+        let said = screen[0].as_str().unwrap();
+        assert!(
+            said.contains("The survey counts nine nests this year, three more than last spring. Most are high in the alders on the east bank, where the water is slow and the fishing is easy."),
+            "{screen}"
+        );
+        for chrome in ["╭", "│", "tern-2-low", "> "] {
+            assert!(!said.contains(chrome), "{chrome:?} in {screen}");
+        }
+        assert_eq!(
+            screen[1],
+            json!([["bank          nests     seen at dusk\neast          6         yes\nisland        3         no", "pre", "auto"]])
+        );
+        assert!(
+            screen[2][0]
+                .as_str()
+                .unwrap()
+                .starts_with("Turn ended · 1 s"),
+            "{screen}"
+        );
+
+        // A shell: the same bubble and message box, and its rows as they
+        // were, in the block a reply's code has, wider than the phone
+        // inside itself only.
+        page.goto(&format!("#/s/alpha/p/{}", c.sh));
+        page.wait("the shell", &format!("location.hash.endsWith('{}') && document.querySelectorAll('.chat-switch button').length === 2", c.sh));
+        page.js("[...document.querySelectorAll('.chat-switch button')].find(b => b.innerText === 'Chat').click()");
+        let sh = page.wait(
+            "the shell's conversation",
+            "(p => p && p.innerText.includes('survey.md     2 KB') && [p.parentNode.className, p.scrollWidth > p.clientWidth, getComputedStyle(p).whiteSpace, document.querySelector('.phone-chat .chat-row').className, document.querySelector('.phone-chat .chat-bubble').className])(document.querySelector('.phone-chat .chat-screen .chat-mono pre'))",
+        );
+        assert_eq!(
+            sh,
+            json!(["md-code chat-mono", true, "pre", "chat-row", "chat-bubble"])
+        );
+        let place = page.js(PLACE);
+        assert_eq!(
+            (&place["page"], &place["scrollers"], &place["wide"]),
+            (&json!([0, 0, true]), &json!(["chat-log"]), &json!([])),
+            "{place}"
+        );
+        shoot(&page, "one-chat-shell");
+
+        // The keyboard. First at the end of the conversation: the page is
+        // slid 150 px up, 480 px are in sight.
+        open(&c.claude);
+        let before = page.js(PLACE);
+        assert_eq!(before["log"][2], json!(0), "{before}");
+        keyboard(&page, 480, 150);
+        let up = page.js(PLACE);
+        assert_eq!(up["vv"], json!([150, 630]), "{up}");
+        assert_eq!(
+            (
+                &up["bar"]["top"],
+                &up["dock"]["bottom"],
+                &up["page"],
+                &up["kbd"]
+            ),
+            (&json!(150), &json!(630), &json!([0, 0, true]), &json!(true)),
+            "{up}"
+        );
+        // Nothing between the message box and the keyboard but its own edge.
+        assert!(
+            up["dock"]["bottom"].as_i64().unwrap() - up["row"]["bottom"].as_i64().unwrap() <= 8,
+            "{up}"
+        );
+        // The last thing said is still in sight above it.
+        assert_eq!(up["log"][2], json!(0), "{up}");
+        assert!(
+            up["last"]["bottom"].as_i64() <= up["logBox"]["bottom"].as_i64()
+                && up["last"]["top"].as_i64() >= up["logBox"]["top"].as_i64(),
+            "{up}"
+        );
+        shoot(&page, "one-chat-keyboard-up");
+        keyboard(&page, 844, 0);
+        let down = page.js(PLACE);
+        assert_eq!(
+            (
+                &down["bar"]["top"],
+                &down["dock"]["bottom"],
+                &down["log"][2],
+                &down["kbd"],
+                &down["page"]
+            ),
+            (
+                &json!(0),
+                &json!(844),
+                &json!(0),
+                &json!(false),
+                &json!([0, 0, true])
+            ),
+            "{down}"
+        );
+        // Further up: the line at the bottom edge stays at the bottom edge.
+        page.js("(l => { l.scrollTop = Math.round(l.scrollHeight / 2); return true; })(document.querySelector('.phone-chat .chat-log'))");
+        let reading = page.js(PLACE);
+        keyboard(&page, 480, 0);
+        let up = page.js(PLACE);
+        assert_eq!(
+            (&up["edge"], &up["dock"]["bottom"], &up["bar"]["top"]),
+            (&reading["edge"], &json!(480), &json!(0)),
+            "{up}"
+        );
+        keyboard(&page, 844, 0);
+        assert_eq!(page.js(PLACE)["edge"], reading["edge"]);
+
+        // The window itself made short, as a browser that makes the page
+        // smaller for its keyboard does: the same.
+        page.js("(Object.defineProperty(window, 'visualViewport', { configurable: true, get: () => window.__vv }), true)");
+        page.protocol(
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width": 390, "height": 500, "deviceScaleFactor": 1, "mobile": false}),
+        );
+        page.wait(
+            "the short window",
+            "window.innerHeight === 500 && document.getElementById('app').getBoundingClientRect().height === 500",
+        );
+        let small = page.js(PLACE);
+        assert_eq!(
+            (&small["dock"]["bottom"], &small["bar"]["top"], &small["page"], &small["scrollers"]),
+            (&json!(500), &json!(0), &json!([0, 0, true]), &json!(["chat-log"])),
+            "{small} {}",
+            page.js("[window.innerHeight, window.visualViewport.height, document.getElementById('app').style.height]")
+        );
+        page.protocol("Emulation.clearDeviceMetricsOverride", json!({}));
+        page.wait("the window as it was", "window.innerHeight > 800");
+
+        // A phone's layout view: the same pane, the same component, the
+        // same place for everything, and the same with the keyboard up.
+        page.goto("#/l/pair");
+        page.wait(
+            "the layout's first pane",
+            "!!document.querySelector('.phone-layout .chat-user .chat-bubble') && [...document.querySelectorAll('.phone-layout .chat-text')].some(t => t.querySelector('.md h5') && t.querySelector('.chat-acts'))",
+        );
+        assert_eq!(
+            page.js(LOOK),
+            looks[0].1,
+            "in a layout it is not drawn as by itself"
+        );
+        let place = page.js(PLACE);
+        assert_eq!(
+            (
+                &place["page"],
+                &place["scrollers"],
+                &place["wide"],
+                &place["top"]
+            ),
+            (
+                &json!([0, 0, true]),
+                &json!(["chat-log"]),
+                &json!([]),
+                &json!(0)
+            ),
+            "{place}"
+        );
+        // (It was left halfway up, above: back to its end.)
+        page.js("(l => { l.scrollTop = l.scrollHeight; return true; })(document.querySelector('.phone-layout .chat-log'))");
+        keyboard(&page, 480, 150);
+        let up = page.js(PLACE);
+        assert_eq!(
+            (
+                &up["bar"]["top"],
+                &up["dock"]["bottom"],
+                &up["page"],
+                &up["log"][2]
+            ),
+            (&json!(150), &json!(630), &json!([0, 0, true]), &json!(0)),
+            "{up}"
+        );
+        shoot(&page, "one-chat-layout-keyboard-up");
+
+        // A computer: a cell of a layout is the same component.
+        let wide = Page::open(&c.s, 1400, 900);
+        wide.goto(&format!("#/s/alpha/p/{}", c.tui));
+        wide.wait(
+            "the pane at full size",
+            "[...document.querySelectorAll('.zoomed .chat-text')].some(t => t.querySelector('.md h5') && t.querySelector('.chat-acts'))",
+        );
+        let big = wide.js(LOOK);
+        for part in ["bubble", "prose", "heading", "lists", "composer"] {
+            let mut theirs = looks[0].1[part].clone();
+            let mut ours = big[part].clone();
+            // (A computer's own sizes: the marks and the buttons are smaller.)
+            if part == "composer" {
+                theirs[6] = json!(null);
+                ours[6] = json!(null);
+            }
+            assert_eq!(ours, theirs, "{part} on a computer");
+        }
+        assert_eq!(big["acts"][1], json!("chat-act act-copy: Copy"));
+        // Where the deck's top bar is, on a computer: it stays.
+        assert_eq!(wide.js("!!document.querySelector('#app > .topbar') && document.querySelector('#app > .topbar').getBoundingClientRect().height > 20"), json!(true));
+        wide.goto("#/l/pair");
+        wide.wait(
+            "the layout",
+            "document.querySelectorAll('.split .chat-pane').length === 2",
+        );
+        shoot(&wide, "one-chat-desktop-layout");
+    }
+
+    /// Pictures of each kind of pane's Chat, for a human to lay side by
+    /// side (`SPANDECK_SHOTS=/some/dir`): nothing is asserted.
+    #[test]
+    #[ignore = "pictures only: set SPANDECK_SHOTS"]
+    fn pictures_of_every_kind_of_chat() {
+        let c = chats();
+        let page = Page::open(&c.s, 390, 844);
+        for (name, id) in [
+            ("claude", &c.claude),
+            ("codex", &c.codex),
+            ("antigravity", &c.agy),
+            ("screen-agent", &c.tui),
+            ("shell", &c.sh),
+        ] {
+            page.goto(&format!("#/s/alpha/p/{id}"));
+            page.wait(
+                "the pane",
+                &format!("!!document.querySelector('.chat-bar') && location.hash.endsWith('{id}')"),
+            );
+            page.js("(b => b && b.click())([...document.querySelectorAll('.chat-switch button')].find(b => b.innerText === 'Chat'))");
+            page.wait("its conversation", "!!document.querySelector('.phone-chat .chat-log') && document.querySelectorAll('.chat-log > *').length > 1");
+            shoot(&page, &format!("phone-{name}"));
+            page.js("(l => { l.scrollTop = 0; })(document.querySelector('.chat-log'))");
+            shoot(&page, &format!("phone-{name}-top"));
+        }
+        let wide = Page::open(&c.s, 1400, 900);
+        wide.goto("#/l/pair");
+        wide.wait(
+            "the layout",
+            "document.querySelectorAll('.split .chat-pane').length === 2",
+        );
+        shoot(&wide, "desktop-layout");
     }
 }
