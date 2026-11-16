@@ -1998,7 +1998,7 @@ fn the_pane_of_a_layout_is_the_pane_itself(s: &Station, page: &common::browser::
     // watched or attached any more.
     page.wait(
         "the message as a bubble, then the next pane",
-        &format!("document.querySelectorAll('.phone-layout .chat-user').length === 2 && document.querySelector('.chat-box').value === '' && (async () => {{ {log}.scrollTop = 40; await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); const b = document.querySelector('.chat-box'); b.value = 'kept'; b.dispatchEvent(new Event('input')); document.querySelector('.lay-nav .lay-step:last-child').click(); return true; }})()"),
+        &format!("document.querySelectorAll('.phone-layout .chat-user').length === 2 && document.querySelector('.chat-box').value === '' && (async () => {{ {log}.scrollTop = 40; await new Promise(r => setTimeout(r, 60)); const b = document.querySelector('.chat-box'); b.value = 'kept'; b.dispatchEvent(new Event('input')); document.querySelector('.lay-nav .lay-step:last-child').click(); return true; }})()"),
     );
     let shell_seen = page.wait(
         "the shell's terminal, then the pane before",
