@@ -627,6 +627,14 @@ fn a_link_that_is_slow_and_alive_is_not_dropped() {
         "the pane to be attached",
         "document.querySelector('.pane').paneTerm.chan !== null",
     );
+    // The link turns slow under a page that is waiting for nothing: with
+    // answers still on their way, each one that arrives late is taken for
+    // proof of the link and the ping behind it is let go of, so the page
+    // never measures the round trip (it read 15 ms for forty seconds).
+    page.wait(
+        "the link to be quiet",
+        "(a => a.pingOut === null && a.awake - a.frameAwake > 500)(api())",
+    );
     wire.slow(2000);
     std::thread::sleep(Duration::from_secs(20));
     page.js("(t => { t.term.focus(); t.term.input('echo slow-$((40+2))\\n'); return true; })(document.querySelector('.pane').paneTerm)");

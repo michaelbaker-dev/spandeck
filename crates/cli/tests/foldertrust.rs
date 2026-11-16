@@ -858,9 +858,12 @@ fn the_deck_has_the_tick_the_note_the_one_tap_and_the_list() {
     // ---- phone ----
     let other = folder(&s, "phone-idea");
     let phone = Page::open(&s, 390, 844);
-    phone.wait("New session", "!!document.querySelector('.new-session')");
-    phone.js("document.querySelector('.new-session').click()");
-    phone.wait("the sheet", "!!document.querySelector('.sheet .tile-pick')");
+    // Tapped again until the sheet is there: a tap before the page has
+    // heard from its station is answered "No station is answering".
+    phone.wait(
+        "New session, and its sheet",
+        "!!document.querySelector('.sheet .tile-pick') || (document.querySelector('.new-session')?.click(), false)",
+    );
     phone.js("[...document.querySelectorAll('.sheet .tile-pick')].find(b => b.innerText.includes('Antigravity')).click()");
     set(
         &phone,
