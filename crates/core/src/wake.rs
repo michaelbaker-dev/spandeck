@@ -110,8 +110,9 @@ pub struct Turn {
 
 /// One look at one pane's mail, with its turn held: if mail waits that the
 /// agent was not told of (or was told of before `told_before_ms` and has
-/// not read), `type_it` is asked to type the nudge, with the first
-/// sender's name. Only when it says it did is anything announced: `told`
+/// not read), `type_it` is asked to type the nudge, with how many
+/// messages there are and who sent them (never what they say). Only when
+/// it says it did is anything announced: `told`
 /// is given the messages' ids first (for the Performance page), then they
 /// are marked. Returns how many were announced.
 pub fn announce(
@@ -120,14 +121,15 @@ pub fn announce(
     now: u64,
     told_before_ms: u64,
     turn: &mut Turn,
-    type_it: impl FnOnce(&str) -> bool,
+    type_it: impl FnOnce(usize, &[String]) -> bool,
     told: impl FnOnce(&[String]),
 ) -> usize {
     let waiting = mail.unannounced(names, told_before_ms);
-    let Some((_, sender, _)) = waiting.first() else {
+    if waiting.is_empty() {
         return 0;
-    };
-    if !type_it(sender) {
+    }
+    let senders: Vec<String> = waiting.iter().map(|w| w.1.clone()).collect();
+    if !type_it(waiting.len(), &senders) {
         return 0;
     }
     turn.last_nudge_ms = Some(now);
@@ -291,7 +293,7 @@ mod tests {
             send(&mail, n, now);
         }
         // The hold landed first: nothing is typed, and nothing is announced.
-        let told = announce(&mail, &names, now, 0, &mut turn, |_| false, |_| {});
+        let told = announce(&mail, &names, now, 0, &mut turn, |_, _| false, |_| {});
         assert_eq!((told, turn.last_nudge_ms), (0, None));
         assert_eq!(mail.unannounced(&names, 0).len(), 50);
 
@@ -304,8 +306,9 @@ mod tests {
                 now,
                 0,
                 &mut turn,
-                |sender| {
-                    assert_eq!(sender, "you@alpha");
+                |count, senders| {
+                    assert_eq!(count, 50);
+                    assert_eq!(senders[0], "you@alpha");
                     typed += 1;
                     true
                 },
@@ -328,7 +331,7 @@ mod tests {
                 later,
                 later - 60_000,
                 &mut turn,
-                |_| {
+                |_, _| {
                     again += 1;
                     true
                 },

@@ -12,7 +12,7 @@ use common::*;
 use serde_json::{json, Value};
 
 /// The nudge that wakes an idle agent with mail, as its terminal shows it.
-const NUDGE: &str = "[fake] got: You have mail from";
+const NUDGE: &str = "[fake] got: You have ";
 
 fn reads_mail() -> Value {
     json!({"steps": [], "on_input": [{"rpc": {"method": "msg.inbox"}}, {"turn_end": "read my mail"}]})

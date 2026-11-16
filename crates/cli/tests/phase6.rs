@@ -59,8 +59,8 @@ fn a_message_is_a_record_and_only_a_nudge_is_typed() {
     // The idle reader is woken by one typed line, then pulls the message itself.
     let screen = s.wait_text(&reader, "heron module");
     assert!(
-        screen.contains("[fake] got: You have mail from demo/writer@alpha"),
-        "{screen}"
+        screen.contains("[fake] got: You have 1 new spandeck message from demo/writer@alpha. Read it with the spandeck inbox tool and act on it"),
+        "the nudge tells the agent to act on its mail, not only to look: {screen}"
     );
     let typed: Vec<&str> = screen
         .lines()
@@ -147,7 +147,7 @@ fn a_paused_agent_is_not_given_new_work_until_it_is_unpaused() {
     );
     std::thread::sleep(Duration::from_millis(2500));
     assert!(
-        !s.text(&pane).contains("You have mail"),
+        !s.text(&pane).contains("new spandeck message"),
         "pause: no new work is delivered"
     );
     s.call("pane.pause", json!({"pane": pane, "paused": false}));
@@ -855,7 +855,7 @@ fn mail_that_is_not_read_is_nudged_again_and_mail_sent_at_startup_is_not_lost() 
     );
     wait_for("a second nudge for the unread message", 20, || {
         (s.text(&ignorer)
-            .matches("You have mail from you@alpha")
+            .matches("[fake] got: You have 1 new spandeck message from you@alpha")
             .count()
             >= 2)
             .then_some(())
@@ -866,9 +866,9 @@ fn mail_that_is_not_read_is_nudged_again_and_mail_sent_at_startup_is_not_lost() 
     );
     // Once it is read, the nudging stops.
     s.call_as_pane(&ignorer, "msg.inbox", json!({})).unwrap();
-    let count = s.text(&ignorer).matches("You have mail").count();
+    let count = s.text(&ignorer).matches("new spandeck message").count();
     std::thread::sleep(Duration::from_millis(4500));
-    assert_eq!(s.text(&ignorer).matches("You have mail").count(), count);
+    assert_eq!(s.text(&ignorer).matches("new spandeck message").count(), count);
 }
 
 /// Layouts, step 2 (agreed 14 Nov 2026): a pane shows the agents working
