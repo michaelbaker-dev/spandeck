@@ -629,6 +629,7 @@ impl Daemon {
                 // A launcher has no tick box: the owner's standing choice
                 // for the folder, or for this project, is what counts.
                 trust_choice: self.folder_trust_at_start(None, agent, &cwd, Some(name), by),
+                hooks_trust_choice: self.hooks_trust_at_start(None, agent, by),
                 cwd: Some(cwd),
                 project: Some(name.to_string()),
                 role: slot.role.clone(),

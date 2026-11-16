@@ -479,7 +479,7 @@ pub fn route(own: &str, method: &str, params: &Value) -> Route {
         // The owner's "Trust this folder" presses keys in the pane: in the
         // order of what is typed there, and nothing typed lands between
         // its keys.
-        "pane.trust_folder" => (Lane::Input, pane()),
+        "pane.trust_folder" | "pane.trust_hooks" => (Lane::Input, pane()),
         "pane.stop" | "pane.kill" | "pane.pause" => (Lane::Urgent, pane()),
         "pane.release" if all => (Lane::Urgent, Some(Scope::AllPanes)),
         "pane.release" => (Lane::Urgent, pane()),

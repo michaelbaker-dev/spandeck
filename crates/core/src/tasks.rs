@@ -406,6 +406,9 @@ impl Daemon {
             // project the owner switched that on for; nothing a caller
             // of `delegate` sends has a say in it.
             trust_choice: self.folder_trust_for_helper(agent, &project, &requester),
+            // And its review of hooks only on the owner's standing choice
+            // for this station, as it is.
+            hooks_trust_choice: self.hooks_trust_at_start(None, agent, &requester),
             ..Default::default()
         });
         let pane = match pane {

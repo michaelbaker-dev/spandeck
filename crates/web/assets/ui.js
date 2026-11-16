@@ -145,7 +145,7 @@ export function trustAsksWords(p) {
   const name = p.agent_name || 'The program';
   return ({
     not_chosen: `${name} asks whether to trust this folder. You did not choose that when the pane was started, so nothing was pressed.`,
-    own_choice_is_no: `${name} asks whether to trust this folder. Its own choice on that screen is "No, exit", so spandeck pressed nothing: one tap here moves it to "Yes" and confirms.`,
+    own_choice_is_no: `${name} asks whether to trust this folder. Its own choice on that screen is "No, exit", and moving its marker for you is switched off on this station (or the marker did not move), so spandeck pressed nothing: one tap here moves it to "Yes" and confirms.`,
     not_the_known_screen: `${name} asks whether to trust this folder, and its screen is not the one spandeck knows (it may list what the folder's settings switch on, or be a newer version). Read it before you answer; nothing was pressed.`,
     switched_off: `${name} asks whether to trust this folder. Nothing is pressed for you here: you typed into this pane, or it is switched off on this station.`,
   })[asks.why] || `${name} asks whether to trust this folder.`;
@@ -202,7 +202,73 @@ export function trustTick(ask, get) {
       r.why === 'project' ? h('span', {}, `On because this project's agents may start without asking you. `) : null,
       h('span', {}, r.allows + ' ' + r.reach + ' '),
       h('span', { class: 'trust-warn' }, TRUST_WARNING),
-      r.pressed === false ? h('span', {}, ` ${r.agent_name}'s own choice on that screen is "No, exit", so spandeck presses nothing there: the pane will offer "Trust this folder", one tap.`) : null].filter(Boolean));
+      r.pressed === false ? h('span', {}, ` ${r.agent_name}'s own choice on that screen is "No, exit", and moving its marker for you is switched off on this station (folder_trust.move), so spandeck presses nothing there: the pane will offer "Trust this folder", one tap.`) : null].filter(Boolean));
+  };
+  return { row, refresh, value: () => (shown ? box.checked : undefined) };
+}
+// ---- trusting spandeck's own hooks (the station's hookstrust.rs) ----
+// What a pane says while its program shows its review of hooks and nothing
+// was pressed. Where the hooks may not all be spandeck's the station says
+// why (`asks.says`), which is put on the page as text.
+export function hooksAsksWords(p) {
+  const asks = p?.hooks_trust?.asks;
+  if (!asks) return '';
+  const name = p.agent_name || 'The program';
+  const why = ({
+    not_chosen: '"Trust spandeck\'s own hooks" is off on this station, so nothing was pressed.',
+    you_typed: 'You typed into this pane, so nothing is pressed for you.',
+    not_the_known_screen: 'Its screen is not the one spandeck knows (a newer version, or a narrow terminal), so nothing was pressed. Read it before you answer.',
+    marker_did_not_move: 'Its marker did not move to "Trust all and continue", so nothing was confirmed.',
+  })[asks.why];
+  if (!why) return `${name} ${String(asks.says || 'asks you to review hooks').slice(0, 400)}.`;
+  return `${name} asks you to review hooks, and every hook it can be asking about is spandeck's own. ${why}`;
+}
+// Said on a pane for ten minutes after spandeck answered for the owner.
+export function hooksAnsweredWords(p) {
+  const a = p?.hooks_trust?.answered;
+  if (!a || a.how !== 'standing' || Date.now() - Number(a.at_ms || 0) > 600000) return '';
+  return `spandeck answered ${p.agent_name || 'the program'}'s review of hooks with "Trust all and continue": every hook was spandeck's own`;
+}
+// The card a pane shows on a phone while its program asks: the words, the
+// owner's one tap where the hooks can only be spandeck's, and (where given)
+// the way to the terminal.
+export function hooksCard(p, tap, terminal) {
+  const asks = p.hooks_trust.asks;
+  return h('div', { class: 'chat-card wait trust-card hooks-card' },
+    h('b', {}, hooksAsksWords(p)),
+    h('div', { class: 'row' },
+      asks.button ? h('button', { type: 'button', class: 'primary hooks-tap', onclick: (e) => { e.currentTarget.blur(); tap(); } }, 'Trust spandeck\'s hooks') : null,
+      terminal ? h('button', { type: 'button', onclick: terminal }, 'Open terminal') : null));
+}
+// The tick in the New pane dialog and the New session sheet. `ask`: calls
+// the station (`hookstrust.choice`). `get`: the agent chosen in the dialog
+// now. On unless the owner turned it off on that station. The row is
+// hidden for a program that has no such review, and on a station from
+// before this (which answers nothing).
+export function hooksTick(ask, get) {
+  const box = h('input', { type: 'checkbox', style: { width: 'auto' }, 'aria-describedby': 'hooks-note' });
+  const label = h('span', {});
+  const note = h('small', { class: 'muted trust-note', id: 'hooks-note' });
+  const row = h('div', { class: 'hooks-row', hidden: true }, h('label', { class: 'row' }, box, label), note);
+  let n = 0, shown = false, touched = false;
+  box.addEventListener('change', () => { touched = true; });
+  const refresh = async () => {
+    const mine = ++n, at = get();
+    let r = null;
+    if (at.agent && at.agent !== 'shell') {
+      try { r = await ask({ agent: at.agent }); } catch (e) { r = null; }
+    }
+    if (mine !== n) return;
+    shown = !!(r && r.asks);
+    row.hidden = !shown;
+    if (!shown) return;
+    if (!touched || box.dataset.for !== r.station + '|' + r.agent) { box.checked = r.on !== false; touched = false; }
+    box.dataset.for = r.station + '|' + r.agent;
+    label.textContent = `Trust spandeck's own hooks in ${r.agent_name} if it asks`;
+    note.replaceChildren(...[
+      h('span', {}, `When ${r.agent_name} shows "Hooks need review", spandeck chooses "${r.answer || 'Trust all and continue'}" for you, and only when every hook it can be asking about is spandeck's own. If someone else's hook, another hooks file or a plugin is there, nothing is pressed and the pane says why. `),
+      h('span', {}, r.on === false ? `Off because you turned it off on ${r.station}. Tick it to turn it on again.` : `Untick it and ${r.station} stops answering, for later panes too.`),
+      r.answers === false ? h('span', { class: 'trust-warn' }, ` ${r.station} does not keep spandeck's hooks in the agent settings, so it answers nothing here whatever is ticked.`) : null].filter(Boolean));
   };
   return { row, refresh, value: () => (shown ? box.checked : undefined) };
 }

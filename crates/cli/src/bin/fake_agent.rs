@@ -40,6 +40,12 @@
 //!       and Enter takes the choice: trusting goes on, leaving exits 1.
 //!       `"wait": false` only prints it, as an agent quoting it would.
 //!       `"after_ms"`: shown only after that long.
+//!       `"as": "codex-hooks"` is Codex's review of hooks instead
+//!       (agents/hookstrust.rs), with `"count"` hooks (12), its marker on
+//!       "1. Review hooks"; `"above": ["a row"]` adds rows above it and
+//!       `"reword"` replaces its title. The arrow keys move the marker and
+//!       Enter takes the choice: "[fake] hooks: trusted all", "review"
+//!       or "skipped".
 //! Beside the steps, `"hook_deadline"`: how long this agent gives a hook
 //! that can block, in seconds, and tells it (default: what spandeck
 //! installs now, 75 for a tool call); `"old"`: 10 seconds and the hook is
@@ -480,12 +486,78 @@ impl Agent {
         }
     }
 
+    /// Codex's review of hooks (see the top of this file).
+    fn hooks_screen(&mut self, spec: &Value) {
+        use spandeck_agents::hookstrust::{drawn, Mark};
+        let count = spec["count"].as_u64().unwrap_or(12) as u32;
+        let order = [Mark::Review, Mark::TrustAll, Mark::Skip];
+        let mut at = 0usize;
+        let draw = |at: usize| {
+            let mut lines = drawn::codex(count, order[at]);
+            if let Some(words) = spec["reword"].as_str() {
+                lines[1] = format!("  {words}");
+            }
+            let above: Vec<String> = spec["above"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|l| l.as_str())
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default();
+            lines.splice(0..0, above);
+            let mut o = std::io::stdout();
+            let _ = o.write_all(b"\x1b[2J\x1b[H");
+            let _ = o.write_all(lines.join("\r\n").as_bytes());
+            let _ = o.flush();
+        };
+        draw(at);
+        if spec["wait"] == json!(false) {
+            out("");
+            return;
+        }
+        loop {
+            let key = match self.input.recv() {
+                Ok(b) => b,
+                Err(_) => std::process::exit(0),
+            };
+            match key {
+                b'\r' | b'\n' => {
+                    let _ = std::io::stdout().write_all(b"\x1b[2J\x1b[H");
+                    out(match order[at] {
+                        Mark::Review => "[fake] hooks: review",
+                        Mark::TrustAll => "[fake] hooks: trusted all",
+                        Mark::Skip => "[fake] hooks: skipped",
+                    });
+                    return;
+                }
+                0x1b => {
+                    let wait = Duration::from_millis(50);
+                    if self.input.recv_timeout(wait) != Ok(b'[') {
+                        continue;
+                    }
+                    match self.input.recv_timeout(wait) {
+                        Ok(b'B') => at = (at + 1).min(2),
+                        Ok(b'A') => at = at.saturating_sub(1),
+                        _ => continue,
+                    }
+                    draw(at);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// A program's folder-trust screen (see the top of this file).
     fn trust_screen(&mut self, spec: &Value) {
         use spandeck_agents::foldertrust::{drawn, Focus};
         let program = spec["as"].as_str().unwrap_or("claude");
         if let Some(ms) = spec["after_ms"].as_u64() {
             std::thread::sleep(Duration::from_millis(ms));
+        }
+        if program == "codex-hooks" {
+            return self.hooks_screen(spec);
         }
         // Each program's own choice when it first draws the screen.
         let mut focus = match (spec["focus"].as_str(), program) {
@@ -511,7 +583,6 @@ impl Agent {
                     Value::String(s) => drawn::antigravity_with(&self.cwd, focus, Some(s)),
                     _ => drawn::antigravity(&self.cwd, focus),
                 },
-                "codex-hooks" => drawn::codex_hooks(),
                 _ => drawn::claude(&self.cwd, focus, 110, &extra),
             };
             if let Some(words) = spec["reword"].as_str() {
@@ -542,11 +613,6 @@ impl Agent {
                 continue;
             }
             match key {
-                b'\r' | b'\n' if program == "codex-hooks" => {
-                    clear();
-                    out("[fake] hooks screen answered");
-                    return;
-                }
                 b'\r' | b'\n' if focus == Focus::Trust => {
                     clear();
                     out("[fake] folder trusted");

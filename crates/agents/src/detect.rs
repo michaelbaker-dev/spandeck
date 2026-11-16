@@ -61,7 +61,10 @@ pub const CODEX_RULES: &[Rule] = &[
     // "Hooks need review / N hooks are new or changed … 1. Review hooks
     // 2. Trust all and continue 3. Continue without trusting (hooks won't
     // run)": Codex skips hooks whose definition changed until the owner
-    // trusts them again.
+    // trusts them again. Whose hooks they are is not known here: where the
+    // review is the program's first screen the pane's reason comes from
+    // core/hookstrust.rs, which reads the files, and this rule is for a
+    // review that shows later.
     Rule {
         state: AgentState::NeedsYou,
         any: &[
@@ -70,7 +73,7 @@ pub const CODEX_RULES: &[Rule] = &[
             "Continue without trusting",
         ],
         window: 16,
-        reason: Some("asks you to trust spandeck's hooks: answer in the terminal (run /hooks)"),
+        reason: Some("asks you to review hooks: answer in the terminal (run /hooks)"),
     },
     Rule {
         state: AgentState::NeedsYou,
@@ -326,7 +329,7 @@ mod tests {
                 CODEX_RULES,
                 "  Hooks need review\n  3 hooks are new or changed\n\n  1. Review hooks\n  2. Trust all and continue\n  3. Continue without trusting (hooks won't run)\n"
             ),
-            needs("asks you to trust spandeck's hooks: answer in the terminal (run /hooks)")
+            needs("asks you to review hooks: answer in the terminal (run /hooks)")
         );
         // An ordinary turn is still a turn.
         assert_eq!(

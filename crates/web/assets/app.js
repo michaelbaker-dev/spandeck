@@ -13,7 +13,7 @@
 
 import { Api } from './api.js';
 import { PaneTerm } from './term.js';
-import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText, heldWords, trustTick, trustCard, trustAnsweredWords, TRUST_WARNING } from './ui.js';
+import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText, heldWords, hooksTick, hooksCard, hooksAnsweredWords, trustTick, trustCard, trustAnsweredWords, TRUST_WARNING } from './ui.js';
 import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
 import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners } from './look.js';
 import { lookEditor } from './lookedit.js';
@@ -638,6 +638,7 @@ function paneMenu(e, st, p, where, term) {
     agent && alive && p.held && { label: 'Release (take mail again)', hint: heldWords(p.held), action: act('pane.release') },
     agent && alive && p.trust?.asks?.button && { label: 'Trust this folder', hint: 'answers its question, this once', action: act('pane.trust_folder') },
     agent && alive && p.trust?.asks?.button && { label: `Trust this folder and remember it for ${p.agent_name}`, action: act('pane.trust_folder', { remember: true }) },
+    agent && alive && p.hooks_trust?.asks?.button && { label: 'Trust spandeck\'s hooks', hint: 'answers its review of hooks, this once', action: act('pane.trust_hooks') },
     agent && { label: p.watch ? 'Stop notifying when it finishes' : 'Notify me when it finishes', action: act('pane.set', { watch: !p.watch }) },
     { label: p.muted ? 'Unmute notifications' : 'Mute notifications', action: act('pane.set', { muted: !p.muted }) },
     '-',
@@ -742,11 +743,15 @@ function newPaneDialog(st, project, then) {
     // used, on where the owner ticked it before or switched it on for the
     // project. The station says which, and what it allows.
     const trust = trustTick((q) => api.on(st, 'foldertrust.choice', q), () => ({ agent: agent.value, project: proj.value, cwd: cwd.value.trim() }));
+    // "Trust spandeck's own hooks in <agent> if it asks": on unless the
+    // owner turned it off on that station.
+    const hooks = hooksTick((q) => api.on(st, 'hookstrust.choice', q), () => ({ agent: agent.value }));
     let canContinue = true, asked = 0, askTimer = null;
     const ask = async () => {
       const n = ++asked;
       const isAgent = agent.value !== 'shell';
       trust.refresh();
+      hooks.refresh();
       lastRow.style.display = isAgent && canContinue ? '' : 'none';
       if (!isAgent || !canContinue) return;
       lastNote.textContent = '';
@@ -767,14 +772,14 @@ function newPaneDialog(st, project, then) {
     const submit = async () => {
       clearTimeout(askTimer);
       const resumeLast = agent.value !== 'shell' && canContinue && last.checked;
-      const params = { agent: agent.value, name: name.value.trim() || undefined, project: proj.value || undefined, cwd: cwd.value || undefined, resume_last: resumeLast || undefined, trust_folder: trust.value() };
+      const params = { agent: agent.value, name: name.value.trim() || undefined, project: proj.value || undefined, cwd: cwd.value || undefined, resume_last: resumeLast || undefined, trust_folder: trust.value(), trust_hooks: hooks.value() };
       const pane = await rpc(st, 'pane.spawn', params);
       close();
       if (resumeLast && !pane.resumed) toast('No saved conversation to continue here: a new one was started');
       then ? then(pane.id) : go(paneUrl(st, pane.id));
     };
     return h('form', { onsubmit: (e) => { e.preventDefault(); submit(); } },
-      field('Run', agent), field('Name', name, 'A name is used once in a project.'), field('Project', proj), field('Folder', cwd), lastRow, trust.row,
+      field('Run', agent), field('Name', name, 'A name is used once in a project.'), field('Project', proj), field('Folder', cwd), lastRow, trust.row, hooks.row,
       h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel'), h('button', { class: 'primary', type: 'submit' }, 'Start')));
   });
 }
@@ -1230,6 +1235,11 @@ async function setupPanel() {
   const loadTrust = () => Promise.all(onlineStations().filter(st => hasCap(st, 'folder_trust')).map(st =>
     api.on(st, 'foldertrust.list', {}).then(l => trustLists.set(st, l)).catch(() => trustLists.delete(st))));
   await loadTrust();
+  // And whether each station answers a review of spandeck's own hooks.
+  const hooksOn = new Map();
+  const loadHooks = () => Promise.all(onlineStations().filter(st => hasCap(st, 'hooks_trust')).map(st =>
+    api.on(st, 'hookstrust.choice', {}).then(c => hooksOn.set(st, c)).catch(() => hooksOn.delete(st))));
+  await loadHooks();
   const setup = view.setup;
   setup.mcp_servers ||= {}; setup.skills ||= {}; setup.defaults ||= {};
   dialog('Agent setup', (close, body) => {
@@ -1292,6 +1302,13 @@ async function setupPanel() {
           trustedFolders(st, list, () => loadTrust().then(draw)),
           (list.projects || []).length ? h('p', { class: 'muted small' }, 'Projects whose agents start without asking: ',
             list.projects.map(p => h('button', { class: 'mini', title: 'Open this project\'s folder trust', onclick: () => folderTrustDialog(st, p.project) }, p.project))) : null))),
+        hooksOn.size ? h('h3', {}, 'Trust spandeck\'s own hooks when an agent asks') : null,
+        hooksOn.size ? h('p', { class: 'muted small' }, `${[...hooksOn.values()][0].programs.map(p => p.agent_name).join(', ')} will not run a hook until you have reviewed it, and asks again whenever spandeck's hooks change. On: spandeck chooses "Trust all and continue" on that screen for you, once, and only when every hook the program can be asking about is spandeck's own; otherwise nothing is pressed and the pane says why. Each station has its own switch, kept by that station.`) : null,
+        h('div', { class: 'hooks-all' }, [...hooksOn].map(([st, c]) => h('label', { class: 'row hooks-switch' },
+          h('input', { type: 'checkbox', checked: c.on !== false, style: { width: 'auto' }, 'aria-label': `Trust spandeck's own hooks on ${st}`,
+            onchange: async (e) => { try { await rpc(st, 'hookstrust.set', { on: e.target.checked }); } catch (er) { /* said by rpc */ } await loadHooks(); draw(); } }),
+          h('span', {}, `${st}: ${c.on !== false ? 'on' : 'off'}`),
+          c.answers === false ? h('span', { class: 'muted small' }, ' · answers nothing here: this station does not keep spandeck\'s hooks in the agent settings') : null))),
         h('div', { class: 'row end' },
           h('button', { onclick: () => { close(); commandDialog(api.station, null); } }, 'Run a command in agents…'),
           h('span', { class: 'grow' }), h('button', { onclick: close }, 'Cancel'), h('button', { class: 'primary', onclick: save }, 'Save for every station')));
@@ -3209,7 +3226,9 @@ function phoneTerm(v, st, p, guest) {
   // Its program's folder-trust question: the owner's one tap, or the note
   // that spandeck answered it. A strip this narrow has no room for either.
   const asks = !p.exited && p.trust?.asks, answered = trustAnsweredWords(p);
-  const sig = `${fitKey}|${fitted}|${p.exited}|${canStop}|${brief}|${JSON.stringify(asks || null)}|${answered}`;
+  // And its review of hooks, the same way.
+  const hooksAsks = !p.exited && p.hooks_trust?.asks, hooksAnswered = hooksAnsweredWords(p);
+  const sig = `${fitKey}|${fitted}|${p.exited}|${canStop}|${brief}|${JSON.stringify(asks || null)}|${answered}|${JSON.stringify(hooksAsks || null)}|${hooksAnswered}`;
   if (v.sig !== sig) {
     v.sig = sig;
     // replaceChildren would print a missing piece as the word "null".
@@ -3219,7 +3238,9 @@ function phoneTerm(v, st, p, guest) {
       h('span', { class: 'grow' }),
       h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(st, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn'),
       asks ? trustCard(p, (remember) => rpc(st, 'pane.trust_folder', { pane: p.id, remember }).catch(() => {})) : null,
-      answered ? h('div', { class: 'muted small trust-said' }, answered + '. It is in the ship\'s log.') : null].filter(Boolean));
+      answered ? h('div', { class: 'muted small trust-said' }, answered + '. It is in the ship\'s log.') : null,
+      hooksAsks ? hooksCard(p, () => rpc(st, 'pane.trust_hooks', { pane: p.id }).catch(() => {})) : null,
+      hooksAnswered ? h('div', { class: 'muted small trust-said hooks-said' }, hooksAnswered + '. It is in the ship\'s log.') : null].filter(Boolean));
   }
   if (v.slot.firstChild !== t.el) v.slot.replaceChildren(t.el);
   const foot = p.exited ? (v.ended ||= h('p', { class: 'muted small' }, 'This pane has ended.')) : composer(st, p);

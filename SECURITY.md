@@ -148,26 +148,52 @@ days, not hours.
 - **Answering a program's "trust this folder?" for you.** An agent program started in a
   folder it has not seen asks whether you trust it. You can tick "Trust this folder for
   <agent> if it asks" when you start the pane, or switch it on for a project
-  (`DECISIONS.md`, "The folder-trust question"). This is the one place where spandeck
-  presses a consent key for you, on a choice you made earlier, and it is bounded. The
+  (`DECISIONS.md`, "The folder-trust question"). This is one of the two places where
+  spandeck presses a consent key for you, on a choice you made earlier (the other is the
+  next entry), and it is bounded. The
   choice is yours alone: starting a pane with it, the list of folders and a project's
   switch are refused to an agent, to a station acting for itself and to the read-only
   caller, and a helper an agent asks for is answered only in a project you switched on.
   It is kept by the station, never in a project's files, so a repository cannot switch
   it on for itself. The key is Enter, pressed once, and only on the program's own first
   screen, word for word, for that pane's folder, within 20 seconds of the program's
-  start, with the program's marker already on "Yes, I trust this folder". A screen that
+  start, with the program's marker seen on "Yes, I trust this folder". A screen that
   says anything more (Claude Code lists what a folder's settings would pre-approve or
-  run), a permission prompt, a login, Codex's review of hooks, or the same words later
-  in a session are never answered. Every answer is in the ship's log and on the pane.
+  run), a permission prompt, a login, or the same words later in a session are never
+  answered (Codex's review of hooks has its own, narrower rule: the next entry). Every answer is in the ship's log and on the pane.
   The programs' own trust files are not written. **What you are granting** is the
   program's own trust, which is wider than it sounds: the program will read, edit and
   run files there, and with Claude Code the folder's own settings then apply without
   asking (permission rules, extra folders, helper commands), for the whole git
   repository the folder is in. **Do not tick it, and do not switch a project on, for a
   folder copied from somewhere you do not trust**: what is in it can then run on this
-  machine as you. Claude Code's own choice on its screen is "No, exit", so by default
-  spandeck presses nothing there and offers you one tap instead.
+  machine as you. Claude Code's own choice on its screen is "No, exit": for a folder you
+  ticked spandeck moves the marker to "Yes" itself, reads the screen again and only then
+  confirms (your decision of 16 Nov 2026). `folder_trust.move = false` turns the moving
+  off; then nothing is pressed there and you are offered one tap instead. The tick itself
+  is still off for a folder you have never used.
+- **Answering Codex's "Hooks need review" for you.** Codex runs no hook until you have
+  reviewed it, and asks again whenever spandeck's hooks change. "Trust spandeck's own
+  hooks" (the tick where you start a pane, the switch per station in Agent setup,
+  `spandeck pane new --no-trust-hooks`) is **on unless you turn it off**
+  (`DECISIONS.md`, "Trusting spandeck's own hooks"). It is the second and last place
+  where spandeck presses a consent key for you. The choice on that screen, "Trust all
+  and continue", trusts every hook Codex found, so spandeck first reads the files Codex
+  takes hooks from and presses nothing unless they show that the hooks can only be
+  spandeck's own: its hooks file holds exactly what this version of spandeck installs
+  and nothing else, and there is no other source (no hooks in Codex's config, in the
+  pane's folder or any folder above it, or in `/etc/codex`; no plugin switched on; no
+  hook setting on the command line; no other `CODEX_HOME`). If any of that fails the
+  pane says which, nothing is pressed, and no one-tap "trust all" is offered: you review
+  them in the terminal. It is held to the same limits as the folder question (the
+  program's own first screen, whole, within 20 seconds of its start, once, not after you
+  typed). The choice is yours alone, is kept by the station and never in a project's
+  files, and is refused to an agent, to a station acting for itself and to the read-only
+  caller; a helper an agent asks for gets your standing choice as it is. Codex's own
+  trust records are never written. **What it does not see**: a hook source that Codex
+  has and this list does not name, and a file changed in the moment between Codex
+  reading it and spandeck reading it. It is not used on Windows, and only the station
+  that keeps the agent settings in your home answers at all.
 - **API keys.** With AgentVault connected, agents use keys through the vault and never
   hold them. See `docs/vault.md`, including what that does not protect against.
 

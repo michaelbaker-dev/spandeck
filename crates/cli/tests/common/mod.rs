@@ -453,6 +453,9 @@ impl Station {
             .env_remove("SPANDECK_SOCKET")
             .env_remove("SPANDECK_TOKEN")
             .env_remove("SPANDECK_PANE")
+            // Codex's settings are the throwaway home's, never the ones a
+            // developer's own shell points at.
+            .env_remove("CODEX_HOME")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
