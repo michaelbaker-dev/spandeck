@@ -647,7 +647,9 @@ fn a_pane_on_another_station_keeps_one_size_whichever_station_serves_the_deck() 
         s == through_one && *by == json!(who)
     });
     assert_eq!(b.pane(&pane)["controller"], json!(who));
-    phone.wait("the phone to give way", gave_way);
+    // (A phone that gives way shows the pane at its own text size, and says
+    // where the pane is open.)
+    phone.wait("the phone to give way", "!!document.querySelector('.term-body.natural') && (document.querySelector('.fit-note')?.innerText || '').includes('Fit takes its size')");
     shows(&phone, "the phone to show the pane's size", through_one);
     shows(&direct, "the window at bravo to show it", through_one);
     assert!(direct.js(gave_way).as_bool().unwrap());
@@ -976,6 +978,16 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     );
     s.wait_state(&asking, "needs_you");
     s.wait_state(&busy, "working");
+    // The shell that is opened further down. (Started before the page is
+    // open: a pane the page sees start is not fitted to the phone in its
+    // first six seconds, which this tier has no time to wait out.)
+    let sh = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "phone-sh", "cwd": s.root.join("home")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let page = Page::open(&s, 390, 800);
     page.wait(
@@ -1037,12 +1049,12 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     open("worker");
     page.js("[...document.querySelectorAll('.phone-pane button')].find(b => b.innerText === 'Stop this turn').click()");
     s.wait_text(&busy, "[fake] interrupted");
-    let size = s.pane(&busy);
-    assert_eq!(
-        (size["cols"].as_u64(), size["controller"].is_null()),
-        (Some(120), true),
-        "the phone did not resize the pane"
-    );
+    // Nobody else has the pane open: the phone fitted it to itself.
+    wait_for("the pane to be fitted to the phone", 10, || {
+        let size = s.pane(&busy);
+        (size["cols"].as_u64().is_some_and(|c| c < 80) && !size["controller"].is_null())
+            .then_some(())
+    });
 
     // 0.2 step 2: talk to an agent from the phone. Dictation fills the same
     // box, so what is tested here is the box: it survives a redraw, and a
@@ -1079,13 +1091,6 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     );
 
     // A shell on the phone: run a command, interrupt it with the Ctrl-C key.
-    let sh = s.call(
-        "pane.spawn",
-        json!({"program": "/bin/sh", "name": "phone-sh", "cwd": s.root.join("home")}),
-    )["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
     open("phone-sh");
     // A shell opens as its terminal, and has the choice of Chat or Terminal
     // like every pane (16 Nov 2026; its Chat is in `chat.rs`). Until then
@@ -1108,21 +1113,36 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     page.js("document.querySelector('.composer-row button[type=submit]').click()");
     s.wait_text(&sh, "back-42");
 
+    // Nobody else has the pane open, so the phone fitted it to itself (16 Nov
+    // 2026; `a_pane_on_a_phone_is_read_at_the_phones_text_size`). Turned
+    // off, the pane has its size back and is watched.
+    let fit = |label: &str| {
+        format!("(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.phone-pane button')].find(b => b.innerText === '{label}'))")
+    };
+    wait_for("the pane to be fitted to the phone", 10, || {
+        let p = s.pane(&sh);
+        (p["cols"].as_u64().is_some_and(|c| c < 80) && !p["controller"].is_null()).then_some(())
+    });
+    page.wait("Fitted, turned off", &fit("Fitted"));
+    let watched = wait_for("the pane to have its size back", 10, || {
+        let p = s.pane(&sh);
+        p["cols"].as_u64().filter(|c| *c >= 80)
+    });
     // A bug that happened on a real phone: tapping the terminal brought up the
     // keyboard, and typing did nothing. Keys typed into the terminal arrive,
     // and the pane keeps its size.
-    open("phone-sh");
-    page.wait("terminal", "document.querySelector('.phone-pane .xterm-helper-textarea') && (document.querySelector('.phone-pane .xterm-helper-textarea').focus(), true)");
+    page.wait("terminal", "document.querySelector('.phone-pane .term-body.natural .xterm-helper-textarea') && (document.querySelector('.phone-pane .xterm-helper-textarea').focus(), true)");
     page.type_str("echo typed-$((20+3))");
     page.press_key("Enter");
     s.wait_text(&sh, "typed-23");
-    assert!(
-        s.pane(&sh)["controller"].is_null(),
+    assert_eq!(
+        s.pane(&sh)["cols"].as_u64(),
+        Some(watched),
         "typing did not take the pane's size"
     );
 
     // Fitting the pane to the phone resizes it, which watching never does.
-    page.js("[...document.querySelectorAll('.phone-pane button')].find(b => b.innerText === 'Fit to screen').click()");
+    page.wait("Fit to screen", &fit("Fit to screen"));
     wait_for("the pane to be resized to the phone", 10, || {
         let p = s.pane(&sh);
         (p["cols"].as_u64().is_some_and(|c| c < 80) && !p["controller"].is_null()).then_some(())
@@ -1573,9 +1593,12 @@ fn answered_in_place_on(
 /// The owner's request (15 Nov 2026): "Can the mobile change colors fonts
 /// etc?" On a phone Appearance is a sheet, opened from the list and from a
 /// pane's menu. A theme chosen there is the deck's, kept by the station; the
-/// sizes of the text are this device's own: they change what is on screen,
-/// are still there after a reload, are in nothing the station keeps, are not
-/// used by the same browser at a computer's width, and resize no pane.
+/// size of text is this device's own, one for a conversation and (a step
+/// smaller) a terminal: it changes what is on screen, is still there after a
+/// reload, is in nothing the station keeps, and is not used by the same
+/// browser at a computer's width. (That a pane nobody else has open is
+/// fitted to the phone, and one somebody has is not resized, is
+/// `a_pane_on_a_phone_is_read_at_the_phones_text_size`.)
 fn the_phones_appearance_sheet(s: &Station, page: &common::browser::Page, pane: &str) {
     let click = |page: &common::browser::Page, what: &str, el: &str| {
         page.wait(what, &format!("(e => e ? (e.click(), true) : false)({el})"));
@@ -1624,19 +1647,18 @@ fn the_phones_appearance_sheet(s: &Station, page: &common::browser::Page, pane: 
     click(page, "Appearance…", item);
     page.wait("the sheet", "!!document.querySelector('.phone-look')");
     page.js(&step("chat", 3));
-    page.js(&step("term", 3));
     assert_eq!(
         page.js(&format!(
             "[{sizes}, [...document.querySelectorAll('.pl-value')].map(v => v.innerText)]"
         )),
-        json!([[18, 18], ["18 px", "16 px"]])
+        json!([[18, 18], ["18 px"]])
     );
     click(page, "Done", "document.querySelector('.sheet-foot button')");
     click(page, "Terminal", "[...document.querySelectorAll('.chat-switch button')].find(b => b.innerText === 'Terminal')");
     let term = "document.querySelector('.pane')?.paneTerm?.term.options.fontSize";
     page.wait(
         "the terminal at this phone's size",
-        &format!("{term} === 16 && !!document.querySelector('.phone-pane .xterm-rows')"),
+        &format!("{term} === 14 && !!document.querySelector('.phone-pane .xterm-rows')"),
     );
     // A bug that happened (15 Nov 2026): a terminal left for the list and
     // opened again had its bar twice.
@@ -1649,12 +1671,13 @@ fn the_phones_appearance_sheet(s: &Station, page: &common::browser::Page, pane: 
     page.reload();
     page.wait(
         "the sizes after a reload",
-        &format!("document.readyState === 'complete' && {term} === 16 && getComputedStyle(document.documentElement).getPropertyValue('--chat-scale') === '1.2'"),
+        &format!("document.readyState === 'complete' && {term} === 14 && getComputedStyle(document.documentElement).getPropertyValue('--chat-scale') === '1.2'"),
     );
     // A bug that happened (15 Nov 2026): a pane wider than the phone, shown
-    // whole and shrunk, was drawn off to the right of its frame.
+    // whole and shrunk, was drawn off to the right of its frame. (Since 16
+    // Nov it is fitted to the phone, nobody else having it open.)
     page.wait(
-        "the watched terminal inside its frame",
+        "the terminal inside its frame",
         "((a, b) => !!a && a.left >= b.left - 1 && a.right <= b.right + 1 && a.width > b.width / 2)(document.querySelector('.phone-pane .xterm-screen')?.getBoundingClientRect(), document.querySelector('.phone-pane .term-body').getBoundingClientRect())",
     );
     let look = s.call("look.get", json!({}));
@@ -1664,17 +1687,12 @@ fn the_phones_appearance_sheet(s: &Station, page: &common::browser::Page, pane: 
             && !look.to_string().contains("size"),
         "a size reached the station: {look}"
     );
-    // A phone that is only watching resized nothing with its larger text.
-    let held = s.pane(pane);
-    assert_eq!(
-        (
-            held["cols"].as_u64(),
-            held["rows"].as_u64(),
-            held["controller"].is_null()
-        ),
-        (was["cols"].as_u64(), was["rows"].as_u64(), true),
-        "the phone's text size did not resize the pane: {held}"
-    );
+    // Fitted to the phone at that size: fewer columns than it had.
+    wait_for("the pane fitted to the phone", 10, || {
+        let held = s.pane(pane);
+        (held["cols"].as_u64() < was["cols"].as_u64() && !held["controller"].is_null())
+            .then_some(())
+    });
     // Another page of the same browser, at a computer's width: the theme,
     // and the deck's sizes.
     page.js(&format!(
@@ -1805,6 +1823,258 @@ async fn live_tailscale_a_local_program_needs_a_token_and_stations_need_the_flee
     );
     assert_eq!(peer("station.info").await.0, 401);
     drop(tokio::task::spawn_blocking(move || drop(s)).await);
+}
+
+/// The owner's reports (16 Nov 2026, from an iPhone): "the appearance did not
+/// take effect, the colors did but not font", then, of a conversation beside
+/// a 120-column terminal shrunk to the phone's width, "Two different windows
+/// with 2 differ t fonts , should be mobile wide font", and "the Claude chat
+/// screen scrolls really nice but the antigravity terminal doesn't".
+///
+/// On a phone every pane is read at the phone's one text size, in either
+/// face. A pane another window has open keeps its size and is drawn at that
+/// text size, scrolled sideways, with the reason said; a pane nobody has
+/// open is fitted to the phone by itself, from its conversation or its
+/// terminal, and gets its size back when the phone leaves it. The size and
+/// the font chosen in the phone's sheet reach the open terminal, one opened
+/// afterwards, the conversation and what a pane printed, are there after a
+/// reload, and the font is kept by the station. A drag over a terminal
+/// follows the finger by the pixel and goes on after it lifts.
+#[test]
+fn a_pane_on_a_phone_is_read_at_the_phones_text_size() {
+    use common::browser::Page;
+    let s = Station::start("alpha");
+    let spawn = |name: &str| {
+        s.call(
+            "pane.spawn",
+            json!({"program": "/bin/sh", "name": name, "cwd": s.root.join("home")}),
+        )["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (wide, other) = (spawn("wide"), spawn("other"));
+    let click = |page: &Page, what: &str, el: &str| {
+        page.wait(what, &format!("(e => e ? (e.click(), true) : false)({el})"));
+    };
+    let button = |text: &str| {
+        format!("[...document.querySelectorAll('.phone-pane button, .phone-chat .chat-switch button')].find(b => b.innerText.trim() === '{text}')")
+    };
+    let cols = |pane: &str| s.pane(pane)["cols"].as_u64().unwrap();
+    let holders = |pane: &str| s.pane(pane)["holders"].as_array().map_or(99, |h| h.len());
+
+    // A computer has the pane open, and so holds its size.
+    let desk = Page::open(&s, 1300, 800);
+    desk.goto(&format!("#/s/alpha/p/{wide}"));
+    desk.wait(
+        "the pane on the computer",
+        "!!document.querySelector('.pane .xterm-rows')",
+    );
+    let held = wait_for("the computer to hold the pane", 10, || {
+        let p = s.pane(&wide);
+        (holders(&wide) == 1 && !p["controller"].is_null() && cols(&wide) > 100)
+            .then(|| cols(&wide))
+    });
+    s.call(
+        "pane.paste",
+        json!({"pane": wide, "text": "echo printed-$((40+2))", "enter": true}),
+    );
+    s.wait_text(&wide, "printed-42");
+
+    // The phone: the pane is not resized, and not shrunk either.
+    let phone = Page::open(&s, 390, 844);
+    phone.goto(&format!("#/s/alpha/p/{wide}"));
+    let term = "document.querySelector('.phone-pane .pane')?.paneTerm";
+    let drawn = "(r => r && [parseFloat(getComputedStyle(r).fontSize), getComputedStyle(r).fontFamily.split(',')[0].trim()])(document.querySelector('.phone-pane .xterm-rows'))";
+    let seen = phone.wait(
+        "the pane at the phone's text size, scrolling sideways, with the reason",
+        &format!("(b => !!b && b.classList.contains('natural') && b.scrollWidth > b.clientWidth + 100 && [document.querySelector('.fit-note')?.innerText || '', getComputedStyle(b.querySelector('.xterm')).transform, {term}.term.options.fontSize, {drawn}[0]])(document.querySelector('.phone-pane .term-body'))"),
+    );
+    assert!(
+        seen[0].as_str().unwrap().contains("Fit takes its size") && seen[1] == json!("none"),
+        "{seen}"
+    );
+    // The default: a terminal's text is at least 11 px on a phone.
+    assert_eq!(
+        (seen[2].as_f64(), seen[3].as_f64()),
+        (Some(12.0), Some(12.0)),
+        "{seen}"
+    );
+    assert_eq!(
+        (cols(&wide), holders(&wide)),
+        (held, 1),
+        "a phone resized a pane a computer has open"
+    );
+    // The whole width, shrunk, is still there to ask for.
+    click(&phone, "Show whole width", &button("Show whole width"));
+    phone.wait("the pane whole", "(b => b.classList.contains('letterbox') && getComputedStyle(b.querySelector('.xterm')).transform !== 'none')(document.querySelector('.phone-pane .term-body'))");
+    click(&phone, "Show at text size", &button("Show at text size"));
+    phone.wait(
+        "the pane at text size again",
+        "document.querySelector('.phone-pane .term-body').classList.contains('natural')",
+    );
+
+    // The sheet: one size for everything, and the terminal's font.
+    click(
+        &phone,
+        "the pane's menu",
+        "document.querySelector('.chat-more')",
+    );
+    click(&phone, "Appearance…", "[...document.querySelectorAll('.menu-item')].find(b => b.innerText.startsWith('Appearance'))");
+    phone.wait(
+        "the sheet",
+        "!!document.querySelector('.phone-look .pl-font')",
+    );
+    phone.js("(b => { for (let i = 0; i < 3; i += 1) b.click(); return true; })(document.querySelector('.pl-size .pl-step:last-of-type'))");
+    click(
+        &phone,
+        "each device's own monospace",
+        "document.querySelector('.pl-font[data-font=system]')",
+    );
+    wait_for("the station to keep the font", 10, || {
+        (s.call("look.get", json!({}))["deck"]["set"]["font.family"]
+            == json!(["ui-monospace", "monospace"]))
+        .then_some(())
+    });
+    assert_eq!(
+        phone.js("[document.querySelector('.pl-value').innerText, document.querySelectorAll('.pl-size').length, document.querySelector('.pl-mono-note').innerText.includes('14 px')]"),
+        json!(["18 px", 1, true])
+    );
+    click(
+        &phone,
+        "Done",
+        "document.querySelector('.sheet-foot button')",
+    );
+    // The terminal that was open.
+    phone.wait(
+        "the open terminal in that size and font",
+        &format!("JSON.stringify({drawn}) === '[14,\"ui-monospace\"]' && {term}.term.options.fontFamily.startsWith('ui-monospace, monospace')"),
+    );
+    // Its conversation, made from its screen: what was sent, and what the
+    // pane printed, which is text set like the terminal's.
+    click(&phone, "Chat", &button("Chat"));
+    let faces = "(q => [q('.chat-bubble'), q('.chat-screen-text'), q('.chat-box')].map(e => e && [parseFloat(getComputedStyle(e).fontSize), getComputedStyle(e).fontFamily.split(',')[0].trim()]))(x => document.querySelector('.phone-chat ' + x))";
+    phone.wait(
+        "what the pane printed, in the conversation",
+        "(document.querySelector('.phone-chat .chat-screen-text')?.innerText || '').includes('printed-42')",
+    );
+    let got = phone.js(faces);
+    assert_eq!(
+        (got[0][0].as_f64(), &got[1], got[2][0].as_f64()),
+        (Some(18.0), &json!([14, "ui-monospace"]), Some(18.0)),
+        "{got}"
+    );
+    assert_eq!(
+        cols(&wide),
+        held,
+        "the conversation resized a pane a computer has open"
+    );
+
+    // The computer lets go of the pane: now fitting it takes its size from
+    // nobody, and the conversation asks for the phone's width.
+    desk.goto("#/fleet");
+    let fitted = wait_for("the pane at the phone's width", 15, || {
+        (cols(&wide) < 60).then(|| cols(&wide))
+    });
+    assert!(fitted >= 20, "{fitted} columns");
+    // As its terminal it is fitted and in control, and fills its frame.
+    click(&phone, "Terminal", &button("Terminal"));
+    phone.wait(
+        "the terminal fitted to the phone",
+        &format!("(t => !!t && t.control && t.chan !== null && t.term.cols < 60 && !t.body.classList.contains('natural') && !t.body.classList.contains('letterbox') && t.body.querySelector('.xterm-screen').offsetHeight > t.body.clientHeight * 0.8 && {}?.getAttribute('aria-pressed') === 'true' && !document.querySelector('.fit-note'))({term})", button("Fitted")),
+    );
+    wait_for("the station to say the phone holds it", 10, || {
+        let p = s.pane(&wide);
+        (holders(&wide) == 1 && !p["controller"].is_null() && cols(&wide) < 60).then_some(())
+    });
+
+    // A drag over the terminal. The arithmetic first (touch.js).
+    let sums = phone.js(
+        "import('./touch.js').then(t => [t.axisOf(3, 4, true), t.axisOf(30, 4, true), t.axisOf(30, 4, false), t.axisOf(4, 30, true),
+           t.linesOf(40, 17), t.linesOf(-9, 17),
+           t.speedOf([{t: 0, x: 0, y: 0}, {t: 50, x: 0, y: 50}], 55, 'y'), t.speedOf([{t: 0, x: 0, y: 0}, {t: 50, x: 0, y: 50}], 400, 'y'), t.speedOf([{t: 0, x: 0, y: 0}, {t: 2, x: 0, y: 500}], 3, 'y'),
+           Math.round(t.glide(1, 1e6).moved), Math.round(t.glide(1, 16).moved + t.glide(t.glide(1, 16).speed, 1e6).moved)])",
+    );
+    assert_eq!(
+        sums,
+        json!([null, "x", "y", "y", {"whole": 2, "rest": 6}, {"whole": 0, "rest": -9}, 1, 0, 0, 325, 325]),
+        "the arithmetic of a drag"
+    );
+    s.call(
+        "pane.paste",
+        json!({"pane": wide, "text": "seq 1000 1400", "enter": true}),
+    );
+    s.wait_text(&wide, "1400");
+    phone.wait("the end of the output", "document.querySelector('.phone-pane .xterm-rows').innerText.split('\\n').some(x => x.trim() === '1400')");
+    // Less than a line: the rows follow the finger, and no line is moved.
+    let part = phone.js(&format!(
+        "(async () => {{ const t = {term}, el = t.body.querySelector('.xterm-screen'), rows = t.body.querySelector('.xterm-rows');
+           const touch = (type, y) => {{ const ev = new Event(type, {{bubbles: true, cancelable: true}}); Object.defineProperty(ev, 'touches', {{value: y === null ? [] : [{{clientX: 100, clientY: y}}]}}); return ev; }};
+           const y0 = t.term.buffer.active.viewportY;
+           el.dispatchEvent(touch('touchstart', 300)); el.dispatchEvent(touch('touchmove', 309));
+           for (let i = 0; i < 100 && !rows.style.transform; i += 1) await new Promise(r => setTimeout(r, 20));
+           const during = [rows.style.transform, t.term.buffer.active.viewportY - y0];
+           el.dispatchEvent(touch('touchend', null));
+           return [during, rows.style.transform, t.term.buffer.active.viewportY - y0]; }})()"
+    ));
+    assert!(
+        part[0] == json!(["translateY(9px)", 0])
+            && part[1] == json!("")
+            && [0, -1].contains(&part[2].as_i64().unwrap()),
+        "a drag of 9 px: {part}"
+    );
+    // A quick drag: the view goes on after the finger lifts, and comes to
+    // rest on a whole line.
+    let flick = phone.js(&format!(
+        "(async () => {{ const t = {term}, el = t.body.querySelector('.xterm-screen'), rows = t.body.querySelector('.xterm-rows');
+           const touch = (type, y) => {{ const ev = new Event(type, {{bubbles: true, cancelable: true}}); Object.defineProperty(ev, 'touches', {{value: y === null ? [] : [{{clientX: 100, clientY: y}}]}}); return ev; }};
+           t.term.scrollToBottom();
+           const y0 = t.term.buffer.active.viewportY;
+           el.dispatchEvent(touch('touchstart', 300));
+           for (let y = 315; y <= 420; y += 15) {{ el.dispatchEvent(touch('touchmove', y)); await new Promise(r => setTimeout(r, 16)); }}
+           el.dispatchEvent(touch('touchend', null));
+           const lifted = t.term.buffer.active.viewportY;
+           for (let i = 0; i < 200 && (t.term.buffer.active.viewportY >= lifted || rows.style.transform); i += 1) await new Promise(r => setTimeout(r, 25));
+           return [y0 - lifted, lifted - t.term.buffer.active.viewportY, rows.style.transform]; }})()"
+    ));
+    assert!(
+        flick[0].as_i64().unwrap() >= 3 && flick[1].as_i64().unwrap() >= 5 && flick[2] == json!(""),
+        "lines moved under the finger, lines moved after it lifted, and where the rows rest: {flick}"
+    );
+
+    // After a reload: the size and the font, and the pane fitted again.
+    phone.reload();
+    phone.wait(
+        "the size and the font after a reload",
+        &format!("document.readyState === 'complete' && !!{term} && {term}.control && JSON.stringify({drawn}) === '[14,\"ui-monospace\"]'"),
+    );
+    // A terminal opened afterwards has them; and the pane the phone left
+    // has the size it had before the phone fitted it.
+    phone.goto(&format!("#/s/alpha/p/{other}"));
+    phone.wait(
+        "another terminal in that size and font, fitted",
+        &format!("location.hash.endsWith('{other}') && !!{term} && {term}.pane.id === '{other}' && {term}.control && JSON.stringify({drawn}) === '[14,\"ui-monospace\"]'"),
+    );
+    wait_for("the pane the phone left to have its size back", 10, || {
+        (cols(&wide) == held && holders(&wide) == 0).then_some(())
+    });
+    // "Fitted" turned off is remembered for that pane, and said.
+    wait_for("the other pane fitted", 10, || {
+        (cols(&other) < 60).then_some(())
+    });
+    click(&phone, "Fitted", &button("Fitted"));
+    let off = phone.wait(
+        "the pane not fitted, and why",
+        &format!("(n => !!n && {term}.body.classList.contains('natural') && [n.innerText, localStorage.getItem('spandeck.phonefit.off')])(document.querySelector('.fit-note'))"),
+    );
+    assert!(
+        off[0].as_str().unwrap().contains("you turned that off")
+            && off[1].as_str().unwrap().contains(other.as_str()),
+        "{off}"
+    );
+    wait_for("its size given back", 10, || {
+        (cols(&other) >= 80).then_some(())
+    });
 }
 
 /// The phone's layout map (agreed prototype, screen 4): a project layout is
@@ -2043,12 +2313,12 @@ fn the_pane_of_a_layout_is_the_pane_itself(s: &Station, page: &common::browser::
         "the conversation where it was",
         &format!("{showing} === 'pair › tallier · 1 of 2' && Math.abs({log}?.scrollTop - window.__top) <= 2 && document.querySelector('.chat-box').value === 'kept' && {watched} === '1 watched, 0 attached'"),
     );
-    let pane = s.pane(&tallier);
-    assert_eq!(
-        (pane["cols"].as_u64(), pane["controller"].is_null()),
-        (Some(120), true),
-        "the layout's conversation did not resize the pane"
-    );
+    // Its terminal was fitted to the phone while it showed, and the pane
+    // was given its size back when the layout stepped on; its conversation,
+    // which is the agent's own and not made from the screen, resizes nothing.
+    wait_for("the pane at the size it had", 10, || {
+        (s.pane(&tallier)["cols"].as_u64() == Some(120)).then_some(())
+    });
 }
 
 /// Kills a daemon the harness did not start (the one "installed" by an add).
@@ -4859,6 +5129,115 @@ fn the_rest_of_the_conversation_view() {
     wide.wait("the terminal again", "!!document.querySelector('.station-main.zoomed .pane .xterm-rows') && !document.querySelector('.chat-pane')");
 }
 
+/// Not a test of behaviour: pictures of a wide pane on a phone, as its
+/// terminal and as its conversation, while a computer has it open and after
+/// the computer lets go of it, and of the sheet, for a person to look at.
+/// `SPANDECK_SHOTS=<folder> cargo test -p spandeck --test phase5 pictures_of_a_pane_at_the_phones_text_size -- --ignored`
+#[test]
+#[ignore = "takes pictures for a person to look at; needs Chrome"]
+fn pictures_of_a_pane_at_the_phones_text_size() {
+    use common::browser::Page;
+    use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png;
+    let out = std::path::PathBuf::from(std::env::var("SPANDECK_SHOTS").expect("SPANDECK_SHOTS"));
+    std::fs::create_dir_all(&out).unwrap();
+    let s = Station::start("spark2");
+    s.call(
+        "look.set",
+        json!({"level": "deck", "choice": {"theme": "solarized-dark"}}),
+    );
+    let said = |blocks: Value| json!({"transcript": {"type": "assistant", "message": {"role": "assistant", "content": blocks}}});
+    let heron = s.fake(
+        json!({"steps": [
+            {"prompt": "Count the herons in survey.csv and fix the tally script."},
+            said(json!([{"type": "text", "text": "I'll count the rows first, then fix `tally.py`."}])),
+            {"turn_end": "**Done: the tally now counts herons only.**\n\n```python\nherons = [r for r in rows if r.species.strip() == 'heron']\nreturn len(herons)\n```"}
+        ]}),
+        json!({"name": "heron"}),
+    );
+    let wide = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "wide", "cwd": s.root.join("home")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let shot = |page: &Page, name: &str| {
+        std::thread::sleep(Duration::from_millis(900));
+        let png = page.tab.capture_screenshot(Png, None, None, true).unwrap();
+        std::fs::write(out.join(format!("{name}.png")), png).unwrap();
+    };
+    let click = |page: &Page, what: &str, el: &str| {
+        page.wait(what, &format!("(e => e ? (e.click(), true) : false)({el})"));
+    };
+    let face = |text: &str| {
+        format!("[...document.querySelectorAll('.chat-switch button')].find(b => b.innerText.trim() === '{text}')")
+    };
+    let desk = Page::open(&s, 1300, 800);
+    desk.goto(&format!("#/s/spark2/p/{wide}"));
+    desk.wait(
+        "the pane on the computer",
+        "!!document.querySelector('.pane .xterm-rows')",
+    );
+    wait_for("the computer to size the pane", 10, || {
+        (s.pane(&wide)["cols"].as_u64().unwrap() > 100).then_some(())
+    });
+    let print = "i=1; while [ $i -le 18 ]; do echo \"$i  the quick brown fox jumps over the lazy dog and keeps going, right across a terminal one hundred and twenty columns wide\"; i=$((i+1)); done";
+    s.call(
+        "pane.paste",
+        json!({"pane": wide, "text": print, "enter": true}),
+    );
+    s.wait_text(&wide, "18  the quick");
+    let phone = Page::open(&s, 390, 844);
+    phone.goto(&format!("#/s/spark2/p/{wide}"));
+    phone.wait(
+        "the terminal",
+        "!!document.querySelector('.phone-pane .xterm-rows')",
+    );
+    shot(&phone, "1-terminal-open-on-a-computer");
+    click(&phone, "Chat", &face("Chat"));
+    phone.wait(
+        "what it printed",
+        "!!document.querySelector('.phone-chat .chat-screen-text')",
+    );
+    shot(&phone, "2-conversation-open-on-a-computer");
+    desk.goto("#/fleet");
+    std::thread::sleep(Duration::from_millis(4000));
+    s.call(
+        "pane.paste",
+        json!({"pane": wide, "text": format!("clear; {print}"), "enter": true}),
+    );
+    std::thread::sleep(Duration::from_millis(1500));
+    shot(&phone, "3-conversation-nobody-else-has-it");
+    click(&phone, "Terminal", &face("Terminal"));
+    phone.wait(
+        "the terminal",
+        "!!document.querySelector('.phone-pane .xterm-rows')",
+    );
+    std::thread::sleep(Duration::from_millis(1500));
+    s.call(
+        "pane.paste",
+        json!({"pane": wide, "text": format!("clear; {print}"), "enter": true}),
+    );
+    shot(&phone, "4-terminal-nobody-else-has-it");
+    phone.goto(&format!("#/s/spark2/p/{heron}"));
+    phone.wait(
+        "the conversation",
+        "!!document.querySelector('.phone-chat .chat-text')",
+    );
+    shot(&phone, "5-conversation-of-an-agent");
+    click(
+        &phone,
+        "the pane's menu",
+        "document.querySelector('.chat-more')",
+    );
+    click(&phone, "Appearance…", "[...document.querySelectorAll('.menu-item')].find(b => b.innerText.startsWith('Appearance'))");
+    phone.wait("the sheet", "!!document.querySelector('.phone-look')");
+    phone.js("(document.querySelector('.pl-size').scrollIntoView(), true)");
+    shot(&phone, "6-sheet-text-size");
+    phone.js("(document.querySelector('.backdrop').scrollTop = 99999, true)");
+    shot(&phone, "7-sheet-fonts");
+}
+
 /// Not a test of behaviour: pictures of the phone's Appearance sheet, and of
 /// a conversation and a terminal at the smallest, the deck's and the largest
 /// text size, in a dark and a light theme, for a person to look at.
@@ -4958,15 +5337,13 @@ fn pictures_of_the_phones_appearance() {
                     "the terminal",
                     "!!document.querySelector('.phone-pane .xterm-rows')",
                 );
-                shot(&phone, &format!("{theme}-{n}-terminal-watching"));
+                shot(&phone, &format!("{theme}-{n}-terminal-of-the-agent"));
                 click(&phone, "Chat", &button("Chat"));
             }
             // A terminal's size shows in a pane fitted to the phone.
             phone.goto(&format!("#/s/spark2/p/{sh}"));
-            if to == "deck" {
-                click(&phone, "Fit to screen", &button("Fit to screen"));
-                phone.wait("fitted", &button("Fitted"));
-            }
+            // (Fitted by itself: nobody else has the pane open.)
+            phone.wait("fitted", &button("Fitted"));
             phone.wait(
                 "the terminal",
                 "!!document.querySelector('.phone-pane .xterm-rows')",

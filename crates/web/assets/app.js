@@ -15,7 +15,7 @@ import { Api } from './api.js';
 import { PaneTerm } from './term.js';
 import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText, heldWords, hooksTick, hooksCard, hooksAnsweredWords, trustTick, trustCard, trustAnsweredWords, TRUST_WARNING } from './ui.js';
 import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
-import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners } from './look.js';
+import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners, termSize } from './look.js';
 import { lookEditor } from './lookedit.js';
 import { phoneLook } from './phonelook.js';
 import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook, refreshAsked, refreshCorrected } from './perf.js';
@@ -2272,7 +2272,8 @@ function getTerm(st, p, where, mode) {
   const key = `${where}:${st}/${p.id}`;
   let t = S.terms.get(key);
   if (!t) {
-    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', face: where === 'leaf' || where === 'zoom' ? (term) => chatToggle(st, term.pane) : null, agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where, term), onUsage: (term) => usageDialog(st, term.pane), onFocus: (term) => { S.focused = `${st}/${term.pane.id}`; }, onAttached: (term) => keyboardBack(st, term) });
+    const lost = where !== 'phone-fit' ? null : () => { const k = `${st}/${p.id}`; phoneFit.delete(k); phoneAuto.delete(k); phoneBefore.delete(k); phoneMine.delete(k); phoneTaken.add(k); update(); };
+    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', natural: where === 'phone', onLost: lost, face: where === 'leaf' || where === 'zoom' ? (term) => chatToggle(st, term.pane) : null, agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where, term), onUsage: (term) => usageDialog(st, term.pane), onFocus: (term) => { S.focused = `${st}/${term.pane.id}`; }, onAttached: (term) => keyboardBack(st, term) });
     S.terms.set(key, t);
     t._fresh = true;
     t.setLink(linkPaneWords(api.link()));
@@ -3123,8 +3124,158 @@ function paneView(st, id) {
 const PHONE_KEYS = [['Esc', '\x1b'], ['Tab', '\t'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['←', '\x1b[D'], ['→', '\x1b[C'], ['⏎', '\r'], ['^C', '\x03']];
 const KEY_NAMES = { '↑': 'Up', '↓': 'Down', '←': 'Left', '→': 'Right', '⏎': 'Enter', '^C': 'Control C' };
 const composers = new Map();
-const phoneFit = new Set();
 const phonePanes = new Map();
+
+// ---- a pane on a phone is read at the phone's text size ----
+// (The owner, 16 Nov 2026, of a conversation beside a 120-column terminal
+// shrunk to the phone's width: "Two different windows with 2 differ t fonts ,
+// should be mobile wide font".) A pane opened on a phone is fitted to the
+// phone by itself, as "Fit to screen" does, when that takes its size from
+// nobody: no other window has its terminal open (`holders`, which the
+// pane's station counts). When one has, the pane keeps its size and is
+// drawn here at the phone's text size all the same, scrolled sideways; the
+// bar says where it is open and offers Fit. When the phone's view of the
+// pane closes, the size the pane had is given back, unless someone else has
+// set another since.
+const phoneFit = new Set();    // fitted to this phone: asked for, or by itself
+const phoneAuto = new Set();   // of those, the ones nobody asked for
+const phoneTaken = new Set();  // another window took the size while it was open here
+const phoneWhole = new Set();  // watched, and shown whole: shrunk to the phone's width
+const phoneBefore = new Map(); // the size to give back: { cols, rows }
+const phoneMine = new Map();   // the size this phone gave it, and when: { cols, rows, at }
+const phoneSeen = new Set();   // the panes on the page in this redraw
+// "Fitted" turned off for a pane is remembered on this device.
+const FIT_OFF = 'spandeck.phonefit.off';
+let fitOff = {};
+try { fitOff = JSON.parse(localStorage.getItem(FIT_OFF) || '{}') || {}; } catch (e) { fitOff = {}; }
+const setFitOff = (key, off) => {
+  if (off) fitOff[key] = 1; else delete fitOff[key];
+  try { localStorage.setItem(FIT_OFF, JSON.stringify(Object.fromEntries(Object.entries(fitOff).slice(-200)))); } catch (e) { /* until the page is closed, then */ }
+};
+// Whether nobody else has the pane's terminal open, as far as its station
+// says: a station from before this does not say, and is then not resized
+// unasked. Nor is a pane whose program is at a question of its first screen
+// (trust this folder, review these hooks): spandeck reads that screen to
+// offer the answer. A pane that has just been started may be about to ask
+// one, so it is left for its first seconds, until the station has looked.
+const YOUNG_MS = 6000;
+const paneBorn = new Map(); // when this page first heard of a pane; 0 for one that was there when its station was first listed
+const listed = new Set();
+function notePanes() {
+  for (const [st, panes] of S.panes) {
+    for (const p of panes) if (!paneBorn.has(`${st}/${p.id}`)) paneBorn.set(`${st}/${p.id}`, listed.has(st) ? Date.now() : 0);
+    listed.add(st);
+  }
+  if (paneBorn.size > 2000) for (const k of [...paneBorn.keys()].slice(0, 1000)) paneBorn.delete(k);
+}
+const phoneFree = (key, p) => !p.exited && !fitOff[key] && !phoneTaken.has(key) && Array.isArray(p.holders) && p.holders.length === 0 && !p.trust?.asks && !p.hooks_trust?.asks
+  && Date.now() - (paneBorn.get(key) ?? Date.now()) >= YOUNG_MS;
+// What is to be given back is kept through a reload of the page (not
+// longer): a pane still at the size this page gave it is given back the size
+// it had before that, and not the phone's own.
+const FIT_BEFORE = 'spandeck.phonefit.before';
+let beforeKept = {}, beforeSaved = '';
+try { beforeKept = JSON.parse(sessionStorage.getItem(FIT_BEFORE) || '{}') || {}; } catch (e) { beforeKept = {}; }
+function phoneHold(key, p, auto) {
+  if (!phoneBefore.has(key)) {
+    const kept = beforeKept[key];
+    phoneBefore.set(key, kept && kept.mc === p.cols && kept.mr === p.rows && kept.cols > 0 && kept.rows > 0 ? { cols: kept.cols, rows: kept.rows } : { cols: p.cols, rows: p.rows });
+  }
+  phoneFit.add(key);
+  if (auto) phoneAuto.add(key);
+}
+// Whether the pane is fitted to this phone, fitting it now when that is free.
+function phoneFitted(st, p, guest) {
+  const key = `${st}/${p.id}`;
+  phoneSeen.add(key);
+  notePanes();
+  // In a layout a pane that has ended is only looked at.
+  if (p.exited) return phoneFit.has(key) && guest === undefined;
+  if (phoneFit.has(key)) { phoneHold(key, p, false); return true; }
+  if (!phoneFree(key, p)) return false;
+  phoneHold(key, p, true);
+  return true;
+}
+// The phone's view of a pane has closed, or Fitted was turned off: the pane
+// has the size it had again, unless another window has set one since.
+function phoneGiveBack(key) {
+  const before = phoneBefore.get(key), set = phoneMine.get(key);
+  phoneBefore.delete(key);
+  phoneMine.delete(key);
+  delete beforeKept[key];
+  const cut = key.indexOf('/'), st = key.slice(0, cut), id = key.slice(cut + 1);
+  const p = findPane(st, id), t = S.terms.get('phone-fit:' + key);
+  if (!before || !p || p.exited || !before.cols || !before.rows) return;
+  // With its terminal on the page, the terminal knows whether it still has
+  // the size; without (its conversation is showing), the list of panes does,
+  // a few seconds after the size was set.
+  if (t && !t.control) return;
+  const now = t && t.chan !== null ? t.size : set;
+  if (!now || (!t && (p.cols !== now.cols || p.rows !== now.rows) && Date.now() - now.at > 6000)) return;
+  if (now.cols === before.cols && now.rows === before.rows) return;
+  api.on(st, 'pane.resize', { pane: id, cols: before.cols, rows: before.rows }).then(() => stationSoon(st, 60)).catch(() => {});
+}
+// After a redraw: every pane fitted here that is no longer on the page.
+function phoneLeft() {
+  notePanes();
+  for (const key of [...phoneFit]) {
+    if (phoneSeen.has(key)) continue;
+    phoneGiveBack(key);
+    if (phoneAuto.delete(key)) phoneFit.delete(key);
+  }
+  for (const key of [...phoneTaken]) if (!phoneSeen.has(key)) phoneTaken.delete(key);
+  phoneSeen.clear();
+  // (What was kept before a reload stays until its pane is fitted again.)
+  const keep = Object.fromEntries(Object.entries(beforeKept).slice(-40));
+  for (const [key, b] of phoneBefore) {
+    const t = S.terms.get('phone-fit:' + key), was = phoneMine.get(key);
+    // What its terminal holds it at, for when the terminal is not on the page.
+    if (t && t.control && t.chan !== null && t.size.cols && (!was || was.cols !== t.size.cols || was.rows !== t.size.rows)) phoneMine.set(key, { cols: t.size.cols, rows: t.size.rows, at: Date.now() });
+    const mine = phoneMine.get(key);
+    if (mine) keep[key] = { cols: b.cols, rows: b.rows, mc: mine.cols, mr: mine.rows };
+  }
+  for (const key of [...phoneMine.keys()]) if (!phoneBefore.has(key)) phoneMine.delete(key);
+  beforeKept = keep;
+  const text = JSON.stringify(keep);
+  if (text !== beforeSaved) { beforeSaved = text; try { sessionStorage.setItem(FIT_BEFORE, text); } catch (e) { /* not kept, then */ } }
+}
+// Where a pane is open, from who its station says has it: a window that
+// reaches it through another station is named for that station.
+function holderWords(st, p) {
+  const clean = (x) => x.replace(/[^A-Za-z0-9-]/g, '').slice(0, 24);
+  const via = (p.holders || []).map(c => S.fleet.stations.find(x => String(c).startsWith(`gw-${clean(x.station)}-`))?.station).find(Boolean);
+  return via && via !== st ? `another window, through ${via}` : `another window of ${st}'s deck`;
+}
+// A pane whose conversation is made from its screen, open as that
+// conversation on a phone: what it prints is read at the phone's width only
+// if the pane is that wide. The conversation attaches to nothing, so the
+// size is asked for by itself, under the same rule, from the width of a
+// printed block and the phone's text size.
+let cellProbe = null;
+function phoneChatFit(st, p, conv) {
+  const key = `${st}/${p.id}`;
+  phoneSeen.add(key);
+  notePanes();
+  if (conv.source !== 'screen' || conv.available !== true) return;
+  const mine = phoneMine.get(key);
+  // Someone else has set another size since: it is theirs.
+  if (mine && (p.cols !== mine.cols || p.rows !== mine.rows) && Date.now() - mine.at > 6000 && !S.terms.has('phone-fit:' + key)) {
+    phoneMine.delete(key); phoneBefore.delete(key); phoneFit.delete(key); phoneAuto.delete(key); phoneTaken.add(key);
+    return;
+  }
+  if (phoneFit.has(key) || !phoneFree(key, p)) return;
+  const px = termSize(pageLook(null)).px;
+  cellProbe ||= document.createElement('canvas').getContext('2d');
+  cellProbe.font = `${px}px ${getComputedStyle(document.documentElement).getPropertyValue('--mono-font') || 'monospace'}`;
+  const cell = cellProbe.measureText('MMMMMMMMMM').width / 10;
+  const block = conv.body.querySelector('.chat-screen-text');
+  const width = (block && block.clientWidth > 60 ? block.clientWidth : innerWidth - 26) - 22;
+  const cols = Math.floor(width / cell), rows = Math.max(12, Math.min(60, Math.floor(innerHeight * 0.6 / (px * 1.4))));
+  if (!(cell > 0) || cols < 20 || cols > 500) return;
+  phoneHold(key, p, true);
+  phoneMine.set(key, { cols, rows, at: Date.now() });
+  if (p.cols !== cols || p.rows !== rows) api.on(st, 'pane.resize', { pane: p.id, cols, rows }).then(() => stationSoon(st, 60)).catch(() => {});
+}
 
 // Kept per pane, so a redraw does not throw away what you are writing.
 function composer(st, p) {
@@ -3218,9 +3369,15 @@ const mapSpan = (n) => {
 // button at each touch). `guest`: in a layout, where the pane is from.
 function phoneTerm(v, st, p, guest) {
   const fitKey = `${st}/${p.id}`;
-  // In a layout a pane that has ended is only looked at.
-  const fitted = phoneFit.has(fitKey) && (guest === undefined || !p.exited);
+  const fitted = phoneFitted(st, p, guest);
   const t = fitted ? getTerm(st, p, 'phone-fit', 'control') : getTerm(st, p, 'phone', 'watch');
+  // Not fitted: at this phone's text size and scrolled, or (asked for) whole.
+  const whole = !fitted && phoneWhole.has(fitKey);
+  if (!fitted) t.setWhole(whole);
+  // Why it is not fitted, beside the button that fits it.
+  const why = fitted || p.exited ? '' : phoneTaken.has(fitKey) || (p.holders || []).length ? `Open in ${holderWords(st, p)}: Fit takes its size.`
+    : fitOff[fitKey] ? 'Not fitted to this phone: you turned that off for this pane.'
+      : !Array.isArray(p.holders) ? `${st} runs an older spandeck, which does not say whether this pane is open elsewhere: Fit resizes it for everyone.` : '';
   if (guest !== undefined) t.setGuest(guest);
   const canStop = !p.exited && (p.state === 'working' || p.state === 'needs_you');
   const pu = p.usage;
@@ -3230,15 +3387,22 @@ function phoneTerm(v, st, p, guest) {
   const asks = !p.exited && p.trust?.asks, answered = trustAnsweredWords(p);
   // And its review of hooks, the same way.
   const hooksAsks = !p.exited && p.hooks_trust?.asks, hooksAnswered = hooksAnsweredWords(p);
-  const sig = `${fitKey}|${fitted}|${p.exited}|${canStop}|${brief}|${JSON.stringify(asks || null)}|${answered}|${JSON.stringify(hooksAsks || null)}|${hooksAnswered}`;
+  const sig = `${fitKey}|${fitted}|${whole}|${why}|${p.exited}|${canStop}|${brief}|${JSON.stringify(asks || null)}|${answered}|${JSON.stringify(hooksAsks || null)}|${hooksAnswered}`;
   if (v.sig !== sig) {
     v.sig = sig;
     // replaceChildren would print a missing piece as the word "null".
     v.head.replaceChildren(...[
-      p.exited ? null : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: (e) => { e.currentTarget.blur(); fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
+      p.exited ? null : h('button', { class: fitted ? '' : 'primary fit-btn', 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone: it gets back the size it had' : 'Resize this pane to fit this screen', onclick: (e) => {
+        e.currentTarget.blur();
+        // Turned off, it stays off for this pane on this device; asked for, it is on again.
+        if (fitted) { phoneGiveBack(fitKey); phoneFit.delete(fitKey); phoneAuto.delete(fitKey); setFitOff(fitKey, true); } else { setFitOff(fitKey, false); phoneTaken.delete(fitKey); phoneWhole.delete(fitKey); phoneHold(fitKey, p, false); }
+        update();
+      } }, fitted ? 'Fitted' : 'Fit to screen'),
+      fitted || p.exited ? null : h('button', { class: 'whole-btn', 'aria-pressed': String(whole), title: whole ? 'Show this pane at this phone\'s text size, and scroll it' : 'Show the whole width of this pane, shrunk to fit', onclick: (e) => { e.currentTarget.blur(); whole ? phoneWhole.delete(fitKey) : phoneWhole.add(fitKey); update(); } }, whole ? 'Show at text size' : 'Show whole width'),
       brief ? h('button', { class: 'phone-usage', title: usageTitle(p.usage), 'aria-label': `Usage: ${brief}`, onclick: (e) => { e.currentTarget.blur(); usageDialog(st, p); } }, brief, h('span', { class: 'muted' }, ' ›')) : null,
       h('span', { class: 'grow' }),
       h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(st, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn'),
+      why ? h('div', { class: 'fit-note', role: 'status' }, why) : null,
       asks ? trustCard(p, (remember) => rpc(st, 'pane.trust_folder', { pane: p.id, remember }).catch(() => {})) : null,
       answered ? h('div', { class: 'muted small trust-said' }, answered + '. It is in the ship\'s log.') : null,
       hooksAsks ? hooksCard(p, () => rpc(st, 'pane.trust_hooks', { pane: p.id }).catch(() => {})) : null,
@@ -3396,6 +3560,7 @@ function phoneLayoutView(lay) {
   const conv = p ? conversation(st, p, 'phone') : null;
   const chat = !!p && faceOf(st, p) === 'chat';
   if (p && !chat) phoneTerm(v, st, p, cur.guest || '');
+  if (p && chat) phoneChatFit(st, p, conv);
   // The panes stepped away from: their conversations are kept, not watched.
   for (const c of cells) if (c.p && c !== cur) chatPark(c.st, c.p);
 
@@ -3434,7 +3599,7 @@ function phonePaneView(st, id) {
   // cannot read, is made from its screen. A pane on a station from before
   // that is its terminal, and the bar says why.
   const conv = conversation(st, p, 'phone');
-  if (faceOf(st, p) === 'chat') return conv.phoneMain();
+  if (faceOf(st, p) === 'chat') { phoneChatFit(st, p, conv); return conv.phoneMain(); }
   const fitKey = `${st}/${p.id}`;
   let v = phonePanes.get(fitKey);
   if (!v) {
@@ -3702,6 +3867,7 @@ function render() {
     if (e) e.scrollTop = top;
   }
   if (pageTop && document.scrollingElement) document.scrollingElement.scrollTop = pageTop;
+  phoneLeft();
   for (const [key, t] of S.terms) if (!t._used) { t.dispose(); S.terms.delete(key); }
   // A conversation that left the page stops being watched; one still on it
   // is where it was scrolled to.
