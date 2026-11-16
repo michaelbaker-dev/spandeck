@@ -3485,6 +3485,13 @@ fn assets_build() -> &'static str {
                 f.data.hash(&mut h);
             }
         }
+        // Debug builds only, for the test of a new build of the deck
+        // replacing the one a browser has saved.
+        if cfg!(debug_assertions) {
+            if let Ok(other) = std::env::var("SPANDECK_TEST_BUILD") {
+                other.hash(&mut h);
+            }
+        }
         format!("{:016x}", h.finish())
     })
 }
