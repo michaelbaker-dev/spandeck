@@ -604,6 +604,7 @@ fn the_deck_has_the_tick_on_by_default_and_remembers_off() {
     page.js("document.querySelector('.dialog button[type=submit]').click()");
     let hooked = pane_named("hooked");
     s.wait_text(&hooked, TRUSTED);
+    page.terminal_face();
     page.wait(
         "the pane to say its review was answered",
         "(n => !!n && n.innerText.includes(\"spandeck answered Codex's review of hooks with \\\"Trust all and continue\\\"\"))(document.querySelector('.strip .hooks-said'))",
@@ -620,6 +621,7 @@ fn the_deck_has_the_tick_on_by_default_and_remembers_off() {
     let waiting = pane_named("waiting");
     wait_asks(&s, &waiting);
     assert_eq!(standing(&s)["on"], json!(false));
+    page.terminal_face();
     page.wait(
         "the one tap on the pane",
         "!!document.querySelector('.strip .hooks-tap')",
@@ -638,6 +640,7 @@ fn the_deck_has_the_tick_on_by_default_and_remembers_off() {
     shoot(&page, "desktop-5-remembered-off");
     page.js("[...document.querySelectorAll('.dialog button')].find(b => b.innerText === 'Cancel').click()");
     page.goto(&format!("#/s/{}/p/{}", s.name, waiting));
+    page.terminal_face();
     page.wait(
         "the one tap on the pane",
         "!!document.querySelector('.strip .hooks-tap')",
@@ -662,6 +665,7 @@ fn the_deck_has_the_tick_on_by_default_and_remembers_off() {
         .to_string();
     wait_asks(&s, &unsafe_pane);
     page.goto(&format!("#/s/{}/p/{}", s.name, unsafe_pane));
+    page.terminal_face();
     page.wait(
         "the reason on the pane",
         "(r => !!r && r.innerText.includes('asks you to trust hooks: another hooks file is in this project'))(document.querySelector('.strip .strip-reason'))",
