@@ -864,6 +864,8 @@ pub mod browser {
         _browser: headless_chrome::Browser,
         pub tab: std::sync::Arc<headless_chrome::Tab>,
         wire: std::sync::Mutex<Option<Wire>>,
+        /// What was right-clicked last, while its menu is the one open.
+        menu_of: std::sync::Mutex<Option<String>>,
     }
 
     /// This page's own connection to the browser: what `Page` asks of the
@@ -990,6 +992,7 @@ pub mod browser {
                 _browser: browser,
                 tab,
                 wire: std::sync::Mutex::new(None),
+                menu_of: std::sync::Mutex::new(None),
             };
             if signed_in {
                 page.tab
@@ -1015,6 +1018,7 @@ pub mod browser {
                 _browser: self._browser.clone(),
                 tab,
                 wire: std::sync::Mutex::new(None),
+                menu_of: std::sync::Mutex::new(None),
             }
         }
 
@@ -1064,10 +1068,36 @@ pub mod browser {
         }
 
         pub fn wait(&self, what: &str, expr: &str) -> Value {
-            wait_for(what, 20, || {
-                let v = self.js(expr);
-                (!v.is_null() && v != json!(false) && v != json!("")).then_some(v)
-            })
+            wait_for_or(
+                what,
+                20,
+                || self.showed(),
+                || {
+                    let v = self.js(expr);
+                    (!v.is_null() && v != json!(false) && v != json!("")).then_some(v)
+                },
+            )
+        }
+
+        /// Where the page is and the start of what it shows, for a wait
+        /// that ran out: several of those were reported with nothing to
+        /// find their cause by.
+        fn showed(&self) -> String {
+            let seen = "JSON.stringify([location.href.replace(/token=[^&]*/, 'token=…'), document.body ? document.body.innerText.slice(0, 1500) : ''])";
+            let params = json!({"expression": seen});
+            match self.call("Runtime.evaluate", params) {
+                Ok(v) => match serde_json::from_str::<Value>(
+                    v["result"]["value"].as_str().unwrap_or("[]"),
+                ) {
+                    Ok(v) => format!(
+                        "the page was at {} and showed:\n{}",
+                        v[0].as_str().unwrap_or("?"),
+                        v[1].as_str().unwrap_or("")
+                    ),
+                    Err(_) => "the page did not say what it showed".to_string(),
+                },
+                Err(e) => format!("the page did not answer: {e}"),
+            }
         }
 
         pub fn goto(&self, hash: &str) {
@@ -1113,21 +1143,57 @@ pub mod browser {
         }
 
         /// Right-click the element `el` (a JS expression) and wait for its menu.
+        /// The page closes a menu whenever it is drawn again, which it is
+        /// for every change it hears of (the change the step before made,
+        /// say): a menu that went that way before it was seen is opened
+        /// again. Three runs in sixteen failed here on two processors once
+        /// the page was asked without the tenth of a second between.
         pub fn right_click(&self, el: &str) {
-            self.wait(
-                "something to right-click",
-                &format!("(el => el ? (el.dispatchEvent(new MouseEvent('contextmenu', {{bubbles: true, cancelable: true, clientX: 300, clientY: 200}})), true) : false)({el})"),
-            );
-            self.wait("the menu", "!!document.querySelector('.menu')");
+            let began = Instant::now();
+            loop {
+                self.wait(
+                    "something to right-click",
+                    &format!("(el => el ? (el.dispatchEvent(new MouseEvent('contextmenu', {{bubbles: true, cancelable: true, clientX: 300, clientY: 200}})), true) : false)({el})"),
+                );
+                let asked = Instant::now();
+                let menu = || self.js("!!document.querySelector('.menu')") == json!(true);
+                while !menu() && asked.elapsed() < Duration::from_secs(1) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if menu() {
+                    break;
+                }
+                assert!(
+                    began.elapsed() < Duration::from_secs(20),
+                    "timed out waiting for the menu\n{}",
+                    self.showed()
+                );
+            }
+            *self.menu_of.lock().unwrap() = Some(el.to_string());
         }
 
         /// Choose the item of the open menu whose label starts with `label`.
+        /// A menu that a redraw took away between the right-click and this
+        /// is opened again; a menu that is there without the item fails at
+        /// once.
         pub fn choose(&self, label: &str) {
-            let done = self.js(&format!(
-                "(i => i && !i.disabled ? (i.click(), true) : [...document.querySelectorAll('.menu-item')].map(x => x.innerText))([...document.querySelectorAll('.menu-item')].find(i => i.innerText.startsWith({})))",
-                json!(label)
-            ));
-            assert_eq!(done, json!(true), "no menu item {label:?} to choose");
+            let began = Instant::now();
+            loop {
+                let done = self.js(&format!(
+                    "(i => i && !i.disabled ? (i.click(), true) : [...document.querySelectorAll('.menu-item')].map(x => x.innerText))([...document.querySelectorAll('.menu-item')].find(i => i.innerText.startsWith({})))",
+                    json!(label)
+                ));
+                let opener = self.menu_of.lock().unwrap().take();
+                if done == json!(true) {
+                    return;
+                }
+                match opener {
+                    Some(el) if done == json!([]) && began.elapsed() < Duration::from_secs(20) => {
+                        self.right_click(&el)
+                    }
+                    _ => assert_eq!(done, json!(true), "no menu item {label:?} to choose"),
+                }
+            }
         }
 
         /// The text on a pane's terminal as the browser shows it.

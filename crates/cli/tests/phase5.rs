@@ -571,6 +571,23 @@ fn a_pane_on_another_station_keeps_one_size_whichever_station_serves_the_deck() 
         let p = b.pane(&pane);
         (p["cols"].as_u64().unwrap(), p["rows"].as_u64().unwrap())
     };
+    // The pane's size and who holds it, from one look at the pane. The
+    // station sets the size and then notes whose it is: for a moment the
+    // new size is there under the last holder's name. Asked one after the
+    // other, the answers came from either side of that moment (once on
+    // the Linux CI runner; seen here by asking without a pause).
+    let held = |what: &str, want: &dyn Fn((u64, u64), &Value) -> bool| {
+        wait_for_or(
+            what,
+            10,
+            || format!("the pane is {}", b.pane(&pane)),
+            || {
+                let p = b.pane(&pane);
+                let size = (p["cols"].as_u64().unwrap(), p["rows"].as_u64().unwrap());
+                want(size, &p["controller"]).then_some(size)
+            },
+        )
+    };
     let open = |s: &Station, w: u32, h: u32| {
         let page = Page::open(s, w, h);
         page.goto(&format!("/s/bravo/p/{pane}"));
@@ -615,9 +632,8 @@ fn a_pane_on_another_station_keeps_one_size_whichever_station_serves_the_deck() 
     // client of its own at bravo. It takes the size, and alpha's window is
     // told, as the window at bravo is.
     phone.js("[...document.querySelectorAll('.phone-pane button')].find(b => b.innerText === 'Fit to screen').click()");
-    let on_phone = wait_for("the phone's size", 10, || {
-        let s = size();
-        (s.0 < 80).then_some(s)
+    let on_phone = held("the phone's size, held by the phone", &|s, by| {
+        s.0 < 80 && !by.is_null() && *by != json!(who)
     });
     one.wait("alpha's window to give way", gave_way);
     assert_ne!(b.pane(&pane)["controller"], json!(who));
@@ -627,8 +643,8 @@ fn a_pane_on_another_station_keeps_one_size_whichever_station_serves_the_deck() 
     // Taking control back in alpha's window works through alpha, and both
     // of the others are told.
     one.js("[...document.querySelectorAll('.strip button')].find(b => b.innerText === 'Take control').click()");
-    wait_for("the size of alpha's window again", 10, || {
-        (size() == through_one).then_some(())
+    held("the size of alpha's window again, held by it", &|s, by| {
+        s == through_one && *by == json!(who)
     });
     assert_eq!(b.pane(&pane)["controller"], json!(who));
     phone.wait("the phone to give way", gave_way);
