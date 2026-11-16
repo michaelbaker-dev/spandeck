@@ -352,6 +352,307 @@ fn a_shell_pane_is_served_as_what_was_sent_and_what_it_printed() {
     assert_eq!(err.code, "denied");
 }
 
+/// OpenCode's database in a station's throwaway home, with the two tables
+/// of OpenCode 2.3.0 that are read (their columns as its own schema has
+/// them, the ones not read left out where it allows).
+fn opencode_store(s: &Station) -> rusqlite::Connection {
+    let dir = s.root.join("home/.local/share/opencode");
+    std::fs::create_dir_all(&dir).unwrap();
+    let conn = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_v2 (id text PRIMARY KEY, project_id text NOT NULL, parent_id text,
+            slug text NOT NULL, directory text NOT NULL, title text, version text NOT NULL,
+            cost real DEFAULT 0 NOT NULL, tokens_input integer DEFAULT 0 NOT NULL, tokens_output integer DEFAULT 0 NOT NULL,
+            tokens_cache_read integer DEFAULT 0 NOT NULL, tokens_cache_write integer DEFAULT 0 NOT NULL, model text,
+            time_created integer NOT NULL, time_updated integer NOT NULL, time_archived integer);
+         CREATE TABLE IF NOT EXISTS session_message (id text PRIMARY KEY, session_id text NOT NULL, type text NOT NULL,
+            seq integer NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL);",
+    )
+    .unwrap();
+    conn
+}
+
+fn opencode_session(conn: &rusqlite::Connection, id: &str, dir: &Path, at: u64) {
+    conn.execute(
+        "INSERT INTO session_v2(id, project_id, slug, directory, version, time_created, time_updated)
+         VALUES(?1, 'prj', 'slug', ?2, '2.3.0', ?3, ?3)",
+        rusqlite::params![id, dir.display().to_string(), at as i64],
+    )
+    .unwrap();
+}
+
+fn opencode_message(conn: &rusqlite::Connection, session: &str, seq: i64, ty: &str, data: Value) {
+    let at = now() as i64;
+    conn.execute(
+        "INSERT OR REPLACE INTO session_message VALUES(?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+        rusqlite::params![
+            format!("msg_{session}_{seq}"),
+            session,
+            ty,
+            seq,
+            at,
+            data.to_string()
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE session_v2 SET time_updated = ?2 WHERE id = ?1",
+        rusqlite::params![session, at],
+    )
+    .unwrap();
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+/// One conversation of Antigravity's in a station's throwaway home, as
+/// `agy` 1.5.9 keeps one: a row of its summaries that says which folder it
+/// belongs to, and its transcript, cut (`transcript.jsonl`) and whole.
+fn antigravity_conversation(s: &Station, id: &str, dir: &Path, steps: &[Value], whole: &[Value]) {
+    let agy = s.root.join("home/.gemini/antigravity-cli");
+    let logs = agy.join("brain").join(id).join(".system_generated/logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    let lines = |steps: &[Value]| steps.iter().map(|l| format!("{l}\n")).collect::<String>();
+    std::fs::write(logs.join("transcript.jsonl"), lines(steps)).unwrap();
+    std::fs::write(logs.join("transcript_full.jsonl"), lines(whole)).unwrap();
+    let conn = rusqlite::Connection::open(agy.join("conversation_summaries.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS conversation_summaries (conversation_id text PRIMARY KEY, title text NOT NULL DEFAULT '',
+            step_count integer NOT NULL DEFAULT 0, workspace_uris text NOT NULL, status text NOT NULL DEFAULT '',
+            parent_conversation_id text NOT NULL DEFAULT '')",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO conversation_summaries(conversation_id, workspace_uris) VALUES(?1, ?2)",
+        rusqlite::params![id, json!([format!("file://{}", dir.display())]).to_string()],
+    )
+    .unwrap();
+}
+
+fn agy_step(n: u64, ty: &str, at: &str, extra: Value) -> Value {
+    let mut step = json!({"step_index": n, "type": ty, "status": "DONE", "created_at": at,
+        "source": if ty == "USER_INPUT" { "USER_EXPLICIT" } else { "MODEL" }});
+    step.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    step
+}
+
+/// What the owner wrote, as Antigravity wraps it.
+fn agy_asked(n: u64, at: &str, text: &str) -> Value {
+    agy_step(
+        n,
+        "USER_INPUT",
+        at,
+        json!({"content": format!("<USER_REQUEST>\n{text}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: {at}.\n</ADDITIONAL_METADATA>")}),
+    )
+}
+
+fn wait_transcript(s: &Station, pane: &str, has: &str) -> Value {
+    wait_for_or(
+        "the pane's own conversation",
+        15,
+        || conversation(s, pane, true).to_string(),
+        || {
+            let a = conversation(s, pane, true);
+            (a["source"] == json!("transcript") && a["items"].to_string().contains(has))
+                .then_some(a)
+        },
+    )
+}
+
+/// The owner's report of 16 Nov 2026, from a phone: "Antigravity chat ...
+/// look different in chat and should be the same. Shouldn't chat be the
+/// same code base for every chat?" Antigravity's and OpenCode's Chat was
+/// their screen. Each now has its own conversation, read from the
+/// program's own store (made here in the real layouts, with made-up
+/// words), and a pane is tied to one as strictly as a Codex pane is: begun
+/// in its folder since its program started, or named by its hook.
+#[test]
+#[cfg(unix)]
+fn opencode_and_antigravity_panes_get_their_own_conversations() {
+    let s = Station::start("alpha");
+    let quiet =
+        || json!({"no_hooks": true, "steps": [], "on_input": [{"say": "drawn on the screen"}]});
+
+    // OpenCode. A conversation from before the pane, in its folder, is not
+    // the pane's; until one is begun the screen is the conversation.
+    let fen = folder(&s, "fen");
+    let db = opencode_store(&s);
+    opencode_session(&db, "ses_before", &fen, 1000);
+    opencode_message(
+        &db,
+        "ses_before",
+        1,
+        "user",
+        json!({"text": "an older question", "time": {"created": 1000}}),
+    );
+    let oc = pane(&s, "opencode", "oc", &fen, quiet());
+    s.wait_text(&oc, "[fake] session");
+    let a = conversation(&s, &oc, true);
+    assert_eq!(a["source"], json!("screen"), "{a}");
+    assert_eq!(
+        a["reason"],
+        json!("no conversation for this pane: OpenCode does not say which conversation it is in (it has no hooks), and no conversation of OpenCode's for this folder has appeared since the pane started (OpenCode begins one with its first message)")
+    );
+    opencode_session(&db, "ses_mine", &fen, now());
+    opencode_message(
+        &db,
+        "ses_mine",
+        1,
+        "user",
+        json!({"text": "How many bitterns?", "files": [], "agents": [], "time": {"created": now()}}),
+    );
+    opencode_message(
+        &db,
+        "ses_mine",
+        2,
+        "assistant",
+        json!({"agent": "build", "content": [{"type": "text", "text": "Counting"}], "time": {"created": now()}}),
+    );
+    let a = wait_transcript(&s, &oc, "bitterns");
+    // The answer is still being written: nothing of it yet.
+    assert_eq!(
+        said(&a),
+        vec![("user".to_string(), "How many bitterns?".to_string())],
+        "{a}"
+    );
+    assert_eq!(
+        (&a["session"], &a["session_from"], &a["agent"]),
+        (&json!("ses_mine"), &json!("files"), &json!("opencode"))
+    );
+    opencode_message(
+        &db,
+        "ses_mine",
+        2,
+        "assistant",
+        json!({"agent": "build", "finish": "stop",
+            "content": [{"type": "tool", "id": "call_1", "name": "shell", "time": {"created": 1, "ran": 2, "completed": 900},
+                         "state": {"status": "completed", "input": {"command": "grep -c bittern fen.log"},
+                                   "content": [{"type": "text", "text": "4"}], "metadata": {"exit": 0}}},
+                        {"type": "text", "text": "There are **four** bitterns."}],
+            "time": {"created": now(), "completed": now()}}),
+    );
+    opencode_message(
+        &db,
+        "ses_mine",
+        3,
+        "idle",
+        json!({"outcome": "succeeded", "time": {"created": now()}}),
+    );
+    let more = wait_for("the settled answer", 15, || {
+        let n = s.call(
+            "pane.conversation",
+            json!({"pane": oc, "screen": true, "session": a["session"], "after": a["cursor"]}),
+        );
+        (n["items"].as_array().is_some_and(|i| i.len() == 3)).then_some(n)
+    });
+    let kinds: Vec<&str> = more["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, vec!["tool", "text", "notice"], "{more}");
+    assert_eq!(
+        (&more["items"][0]["status"], &more["items"][2]["what"]),
+        (&json!("ok"), &json!("turn_ended"))
+    );
+    assert_eq!(
+        more["items"][1]["text"],
+        json!("There are **four** bitterns.")
+    );
+    assert!(!more.to_string().contains("older question"));
+    assert_eq!(s.pane(&oc)["unread"], json!(true));
+    let detail = s.call(
+        "pane.conversation.detail",
+        json!({"pane": oc, "item": more["items"][0]["id"], "session": a["session"]}),
+    );
+    assert_eq!(detail["output"]["text"], json!("4"), "{detail}");
+
+    // Antigravity. One conversation from before the pane, in its folder:
+    // not the pane's. One begun since: the pane's, read from its whole
+    // transcript. Then a hook names another, and the hook wins.
+    let mere = folder(&s, "mere");
+    let before = [agy_asked(0, "2020-01-01T00:00:00Z", "an older question")];
+    antigravity_conversation(
+        &s,
+        "0aaaaaaa-0000-4000-8000-000000000001",
+        &mere,
+        &before,
+        &before,
+    );
+    let agy = pane(&s, "antigravity", "agy", &mere, quiet());
+    s.wait_text(&agy, "[fake] session");
+    let a = conversation(&s, &agy, true);
+    assert_eq!(a["source"], json!("screen"), "{a}");
+    assert!(
+        a["reason"].as_str().unwrap().ends_with("no conversation of Antigravity's for this folder has appeared since the pane started (Antigravity begins one with its first message)"),
+        "{a}"
+    );
+    let since = "2099-01-01T00:00:00Z";
+    let reply = "### Grebes\n\n1. two on the mere\n2. one in the reeds";
+    let cut = [
+        agy_asked(0, since, "How many grebes? (cut"),
+        agy_step(1, "PLANNER_RESPONSE", since, json!({"content": reply})),
+    ];
+    let whole = [
+        agy_asked(0, since, "How many grebes? (cut here by the program)"),
+        cut[1].clone(),
+    ];
+    antigravity_conversation(
+        &s,
+        "0aaaaaaa-0000-4000-8000-000000000002",
+        &mere,
+        &cut,
+        &whole,
+    );
+    let a = wait_transcript(&s, &agy, "grebes");
+    assert_eq!(
+        said(&a),
+        vec![
+            (
+                "user".to_string(),
+                "How many grebes? (cut here by the program)".to_string()
+            ),
+            ("text".to_string(), reply.to_string()),
+            ("notice".to_string(), String::new()),
+        ],
+        "{a}"
+    );
+    assert_eq!(
+        (&a["session_from"], &a["agent"]),
+        (&json!("files"), &json!("antigravity"))
+    );
+    assert!(!a.to_string().contains("local time") && !a.to_string().contains("older question"));
+    let named = "0aaaaaaa-0000-4000-8000-000000000003";
+    let other = folder(&s, "elsewhere");
+    let theirs = [agy_asked(
+        0,
+        "2020-01-01T00:00:00Z",
+        "What the hook's conversation holds",
+    )];
+    antigravity_conversation(&s, named, &other, &theirs, &theirs);
+    s.call_as_pane(
+        &agy,
+        "hook.ingest",
+        json!({"agent": "antigravity", "payload": {"hookEventName": "PreInvocation", "conversationId": named,
+            "transcriptPath": mere.join(".gemini/antigravity-cli/transcript.jsonl"), "cwd": mere, "lastUserInput": "x"}}),
+    )
+    .unwrap();
+    let b = wait_transcript(&s, &agy, "the hook's conversation");
+    assert_eq!(
+        (&b["session"], &b["session_from"]),
+        (&json!(named), &json!("hooks")),
+        "{b}"
+    );
+    assert!(!b.to_string().contains("grebes"));
+}
+
 /// What the two browser scenarios share: a Codex whose hooks never ran and
 /// a real shell, side by side in a layout, and a way to write pictures for
 /// a human to look at (`SPANDECK_SHOTS=/some/dir`).

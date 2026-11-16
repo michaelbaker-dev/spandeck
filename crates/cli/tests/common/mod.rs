@@ -456,6 +456,8 @@ impl Station {
             // Codex's settings are the throwaway home's, never the ones a
             // developer's own shell points at.
             .env_remove("CODEX_HOME")
+            // Nor is OpenCode's database: the throwaway home has its own.
+            .env_remove("XDG_DATA_HOME")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());

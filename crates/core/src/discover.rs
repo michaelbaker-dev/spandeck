@@ -2,13 +2,15 @@
 //! pane"; `docs/conversation-api.md`, "How a pane's session is found").
 //!
 //! Codex runs its hooks only after the owner has reviewed them in Codex,
-//! which may be never. Until a hook names the pane's session, the station
-//! looks for it among Codex's own session files, and takes one only when it
-//! can be no other pane's:
+//! which may be never; OpenCode has no hooks; Antigravity's may not have
+//! run. Until a hook names the pane's session, the station looks for it in
+//! the program's own store (Codex's session files; OpenCode's database and
+//! Antigravity's transcripts: `spandeck_archive::stores`), and takes one
+//! only when it can be no other pane's:
 //!
-//! - the file is one of Codex's own conversations (not one it started for a
-//!   sub-agent), its first line records the pane's working folder, and it
-//!   was started at or after the pane's program was;
+//! - it is one of the program's own conversations (not one it started for a
+//!   sub-agent), it records the pane's working folder, and it was started
+//!   at or after the pane's program was;
 //! - no other pane is in it (named by that pane's hooks, or by the session
 //!   it was started into);
 //! - no other pane running Codex in that folder, and reporting nothing
@@ -27,9 +29,10 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use spandeck_agents::sessions::{self, CodexFile, Folder};
+use spandeck_agents::sessions::{self, Folder};
 use spandeck_agents::AgentKind;
 use spandeck_archive::conversation::ts_ms;
+use spandeck_archive::stores::{self, Stored};
 
 use crate::daemon::{Daemon, PaneMeta};
 
@@ -67,13 +70,14 @@ pub fn choose(
     pane_started_ms: u64,
     rivals: &[u64],
     program: &str,
+    kept: &str,
 ) -> Result<usize, String> {
     let mine: Vec<usize> = (0..files.len())
         .filter(|i| files[*i].started_ms >= pane_started_ms)
         .collect();
     if mine.is_empty() {
         return Err(format!(
-            "no session file of {program}'s for this folder has appeared since the pane started ({program} begins one with its first message)"
+            "no {kept} of {program}'s for this folder has appeared since the pane started ({program} begins one with its first message)"
         ));
     }
     // A file begun after another such pane had started could be that
@@ -86,7 +90,7 @@ pub fn choose(
         .collect();
     if own.is_empty() {
         return Err(format!(
-            "another pane runs {program} in this folder and reports nothing either, so a session file begun since both started could be either pane's: spandeck does not guess"
+            "another pane runs {program} in this folder and reports nothing either, so a {kept} begun since both started could be either pane's: spandeck does not guess"
         ));
     }
     // Still written to after every later one began: a conversation that is
@@ -104,7 +108,7 @@ pub fn choose(
     match live.as_slice() {
         [one] => Ok(*one),
         _ => Err(format!(
-            "{} of {program}'s session files for this folder were written to at the same time since the pane started, so more than one {program} is at work here: spandeck does not guess which is this pane's",
+            "{} of {program}'s {kept}s for this folder were written to at the same time since the pane started, so more than one {program} is at work here: spandeck does not guess which is this pane's",
             live.len()
         )),
     }
@@ -127,24 +131,76 @@ impl Daemon {
         self.finds.lock().unwrap().remove(pane);
     }
 
-    /// The file of a session a pane was started into, for a program whose
-    /// files are found by the session's id.
+    /// What the archive follows for a session of this pane's program that
+    /// is known by its id (a hook named it, or the pane was started into
+    /// it): Codex's file, Antigravity's transcript, OpenCode's database.
     pub(crate) fn session_file(&self, meta: &PaneMeta, session: &str) -> Option<String> {
-        if meta.agent != AgentKind::Codex {
-            return None;
+        let path = match meta.agent {
+            AgentKind::Codex => {
+                sessions::codex_file_of(&sessions::codex_sessions_dir(&self.home), session)
+            }
+            AgentKind::Antigravity => {
+                stores::antigravity_transcript(&stores::antigravity_dir(&self.home), session)
+            }
+            AgentKind::OpenCode => {
+                let db = spandeck_archive::usage::opencode_db(&self.home);
+                stores::opencode_has(&db, session).then_some(db)
+            }
+            _ => None,
+        };
+        path.map(|p| p.display().to_string())
+    }
+
+    /// The transcript a hook named, as the archive is to follow it. For
+    /// Antigravity that is the transcript found by the conversation's id
+    /// where the program is known to keep it, whole rather than with its
+    /// long fields cut, else the file the hook named; and once lines of one
+    /// file have been read the session stays with that file (the two files
+    /// hold the same lines, but not at the same places). `None`: no file is
+    /// there yet.
+    pub(crate) fn transcript_named(
+        &self,
+        agent: AgentKind,
+        session: Option<&str>,
+        named: &str,
+        current: Option<&str>,
+    ) -> Option<String> {
+        if agent != AgentKind::Antigravity {
+            return Some(named.to_string());
         }
-        sessions::codex_file_of(&sessions::codex_sessions_dir(&self.home), session)
-            .map(|p| p.display().to_string())
+        let by_id = session.and_then(|id| {
+            stores::antigravity_transcript(&stores::antigravity_dir(&self.home), id)
+        });
+        let whole = stores::antigravity_whole(std::path::Path::new(named));
+        let best = by_id
+            .or_else(|| whole.is_file().then_some(whole))
+            .map(|p| p.display().to_string());
+        let begun = session
+            .and_then(|id| self.archive.session(id))
+            .is_some_and(|s| s.lines > 0);
+        match current {
+            Some(current) if begun || best.is_none() => Some(current.to_string()),
+            _ => best,
+        }
+    }
+
+    /// The programs whose own store is looked through for a pane's
+    /// session, and what one conversation in it is called.
+    fn store_of(agent: AgentKind) -> Option<&'static str> {
+        match agent {
+            AgentKind::Codex => Some("session file"),
+            AgentKind::OpenCode | AgentKind::Antigravity => Some("conversation"),
+            _ => None,
+        }
     }
 
     /// The session of a pane whose program has named none, from the
-    /// program's own files: `(session, file)`, or why none is taken. `None`
-    /// for a program whose files are not looked through. Looked for at most
-    /// twice a second for a pane; reads directories and first lines.
+    /// program's own store: `(session, file)`, or why none is taken. `None`
+    /// for a program whose store is not looked through. Looked for at most
+    /// twice a second for a pane; reads directories, first lines and a few
+    /// rows.
     pub(crate) fn find_session(&self, meta: &PaneMeta) -> Option<Result<(String, String), String>> {
-        if meta.agent != AgentKind::Codex {
-            return None;
-        }
+        Self::store_of(meta.agent)?;
         let started = meta.proc_started_ms.unwrap_or(meta.created_ms);
         {
             let finds = self.finds.lock().unwrap();
@@ -171,8 +227,36 @@ impl Daemon {
         Some(found)
     }
 
+    /// The program's own conversations begun since `started`.
+    fn stored_since(&self, agent: AgentKind, started: u64) -> Vec<Stored> {
+        match agent {
+            AgentKind::Codex => {
+                sessions::codex_since(&sessions::codex_sessions_dir(&self.home), started)
+                    .into_iter()
+                    .filter_map(|f| {
+                        Some(Stored {
+                            started_ms: ts_ms(&f.started)?,
+                            id: f.id,
+                            folders: vec![f.cwd],
+                            modified_ms: f.modified_ms,
+                            path: f.path,
+                        })
+                    })
+                    .collect()
+            }
+            AgentKind::OpenCode => {
+                stores::opencode_since(&spandeck_archive::usage::opencode_db(&self.home), started)
+            }
+            AgentKind::Antigravity => {
+                stores::antigravity_since(&stores::antigravity_dir(&self.home), started)
+            }
+            _ => vec![],
+        }
+    }
+
     fn look_for_session(&self, meta: &PaneMeta, started: u64) -> Result<(String, String), String> {
         let program = meta.agent.display();
+        let kept = Self::store_of(meta.agent).unwrap_or("conversation");
         let folder = Folder::of(std::path::Path::new(&meta.cwd));
         let mut taken: Vec<String> = vec![];
         let mut rivals: Vec<u64> = vec![];
@@ -188,27 +272,21 @@ impl Daemon {
                 rivals.push(m.proc_started_ms.unwrap_or(m.created_ms));
             }
         }
-        let files: Vec<CodexFile> =
-            sessions::codex_since(&sessions::codex_sessions_dir(&self.home), started)
-                .into_iter()
-                .filter(|f| folder.is(&f.cwd) && !taken.contains(&f.id))
-                .collect();
+        let files: Vec<Stored> = self
+            .stored_since(meta.agent, started)
+            .into_iter()
+            .filter(|f| f.folders.iter().any(|d| folder.is(d)) && !taken.contains(&f.id))
+            .collect();
         let candidates: Vec<Candidate> = files
             .iter()
-            .filter_map(|f| {
-                Some(Candidate {
-                    id: f.id.clone(),
-                    started_ms: ts_ms(&f.started)?,
-                    modified_ms: f.modified_ms,
-                })
+            .map(|f| Candidate {
+                id: f.id.clone(),
+                started_ms: f.started_ms,
+                modified_ms: f.modified_ms,
             })
             .collect();
-        let i = choose(&candidates, started, &rivals, program)?;
-        let file = files
-            .iter()
-            .find(|f| f.id == candidates[i].id)
-            .ok_or_else(|| "its session file is gone".to_string())?;
-        Ok((file.id.clone(), file.path.display().to_string()))
+        let i = choose(&candidates, started, &rivals, program, kept)?;
+        Ok((files[i].id.clone(), files[i].path.display().to_string()))
     }
 }
 
@@ -230,7 +308,7 @@ mod tests {
     #[test]
     fn a_session_is_taken_only_when_it_can_be_no_other_panes() {
         let pick = |files: &[Candidate], rivals: &[u64]| {
-            choose(files, 1000, rivals, "Codex").map(|i| files[i].id.clone())
+            choose(files, 1000, rivals, "Codex", "session file").map(|i| files[i].id.clone())
         };
         // Nothing since the pane started: one from before it is not its.
         let why = pick(&[file("old", 900, 5000)], &[]).unwrap_err();

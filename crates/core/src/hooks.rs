@@ -121,6 +121,19 @@ impl Daemon {
     ) -> HookDecision {
         let now = now_ms();
         let mut stuck: Option<String> = None;
+        // The file to follow for the transcript the hook named (for
+        // Antigravity, the whole one: discover.rs). Worked out before the
+        // pane's state is held.
+        let named = ev.transcript_path.as_deref().and_then(|tp| {
+            let was = p.meta();
+            let same = was.session_id.as_deref() == ev.session_id.as_deref();
+            self.transcript_named(
+                ev.agent,
+                ev.session_id.as_deref(),
+                tp,
+                was.transcript_path.as_deref().filter(|_| same),
+            )
+        });
         let (meta, session_changed) = {
             let mut m = p.meta.lock().unwrap();
             m.hooks_seen = true;
@@ -133,9 +146,14 @@ impl Daemon {
                 if m.session_id.as_deref() != Some(sid) {
                     m.session_id = Some(sid.clone());
                     session_changed = true;
+                    // Another conversation of Antigravity's, whose
+                    // transcript is not there yet: not the last one's.
+                    if ev.agent == AgentKind::Antigravity && named.is_none() {
+                        m.transcript_path = None;
+                    }
                 }
             }
-            if let Some(tp) = &ev.transcript_path {
+            if let Some(tp) = &named {
                 if m.transcript_path.as_deref() != Some(tp) {
                     m.transcript_path = Some(tp.clone());
                     session_changed = true;

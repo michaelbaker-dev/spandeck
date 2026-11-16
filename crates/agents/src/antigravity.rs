@@ -94,9 +94,9 @@ impl Adapter for Antigravity {
             kind,
             agent: AgentKind::Antigravity,
             session_id: s(p, "conversationId"),
-            // Not passed on: the session archive reads Claude Code's and
-            // Codex's session files, and this is neither.
-            transcript_path: None,
+            // The conversation's transcript, as JSON lines (the archive
+            // reads it: `spandeck_archive::stores`).
+            transcript_path: s(p, "transcriptPath"),
             cwd: s(p, "cwd"),
             state,
             tool: None,
@@ -172,6 +172,7 @@ mod tests {
         let common = json!({
             "conversationId": "ec33ebf9-0cba-4100-8142-c61503f6c587",
             "workspacePaths": ["/w"], "modelName": "auto",
+            "transcriptPath": "/w/.gemini/antigravity-cli/transcript.jsonl",
             "lastUserInput": "Fix the failing unit test", "cwd": "/w",
         });
         let with = |extra: Value| {
@@ -186,6 +187,10 @@ mod tests {
         assert_eq!(
             start.session_id.as_deref(),
             Some("ec33ebf9-0cba-4100-8142-c61503f6c587")
+        );
+        assert_eq!(
+            start.transcript_path.as_deref(),
+            Some("/w/.gemini/antigravity-cli/transcript.jsonl")
         );
         let pre = with(json!({"hookEventName": "PreInvocation", "invocationNum": 3})).unwrap();
         assert_eq!(pre.state, Some(AgentState::Working));

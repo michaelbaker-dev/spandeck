@@ -7,6 +7,9 @@
 //!
 //! Script: {"steps": [...], "on_input": [...]}. Steps:
 //!   {"say": "text"}                      print a line
+//!   {"raw": "bytes"}                     write these to the terminal as they are
+//!                                        (escape sequences: a program that
+//!                                        draws its screen itself)
 //!   {"sleep": ms}
 //!   {"prompt": "text"}                   UserPromptSubmit
 //!   {"tool": {"name":"Bash","command":"x","ok":true,"file":"p","run":false}}
@@ -480,6 +483,10 @@ impl Agent {
     fn step(&mut self, step: &Value) {
         if let Some(text) = step.get("say").and_then(|s| s.as_str()) {
             out(text);
+        } else if let Some(bytes) = step.get("raw").and_then(|s| s.as_str()) {
+            let mut o = std::io::stdout();
+            let _ = o.write_all(bytes.as_bytes());
+            let _ = o.flush();
         } else if let Some(ms) = step.get("sleep").and_then(|s| s.as_u64()) {
             std::thread::sleep(Duration::from_millis(ms));
         } else if let Some(text) = step.get("prompt").and_then(|s| s.as_str()) {
