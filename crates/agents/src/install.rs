@@ -379,7 +379,7 @@ fn marker_version(command: &str) -> Option<u32> {
     command[idx + MARKER.len()..].trim().parse().ok()
 }
 
-fn is_ours(handler: &Value) -> bool {
+pub(crate) fn is_ours(handler: &Value) -> bool {
     handler
         .get("command")
         .and_then(|c| c.as_str())
@@ -492,7 +492,7 @@ pub fn status(kind: AgentKind, home: &Path) -> Result<Status> {
     let installed = version.is_some();
     let note = match (kind, installed) {
         (AgentKind::Codex, true) => Some(
-            "Codex runs a hook only after you trust it: open Codex and run /hooks once."
+            "Codex runs a hook only after you trust it, and shows \"Hooks need review\" when a hook is new or changed. In a pane spandeck starts, spandeck chooses \"Trust all and continue\" there for you when every hook Codex can be asking about is spandeck's own and \"Trust spandeck's own hooks\" is on for the station (Agent setup; `spandeck pane new --no-trust-hooks` turns it off). Otherwise review them in Codex: /hooks."
                 .to_string(),
         ),
         _ => None,

@@ -8,6 +8,9 @@
 //!
 //! Known caveats from the reference:
 //! - Hooks must be reviewed and trusted in Codex (`/hooks`) before they run.
+//!   Where every hook can only be spandeck's own, spandeck answers that
+//!   review for the owner (hookstrust.rs: the screen, and where Codex
+//!   takes hooks from).
 //! - PreToolUse covers shell, apply_patch and MCP tools, not hosted tools; the
 //!   reference calls hooks "a guardrail, not a complete enforcement boundary".
 //! - herdr 0.9.5 stopped installing Codex turn hooks because of a startup

@@ -214,6 +214,7 @@ const OWNER_READS: &[&str] = &[
     "fleet.add_status",
     "foldertrust.choice",
     "foldertrust.list",
+    "hookstrust.choice",
 ];
 
 /// Does this method only read? Such a call changes nothing, so a Control
@@ -306,6 +307,9 @@ const REPEATABLE: &[&str] = &[
     "foldertrust.list",
     "foldertrust.remove",
     "foldertrust.project",
+    // And the one for spandeck's own hooks.
+    "hookstrust.choice",
+    "hookstrust.set",
 ];
 
 /// Changes that are done once by their request id, the answer kept for a
@@ -830,7 +834,11 @@ impl Daemon {
                 // it were. Forwarded, it is the owner's request.
                 let asked = opts.trust_folder.take();
                 opts.trust_choice = None;
+                // The same for the tick about spandeck's own hooks.
+                let asked_hooks = opts.trust_hooks.take();
+                opts.hooks_trust_choice = None;
                 let mut keep = None;
+                let mut keep_hooks = None;
                 if caller.authority == Authority::Owner {
                     let agent = opts.agent.unwrap_or_else(|| {
                         opts.program
@@ -838,6 +846,9 @@ impl Daemon {
                             .map(spandeck_agents::kind_from_command)
                             .unwrap_or(AgentKind::Shell)
                     });
+                    opts.hooks_trust_choice =
+                        self.hooks_trust_at_start(asked_hooks, agent, &caller.who);
+                    keep_hooks = Some(agent);
                     let cwd = opts.cwd.clone().unwrap_or_else(|| self.home.clone());
                     if cwd.is_dir() {
                         opts.trust_choice = self.folder_trust_at_start(
@@ -855,6 +866,9 @@ impl Daemon {
                 // before its program can have drawn its question.
                 if let Some((agent, cwd)) = keep {
                     self.folder_trust_keep(asked, agent, &cwd, &caller.who);
+                }
+                if let Some(agent) = keep_hooks {
+                    self.hooks_trust_keep(asked_hooks, agent, &caller.who);
                 }
                 self.write_instructions(&pane.meta());
                 let mut view = self.pane_view(&pane);
@@ -889,6 +903,30 @@ impl Daemon {
                 // The owner pressed keys in the pane: as with anything
                 // they type, a held pane is released. A tap that pressed
                 // nothing releases nothing.
+                self.release_by_typing(pane, by);
+                done
+            }
+            // Trusting spandeck's own hooks (hookstrust.rs). The owner's,
+            // like the folder-trust methods above.
+            "hookstrust.choice" => {
+                let agent = match opt(&params, "agent") {
+                    Some(a) => Some(AgentKind::parse(a).ok_or_else(|| invalid("unknown agent"))?),
+                    None => None,
+                };
+                self.hooks_trust_choice(agent)
+            }
+            "hookstrust.set" => {
+                let on = params
+                    .get("on")
+                    .and_then(|v| v.as_bool())
+                    .ok_or_else(|| invalid("on: true or false"))?;
+                self.hooks_trust_set(on, by)
+            }
+            "pane.trust_hooks" => {
+                let pane = s(&params, "pane")?;
+                let done = self.hooks_trust_tap(pane, by).await?;
+                // The owner pressed keys in the pane, as with their
+                // "Trust this folder".
                 self.release_by_typing(pane, by);
                 done
             }
@@ -977,7 +1015,7 @@ impl Daemon {
                 let text = s(&params, "text")?;
                 if caller.is_owner() {
                     self.release_by_typing(&id, by);
-                    self.folder_trust_owner_typed(&id);
+                    self.start_screen_owner_typed(&id);
                 }
                 self.send_text_from(&id, text, enter, Some(&caller.client))?;
                 if caller.is_owner() {
@@ -992,7 +1030,7 @@ impl Daemon {
                 }
                 let text = s(&params, "text")?;
                 self.release_by_typing(&id, by);
-                self.folder_trust_owner_typed(&id);
+                self.start_screen_owner_typed(&id);
                 self.paste_from(&id, text, flag(&params, "enter"), Some(&caller.client))?;
                 self.note_input(&id, &caller.who, &caller.client);
                 json!({"ok": true})
@@ -1005,7 +1043,7 @@ impl Daemon {
                 // at a pane never releases it.
                 if caller.is_owner() && crate::holds::is_typing(data) {
                     self.release_by_typing(&pane.id, by);
-                    self.folder_trust_owner_typed(&pane.id);
+                    self.start_screen_owner_typed(&pane.id);
                 }
                 self.type_keys(&pane.id, data, Some(&caller.client))?;
                 self.note_input(&pane.id, &caller.who, &caller.client);
@@ -2521,6 +2559,19 @@ mod tests {
             assert!(allowed(Authority::Owner, m) && !not_forwarded(m), "{m}");
         }
         assert_eq!(class("pane.trust_folder", &none), Class::Never);
+        // Trusting spandeck's own hooks (16 Nov 2026) is the owner's alone
+        // in the same way: the tick (`pane.spawn`), the station's switch
+        // and the one tap. No agent, no station acting for itself and no
+        // read-only caller can set the choice, read it, or have the
+        // review answered.
+        for m in ["hookstrust.choice", "hookstrust.set", "pane.trust_hooks"] {
+            for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
+                assert!(!allowed(who, m), "{who:?} {m}");
+            }
+            assert!(allowed(Authority::Owner, m) && !not_forwarded(m), "{m}");
+        }
+        assert_eq!(class("pane.trust_hooks", &none), Class::Never);
+        assert!(reads("hookstrust.choice") && !reads("hookstrust.set"));
         for (m, params) in [
             ("pane.kill", none.clone()),
             ("pane.pause", json!({"pane": "p"})),

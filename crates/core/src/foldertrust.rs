@@ -17,40 +17,40 @@
 //!   repository, and a repository must not be able to say it is trusted.
 //! - **What is answered.** The program's own screen, word for word, for the
 //!   pane's own folder (agents/foldertrust.rs: `Exact`), first seen within
-//!   `WINDOW_MS` of the program's start, before any hook of the session,
-//!   with the marker already on the trusting choice. Once per start of the
-//!   program. Anything else is left to the owner, and the pane says so.
+//!   `WINDOW_MS` of the program's start, before any hook of the session.
+//!   Where the program's own choice is to leave (Claude Code), the marker
+//!   is moved to the trusting choice, the screen is read again, and Enter
+//!   is pressed only with the marker seen there (the owner's decision of
+//!   16 Nov 2026; `folder_trust.move = false` turns the moving off). Once
+//!   per start of the program. Anything else is left to the owner, and
+//!   the pane says so.
 //! - **The key** is an item of the pane's input like any other
 //!   (terminal/input.rs). The programs' own trust files are never written.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use spandeck_agents::foldertrust::{self as screen, Focus, Level, Seen};
-use spandeck_agents::{AgentKind, AgentState};
+use spandeck_agents::AgentKind;
 use spandeck_terminal::Item;
 
 use crate::daemon::{invalid, Daemon, Error, PaneEntry, PaneMeta, Result};
 use crate::paths::now_ms;
-
-/// The question is the program's first screen: one that first shows later
-/// than this after the program started is not it.
-pub const WINDOW_MS: u64 = 20_000;
-/// A screen is acted on once it has stood unchanged this long: a program
-/// may still be drawing it, and Claude Code takes no key in the first
-/// moment its prompt is up.
-pub const SETTLE_MS: u64 = 700;
-/// How long the marker is given to move after the key that moves it.
-const MOVE_MS: u64 = 3_000;
+use crate::startscreen::{Moving, Stood, Watch, MOVE_MS};
+// What this shares with the review of spandeck's hooks (hookstrust.rs):
+// the first screen, the settle time, once per start, and what a pane's
+// record holds.
+pub use crate::startscreen::{Answered, Asks, Choice, SETTLE_MS, WINDOW_MS};
 
 const KEY: &str = "folder_trust";
 /// Said in `caps` by a station that has this.
 pub const CAP: &str = "folder_trust";
-/// A pane's `needs_reason` while the question is on its screen.
+/// A pane's `needs_reason` while the question is on its screen. Why
+/// nothing was pressed is in `trust.asks.why`: `not_chosen`,
+/// `not_the_known_screen`, `own_choice_is_no`, `switched_off`.
 pub const ASKS: &str = "asks whether to trust this folder: answer in the terminal";
 
 /// A folder the owner said a program may be told is trusted.
@@ -78,57 +78,8 @@ pub struct Store {
     pub projects: Vec<ProjectRule>,
 }
 
-/// On a pane's record: the standing choice it was started with.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Choice {
-    /// Who started the pane.
-    pub by: String,
-    /// `folder`: the owner ticked this folder for this program. `project`:
-    /// the pane is in the folders of a project the owner switched on.
-    pub why: String,
-}
-
-/// On a pane's record: its question was answered.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Answered {
-    pub at_ms: u64,
-    /// `standing`: by spandeck, on the choice the pane was started with.
-    /// `tap`: by the owner's own "Trust this folder".
-    pub how: String,
-    pub by: String,
-}
-
-/// On a pane's record: the question is on its screen and was not answered.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Asks {
-    pub since_ms: u64,
-    /// The choices can be read, so the owner's one tap can answer it.
-    pub button: bool,
-    /// Why spandeck pressed nothing: `not_chosen`, `not_the_known_screen`,
-    /// `own_choice_is_no`, `switched_off`.
-    pub why: String,
-}
-
-#[derive(Default)]
-struct Watch {
-    /// The start of the program this is about.
-    started_ms: u64,
-    first_seen_ms: Option<u64>,
-    /// The screen as last read, and since when it has read the same.
-    same: Option<(Seen, u64)>,
-    /// The key that moves the marker was sent, and when.
-    moved_ms: Option<u64>,
-    /// Nothing is pressed here any more without the owner.
-    auto_off: bool,
-    /// Never read again: answered, or past its start.
-    closed: bool,
-}
-
-#[derive(Default)]
-pub struct State {
-    lock: Mutex<()>,
-    watch: Mutex<HashMap<String, Watch>>,
-}
+/// Panes that may still be at their program's folder-trust question.
+pub(crate) type State = crate::startscreen::Watches<Seen>;
 
 /// A folder as the station names it: links resolved when it exists.
 pub fn canon(path: &Path) -> String {
@@ -403,7 +354,7 @@ impl Daemon {
     /// first stands? Claude Code's marker starts on "No, exit".
     fn folder_trust_would_press(&self, agent: AgentKind) -> bool {
         self.flag_on("folder_trust", true)
-            && (agent != AgentKind::Claude || self.flag_on("folder_trust.move", false))
+            && (agent != AgentKind::Claude || self.flag_on("folder_trust.move", true))
     }
 
     /// `trust` in a pane's view.
@@ -438,14 +389,6 @@ impl Daemon {
         }
     }
 
-    /// The owner typed into the pane: they are answering it themselves,
-    /// and nothing is pressed for them after that.
-    pub(crate) fn folder_trust_owner_typed(&self, pane: &str) {
-        if let Some(w) = self.folder_trust.watch.lock().unwrap().get_mut(pane) {
-            w.auto_off = true;
-        }
-    }
-
     /// Look at every agent pane that may still be at its first screen.
     /// Returns the panes whose screen is the question, which the ordinary
     /// screen detection leaves alone: what they say comes from here.
@@ -453,14 +396,8 @@ impl Daemon {
         let mut showing = HashSet::new();
         let now = now_ms();
         let panes = self.list_panes();
-        {
-            let live: HashSet<&str> = panes.iter().map(|p| p.id.as_str()).collect();
-            self.folder_trust
-                .watch
-                .lock()
-                .unwrap()
-                .retain(|id, _| live.contains(id.as_str()));
-        }
+        self.folder_trust
+            .keep_only(&panes.iter().map(|p| p.id.as_str()).collect());
         for p in panes {
             let m = {
                 let m = p.meta.lock().unwrap();
@@ -470,14 +407,7 @@ impl Daemon {
                 // Past its first screen, as nearly every pane is: nothing
                 // is read, and nothing is copied.
                 let started = m.proc_started_ms.unwrap_or(m.created_ms);
-                let past = self
-                    .folder_trust
-                    .watch
-                    .lock()
-                    .unwrap()
-                    .get(&p.id)
-                    .is_some_and(|w| w.closed && w.started_ms == started);
-                if past && m.trust_asks.is_none() {
+                if self.folder_trust.past(&p.id, started) && m.trust_asks.is_none() {
                     continue;
                 }
                 m.clone()
@@ -507,61 +437,34 @@ impl Daemon {
     /// screen is not the question.
     fn folder_trust_step(&self, p: &PaneEntry, m: &PaneMeta, now: u64) -> Option<Act> {
         let started = m.proc_started_ms.unwrap_or(m.created_ms);
-        let mut watch = self.folder_trust.watch.lock().unwrap();
-        let w = watch.entry(p.id.clone()).or_default();
-        if w.started_ms != started {
-            *w = Watch {
-                started_ms: started,
-                ..Default::default()
-            };
-        }
-        if w.closed {
-            return None;
-        }
+        self.folder_trust
+            .turn(&p.id, started, |w| self.folder_trust_decide(p, m, now, w))
+    }
+
+    fn folder_trust_decide(
+        &self,
+        p: &PaneEntry,
+        m: &PaneMeta,
+        now: u64,
+        w: &mut Watch<Seen>,
+    ) -> Option<Act> {
         // A hook of the session, an answer already given, a program that
         // ended: the first screen is behind it.
-        if m.hooks_seen || m.trust_answered.is_some() || m.exit.is_some() {
-            w.closed = true;
-            return None;
-        }
-        let age = now.saturating_sub(started);
-        let Some(seen) = screen::read(m.agent, &p.term.lines(), &self.folder_names(&m.cwd)) else {
-            w.same = None;
-            if age > WINDOW_MS {
-                w.closed = true;
-            }
-            return None;
+        let behind = m.hooks_seen || m.trust_answered.is_some() || m.exit.is_some();
+        let carried = m.trust_asks.as_ref().map(|a| a.since_ms);
+        let read = || screen::read(m.agent, &p.term.lines(), &self.folder_names(&m.cwd));
+        let (seen, since_ms) = match w.look(now, behind, carried, read) {
+            Stood::NotIt => return None,
+            Stood::Wait => return Some(Act::Wait),
+            Stood::Stands(seen, since_ms) => (seen, since_ms),
         };
-        if w.first_seen_ms.is_none() {
-            // A pane carried through an upgrade was already at the
-            // question if its record says so: it is the same first screen.
-            w.first_seen_ms = match &m.trust_asks {
-                Some(asks) => Some(asks.since_ms),
-                None if age > WINDOW_MS => {
-                    w.closed = true;
-                    return None;
-                }
-                None => Some(now),
-            };
-        }
-        match w.same {
-            Some((was, since)) if was == seen => {
-                if now.saturating_sub(since) < SETTLE_MS {
-                    return Some(Act::Wait);
-                }
-            }
-            _ => {
-                w.same = Some((seen, now));
-                return Some(Act::Wait);
-            }
-        }
         let button = seen.level >= Level::Choices;
-        let since_ms = w.first_seen_ms.unwrap_or(now);
         let asks = |why: &str| {
             Some(Act::Say(Asks {
                 since_ms,
                 button,
                 why: why.to_string(),
+                says: None,
             }))
         };
         let Some(choice) = m
@@ -583,19 +486,12 @@ impl Daemon {
                 w.closed = true;
                 Some(Act::Answer(choice.clone()))
             }
-            // The program's own choice is to leave. Its marker is moved
-            // only where the owner switched that on, and once.
-            Some(Focus::Exit) if self.flag_on("folder_trust.move", false) => match w.moved_ms {
-                None => {
-                    w.moved_ms = Some(now);
-                    w.same = None;
-                    Some(Act::Move)
-                }
-                Some(at) if now.saturating_sub(at) < MOVE_MS => Some(Act::Wait),
-                Some(_) => {
-                    w.auto_off = true;
-                    asks("own_choice_is_no")
-                }
+            // The program's own choice is to leave. Its marker is moved,
+            // once, unless the owner switched that off.
+            Some(Focus::Exit) if self.flag_on("folder_trust.move", true) => match w.moving(now) {
+                Moving::Now => Some(Act::Move),
+                Moving::Wait => Some(Act::Wait),
+                Moving::Failed => asks("own_choice_is_no"),
             },
             _ => asks("own_choice_is_no"),
         }
@@ -603,30 +499,7 @@ impl Daemon {
 
     /// Set or clear what a pane says about the question on its screen.
     fn folder_trust_say(&self, p: &PaneEntry, asks: Option<Asks>) {
-        let changed = {
-            let mut m = p.meta.lock().unwrap();
-            let changed = m.trust_asks != asks;
-            m.trust_asks = asks.clone();
-            changed
-        };
-        match asks {
-            Some(_) => {
-                self.set_state(p, AgentState::NeedsYou, Some(ASKS.to_string()));
-            }
-            None => {
-                let mine = {
-                    let m = p.meta.lock().unwrap();
-                    m.state == AgentState::NeedsYou && m.needs_reason.as_deref() == Some(ASKS)
-                };
-                if mine {
-                    self.set_state(p, AgentState::Idle, None);
-                }
-            }
-        }
-        if changed {
-            self.save_pane(p);
-            self.emit("pane.updated", Some(&p.id), None, json!({}));
-        }
+        self.start_screen_say(p, |m| &mut m.trust_asks, asks, ASKS);
     }
 
     /// Press the confirming key, once, and put it on record.
@@ -695,23 +568,13 @@ impl Daemon {
             || screen::read(m.agent, &p.term.lines(), &names).filter(|s| s.level >= Level::Choices);
         // Claimed with the watch locked, so that this and a standing
         // choice cannot both press.
+        if !self
+            .folder_trust
+            .claim(pane, || m.exit.is_none() && read().is_some())
         {
-            let mut watch = self.folder_trust.watch.lock().unwrap();
-            let w = watch
-                .get_mut(pane)
-                .filter(|w| !w.closed && w.first_seen_ms.is_some());
-            let Some(w) = w else { return Err(not_now()) };
-            if m.exit.is_some() || read().is_none() {
-                return Err(not_now());
-            }
-            w.closed = true;
+            return Err(not_now());
         }
-        let reopen = || {
-            if let Some(w) = self.folder_trust.watch.lock().unwrap().get_mut(pane) {
-                w.closed = false;
-                w.auto_off = true;
-            }
-        };
+        let reopen = || self.folder_trust.reopen(pane);
         if read().and_then(|s| s.focus) == Some(Focus::Exit) {
             let keys = screen::move_to_trust(m.agent).ok_or_else(not_now)?;
             p.term.send(Item::keys(keys))?;

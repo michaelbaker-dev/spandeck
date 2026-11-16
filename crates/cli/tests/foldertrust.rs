@@ -231,12 +231,15 @@ fn a_ticked_folder_is_answered_once_and_an_unticked_one_waits_for_the_owner() {
 }
 
 /// Claude Code's own choice on its screen is "No, exit" (recorded from
-/// 2.1.323): Enter alone would leave. So a ticked folder is not answered
-/// by a key there; the pane says why, and the owner's one tap moves the
-/// marker, sees that it moved, and only then confirms. A screen that is
-/// not the known one is never answered on a standing choice either.
+/// 2.1.323): Enter alone would leave. The owner's decision of 16 Nov 2026
+/// ("Make spandeck fully automatic with codex and Claude or any agent"):
+/// for a ticked folder spandeck moves the marker itself, sees that it
+/// moved, and only then confirms. With `folder_trust.move = false` it
+/// presses nothing there; the pane says why, and the owner's one tap does
+/// the same three things. A screen that is not the known one is never
+/// answered on a standing choice either way.
 #[test]
-fn claude_codes_marker_is_moved_only_for_the_owners_tap_and_an_unknown_screen_is_left_alone() {
+fn claude_codes_marker_is_moved_for_a_ticked_folder_and_an_unknown_screen_is_left_alone() {
     let s = Station::start("alpha");
     // A ticked folder whose program words its question differently, and
     // one where Claude Code lists what the folder's settings switch on:
@@ -270,6 +273,28 @@ fn claude_codes_marker_is_moved_only_for_the_owners_tap_and_an_unknown_screen_is
         .unwrap()
         .to_string();
 
+    // As it is unless the owner says otherwise: answered, by moving the
+    // marker and confirming, and the program goes on.
+    let auto_dir = folder(&s, "claude-auto");
+    let c = s.call(
+        "foldertrust.choice",
+        json!({"agent": "claude", "cwd": auto_dir}),
+    );
+    assert_eq!(c["pressed"], json!(true), "the dialog promises no tap");
+    let auto = start(&s, "claude", &auto_dir, json!({"trust_folder": true}));
+    s.wait_text(&auto, TRUSTED);
+    s.wait_text(&auto, "[fake] session");
+    assert!(!s.text(&auto).contains("left: the folder was not trusted"));
+    assert_eq!(answers(&s, &auto).len(), 1);
+    assert_eq!(answers(&s, &auto)[0]["data"]["how"], json!("standing"));
+    assert!(s.pane(&auto)["exit"].is_null());
+
+    // The owner's switch against it: nothing is pressed, and the tap is
+    // offered.
+    s.call(
+        "station.flags",
+        json!({"set": {"folder_trust.move": false}}),
+    );
     let dir = folder(&s, "claude-new");
     let pane = start(&s, "claude", &dir, json!({"trust_folder": true}));
     let p = wait_asks(&s, &pane);
@@ -314,7 +339,9 @@ fn claude_codes_marker_is_moved_only_for_the_owners_tap_and_an_unknown_screen_is
 #[test]
 #[ignore = "merge tier: waits several times for a key that must not be pressed"]
 fn nothing_but_the_first_screen_of_a_chosen_folder_is_answered() {
-    let s = Station::start("alpha");
+    // Two of these panes wait with their marker on "No, exit" for what
+    // the owner does next, so moving it for them is switched off here.
+    let s = Station::start_with("alpha", "[flags]\nfolder_trust.move = false\n", &[]);
     let a_key_would_have_come = || std::thread::sleep(Duration::from_millis(3000));
     let spawn = |agent: &str, dir: &Path, script: Value, extra: Value| {
         let path = s.script_file(&script);
@@ -410,7 +437,7 @@ fn nothing_but_the_first_screen_of_a_chosen_folder_is_answered() {
     for pane in [&hooks, &hooks_in_agy] {
         let screen = s.text(pane);
         assert!(screen.contains("Hooks need review"), "{screen}");
-        assert!(!screen.contains("hooks screen answered"), "{screen}");
+        assert!(!screen.contains("[fake] hooks:"), "{screen}");
         assert!(trust(&s, pane)["asks"].is_null(), "not a folder's trust");
     }
     assert!(s.text(&permission).contains("Do you want to proceed?"));
@@ -544,8 +571,8 @@ fn a_helper_is_answered_only_in_a_project_the_owner_switched_on() {
 
 /// The program started again in the same pane (the owner's Restart, or the
 /// station after a crash) is answered again only because the pane was
-/// started with the choice; and the switch that lets spandeck move Claude
-/// Code's marker does that and nothing more.
+/// started with the choice; and Claude Code's marker is moved for a
+/// chosen folder and for nothing more.
 #[test]
 #[ignore = "merge tier: restarts a pane and a station"]
 fn a_pane_started_with_the_choice_keeps_it_through_a_restart() {
@@ -609,8 +636,7 @@ fn a_pane_started_with_the_choice_keeps_it_through_a_restart() {
     );
     assert!(answers(&s, &plain).is_empty());
 
-    // Claude Code, with the owner's switch for moving its marker.
-    s.call("station.flags", json!({"set": {"folder_trust.move": true}}));
+    // Claude Code, whose marker spandeck moves for a chosen folder.
     let cdir = folder(&s, "claude-moved");
     let claude = start(&s, "claude", &cdir, json!({"trust_folder": true}));
     s.wait_text(&claude, TRUSTED);
@@ -687,8 +713,10 @@ fn the_deck_has_the_tick_the_note_the_one_tap_and_the_list() {
     };
     let s = Station::start_with(
         "spark2",
+        // Moving Claude Code's marker is switched off here, so that the
+        // deck's one tap and what it says of it are seen.
         &format!(
-            "[agents.antigravity]\nprogram = '{FAKE}'\nargs = [\"--script\", '{}']\n[agents.claude]\nprogram = '{FAKE}'\nargs = [\"--script\", '{}']\n",
+            "[flags]\nfolder_trust.move = false\n[agents.antigravity]\nprogram = '{FAKE}'\nargs = [\"--script\", '{}']\n[agents.claude]\nprogram = '{FAKE}'\nargs = [\"--script\", '{}']\n",
             script("antigravity").display(),
             script("claude").display()
         ),
@@ -776,9 +804,14 @@ fn the_deck_has_the_tick_the_note_the_one_tap_and_the_list() {
         &dir.display().to_string(),
     );
     page.wait("the tick box", tick_shown);
+    // For this folder: a tick clicked before the dialog has asked about
+    // the folder just typed is put back to what the station answers.
     page.wait(
-        "the tick for Claude Code",
-        "document.querySelector('.dialog .trust-row').innerText.includes('for Claude Code')",
+        "the tick for Claude Code in this folder",
+        &format!(
+            "(t => t.includes('for Claude Code') && t.includes({}))(document.querySelector('.dialog .trust-row').innerText)",
+            json!(dir.display().to_string())
+        ),
     );
     assert_eq!(
         page.js("document.querySelector('.dialog .trust-row input').checked"),

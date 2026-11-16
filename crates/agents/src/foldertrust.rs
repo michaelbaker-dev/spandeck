@@ -157,7 +157,7 @@ pub fn move_to_trust(kind: AgentKind) -> Option<&'static [u8]> {
 }
 
 /// A line without the frame a program may draw around its prompt.
-fn clean(line: &str) -> String {
+pub(crate) fn clean(line: &str) -> String {
     line.chars()
         .filter(|c| !('\u{2500}'..='\u{257f}').contains(c))
         .collect::<String>()
@@ -173,7 +173,7 @@ fn squash(s: &str) -> String {
 
 /// A choice's line: `Some(true)` with the marker before it, `Some(false)`
 /// without, `None` when the line is something else.
-fn choice(row: &str, label: &str, marker: char) -> Option<bool> {
+pub(crate) fn choice(row: &str, label: &str, marker: char) -> Option<bool> {
     if row == label {
         return Some(false);
     }
@@ -384,19 +384,11 @@ pub mod drawn {
         out
     }
 
-    /// Codex's review of new hooks, from the words in 0.169.0's program
-    /// text. Not a folder's trust: it is here so that the tests can show
-    /// it is never read as one.
+    /// Codex's review of new hooks, as a real 0.169.0 drew it
+    /// (agents/hookstrust.rs). Not a folder's trust: it is here so that
+    /// the tests can show it is never read as one.
     pub fn codex_hooks() -> Vec<String> {
-        vec![
-            "Hooks need review".into(),
-            "1 hook is new or changed.".into(),
-            "Hooks can run outside the sandbox after you trust them.".into(),
-            String::new(),
-            "› 1. Review hooks".into(),
-            "  2. Trust all and continue".into(),
-            "  3. Continue without trusting (hooks won't run)".into(),
-        ]
+        crate::hookstrust::drawn::codex(1, crate::hookstrust::Mark::Review)
     }
 }
 

@@ -20,7 +20,7 @@
 // - Times are the station's: an elapsed time is worked out from the clock the
 //   station sent with its answer, plus the time since that answer arrived.
 
-import { h, showMenu, toast, dialog, copyText, dot, stateOf, STATE_LABEL, fmtTokens, heldWords, RELEASE_SAYS, trustAnsweredWords, trustTick, trustCard } from './ui.js';
+import { h, showMenu, toast, dialog, copyText, dot, stateOf, STATE_LABEL, fmtTokens, heldWords, RELEASE_SAYS, trustAnsweredWords, trustTick, trustCard, hooksTick } from './ui.js';
 import { renderMarkdown } from './md.js';
 import { sendAct } from './typed.js';
 import { retryIn } from './api.js';
@@ -1235,12 +1235,14 @@ export function newSession() {
     const lastNote = h('small', { class: 'muted' });
     const lastRow = h('div', {}, h('label', { class: 'row' }, last, 'Continue the last conversation in this folder'), lastNote);
     const trust = trustTick((q) => env.api.on(S.st, 'foldertrust.choice', q), () => ({ agent: S.agent, project: proj.value, cwd: cwd.value.trim() }));
+    const hooks = hooksTick((q) => env.api.on(S.st, 'hookstrust.choice', q), () => ({ agent: S.agent }));
     const first = h('textarea', { rows: 3, class: 'chat-first', placeholder: 'Optional: what to say first', 'aria-label': 'First message' });
     const firstRow = h('label', { class: 'field' }, h('span', {}, 'First message'), first);
     let asked = 0, canContinue = true, timer = null;
     const ask = async () => {
       const n = ++asked, agent = S.agent !== 'shell';
       trust.refresh();
+      hooks.refresh();
       lastRow.hidden = !(agent && canContinue);
       firstRow.hidden = !agent;
       if (!agent || !canContinue) return;
@@ -1269,7 +1271,7 @@ export function newSession() {
       const agent = S.agent !== 'shell', resume = agent && canContinue && last.checked;
       const name = env.freeName(S.agent, env.panesOf(S.st).filter(x => !x.exited && (x.project || '') === proj.value).map(x => x.name));
       const pane = await env.rpc(S.st, 'pane.spawn', { agent: S.agent, name, project: proj.value || undefined, cwd: cwd.value.trim() || undefined,
-        trust_folder: trust.value(), resume_last: resume || undefined, prompt: agent && first.value.trim() ? first.value.trim() : undefined });
+        trust_folder: trust.value(), trust_hooks: hooks.value(), resume_last: resume || undefined, prompt: agent && first.value.trim() ? first.value.trim() : undefined });
       try { localStorage.setItem('spandeck.newSession.agent', S.agent); } catch (e) { /* not kept */ }
       close();
       if (resume && !pane.resumed) toast('No saved conversation to continue here: a new one was started');
@@ -1278,7 +1280,7 @@ export function newSession() {
     return h('form', { class: 'new-session-form', onsubmit: (e) => { e.preventDefault(); start().catch(() => {}); } },
       h('h3', {}, 'Agent'), tiles, h('h3', {}, 'Station'), chips,
       h('label', { class: 'field' }, h('span', {}, 'Project'), proj), h('label', { class: 'field' }, h('span', {}, 'Folder'), cwd),
-      lastRow, trust.row, firstRow,
+      lastRow, trust.row, hooks.row, firstRow,
       h('div', { class: 'row end sheet-foot' }, h('button', { type: 'button', onclick: close }, 'Cancel'), h('button', { class: 'primary', type: 'submit' }, 'Start')));
   });
   box.body.parentNode.classList.add('sheet');

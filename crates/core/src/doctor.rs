@@ -232,7 +232,7 @@ impl Daemon {
             if let Ok(st) = install::status(kind, &self.home) {
                 let detail = match (st.installed, st.outdated, kind) {
                     (true, true, _) => format!("hooks installed but out of date (v{}): a rule check is cut off after 10 seconds. Run `spandeck integration install {}`{}", st.version.unwrap_or(0), kind.as_str(), if kind == AgentKind::Codex { ", then trust the hooks again in Codex with /hooks" } else { "" }),
-                    (true, false, _) => format!("hooks installed (v{}){}", st.version.unwrap_or(0), st.note.map(|n| format!("; {n}")).unwrap_or_default()),
+                    (true, false, _) => format!("hooks installed (v{}){}{}", st.version.unwrap_or(0), st.note.map(|n| format!("; {n}")).unwrap_or_default(), if kind == AgentKind::Codex { self.hooks_trust_doctor_words() } else { String::new() }),
                     (false, _, AgentKind::Claude) => "not installed globally; panes spandeck starts are hooked at launch anyway".to_string(),
                     (false, _, _) if !owns => "not installed, and not this station's to install (see agent settings): Codex's state is read from its screen".to_string(),
                     (false, _, _) => "not installed: run `spandeck integration install codex`, then trust the hooks in Codex with /hooks".to_string(),

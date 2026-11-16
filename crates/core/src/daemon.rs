@@ -217,6 +217,17 @@ pub struct PaneMeta {
     /// The question is on the screen now and nothing was pressed.
     #[serde(default)]
     pub trust_asks: Option<crate::foldertrust::Asks>,
+    /// The owner's standing choice this pane was started with: if its
+    /// program asks to review hooks and they are all spandeck's own, they
+    /// are trusted (hookstrust.rs). Kept through a restart of the program.
+    #[serde(default)]
+    pub hooks_trust_choice: Option<crate::startscreen::Choice>,
+    /// The program's review of hooks was answered, by whom and how.
+    #[serde(default)]
+    pub hooks_trust_answered: Option<crate::startscreen::Answered>,
+    /// The review is on the screen now and nothing was pressed.
+    #[serde(default)]
+    pub hooks_trust_asks: Option<crate::startscreen::Asks>,
 }
 
 /// What came of stopping one pane.
@@ -321,6 +332,14 @@ pub struct SpawnOpts {
     /// caller's parameters: whoever starts the pane works it out.
     #[serde(skip)]
     pub trust_choice: Option<crate::foldertrust::Choice>,
+    /// The New pane dialog's tick, "Trust spandeck's own hooks in <agent>
+    /// if it asks", as the caller sent it. Read by `pane.spawn` for the
+    /// owner only, and by nothing else (hookstrust.rs).
+    pub trust_hooks: Option<bool>,
+    /// The choice the pane starts with. Never read from a caller's
+    /// parameters: whoever starts the pane works it out.
+    #[serde(skip)]
+    pub hooks_trust_choice: Option<crate::startscreen::Choice>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,6 +412,8 @@ pub struct Inner {
     pub(crate) typed: Mutex<HashMap<String, u64>>,
     /// Panes that may still be at their program's folder-trust question.
     pub(crate) folder_trust: crate::foldertrust::State,
+    /// Panes that may still be at their program's review of hooks.
+    pub(crate) hooks_trust: crate::hookstrust::State,
     pub(crate) keep_awake: Mutex<Option<std::process::Child>>,
     /// pane -> (session, line): how far the owner has read each pane's
     /// conversation. Kept in the key-value table; this is its copy in memory.
@@ -565,6 +586,7 @@ impl Daemon {
             presence: Mutex::new(HashMap::new()),
             typed: Mutex::new(HashMap::new()),
             folder_trust: Default::default(),
+            hooks_trust: Default::default(),
             keep_awake: Mutex::new(None),
             read_marks: Mutex::new(HashMap::new()),
             keep_awake_held: std::sync::atomic::AtomicBool::new(false),
@@ -1265,6 +1287,9 @@ impl Daemon {
             trust_choice: opts.trust_choice.clone(),
             trust_answered: None,
             trust_asks: None,
+            hooks_trust_choice: opts.hooks_trust_choice.clone(),
+            hooks_trust_answered: None,
+            hooks_trust_asks: None,
         };
         let entry = Arc::new(PaneEntry {
             id: id.clone(),
@@ -1561,7 +1586,9 @@ impl Daemon {
     fn detect_screens(&self) {
         // A program's folder-trust question is read first, and what such
         // a pane says comes from there (foldertrust.rs).
-        let trust = self.folder_trust_look();
+        let mut trust = self.folder_trust_look();
+        // And its review of hooks (hookstrust.rs).
+        trust.extend(self.hooks_trust_look());
         for p in self.list_panes() {
             let (agent, hooks_seen, exited, state, reason) = {
                 let m = p.meta.lock().unwrap();
@@ -1773,6 +1800,7 @@ impl Daemon {
                 // The same rule for the program started again, and only
                 // for a pane that was started with the choice.
                 trust_choice: meta.trust_choice.clone(),
+                hooks_trust_choice: meta.hooks_trust_choice.clone(),
                 ..Default::default()
             })
             .inspect_err(|_| {
@@ -2461,6 +2489,7 @@ impl Daemon {
                 resume: self.resumable(&meta),
                 slot: meta.slot.clone(),
                 trust_choice: meta.trust_choice.clone(),
+                hooks_trust_choice: meta.hooks_trust_choice.clone(),
                 ..Default::default()
             };
             match self.spawn_pane(opts) {
@@ -2763,6 +2792,8 @@ impl Daemon {
         // The folder-trust tick, the one tap and the list: a deck offers
         // them only for a station that says so.
         caps.push(crate::foldertrust::CAP);
+        // The tick for spandeck's own hooks, its switch and the one tap.
+        caps.push(crate::hookstrust::CAP);
         // A question and a plan are held for the owner, and
         // `question.answer` answers them.
         caps.push(crate::questions::CAP);

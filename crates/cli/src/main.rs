@@ -242,6 +242,15 @@ enum PaneCmd {
         /// copied from somewhere you do not trust.
         #[arg(long)]
         trust_folder: bool,
+        /// Do not answer the agent's review of hooks (Codex's "Hooks need
+        /// review") for me, here or in later panes on this station. Without
+        /// it spandeck chooses "Trust all and continue" when every hook
+        /// the agent can be asking about is spandeck's own.
+        #[arg(long, conflicts_with = "trust_hooks")]
+        no_trust_hooks: bool,
+        /// Turn that back on for this station.
+        #[arg(long)]
+        trust_hooks: bool,
         /// Program and arguments instead of an agent.
         #[arg(last = true)]
         command: Vec<String>,
@@ -253,6 +262,12 @@ enum PaneCmd {
         pane: String,
         #[arg(long)]
         remember: bool,
+    },
+    /// Choose "Trust all and continue" at the review of hooks a pane's
+    /// program is showing. Refused, with the reason, when the hooks may
+    /// not all be spandeck's own.
+    TrustHooks {
+        pane: String,
     },
     List,
     /// Print a pane's screen.
@@ -620,6 +635,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 cwd,
                 resume_last,
                 trust_folder,
+                no_trust_hooks,
+                trust_hooks,
                 command,
             } => {
                 let cwd = cwd.or_else(|| std::env::current_dir().ok());
@@ -630,7 +647,14 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 // Not given, nothing is sent: the owner's standing choice
                 // for the folder stands as it is.
                 let trust = trust_folder.then_some(true);
-                let v = c.call("pane.spawn", json!({"agent": agent, "name": name, "project": project, "cwd": cwd, "program": program, "args": args, "resume_last": resume_last, "trust_folder": trust}))?;
+                // The same for spandeck's own hooks: on unless the owner
+                // turned it off, and only a flag changes that.
+                let hooks = match (no_trust_hooks, trust_hooks) {
+                    (true, _) => Some(false),
+                    (_, true) => Some(true),
+                    _ => None,
+                };
+                let v = c.call("pane.spawn", json!({"agent": agent, "name": name, "project": project, "cwd": cwd, "program": program, "args": args, "resume_last": resume_last, "trust_folder": trust, "trust_hooks": hooks}))?;
                 // The id stays alone on standard output, for scripts.
                 if resume_last && v["resumed"] != json!(true) && v["agent"] != json!("shell") {
                     eprintln!("spandeck: no saved conversation to continue in this folder; a new one was started");
@@ -642,6 +666,9 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     "pane.trust_folder",
                     json!({"pane": pane, "remember": remember}),
                 )?;
+            }
+            PaneCmd::TrustHooks { pane } => {
+                c.call("pane.trust_hooks", json!({"pane": pane}))?;
             }
             PaneCmd::List => {
                 let v = c.call("pane.list", json!({}))?;
