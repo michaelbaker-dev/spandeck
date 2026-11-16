@@ -404,9 +404,10 @@ fn sign_in_as_device(page: &browser::Page, s: &Station) {
     ));
     let token = got["token"].as_str().expect("a token");
     page.js(&format!(
-        "(localStorage.setItem('spandeck.token', {}), location.reload(), true)",
+        "(localStorage.setItem('spandeck.token', {}), true)",
         json!(token)
     ));
+    page.reload();
     std::thread::sleep(Duration::from_millis(300));
     page.wait(
         "the deck again",

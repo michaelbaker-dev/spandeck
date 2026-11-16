@@ -1104,8 +1104,8 @@ fn a_layout_keeps_the_keyboard_and_the_keys_of_a_reconnect() {
     page.wait("the station to have read the page's clock", "api().ready");
     // The keyboard goes to the second pane, as a click puts it there.
     page.js(&format!("({term}.el.dispatchEvent(new MouseEvent('mousedown', {{bubbles: true}})), {term}.term.focus(), true)"));
-    page.tab.type_str("echo before-$((1+1))").unwrap();
-    page.tab.press_key("Enter").unwrap();
+    page.type_str("echo before-$((1+1))");
+    page.press_key("Enter");
     a.wait_text(&right, "before-2");
     for round in 0..3 {
         // The connection is lost, and what is typed at that moment is held.
@@ -1125,10 +1125,8 @@ fn a_layout_keeps_the_keyboard_and_the_keys_of_a_reconnect() {
             json!(true),
             "round {round}"
         );
-        page.tab
-            .type_str(&format!("echo after{round}-$((3+3))"))
-            .unwrap();
-        page.tab.press_key("Enter").unwrap();
+        page.type_str(&format!("echo after{round}-$((3+3))"));
+        page.press_key("Enter");
         a.wait_text(&right, &format!("after{round}-6"));
     }
     let (l, r) = (a.text(&left), a.text(&right));

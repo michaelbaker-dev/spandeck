@@ -582,7 +582,7 @@ fn the_deck_and_the_phone_show_a_held_pane_and_release_it() {
         let lines = "0123456789abcdef0123456789abcdef0123456789abcdef\r".repeat(420);
         s.call("pane.input", json!({"pane": deaf, "data": lines}));
         page.js("document.querySelector('.xterm-helper-textarea').focus()");
-        page.tab.type_str("abc").unwrap();
+        page.type_str("abc");
         // The keys are behind the lines, in the pane's input, when the
         // stop comes; the stop cannot reach the program, and says so.
         std::thread::sleep(Duration::from_millis(500));
