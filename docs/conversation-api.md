@@ -5,6 +5,8 @@ conversation view"). This is the contract the view is built on (`crates/web/asse
 phase M2). The code is
 `crates/archive/src/conversation.rs` (session file to items), `crates/core/src/conversation.rs`
 (the calls) and `watch_local` / `watch_remote` in `crates/web/src/lib.rs` (the live stream).
+Answering a question or a plan (phase M3, 16 Nov 2026) is `crates/core/src/questions.rs`:
+`live.questions` and `question.answer`, below.
 
 ## Rules that hold for every call
 
@@ -90,6 +92,7 @@ answer is as fresh as the file whoever asks.
     "paused": false, "exited": false, "resumed": false, "hooks_seen": true,
     "held": null,
     "approvals": [],
+    "questions": [],
     "unread": true, "read_line": 9,
     "now_ms": 1794736806200
   }
@@ -150,8 +153,8 @@ apply is absent, not null.
 | `text` | `text`, `more?`, `phase?` | The agent's words, as markdown source. Codex adds `phase`: `commentary` (said while working) or `final_answer`. |
 | `thinking` | `duration_ms?` | Never the thinking. Codex gives no duration. |
 | `tool` | `name`, `summary`, `status`, `duration_ms?`, `added?`, `removed?`, `background?` | `summary` is one line, 200 characters at most: the command, the file, the pattern, the address. May be empty. `added` / `removed`: lines an edit changed. `background`: started and left running. |
-| `question` | `questions`, `status`, `answers?` | Claude Code's AskUserQuestion. `questions[]`: `header`, `question`, `multi`, `options[] {label, description?}`. `answers`: `[question, answer]` pairs, once answered. |
-| `plan` | `text`, `status`, `more?` | Claude Code's ExitPlanMode. `text` is the plan, markdown source. |
+| `question` | `questions`, `status`, `answers?` | Claude Code's AskUserQuestion. `questions[]`: `header`, `question`, `multi`, `options[] {label, description?}`. `answers`: `[question, answer]` pairs, once answered. While it waits it may be held for the owner: see `live.questions`. |
+| `plan` | `text`, `status`, `more?` | Claude Code's ExitPlanMode. `text` is the plan, markdown source; it can be empty when Claude Code wrote the call without it (`live.questions` has it while the plan is held). `rejected`: the owner declined it in the terminal, or sent it back from the deck. |
 | `tasks` | `name`, `summary`, `status`, `background?` | A sub-agent the agent started: `name` is its kind ("Explore"), `summary` what it was asked. One item per sub-agent; fold neighbours into "3 tasks". Which are running now is `live.subagents`. |
 | `notice` | `what`, and by `what`: | Something that happened, not something said. |
 | | `turn_ended`: `duration_ms?` | The agent finished its turn. |
@@ -187,11 +190,116 @@ kind as a quiet line with its name, never as an error.
 | `paused`, `exited`, `resumed`, `hooks_seen` | As in the pane list. `resumed`: the program was started into a saved conversation. |
 | `held` | `null`, or why the agent takes no mail until the owner releases it: `{stopped, restored, mail}`. `stopped` is `null` or `{at_ms, by, reached}`: the owner (or a "stop every agent") stopped it; `reached: false` means the program was not reading and the stop did not reach it ("use Kill"). `restored` is `null` or `{at_ms, why}`: the station started it again after a restart (`why`: `crash`, `stop`, `upgrade`). `mail` is how many messages wait. Show it with a Release button: `pane.release {pane}` (the owner's only; `{all: true}` for every pane on the station), answered `{ok, pane, released, still_paused, saved}`. Sending the pane anything (`pane.send_text`, `pane.paste`, `pane.input`) releases it too. `paused` is apart: Release never changes it. The same `held` is in `pane.list` and `pane.get`. A station from before this has no `held`. |
 | `approvals` | Requests held for the owner for this pane, oldest first. Each: `{kind: "approval", id: "approval:<approval id>", approval, what, summary, tool, ts_ms, item}`. `approval` is the id `approval.answer {id, allow, reason?}` takes, as today. `what` is the kind of request (`permission`, `route`). `item` is the `id` of the `tool` item the request is about, or `null`: draw the card anyway. It is set only when the station is sure which call it is: the call with the id the hook gave, else the newest running call of that tool with the same command or file. It can name an item on a line after this answer's `cursor`, which the next answer brings. They are not in `items`: they are not in the session file. |
+| `questions` | A question or a plan the station holds for the owner for this pane, oldest first (eight at most). Below. A station from before 16 Nov 2026 has no such field. |
 | `unread`, `read_line` | Whether the agent has said something after the read mark, and the mark. Below. |
 | `now_ms` | The station's clock. |
 
-A `question` or `plan` with `status: "waiting"` cannot be answered through the API yet (phase
-M3). Show it, and send the owner to the terminal to answer.
+### `live.questions`: a question or a plan held for the owner
+
+Claude Code asks the owner with two tools: `AskUserQuestion` (item kind `question`) and
+`ExitPlanMode` (item kind `plan`). When the pane's session has the hook that can hold such a
+call (sessions started after 16 Nov 2026; `DECISIONS.md`, "Answer in place"), the station holds
+it, the agent's terminal shows no prompt, and the call is listed here until it is answered,
+let go, or its time runs out. They are not in `approvals` and not in `approval.list`.
+
+```json
+"questions": [
+  {"kind": "question", "id": "a_01jx7q", "item": "17.0",
+   "ts_ms": 1794736821000, "until_ms": 1794737421000, "attached": true,
+   "questions": [
+     {"header": "Species", "question": "Which herons count?", "multi": false,
+      "options": [{"label": "Grey herons only", "description": "Skip egrets and bitterns"},
+                  {"label": "All herons", "description": "Count every bird in the heron family"}]},
+     {"header": "Rivers", "question": "Which rivers?", "multi": true,
+      "options": [{"label": "Avon"}, {"label": "Exe"}, {"label": "Tamar"}]}]},
+  {"kind": "plan", "id": "a_01jx7r", "item": "19.0",
+   "ts_ms": 1794736841000, "until_ms": 1794737441000, "attached": true,
+   "text": "# Tally plan\n\n1. Filter the rows to grey herons\n2. Run the tests again", "more": false}
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `kind` | `question` or `plan`. |
+| `id` | What `question.answer` takes. |
+| `item` | The `id` of the `question` or `plan` item this is, or `null` (the item is on a line the answer has not reached yet, or the station is not sure which it is): draw the card anyway, from what is here. Tied by the call's own id; else to the only call of that tool that waits. |
+| `ts_ms`, `until_ms` | When it was first asked, and until when the station holds it, on the station's clock: `until_ms - live.now_ms` is how long it still waits here. After that the agent shows its own prompt in the terminal. Counted from the first asking, through a restart. |
+| `attached` | `false` while the agent's hook is finding its way back after the station restarted. It can be answered all the same: the answer is kept for the hook. |
+| `questions` | For a question: as in a `question` item (`header`, `question`, `multi`, `options[] {label, description?}`), cleaned and cut the same way. One to eight questions, each with one to sixteen options. An answer names an option by its place in `options`, counted from 0. |
+| `text`, `more` | For a plan: the plan as the hook was given it, markdown source, cut at 64 KB (`more`). Claude Code may write the call to the session file without the plan, so prefer this to the item's `text`. |
+
+A `question` or `plan` item with `status: "waiting"` that is **not** in `live.questions` is not
+held: it waits in the terminal (the hold ran out, the owner let it go, the session was started
+before it could be held, or holding is switched off with `question_hold_s = 0`). Show it and
+send the owner to the terminal. `live.needs_reason` then begins `its question is in the
+terminal now` or `its plan is in the terminal now`, with why in brackets.
+
+**In the pane list.** `pane.list` and `pane.get` say `asks: null`, or
+`asks: {kind: "question" | "plan", until_ms}` for a pane with something held: which kind and
+until when, never what it says (agents read the pane list). The pane's state is `needs_you`
+and its `needs_reason` reads `asks you a question: answer it in Chat (in the terminal from
+14:12 UTC)` (or `asks you to approve its plan: …`).
+
+## `question.answer`
+
+The owner's only: an agent's token is refused (`denied`), for its own pane too, and so are a
+station's own call and the read-only caller. For a pane on another station:
+`peer.call {station, method: "question.answer", params}`.
+
+```
+{id, answers: [{picked?: [n, …], other?: "text"}, …]}     a question
+{id, approve: true}                                       a plan: approve it
+{id, approve: false, text?: "what to change"}             a plan: keep planning
+{id, release: true}                                       either: answer in the terminal instead
+```
+
+| Parameter | Meaning |
+|---|---|
+| `id` | The `id` from `live.questions`. |
+| `answers` | One entry for each question, in order. `picked`: places in that question's `options` (from 0). `other`: an answer of the owner's own, 4,000 characters at most. A question with `multi: false` takes exactly one of the two, and one place; one with `multi: true` takes any number of places and, beside or instead, `other`. Every question must have an answer. |
+| `approve`, `text` | For a plan. `text`: a note for the agent, sent only with `approve: false`, 4,000 characters at most. |
+| `release` | Let it go: the hook says nothing and the agent shows its own prompt in the terminal at once. Nothing is answered. |
+
+```json
+{"ok": true, "saved": true, "delivered": true}
+{"ok": true, "saved": true, "delivered": false, "note": "recorded: the agent will get it when it reconnects"}
+{"ok": true, "released": true, "saved": true}
+```
+
+- `delivered: false`: the agent's hook is not connected at this moment (the station has just
+  restarted); the answer is kept and given to it when it is back.
+- **Once.** A second answer is refused (`invalid`: "that question is no longer waiting here
+  …"). The same answer sent again with its request id and `again_ms` (the answer to the first
+  try was lost) is told `{"ok": true, "repeat": true}` and changes nothing.
+- Errors: `not_found` (no question or plan with that id), `invalid` (it is no longer waiting;
+  or the answer does not fit the question: a place that is not an option, two answers where
+  one is taken, a question with no answer, `answers` for a plan), `denied`.
+  `approval.answer` with a question's id is refused (`invalid`), and names this call.
+- An answer from here counts as the owner's input to the pane: like typing into it, it releases
+  a pane held after a stop or a restart (`held`), and never a paused one. `release` releases
+  nothing.
+- The station emits `question.resolved` (`data: {id, status}`; `allowed`, `denied`, `released`,
+  `expired`, `cancelled`) to decks connected to it; the stream sends the changed `live`.
+
+**What the agent is given** (Claude Code's hook reference, "Tools that require user
+interaction"; not run with the real agent). The call's whole input, with the answer in it:
+
+```json
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+  "updatedInput": {"questions": [ …as the agent wrote them… ],
+    "answers": {"Which herons count?": "All herons", "Which rivers?": "Avon, Tamar, Dart"}}}}
+```
+
+Each question's text maps to the label chosen; several labels are joined with `, `; `other` is
+given as typed, after the labels when there are both. A plan that is approved: `allow`, with
+`updatedInput` the input as it came (`plan`, `planFilePath`). A plan that is sent back:
+`"permissionDecision": "deny"` and `"permissionDecisionReason": "The owner read this plan in
+spandeck and did not approve it: keep planning, and do not start the work. The owner's note:
+…"`. Let go, or not answered in time: the hook prints nothing.
+
+**How long.** Ten minutes, or the station's `question_hold_s` (seconds; `[flags]` or
+`station.flags`; 0: never held). Never past the hook's own timeout less 5 seconds: the entry
+spandeck installs gives it an hour.
 
 ## `pane.conversation.detail`
 
@@ -334,7 +442,7 @@ an item of another session), `unreachable` (the pane's station, through the gate
 | Tool duration | Yes | Yes, from the times of the two records | | |
 | Diff of an edit | Yes | No | | |
 | Thinking duration | Yes | No | | |
-| Question, plan | Shown, with the answer once given | Not in its files | | |
+| Question, plan | Shown, with the answer once given; held for the owner and answered with `question.answer` (sessions started after 16 Nov 2026; not run with the real agent) | Not in its files; what Codex asks is in its terminal | The terminal | |
 | Sub-agents as `tasks` | Yes | No (`live.subagents` still counts them from hooks) | | |
 | Compaction, turn end, interrupted, error | Yes | Turn end with duration; the others are written from Codex's public format and were not in the files read | | |
 | `live`, approvals, `unread` | Yes | Yes (approvals where Codex's hooks hold them) | `live` only | `live` only |

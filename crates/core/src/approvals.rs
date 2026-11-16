@@ -470,8 +470,14 @@ impl ApprovalBook {
     /// What the database does not have yet is laid over what it gave, so
     /// an approval just asked for is listed and one just answered never
     /// shows as waiting again (db.rs).
-    fn overlaid(&self, mut rows: Vec<Value>, pending_only: bool) -> Vec<Value> {
-        for op in self.db.pending() {
+    ///
+    /// `unwritten`: what was not written yet, taken *before* `rows` were
+    /// read. Taken after, a change that was written in between is in
+    /// neither: the rows are from before it and the list of what is
+    /// unwritten no longer has it, and a question just let go read as
+    /// still waiting (found by the scenario test, one run in five).
+    fn overlaid(&self, mut rows: Vec<Value>, pending_only: bool, unwritten: Vec<Op>) -> Vec<Value> {
+        for op in unwritten {
             match op {
                 Op::ApprovalNew {
                     id,
@@ -529,7 +535,8 @@ impl ApprovalBook {
         // An answer that is not written yet may be for a row that still
         // reads as waiting: every row is read then, and the waiting ones
         // are picked after what is unwritten is laid over them.
-        let unwritten = self.db.stats().waiting > 0;
+        let ops = self.db.pending();
+        let unwritten = !ops.is_empty() || self.db.stats().waiting > 0;
         let rows = self
             .db
             .read(|c| {
@@ -551,7 +558,7 @@ impl ApprovalBook {
                 rows.collect::<rusqlite::Result<Vec<Value>>>()
             })
             .unwrap_or_default();
-        self.overlaid(rows, pending_only)
+        self.overlaid(rows, pending_only, ops)
     }
 
     /// The approvals, as anyone is shown them: a hook's mark is left out,

@@ -1416,6 +1416,9 @@ fn the_conversation_view(s: &Station, page: &common::browser::Page) {
         "the finished agent's conversation",
         &format!("location.hash.endsWith('/p/{finished}') && !!document.querySelector('.phone-chat .chat-text')"),
     );
+    // Started here, so that it is in the list by the time the list is looked
+    // at: the agent whose question and plan are answered below.
+    let surveyor = surveyor(s);
     wait_for("that conversation to be marked read", 10, || {
         (s.pane(finished)["unread"] == json!(false)).then_some(())
     });
@@ -1427,7 +1430,113 @@ fn the_conversation_view(s: &Station, page: &common::browser::Page) {
             row("asker")
         ),
     );
+    answered_in_place(s, page, &surveyor);
+    page.goto("#/fleet");
     the_phones_appearance_sheet(s, page, &counter);
+}
+
+/// Mobile plan, phase M3, on a phone: a question the agent asks is a card
+/// above the message box, with each choice a button; several questions are
+/// steps; several choices and an answer of the owner's own are sent as the
+/// one answer the agent expects, once; a plan is drawn as markdown and sent
+/// back with a note. The card says until when it waits here. The pane is
+/// under "Needs you", and its row leads to the card. What the agent wrote
+/// is text on the page, never HTML (rule 6). The rest (a plan approved, the
+/// hold running out, "Answer in the terminal instead", who may answer, a
+/// restart) is in `questions.rs` and `away.rs`, without a browser.
+fn answered_in_place(s: &Station, page: &common::browser::Page, surveyor: &str) {
+    let click = |what: &str, el: &str| {
+        page.wait(what, &format!("(e => e ? (e.click(), true) : false)({el})"));
+    };
+    let opt = |text: &str| {
+        format!("[...document.querySelectorAll('.chat-card.held .ask-opt')].find(b => b.innerText.includes('{text}'))")
+    };
+    answered_in_place_on(s, page, surveyor, &click, &opt);
+}
+
+/// An agent that asks two questions together, then proposes a plan.
+fn surveyor(s: &Station) -> String {
+    s.fake(
+        json!({"steps": [
+            {"prompt": "tally the birds"},
+            {"ask": {"questions": [
+                {"header": "Species", "question": "Which herons count?", "multiSelect": false,
+                 "options": [{"label": "Grey herons only", "description": "Skip egrets"},
+                             {"label": "<img src=x onerror=\"window.__hit = 2\">All herons", "description": "<b>Every</b> bird"}]},
+                {"header": "Rivers", "question": "Which rivers?", "multiSelect": true,
+                 "options": [{"label": "Avon"}, {"label": "Exe"}]}]}},
+            {"say": "settled the question"},
+            {"plan": {"plan": "# Tally plan\n\n1. Count the **grey** herons\n\n<img src=x onerror=\"window.__hit = 3\">"}},
+            {"say": "settled the plan"},
+            {"turn_end": "counted"}
+        ]}),
+        json!({"name": "surveyor"}),
+    )
+}
+
+fn answered_in_place_on(
+    s: &Station,
+    page: &common::browser::Page,
+    surveyor: &str,
+    click: &dyn Fn(&str, &str),
+    opt: &dyn Fn(&str) -> String,
+) {
+    // Under "Needs you" in the list, saying what kind of thing it asks; its
+    // row (the address a notice carries) leads to the card.
+    let row = "[...document.querySelectorAll('.phone-needs a')].find(r => r.innerText.includes('surveyor') && r.innerText.includes('asks you a question'))";
+    click("the row under Needs you", row);
+    page.wait(
+        "the card, at its first question",
+        "document.querySelectorAll('.chat-cards .chat-card.held .ask-opt').length === 3 && /^Waits here for 10 more minutes, then moves to the terminal\\.$/.test(document.querySelector('.ask-wait')?.innerText || '')",
+    );
+    assert_eq!(
+        page.js("[document.querySelector('.ask-head').innerText.replace(/\\s+/g, ' ').trim(), document.querySelector('.ask-q').innerText,
+                  [...document.querySelectorAll('.ask-opt b')].map(b => b.innerText), document.querySelectorAll('.chat-card.held img, .chat-card.held b b').length, !!window.__hit,
+                  !!document.querySelector('.chat-card.held .ask-terminal'), !!document.querySelector('.chat-card.ask.terminal')]"),
+        json!(["Species The agent asks · question 1 of 2", "Which herons count?",
+               ["Grey herons only", "<img src=x onerror=\"window.__hit = 2\">All herons", "Other…"], 0, false, true, false])
+    );
+    // One choice, then the next question: several choices and one of the
+    // owner's own.
+    click("a choice", &opt("All herons"));
+    page.wait(
+        "the second question",
+        "document.querySelector('.ask-head')?.innerText.includes('question 2 of 2') && document.querySelector('.ask-send')?.disabled === true",
+    );
+    click("Avon", &opt("Avon"));
+    click("Other", &opt("Other"));
+    page.wait("the field", "(o => o ? (o.value = 'Dart', o.dispatchEvent(new Event('input')), true) : false)(document.querySelector('.ask-other'))");
+    click("Send answers", "(b => b && !b.disabled && b.innerText === 'Send answers' && b)(document.querySelector('.ask-send'))");
+    s.wait_text(surveyor, "settled the question");
+    let screen: String = s.text(surveyor).split_whitespace().collect();
+    let answers = "\"answers\":{\"Whichheronscount?\":\"<imgsrc=xonerror=\\\"window.__hit=2\\\">Allherons\",\"Whichrivers?\":\"Avon,Dart\"}";
+    assert_eq!(screen.matches(answers).count(), 1, "{screen}");
+    assert_eq!(s.log("question.answered").len(), 1);
+
+    // The plan takes its place: markdown, drawn as text; sent back with a
+    // note, and the item says so.
+    page.wait(
+        "the plan's card",
+        "!!document.querySelector('.chat-card.held.plan .ask-plan strong') && document.querySelectorAll('.chat-answer').length === 2",
+    );
+    assert_eq!(
+        page.js("[document.querySelector('.ask-plan .md-h1').innerText, document.querySelector('.ask-plan strong').innerText, document.querySelectorAll('.chat-card.held img').length, !!window.__hit,
+                  document.querySelector('.ask-plan').innerText.includes('<img src=x onerror='), [...document.querySelectorAll('.chat-answer')].map(a => a.innerText.replace(/\\s+/g, ' '))[1]]"),
+        json!(["Tally plan", "grey", 0, false, true, "Which rivers? Avon, Dart"])
+    );
+    page.js("(n => (n.value = 'count the egrets too', n.dispatchEvent(new Event('input')), true))(document.querySelector('.ask-note'))");
+    click("Keep planning", "document.querySelector('.ask-keep')");
+    s.wait_text(surveyor, "settled the plan");
+    assert!(
+        s.text(surveyor)
+            .split_whitespace()
+            .collect::<String>()
+            .contains("keepplanning,anddonotstartthework.Theowner'snote:counttheegretstoo"),
+        "{}",
+        s.text(surveyor)
+    );
+    // (That the item then reads "sent back" is looked at in `questions.rs`,
+    // as its status, and in the pictures: this tier has no time to wait.)
 }
 
 /// The owner's request (15 Nov 2026): "Can the mobile change colors fonts
@@ -4517,14 +4626,15 @@ fn the_rest_of_the_conversation_view() {
     }
     s.wait_text(&stuck, "[fake] got: 2");
 
-    // A question that waits is shown, and is answered in the terminal.
+    // A question that waits and that no hook holds (this one is only in the
+    // session file) is shown, and is answered in the terminal, with the keys.
     let asks = s.fake(
         json!({"steps": [{"prompt": "tally"}, line(json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "q1", "name": "AskUserQuestion",
             "input": {"questions": [{"header": "Species", "question": "Which herons count?", "multiSelect": false, "options": [{"label": "Grey herons only"}, {"label": "All herons"}]}]}}]}})), {"sleep": 600000}]}),
         json!({"name": "asks"}),
     );
     phone.goto(&pane(&asks));
-    phone.wait("the question", "document.querySelector('.chat-card.ask')?.innerText.includes('Which herons count?') && document.querySelectorAll('.chat-card.ask button').length === 1");
+    phone.wait("the question", "document.querySelector('.chat-card.ask')?.innerText.includes('Which herons count?') && document.querySelectorAll('.chat-card.ask.terminal .key').length === 9 && !document.querySelector('.chat-card.held')");
     click(
         &phone,
         "Answer in the terminal",
@@ -4713,6 +4823,200 @@ fn pictures_of_the_phones_appearance() {
                 "the conversation",
                 "!!document.querySelector('.phone-chat .chat-text')",
             );
+        }
+    }
+}
+
+/// Not a test of behaviour: pictures of a question and a plan answered in
+/// place (mobile plan, phase M3), on a phone and on a computer, in a dark
+/// and a light theme.
+/// `SPANDECK_SHOTS=<folder> cargo test -p spandeck --test phase5 pictures_of_answering -- --ignored`
+#[test]
+#[ignore = "takes pictures for a person to look at; needs Chrome"]
+fn pictures_of_answering_in_place() {
+    use common::browser::Page;
+    use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png;
+    let out = std::path::PathBuf::from(std::env::var("SPANDECK_SHOTS").expect("SPANDECK_SHOTS"));
+    std::fs::create_dir_all(&out).unwrap();
+    let s = Station::start("spark2");
+    let line = |v: Value| json!({"transcript": v});
+    let said = |text: &str| {
+        line(
+            json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}),
+        )
+    };
+    let title = |t: &str| line(json!({"type": "ai-title", "aiTitle": t}));
+    let species = json!({"header": "Species", "question": "Which herons count?", "multiSelect": false,
+        "options": [{"label": "Grey herons only", "description": "Skip egrets and bitterns"},
+                    {"label": "All herons", "description": "Count every bird in the heron family"}]});
+    let rivers = json!({"header": "Rivers", "question": "Which rivers should the tally cover?", "multiSelect": true,
+        "options": [{"label": "Avon", "description": "42 survey rows"}, {"label": "Exe", "description": "17 survey rows"},
+                    {"label": "Tamar", "description": "9 survey rows, two with no date"}]});
+    let plan = "# Tally plan\n\n1. Filter the rows to **grey herons**\n2. Fix `tally.py` so that it strips the species name\n3. Run the tests again\n\n| File | Change |\n|:--|:--|\n| `tally.py` | filter, then count |\n| `tests/test_tally.py` | a row with a trailing space |\n\nRaw HTML stays text: <b>not bold</b>.";
+    let spawn = |name: &str, titled: &str, prompt: &str, words: &str, ask: Value| {
+        s.fake(
+            json!({"steps": [title(titled), {"prompt": prompt}, said(words), ask, {"turn_end": "Done."}]}),
+            json!({"name": name}),
+        )
+    };
+    let shot = |page: &Page, name: &str| {
+        std::thread::sleep(Duration::from_millis(700));
+        let png = page.tab.capture_screenshot(Png, None, None, true).unwrap();
+        std::fs::write(out.join(format!("{name}.png")), png).unwrap();
+    };
+    let pane = |id: &str| format!("#/s/spark2/p/{id}");
+    let click = |page: &Page, what: &str, el: &str| {
+        page.wait(what, &format!("(e => e ? (e.click(), true) : false)({el})"));
+    };
+    let opt = |text: &str| {
+        format!("[...document.querySelectorAll('.chat-card.held .ask-opt')].find(b => b.innerText.includes('{text}'))")
+    };
+    let held = |id: &str| {
+        wait_for("the held question", 15, || {
+            s.call("pane.conversation", json!({"pane": id}))["live"]["questions"]
+                .get(0)
+                .cloned()
+        })
+    };
+    for theme in ["dark", "light"] {
+        s.call(
+            "look.set",
+            json!({"level": "deck", "choice": {"theme": format!("spandeck-{theme}")}}),
+        );
+        // Each theme has agents of its own: a card that was answered is gone.
+        let one = spawn(
+            &format!("herons-{theme}"),
+            "Which herons to count",
+            "Tally the survey.",
+            "Before I count, one thing to settle.",
+            json!({"ask": {"questions": [species.clone()]}}),
+        );
+        let two = spawn(
+            &format!("rivers-{theme}"),
+            "Herons by river",
+            "Tally the survey by river.",
+            "Two things to settle first.",
+            json!({"ask": {"questions": [species.clone(), rivers.clone()]}}),
+        );
+        let planner = spawn(
+            &format!("planner-{theme}"),
+            "Plan for the tally fix",
+            "Plan the fix for the tally script. Do not change anything yet.",
+            "I've read the script and the survey. Here is the plan.",
+            json!({"plan": {"plan": plan}}),
+        );
+        let moved = spawn(
+            &format!("moved-{theme}"),
+            "Egrets, yes or no",
+            "Count the egrets too?",
+            "I need to know one thing.",
+            json!({"ask": {"questions": [species.clone()]}}),
+        );
+        for id in [&one, &two, &planner] {
+            held(id);
+        }
+        s.call(
+            "question.answer",
+            json!({"id": held(&moved)["id"], "release": true}),
+        );
+        s.wait_text(&moved, "is in the terminal");
+
+        let phone = Page::open(&s, 390, 844);
+        phone.wait(
+            "the list",
+            "document.querySelectorAll('.session-row').length >= 4",
+        );
+        shot(&phone, &format!("phone-{theme}-1-list-needs-you"));
+        phone.goto(&pane(&one));
+        phone.wait("the question", "!!document.querySelector('.chat-card.held .ask-opt') && !!document.querySelector('.ask-wait')?.innerText");
+        shot(&phone, &format!("phone-{theme}-2-question"));
+        click(&phone, "Other", &opt("Other"));
+        phone.wait("the field", "!!document.querySelector('.ask-other')");
+        phone.js("(o => { o.value = 'Grey herons, and the two bitterns by the weir'; o.dispatchEvent(new Event('input')); return true; })(document.querySelector('.ask-other'))");
+        shot(&phone, &format!("phone-{theme}-3-question-other"));
+        click(&phone, "Other again", &opt("Other"));
+        click(&phone, "an option", &opt("Grey herons only"));
+        phone.wait(
+            "the answer on the item",
+            "!document.querySelector('.chat-card.held') && !!document.querySelector('.chat-answer')",
+        );
+        shot(&phone, &format!("phone-{theme}-4-question-answered"));
+        phone.goto(&pane(&two));
+        phone.wait(
+            "step one",
+            "!!document.querySelector('.chat-card.held .ask-opt')",
+        );
+        shot(&phone, &format!("phone-{theme}-5-two-questions-step-1"));
+        click(&phone, "an option", &opt("All herons"));
+        phone.wait(
+            "step two",
+            "document.querySelector('.chat-card.held .ask-head')?.innerText.includes('2 of 2')",
+        );
+        click(&phone, "Avon", &opt("Avon"));
+        click(&phone, "Tamar", &opt("Tamar"));
+        phone.wait(
+            "two ticked",
+            "document.querySelectorAll('.chat-card.held .ask-opt.on').length === 2",
+        );
+        shot(
+            &phone,
+            &format!("phone-{theme}-6-two-questions-step-2-multi"),
+        );
+        phone.goto(&pane(&planner));
+        phone.wait(
+            "the plan",
+            "!!document.querySelector('.chat-card.held.plan .ask-plan table')",
+        );
+        shot(&phone, &format!("phone-{theme}-7-plan"));
+        phone.goto(&pane(&moved));
+        phone.wait(
+            "in the terminal",
+            "!!document.querySelector('.chat-card.ask.terminal')",
+        );
+        shot(&phone, &format!("phone-{theme}-8-moved-to-the-terminal"));
+        drop(phone);
+
+        let wide = Page::open(&s, 1400, 900);
+        wide.goto(&pane(&two));
+        wide.wait(
+            "the terminal",
+            "!!document.querySelector('.strip .face-btn')",
+        );
+        shot(
+            &wide,
+            &format!("desktop-{theme}-1-terminal-says-answer-in-chat"),
+        );
+        click(&wide, "Chat", "document.querySelector('.strip .face-btn')");
+        wide.wait(
+            "the question",
+            "!!document.querySelector('.chat-pane .chat-card.held .ask-opt')",
+        );
+        shot(&wide, &format!("desktop-{theme}-2-question"));
+        wide.goto(&pane(&planner));
+        wide.wait(
+            "the terminal",
+            "!!document.querySelector('.strip .face-btn')",
+        );
+        click(&wide, "Chat", "document.querySelector('.strip .face-btn')");
+        wide.wait(
+            "the plan",
+            "!!document.querySelector('.chat-pane .chat-card.held.plan .ask-plan table')",
+        );
+        wide.js("(n => { n.value = 'Count the egrets as well'; n.dispatchEvent(new Event('input')); return true; })(document.querySelector('.ask-note'))");
+        shot(&wide, &format!("desktop-{theme}-3-plan"));
+        click(
+            &wide,
+            "Keep planning",
+            "document.querySelector('.chat-card.held .ask-keep')",
+        );
+        wide.wait(
+            "the plan sent back",
+            "!document.querySelector('.chat-card.held') && [...document.querySelectorAll('.chat-box-item .chat-from')].some(f => f.innerText.includes('sent back'))",
+        );
+        shot(&wide, &format!("desktop-{theme}-4-plan-sent-back"));
+        drop(wide);
+        for id in [&one, &two, &planner, &moved] {
+            s.call("pane.close", json!({"pane": id}));
         }
     }
 }

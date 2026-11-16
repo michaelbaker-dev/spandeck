@@ -13,8 +13,10 @@
 // - This view never attaches to the pane, so it never sets the pane's size
 //   ("One size per pane"): it only watches the conversation and sends what
 //   the phone's message box already sends.
-// - Buttons answer only what a hook holds (an approval). A question or a plan
-//   is shown and answered in the terminal.
+// - Buttons answer only what a hook holds: an approval, and a question or a
+//   plan the station says it holds (`live.questions`). An answer is made of
+//   the choices the station sent, by their place, and of what the owner
+//   types. A question or a plan nobody holds is answered in the terminal.
 // - Times are the station's: an elapsed time is worked out from the clock the
 //   station sent with its answer, plus the time since that answer arrived.
 
@@ -59,6 +61,11 @@ const since = (ms) => {
   return s < 60 ? s + ' s' : s < 3600 ? Math.floor(s / 60) + ' m' : s < 86400 ? Math.floor(s / 3600) + ' h' : Math.floor(s / 86400) + ' d';
 };
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many || one + 's'}`;
+// How much longer a held question waits here: "9 more minutes", "40 more seconds".
+const moreTime = (ms) => {
+  const s = Math.ceil(ms / 1000);
+  return s >= 90 ? `${Math.round(s / 60)} more minutes` : `${plural(Math.max(s, 1), 'more second')}`;
+};
 const quiet = (text, cls) => h('div', { class: 'chat-quiet' + (cls ? ' ' + cls : '') }, text);
 const idOrder = (id) => { const [a, b] = String(id).split('.'); return [Number(a) || 0, Number(b) || 0]; };
 
@@ -109,8 +116,14 @@ export function termBox(st, p, box) { termBoxes.set(keyOf(st, p), box); box.valu
 // "Chat" on a terminal's title bar, on a computer.
 export function chatToggle(st, p) {
   if (!p || p.agent === 'shell') return null;
+  // A question or a plan held for the owner is answered in the conversation:
+  // while it is held, the terminal does not show the agent's own prompt.
+  if (p.asks && !p.exited) return h('button', { class: 'mini face-btn attn', title: `${p.name} ${asksWords(p)}. It is held for you in its conversation; the terminal shows its own prompt only if nobody answers there in time.`, onclick: () => setFace(st, p, 'chat') }, 'Answer in Chat');
   return h('button', { class: 'mini face-btn', title: 'Show this pane as a conversation: what was said, with the tool calls folded away. The terminal is one click back.', onclick: () => setFace(st, p, 'chat') }, 'Chat');
 }
+
+// What a pane asks the owner, from the pane list: which kind, never what.
+const asksWords = (p) => (p.asks && p.asks.kind === 'plan' ? 'asks you to approve its plan' : 'asks you a question');
 
 // ---- what waits for the owner, across the fleet, in the order to take it ----
 
@@ -124,6 +137,9 @@ export function queue(except) {
     if (p) add(a.station, p, 'an approval');
   }
   const agents = env.panes().filter(x => x.p.agent !== 'shell').sort((x, y) => (x.p.state_since_ms || 0) - (y.p.state_since_ms || 0));
+  // A question or a plan held for the owner comes before what waits in a
+  // terminal: it can be answered where the owner is.
+  for (const x of agents) if (x.p.state === 'needs_you' && x.p.asks) add(x.st, x.p, x.p.asks.kind === 'plan' ? 'a plan to approve' : 'a question');
   for (const x of agents) if (x.p.state === 'needs_you') add(x.st, x.p, 'waiting for you');
   for (const x of agents) if (x.p.state === 'error') add(x.st, x.p, 'an error');
   for (const x of agents) if (x.p.unread && (x.p.state === 'done' || x.p.state === 'idle')) add(x.st, x.p, 'finished, not read');
@@ -160,6 +176,8 @@ class Conv {
     this.open = new Set(); this.revs = new Map(); this.nodes = new Map(); this.dockNodes = new Map();
     this.details = new Map(); this.full = new Map(); this.readTo = -1;
     this.stuck = true; this.top = 0; this.peekOpen = false; this.clocks = [];
+    // What the owner has picked on a question's or a plan's card, by its id.
+    this.asking = new Map(); this.waits = [];
     this.where = 'phone'; this.used = true; this.seeded = false;
 
     this.bar = h('header', { class: 'chat-bar' });
@@ -396,7 +414,8 @@ class Conv {
         const next = items[i + 1];
         const done = it.kind === 'text' && (next ? !(RUN.has(next.kind) || next.kind === 'text') : !working);
         if (done) lastDone = it;
-        one('i:' + it.id, `${it._v}.${this.rev(it.id)}.${done}`, () => this.itemEl(it, done));
+        const heldId = it.kind === 'question' || it.kind === 'plan' ? this.heldFor(it.id)?.id || '' : '';
+        one('i:' + it.id, `${it._v}.${this.rev(it.id)}.${done}.${heldId}`, () => this.itemEl(it, done));
         i += 1;
       }
       if (this.notUnderstood > 0) one('lost', this.notUnderstood, () => h('div', { class: 'chat-quiet warn' },
@@ -543,16 +562,27 @@ class Conv {
           canSpeak() ? h('button', { type: 'button', class: 'chat-act', 'aria-pressed': 'false', onclick: speak }, 'Read aloud') : null) : null);
     }
     if (it.kind === 'question') {
-      const state = { waiting: ' · waiting for an answer', dismissed: ' · not answered' }[it.status] || '';
+      const held = it.status === 'waiting' && this.heldFor(it.id);
+      const state = held ? ' · waiting for your answer, below' : { waiting: ' · waiting for an answer', dismissed: ' · not answered' }[it.status] || '';
+      const qs = Array.isArray(it.questions) ? it.questions : [], answers = Array.isArray(it.answers) ? it.answers : [];
+      // Held: the card below has the question and its choices; not twice.
+      if (held) return h('div', { class: 'chat-box-item held-item' }, h('div', { class: 'chat-from' }, 'The agent asked' + state), qs.map(q => h('div', { class: 'chat-q' }, h('b', {}, String(q.question || '')))));
       return h('div', { class: 'chat-box-item' }, h('div', { class: 'chat-from' }, 'The agent asked' + state),
-        (Array.isArray(it.questions) ? it.questions : []).map(q => h('div', { class: 'chat-q' },
+        qs.map(q => h('div', { class: 'chat-q' },
           q.header ? h('span', { class: 'chip' }, String(q.header)) : null, h('b', {}, String(q.question || '')),
           h('ul', {}, (Array.isArray(q.options) ? q.options : []).map(o => h('li', {}, String(o.label || ''), o.description ? h('span', { class: 'muted' }, ' — ' + o.description) : null))))),
-        (Array.isArray(it.answers) ? it.answers : []).map(a => h('div', { class: 'chat-answer' }, 'Answered: ', h('b', {}, String(Array.isArray(a) ? a[1] : a)))));
+        // With several questions, each answer says which one it is for.
+        answers.map(a => h('div', { class: 'chat-answer' }, answers.length > 1 && Array.isArray(a) ? String(a[0]) + ' ' : 'Answered: ', h('b', {}, String(Array.isArray(a) ? a[1] : a)))));
     }
     if (it.kind === 'plan') {
-      const state = { waiting: 'waiting for your answer', approved: 'approved', rejected: 'not approved', dismissed: 'set aside' }[it.status] || String(it.status || '');
-      return h('div', { class: 'chat-box-item' }, h('div', { class: 'chat-from' }, 'The agent proposed a plan' + (state ? ' · ' + state : '')), md(text), rest);
+      const held = it.status === 'waiting' && this.heldFor(it.id);
+      const state = held ? 'waiting for your answer, below' : { waiting: 'waiting for your answer', approved: 'approved', rejected: 'sent back: keep planning', dismissed: 'set aside' }[it.status] || String(it.status || '');
+      // Claude Code may leave the plan out of the call it writes to the
+      // session file; what the hook was given has it.
+      const plan = text || (held && typeof held.text === 'string' ? held.text : '');
+      // Held: the plan is in the card below, with its buttons; not twice.
+      if (held) return h('div', { class: 'chat-box-item held-item' }, h('div', { class: 'chat-from' }, 'The agent proposed a plan · ' + state));
+      return h('div', { class: 'chat-box-item' }, h('div', { class: 'chat-from' }, 'The agent proposed a plan' + (state ? ' · ' + state : '')), md(plan), rest);
     }
     if (it.kind === 'notice') {
       const flag = 'n:' + it.id, open = this.open.has(flag);
@@ -586,8 +616,19 @@ class Conv {
     const working = L.state === 'working' && !exited;
     const subs = Array.isArray(L.subagents) ? L.subagents : [];
     const approvals = this.available === true && Array.isArray(L.approvals) ? L.approvals.filter(a => a && typeof a.approval === 'string') : [];
-    const asked = this.available === true ? this.items.filter(x => (x.kind === 'question' || x.kind === 'plan') && x.status === 'waiting') : [];
-    const blocked = !exited && this.available === true && !approvals.length && !asked.length && (L.state === 'needs_you' || L.state === 'error');
+    // A question or a plan the station holds for the owner: answered here.
+    const held = this.available === true && !exited && Array.isArray(L.questions) ? L.questions.filter(q => q && typeof q.id === 'string' && (q.kind === 'question' || q.kind === 'plan')) : [];
+    for (const id of [...this.asking.keys()]) if (!held.some(q => q.id === id)) this.asking.delete(id);
+    // One that waits and is not held is answered in the terminal: it was
+    // not answered here in time, or its session cannot be held. Not shown
+    // in the moment between the call being written and its hook asking.
+    const now = (L.now_ms || 0) + (performance.now() - this.liveAt);
+    const settled = (x) => L.state === 'needs_you' || typeof x.ts_ms !== 'number' || now - x.ts_ms > 4000;
+    const waiting = this.available === true ? this.items.filter(x => (x.kind === 'question' || x.kind === 'plan') && x.status === 'waiting'
+      && !held.some(q => q.item === x.id || (q.item === null && q.kind === x.kind))) : [];
+    const asked = waiting.filter(settled);
+    this.askSoon = waiting.length > asked.length;
+    const blocked = !exited && this.available === true && !approvals.length && !asked.length && !held.length && (L.state === 'needs_you' || L.state === 'error');
     // A banner that waits in the terminal shows the terminal's last lines.
     if (blocked && !this.wasBlocked) this.peekOpen = true;
     if (!blocked && this.wasBlocked && !working) this.peekOpen = false;
@@ -613,11 +654,22 @@ class Conv {
 
     const cards = [];
     for (const a of approvals) cards.push(this.node(cache, used, 'ap:' + a.approval, a.summary, () => this.approvalEl(a)));
-    for (const it of asked) cards.push(this.node(cache, used, 'ask:' + it.id, it._v, () => h('div', { class: 'chat-card ask' },
-      h('b', {}, it.kind === 'plan' ? 'The agent proposed a plan and waits for your answer' : 'The agent asked you a question'),
-      it.kind === 'plan' ? null : (Array.isArray(it.questions) ? it.questions : []).map(q => h('div', {}, String(q.question || ''))),
-      h('div', { class: 'muted small' }, 'Answering from here is not built yet: the choices are in the terminal.'),
-      h('button', { type: 'button', class: 'primary', onclick: () => setFace(this.st, p, 'terminal') }, 'Answer in the terminal'))));
+    for (const q of held) {
+      const s = this.askState(q);
+      cards.push(this.node(cache, used, 'held:' + q.id, `${s.rev}|${q.attached}|${q.until_ms}`, () => (q.kind === 'plan' ? this.planEl(q, s) : this.questionEl(q, s))));
+    }
+    for (const it of asked) {
+      // Why it is the terminal's: the station says so when it let it go.
+      const moved = typeof L.needs_reason === 'string' && /in the terminal now/.test(L.needs_reason) ? L.needs_reason : '';
+      cards.push(this.node(cache, used, 'ask:' + it.id, `${it._v}|${moved}`, () => h('div', { class: 'chat-card ask terminal' },
+        h('b', {}, it.kind === 'plan' ? 'The agent proposed a plan and waits for your answer in the terminal' : 'The agent asked you a question, in the terminal'),
+        it.kind === 'plan' ? null : (Array.isArray(it.questions) ? it.questions : []).map(x => h('div', {}, String(x.question || ''))),
+        h('div', { class: 'muted small' }, moved ? `It is not held here any more: ${moved.replace(/^its (question|plan) is in the terminal now \(?/, '').replace(/\)$/, '')}. The choices are in the terminal.`
+          : 'It is not held here: this session was started before spandeck could hold a question, its station runs an older spandeck, or holding is switched off there. The choices are in the terminal.'),
+        h('div', { class: 'wait-keys', role: 'group', 'aria-label': 'Keys for the terminal' },
+          WAIT_KEYS.map(([label, bytes]) => h('button', { type: 'button', class: 'key', 'aria-label': KEY_SAYS[label] || label, onclick: () => this.key1(bytes) }, label)),
+          h('button', { type: 'button', class: 'primary', onclick: () => setFace(this.st, p, 'terminal') }, 'Answer in the terminal')))));
+    }
     if (blocked) cards.push(this.node(cache, used, 'wait', `${L.state}|${L.needs_reason}`, () => h('div', { class: 'chat-card wait' + (L.state === 'error' ? ' err' : '') },
       h('b', {}, (L.state === 'error' ? 'Stopped on an error: ' : 'Waiting in the terminal: ') + (L.needs_reason || 'it needs you')),
       h('div', { class: 'wait-keys', role: 'group', 'aria-label': 'Keys for the terminal' },
@@ -634,7 +686,138 @@ class Conv {
     this.composer.hidden = !!exited || this.available !== true;
     this.working = working;
     this.sendState();
+    // Until when each held card waits here, by the station's clock.
+    this.waits = held.map(q => ({ el: cache.get('held:' + q.id)?.el.querySelector('.ask-wait'), until: q.until_ms }));
     this.tick();
+  }
+
+  // ---- a question or a plan the station holds for the owner ----
+
+  heldFor(id) {
+    const qs = this.live?.questions;
+    return (Array.isArray(qs) && qs.find(q => q && q.item === id && typeof q.id === 'string')) || null;
+  }
+
+  // What the owner has picked so far: kept while the card is redrawn.
+  askState(q) {
+    let s = this.asking.get(q.id);
+    if (!s) {
+      const n = Array.isArray(q.questions) ? q.questions.length : 0;
+      s = { step: 0, picks: Array.from({ length: n }, () => new Set()), other: Array(n).fill(''), otherOpen: Array(n).fill(false), note: '', rev: 0, busy: false };
+      this.asking.set(q.id, s);
+    }
+    return s;
+  }
+
+  // `question.answer`: the owner's only, at the pane's station. The card
+  // stays, saying it was sent, until the station says the question is gone.
+  answerHeld(q, s, params, said) {
+    if (s.busy) return;
+    s.busy = true; s.rev += 1;
+    this.drawDock();
+    env.rpc(this.st, 'question.answer', { id: q.id, ...params })
+      .then((r) => toast(r && r.delivered === false ? said + '. The agent is finding its way back after a restart: it is given your answer when it is back.' : said))
+      .catch(() => { s.busy = false; s.rev += 1; this.drawDock(); });
+  }
+
+  // The foot of a held card: how long it waits here, and the way out.
+  heldFoot(q, s) {
+    const toTerminal = () => {
+      if (s.busy) return;
+      s.busy = true; s.rev += 1;
+      this.drawDock();
+      env.rpc(this.st, 'question.answer', { id: q.id, release: true })
+        .then(() => { toast('It is in the terminal now'); setFace(this.st, this.p, 'terminal'); })
+        .catch(() => { s.busy = false; s.rev += 1; this.drawDock(); });
+    };
+    return [
+      q.attached === false ? h('div', { class: 'muted small' }, 'The agent is finding its way back after a restart. Your answer is kept for it.') : null,
+      h('div', { class: 'ask-foot' },
+        h('span', { class: 'muted small ask-wait', role: 'note' }),
+        h('button', { type: 'button', class: 'mini ask-terminal', disabled: s.busy, title: 'Let it go: the agent then shows its own prompt in the terminal, at once. Nothing is answered for you.', onclick: toTerminal }, 'Answer in the terminal instead')),
+    ];
+  }
+
+  // A question, or several asked together (one step each): every option a
+  // large button with what it means; several may be ticked where the agent
+  // allows it; "Other…" is a field for an answer of the owner's own. An
+  // answer is sent as the places of the options picked, never their text.
+  questionEl(q, s) {
+    const qs = Array.isArray(q.questions) ? q.questions : [], many = qs.length > 1;
+    const n = Math.max(0, Math.min(s.step, qs.length - 1)), cur = qs[n] || {}, last = n >= qs.length - 1;
+    const opts = Array.isArray(cur.options) ? cur.options : [];
+    const has = (i) => s.picks[i].size > 0 || s.other[i].trim() !== '';
+    const send = () => this.answerHeld(q, s, { answers: qs.map((_, i) => ({ picked: [...s.picks[i]].sort((a, b) => a - b), other: s.other[i].trim() || undefined })) }, many ? 'Answers sent' : 'Answer sent');
+    const redraw = (then) => { s.rev += 1; this.drawDock(); if (then) then(); };
+    const pick = (i) => {
+      const set = s.picks[n];
+      if (cur.multi) { set.has(i) ? set.delete(i) : set.add(i); return redraw(); }
+      set.clear(); set.add(i);
+      s.other[n] = ''; s.otherOpen[n] = false;
+      // One question with one choice: the tap is the answer. With several
+      // questions it leads to the next, and the last step sends them all.
+      if (!many) return send();
+      if (!last) s.step = n + 1;
+      redraw();
+    };
+    let submit = null;
+    const ready = () => (many && !last ? has(n) : qs.every((_, i) => has(i)));
+    const other = h('input', { class: 'ask-other', placeholder: 'Your own answer', 'aria-label': 'Your own answer', maxLength: 4000, disabled: s.busy, enterkeyhint: 'send', dataset: { keep: `ask:${q.id}:${n}` } });
+    other.value = s.other[n];
+    const list = h('div', { class: 'ask-opts', role: cur.multi ? 'group' : 'radiogroup', 'aria-label': String(cur.question || 'Choices') },
+      opts.map((o, i) => h('button', { type: 'button', class: 'ask-opt' + (s.picks[n].has(i) ? ' on' : ''), role: cur.multi ? 'checkbox' : 'radio', 'aria-checked': String(s.picks[n].has(i)), disabled: s.busy, onclick: () => pick(i) },
+        h('span', { class: 'ask-mark' + (cur.multi ? ' box' : ''), 'aria-hidden': 'true' }, s.picks[n].has(i) ? '✓' : ''),
+        h('span', { class: 'ask-label' }, h('b', {}, String(o.label || '')), o.description ? h('span', { class: 'muted' }, String(o.description)) : null))),
+      h('button', { type: 'button', class: 'ask-opt other' + (s.otherOpen[n] ? ' on' : ''), 'aria-expanded': String(!!s.otherOpen[n]), disabled: s.busy,
+        onclick: () => { s.otherOpen[n] = !s.otherOpen[n]; if (!s.otherOpen[n]) s.other[n] = ''; redraw(() => { if (s.otherOpen[n]) this.cards.querySelector('.ask-other')?.focus(); }); } },
+        h('span', { class: 'ask-mark' + (cur.multi ? ' box' : ''), 'aria-hidden': 'true' }, s.otherOpen[n] && cur.multi ? '✓' : ''), h('span', { class: 'ask-label' }, h('b', {}, 'Other…'))),
+      s.otherOpen[n] ? other : null);
+    other.addEventListener('input', () => {
+      s.other[n] = other.value;
+      // Where one answer is taken, an answer of the owner's own is that one.
+      if (!cur.multi && other.value.trim()) {
+        s.picks[n].clear();
+        for (const b of list.querySelectorAll('.ask-opt.on:not(.other)')) { b.classList.remove('on'); b.setAttribute('aria-checked', 'false'); b.firstChild.textContent = ''; }
+      }
+      if (submit) submit.disabled = s.busy || !ready();
+    });
+    other.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); if (submit && !submit.disabled) submit.click(); } });
+    if (many || cur.multi || s.otherOpen[n]) {
+      submit = h('button', { type: 'button', class: 'primary ask-send', disabled: s.busy || !ready(), onclick: () => { if (many && !last) { s.step = n + 1; redraw(); } else send(); } },
+        s.busy ? 'Sent…' : many ? (last ? 'Send answers' : 'Next') : 'Send answer');
+    }
+    return h('div', { class: 'chat-card ask held', dataset: { held: q.id } },
+      h('div', { class: 'ask-head' },
+        cur.header ? h('span', { class: 'chip' }, String(cur.header)) : null,
+        h('span', { class: 'muted small' }, many ? `The agent asks · question ${n + 1} of ${qs.length}` : 'The agent asks'),
+        cur.multi ? h('span', { class: 'muted small' }, ' · choose any') : null),
+      h('b', { class: 'ask-q' }, String(cur.question || '')),
+      list,
+      many || submit ? h('div', { class: 'row ask-nav' },
+        many && n > 0 ? h('button', { type: 'button', disabled: s.busy, onclick: () => { s.step = n - 1; redraw(); } }, 'Back') : null,
+        h('span', { class: 'grow' }), submit) : null,
+      s.busy && !submit ? h('div', { class: 'muted small' }, 'Sent…') : null,
+      this.heldFoot(q, s));
+  }
+
+  // A plan: drawn like a reply (md.js: text, never HTML), then Approve, or
+  // Keep planning with a note for the agent.
+  planEl(q, s) {
+    const note = h('input', { class: 'ask-note', placeholder: 'What to change (optional, with Keep planning)', 'aria-label': 'A note for the agent, sent with Keep planning', maxLength: 4000, disabled: s.busy, dataset: { keep: `ask:${q.id}:note` } });
+    note.value = s.note;
+    note.addEventListener('input', () => { s.note = note.value; });
+    const item = typeof q.item === 'string' ? this.byId.get(q.item) : null;
+    const text = typeof q.text === 'string' && q.text ? q.text : String(item?.text || '');
+    return h('div', { class: 'chat-card ask held plan', dataset: { held: q.id } },
+      h('div', { class: 'ask-head' }, h('span', { class: 'muted small' }, 'The agent proposes a plan and waits for your answer')),
+      h('div', { class: 'ask-plan' + (s.tall ? ' tall' : ''), tabIndex: 0, role: 'document', 'aria-label': 'The plan' }, renderMarkdown(text || '(the plan is empty)', { openLink, copy: (t) => copyText(t) })),
+      h('button', { type: 'button', class: 'mini ask-tall', 'aria-pressed': String(!!s.tall), onclick: () => { s.tall = !s.tall; s.rev += 1; this.drawDock(); } }, s.tall ? 'Show less of the plan' : 'Show the whole plan'),
+      q.more ? h('div', { class: 'muted small' }, 'The plan is longer than is shown here: the rest is in the terminal.') : null,
+      note,
+      h('div', { class: 'row ask-nav' },
+        h('button', { type: 'button', class: 'primary ask-approve', disabled: s.busy, onclick: () => this.answerHeld(q, s, { approve: true }, 'Plan approved') }, s.busy ? 'Sent…' : 'Approve'),
+        h('button', { type: 'button', class: 'ask-keep', disabled: s.busy, onclick: () => this.answerHeld(q, s, { approve: false, text: s.note.trim() || undefined }, 'Sent back: it keeps planning') }, 'Keep planning')),
+      this.heldFoot(q, s));
   }
 
   approvalEl(a) {
@@ -656,6 +839,14 @@ class Conv {
   tick() {
     const waited = performance.now() - this.liveAt;
     for (const c of this.clocks) if (c.el) c.el.textContent = ' · ' + dur(Math.max(0, c.base + waited));
+    // How much longer a held question waits here: the station's deadline,
+    // by the station's clock.
+    const now = (this.live?.now_ms || 0) + waited;
+    for (const w of this.waits) {
+      if (!w.el || typeof w.until !== 'number') continue;
+      const left = w.until - now;
+      w.el.textContent = left > 0 ? `Waits here for ${moreTime(left)}, then moves to the terminal.` : 'Its time here is up: it moves to the terminal.';
+    }
   }
 
   async peek() {
@@ -865,6 +1056,8 @@ export function initChat(e) {
   setInterval(() => {
     for (const c of convs.values()) {
       if (!c.body.isConnected) continue;
+      // A question that waits and is not held (yet): its card is due.
+      if (c.askSoon) c.drawDock();
       c.tick();
       if (c.peekOpen && c.peekEl.isConnected && document.visibilityState === 'visible') c.peek();
     }
@@ -934,6 +1127,8 @@ function loadTitles() {
 
 const rowDoes = (p) => {
   const s = stateOf(p);
+  // Held for the owner in its conversation: said short, so that it fits.
+  if (s === 'needs_you' && p.asks) return asksWords(p);
   if (s === 'needs_you') return p.needs_reason ? 'needs you: ' + p.needs_reason : 'needs you';
   if (s === 'working') return 'working ' + since(p.state_since_ms);
   if (s === 'exited') return 'ended';

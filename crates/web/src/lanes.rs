@@ -480,7 +480,9 @@ pub fn route(own: &str, method: &str, params: &Value) -> Route {
         "pane.release" if all => (Lane::Urgent, Some(Scope::AllPanes)),
         "pane.release" => (Lane::Urgent, pane()),
         "stop.all" => (Lane::Urgent, Some(Scope::AllPanes)),
-        "approval.answer" => (Lane::Urgent, None),
+        // An answer to an approval, and to a question or a plan an agent
+        // waits on: never behind other requests.
+        "approval.answer" | "question.answer" => (Lane::Urgent, None),
         "pane.attach" | "pane.conversation.watch" => (Lane::Attach, None),
         // Calls that wait on purpose: for an agent, a task, the owner's
         // answer at another station. Nothing stands behind them.
@@ -851,6 +853,10 @@ mod tests {
         );
         assert_eq!(
             lane("approval.answer", json!({})),
+            (Lane::Urgent, None, None)
+        );
+        assert_eq!(
+            lane("question.answer", json!({"id": "a1", "release": true})),
             (Lane::Urgent, None, None)
         );
         assert_eq!(lane("pane.list", json!({})), (Lane::Read, None, None));

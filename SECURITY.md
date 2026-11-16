@@ -105,6 +105,20 @@ days, not hours.
   pane's terminal, and keeps none of it. (A station of your fleet can pass on a request
   as you for any call; see Known limits.) Text in it is data: the station drops terminal control sequences and returns
   text, never markup.
+- **Answering an agent's question from the deck.** When Claude Code asks you a question
+  or asks you to approve a plan, its hook can hold the call so that you answer it in the
+  Control Deck instead of the terminal (`DECISIONS.md`, "Answer in place"). This is a new
+  way for your browser to put something into an agent's tool call, and it is bounded:
+  only a signed-in deck can answer (`question.answer` is yours alone: an agent is
+  refused, for its own question too, and so are a station acting for itself and the
+  read-only caller); the answer reaches only the hook that asked, in the pane that asked,
+  once; and it is made of the question's own options, named by their place and looked up
+  by the station in the call the agent made, plus what you type yourself (an answer of
+  your own, or a note on a plan, 4,000 characters at most). Nothing else of the call can
+  be changed from the browser. Nobody answers for you: when you do not answer in time,
+  the agent shows its own prompt in its terminal. What was asked is part of your
+  conversation, so it is not in the list of approvals, the notice or the ship's log,
+  which only say that something is asked.
 - **API keys.** With AgentVault connected, agents use keys through the vault and never
   hold them. See `docs/vault.md`, including what that does not protect against.
 
@@ -130,6 +144,14 @@ days, not hours.
   with the pane's own token could ask with an id, but only for that pane, and only the
   hook that made an id knows it.
 
+- A question an agent asks is the agent's own text. The card that shows it is drawn as
+  text, never as markup, but what it says is still whatever the agent, or anything that
+  runs as you with that pane's token, chose to write: read it as you would read the
+  prompt in the terminal. What you type as an answer goes to that agent as its tool's
+  result, as it would from the terminal. That an hour's timeout is honoured and that the
+  answer is taken as documented rests on Claude Code's hook reference and has not been
+  run with the real agent; if a hook is cancelled early, the prompt appears in the
+  terminal and the card can stay for up to ten minutes with nobody behind it.
 - A pane's conversation holds whatever its terminal showed, including a secret an agent
   printed or a file it read. Any signed-in browser can read it, and it crosses your
   tailnet to that browser unencrypted by spandeck (Tailscale encrypts between devices),
