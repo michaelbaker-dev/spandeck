@@ -8,20 +8,34 @@ const FRAME_OUTPUT = 1, FRAME_RESYNC = 2;
 // different in every tab or window. Two windows of the same browser showing the
 // same pane used to look like one client, so neither gave way and they resized
 // the pane back and forth without end (the screen flashed).
-function clientId() {
+const hex = (bytes) => Array.from(crypto.getRandomValues(new Uint8Array(bytes)), b => b.toString(16).padStart(2, '0')).join('');
+// `renew`: this tab's part is made again (another page turned out to hold it).
+function clientId(renew = false) {
   let id = localStorage.getItem('spandeck.client');
   if (!id) {
-    id = 'web-' + Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, '0')).join('');
+    id = 'web-' + hex(8);
     localStorage.setItem('spandeck.client', id);
   }
   let tab = null;
   try { tab = sessionStorage.getItem('spandeck.tab'); } catch (e) { /* no session storage: one tab's worth */ }
-  if (!tab) {
-    tab = Array.from(crypto.getRandomValues(new Uint8Array(3)), b => b.toString(16).padStart(2, '0')).join('');
+  const had = !!tab;
+  if (!tab || renew) {
+    tab = hex(3);
     try { sessionStorage.setItem('spandeck.tab', tab); } catch (e) { /* as above */ }
   }
-  return `${id}-${tab}`;
+  return { id: `${id}-${tab}`, had };
 }
+// This page, for as long as it is loaded: made here, kept in memory only,
+// so a reload or a duplicated tab is another page. The station closes a
+// connection only for a newer one with the same client id AND instance:
+// the same page come back.
+const INSTANCE = hex(8);
+// Where a page starts counting the names of its attachments: a place of its
+// own below 2^30. A name is used once in the page's life, across every
+// reconnect, so a number left over from an earlier connection is one the new
+// connection was never given. (The audit: a key carrying pane B's old number
+// was written to pane C.)
+const firstName = () => 1 + crypto.getRandomValues(new Uint32Array(1))[0] % ((1 << 30) - 1);
 
 // The localhost token arrives once in the URL fragment and is kept locally.
 // Only the station's own, from `spandeck cc` on that machine: a browser's
@@ -54,6 +68,12 @@ export const ASLEEP = 2000;
 // With nothing heard for this long while the page is being looked at, it
 // asks: a ping. A healthy idle link so carries one small frame a second.
 export const PING_AFTER = 1000;
+// And at least this often whatever is heard, where the station reads this
+// page's clock from its pings (what is typed is stamped with that clock, and
+// a reading must not grow old on a link that is busy printing).
+export const PING_EVERY = 5000;
+// A key was sent and nothing has come back for this long: ask now.
+export const PROBE_AFTER = 300;
 // Trying again after a lost connection: at once, then these, each 30% either
 // way so that many pages do not come back in step, then every 5 s for ever.
 export const RETRY = [0, 100, 200, 400, 800, 1600, 3200, 5000];
@@ -112,7 +132,14 @@ export class Api {
     this.statusListeners = new Set();
     this.station = null;
     this.version = null;
-    this.client = clientId();
+    const me = clientId();
+    this.client = me.id;
+    this.instance = INSTANCE;
+    this.chanNext = firstName();
+    this.attaching = new Map();
+    // A duplicated tab is a client of its own (see `_twins`).
+    this.renamed = 0;
+    this._twins(me.had);
     this.connected = false;
     this.authError = null;
     // Refused for now, for a reason that is not this browser's (the station
@@ -129,8 +156,19 @@ export class Api {
     // background, a phone that was locked or a laptop that slept concludes
     // nothing from the time it was away.
     this.pings = false;      // the station answers pings (`caps`)
+    // What is typed (typed.js, term.js). `stamps`: the station judges what
+    // is typed by its stamp (`caps`: `input`), so keys may be held for a
+    // moment and sent after a reconnect. `based`: the station has answered
+    // a ping of this connection since the page was last away, so it knows
+    // how this page's clock stands; nothing stamped is sent before that.
+    this.stamps = false;
+    this.based = false;
+    this.framePerf = 0;      // when the last frame came, by the page's clock
+    this.pingedAwake = 0;    // when the last ping went, on the awake clock
+    this.probing = null;     // the timer of a key waiting for something back
     this.awake = 0;
     this.beatAt = performance.now();
+    this.beatWall = Date.now();
     this.wasHidden = document.visibilityState !== 'visible';
     this.frameAwake = 0;     // when the last frame came, on that clock
     this.frameWall = 0;      // and by the clock on the wall ("as of")
@@ -153,6 +191,37 @@ export class Api {
     addEventListener('online', wake);
   }
 
+  // A duplicated tab copies `sessionStorage`, and with it the tab's part of
+  // the client id: two pages would then be one client to every station, and
+  // each would take the other's resize for its own (the sizing rule: each
+  // tab is a client). Pages of one browser say who they are to each other;
+  // of two with the same id, the one loaded later makes itself a new one and
+  // connects again under it. (They never close each other's connection
+  // meanwhile: that goes by the instance.) A page that finds its tab id
+  // already there, and was not reloaded, waits a moment for another page to
+  // say so before it first connects.
+  _twins(had) {
+    if (typeof BroadcastChannel !== 'function') return;
+    const born = Date.now(), bc = new BroadcastChannel('spandeck.tab');
+    const say = () => bc.postMessage({ tab: this.client, instance: this.instance, born });
+    bc.onmessage = (ev) => {
+      const m = ev.data;
+      if (!m || m.tab !== this.client || m.instance === this.instance) return;
+      if (born < m.born || (born === m.born && this.instance < m.instance)) return say();
+      this.client = clientId(true).id;
+      this.renamed += 1;
+      const ws = this.ws;
+      if (ws) { this._closed(ws); try { ws.close(); } catch (e) { /* gone already */ } }
+    };
+    say();
+    let reloaded = false;
+    try { reloaded = performance.getEntriesByType('navigation')[0]?.type === 'reload'; } catch (e) { /* not known: wait */ }
+    if (had && !reloaded) this.settling = new Promise(r => setTimeout(r, 80));
+  }
+
+  // A name for a new attachment: never used before by this page.
+  _name() { return this.chanNext++; }
+
   onEvent(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
   onStatus(fn) { this.statusListeners.add(fn); return () => this.statusListeners.delete(fn); }
   _status() { for (const fn of this.statusListeners) fn(this.connected, this.authError); }
@@ -161,12 +230,24 @@ export class Api {
   // Connected, and answering as far as this page knows: what is typed is
   // sent only then.
   get live() { return this.connected && !this.silent; }
+  // And the station can tell how old something typed is (or does not judge
+  // it, as a station from before): what is typed may be sent.
+  get ready() { return this.live && (!this.stamps || this.based); }
+  // Why what is typed cannot be sent now, or null (typed.js, `offWords`).
+  get offWhy() { return !this.connected ? 'closed' : this.silent ? 'silent' : this.stamps && !this.based ? 'clock' : null; }
   // This connection's round trip: the median of the last 8 pings.
   rtt() { return median(this.rtts); }
   // What the bounds are worked out from: that, or the latest one when it
   // is longer, so that a link that has just turned slow is given the time
   // of a slow link at once and not five pings later.
   _trip() { return Math.max(this.rtt() || 0, this.rtts[this.rtts.length - 1] || 0); }
+  // The round trip a key's limit is worked out from (the station adds it
+  // twice to its two seconds): the middle one of the last 8, or the latest
+  // when that is longer, but then counted as at most a second more than
+  // twice the middle one. So a link that has just turned slow can be typed
+  // over at once, and one answer that came late because the link stood
+  // still does not make the next keys' limit long.
+  _way() { const mid = this.rtt() || 0; return Math.max(mid, Math.min(this.rtts[this.rtts.length - 1] || 0, 2 * mid + 1000)); }
   _now() { return this.awake + (this.wasHidden ? 0 : Math.min(performance.now() - this.beatAt, ASLEEP)); }
   // What the screen is drawn from (see linkLevel).
   link() {
@@ -179,9 +260,13 @@ export class Api {
   // Every half second, and at once when the page is shown again or the
   // browser says the network is back (`wake`).
   _beat(wake = false) {
-    const now = performance.now(), dt = now - this.beatAt;
+    // By the page's clock or the clock on the wall, whichever says longer:
+    // on some machines the page's clock stands still while the machine
+    // sleeps, and a tick after an hour's sleep would look on time.
+    const now = performance.now(), wall = Date.now(), dt = Math.max(now - this.beatAt, wall - this.beatWall);
     const kind = tickKind(document.visibilityState === 'visible', this.wasHidden || wake, dt);
     this.beatAt = now;
+    this.beatWall = wall;
     this.wasHidden = kind === 'hidden';
     if (kind === 'hidden') return;
     if (kind === 'woke') return this._woke();
@@ -193,7 +278,9 @@ export class Api {
     // to this page is full): the frames were the proof, and the next
     // quiet second asks again.
     if (this.pingOut && this.frameAwake > this.pingOut.awake && at - this.pingOut.awake >= slowAfter(this._trip())) this.pingOut = null;
-    if (!this.pingOut && quiet >= PING_AFTER) this._ping();
+    // (And at once while the station has not read this page's clock: the
+    // answer to the ping that was to say so may have been dropped.)
+    if (!this.pingOut && (quiet >= PING_AFTER || (this.stamps && (!this.based || at - this.pingedAwake >= PING_EVERY)))) this._ping();
     const unanswered = this.pingOut && this.frameAwake <= this.pingOut.awake ? at - this.pingOut.awake : 0;
     if (unanswered >= slowAfter(this._trip())) {
       // After waking, the one ping decides: the socket of a machine that
@@ -208,15 +295,42 @@ export class Api {
   _woke() {
     this.frameAwake = this.awake;
     this.pingOut = null;
+    // This page's clock may have stood still: the station is told so by
+    // the next ping (`fresh`), and nothing typed is sent until it answers.
+    this.based = false;
     if (this.connected && this.pings) { this.deciding = true; this._ping(); }
     else if (!this.connected && this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; this.connect(); }
     this._emit('page.woke');
   }
 
+  // `t`: this page's clock, which the station reads from here and nowhere
+  // else. `rtt`: this connection's round trip (`_way`), which is added twice
+  // to how late a key may be. `fresh`: no ping has been answered since this page
+  // signed in or was last away, so the readings from before count for
+  // nothing.
   _ping() {
     if (!this.connected) return;
     this.pingOut = { n: ++this.pingN, t: performance.now(), awake: this._now() };
-    try { this.ws.send(JSON.stringify({ ping: this.pingOut.n, t: this.pingOut.t })); } catch (e) { /* closing: the close says so */ }
+    this.pingedAwake = this.pingOut.awake;
+    const ping = { ping: this.pingOut.n, t: this.pingOut.t, rtt: Math.round(this._way()) };
+    if (!this.based) ping.fresh = true;
+    try { this.ws.send(JSON.stringify(ping)); } catch (e) { /* closing: the close says so */ }
+  }
+
+  // A key was sent (term.js). When nothing at all comes back within 300 ms
+  // the page asks at once, instead of at the next quiet second, and judges
+  // the answer by the same bound as ever (`slowAfter`): typing is off from
+  // then, and the connection is kept. Any frame turns typing back on.
+  typed() {
+    if (!this.pings || this.probing) return;
+    const sent = this._now();
+    this.probing = setTimeout(() => {
+      this.probing = null;
+      if (!this.connected || this.frameAwake > sent) return;
+      if (!this.pingOut) this._ping();
+      const left = slowAfter(this._trip()) - (this._now() - this.pingOut.awake);
+      setTimeout(() => this._beat(), Math.max(0, left) + 20);
+    }, PROBE_AFTER);
   }
 
   // Ask now, for a caller that wants to know whether the link answers (what
@@ -235,6 +349,7 @@ export class Api {
   _heard() {
     this.frameAwake = this._now();
     this.frameWall = Date.now();
+    this.framePerf = performance.now();
     this.deciding = false;
     if (this.silent) { this.silent = false; this._back(); this._status(); }
   }
@@ -267,11 +382,15 @@ export class Api {
     if (was && performance.now() - this.openedAt > 3000) { this.tries = 0; this.timeouts = 0; }
     this.connected = false;
     this.silent = false;
+    this.based = false;
     this.pingOut = null;
     this.deciding = false;
     if (was) this.gapFrom ??= this._now();
     for (const p of this.pending.values()) { clearTimeout(p.limit); p.reject(Object.assign(new Error('connection lost'), { code: 'connection_lost' })); }
     this.pending.clear();
+    // Every attachment was this connection's: its name names nothing now,
+    // and whoever held it is told so before anything else can be typed.
+    for (const c of this.chans.values()) c.onClosed && c.onClosed();
     this.chans.clear();
     for (const fn of this.settle || []) fn(false);
     this.settle = null;
@@ -283,6 +402,11 @@ export class Api {
   }
 
   connect() {
+    if (!this.settling) return this._open();
+    return this.settling.then(() => { this.settling = null; return this._open(); });
+  }
+
+  _open() {
     return new Promise((resolve) => {
       if (this.ws) return resolve(this.connected);
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -305,7 +429,9 @@ export class Api {
       ws.onopen = () => {
         clearTimeout(limit);
         limit = setTimeout(late, signInWithin(performance.now() - began));
-        ws.send(JSON.stringify({ auth: { token: takeToken(), client: this.client, caps: ['busy'] } }));
+        // `instance`: this page (see INSTANCE). `names`: every pane this
+        // page attaches is named by it.
+        ws.send(JSON.stringify({ auth: { token: takeToken(), client: this.client, instance: this.instance, caps: ['busy', 'names'] } }));
       };
       ws.onmessage = (ev) => {
         if (ws !== this.ws) return;
@@ -333,6 +459,10 @@ export class Api {
           // does not answer a ping: it is then not sent one, and nothing is
           // concluded from its silence, as before.
           this.pings = Array.isArray(msg.auth.caps) && msg.auth.caps.includes('ping');
+          // And one that does not say `input` takes what is typed as it
+          // comes, however late: towards it nothing is held to be sent later.
+          this.stamps = this.pings && msg.auth.caps.includes('input');
+          this.based = false;
           this.everConnected = true;
           this.connected = true;
           this.openedAt = performance.now();
@@ -342,6 +472,9 @@ export class Api {
           if (!this.rtts.length) this.rtts.push((performance.now() - began) / 2);
           this._heard();
           this._back();
+          // The station reads this page's clock from this, before anything
+          // typed is sent.
+          if (this.stamps) this._ping();
           this.call('events.subscribe', {}).catch(() => {});
           this._status();
           for (const fn of this.settle || []) fn(true);
@@ -358,6 +491,8 @@ export class Api {
             this.pingOut = null;
             const told = this.probes?.get(msg.pong);
             if (told) { this.probes.delete(msg.pong); told(ms); }
+            // The station has this page's clock: what is typed may go.
+            if (!this.based) { this.based = true; this._emit('input.ready'); this._status(); }
           }
           return;
         }
@@ -378,6 +513,14 @@ export class Api {
           // What was typed for a pane of another station was not sent: that
           // station is not taking it, and too much already waits.
           if (c && msg.input_refused) c.onRefused && c.onRefused(String(msg.station || '').slice(0, 64));
+          // Something typed and stamped was not taken: which (its number),
+          // why, and how late. Numbers and a name from a station: whole
+          // numbers or nothing, a bounded name, a reason from a short list.
+          if (c && msg.input_dropped) {
+            const n = (v) => (Number.isFinite(v) && v >= 0 ? Math.round(v) : null);
+            c.onDropped && c.onDropped({ iseq: n(msg.iseq), why: ['late', 'silent', 'not_ready'].includes(msg.why) ? msg.why : 'refused',
+              ageMs: n(msg.age_ms), limitMs: n(msg.limit_ms), quietMs: n(msg.quiet_ms), station: String(msg.station || '').slice(0, 64) });
+          }
           // A watched conversation (chat.js): what is new, or that it ended.
           if (c && msg.conversation) c.onConversation && c.onConversation(msg.conversation);
           if (c && msg.conversation_end) c.onEnd && c.onEnd(msg.conversation_end);
@@ -387,7 +530,10 @@ export class Api {
         if (!p) return;
         this.pending.delete(msg.id);
         clearTimeout(p.limit);
-        if (msg.error) p.reject(Object.assign(new Error(msg.error.message || 'error'), { code: msg.error.code }));
+        // `late`: something typed that reached the station after its limit
+        // (typed.js): how late, and the limit, as whole numbers or nothing.
+        if (msg.error) p.reject(Object.assign(new Error(msg.error.message || 'error'), { code: msg.error.code },
+          msg.error.code === 'late' && Number.isFinite(msg.error.age_ms) && Number.isFinite(msg.error.limit_ms) ? { late: { ageMs: Math.round(msg.error.age_ms), limitMs: Math.round(msg.error.limit_ms), station: String(msg.error.station || '').slice(0, 64) } } : {}));
         else p.resolve(msg.result);
       };
       ws.onclose = () => { clearTimeout(limit); this._closed(ws); };
@@ -446,14 +592,32 @@ export class Api {
     return this.call('peer.call', { station, method, params }, opts.within ? { within: opts.within + 2000, of: station } : opts);
   }
 
+  // Attach to a pane under a name of this page's choosing (a station from
+  // before gives a number of its own, and whichever the answer names is the
+  // channel). `handlers.gone()`: whoever asked no longer wants it; it is let
+  // go of here, and nothing is returned. One pane is attached by one request
+  // at a time, each after the one before has been answered and, if unwanted,
+  // let go of: so that at the pane's station this page's newer attachment
+  // always follows its older one.
   async attach(station, pane, mode, handlers) {
-    const res = await this.call('pane.attach', { pane, mode, station: station === this.station ? undefined : station });
-    this.chans.set(res.chan, handlers);
-    const snapshot = Uint8Array.from(atob(res.snapshot_b64), c => c.charCodeAt(0));
-    // `client`: who this tab is at the pane's station. Through a gateway that
-    // is a name the gateway made for this tab; here it is this tab's own.
-    const client = typeof res.client === 'string' && res.client ? res.client : this.client;
-    return { chan: res.chan, info: res.info, exited: res.exited, snapshot, client };
+    const key = `${station}/${pane}`, before = this.attaching.get(key);
+    let done;
+    const mine = new Promise(r => { done = r; });
+    this.attaching.set(key, mine);
+    try {
+      if (before) await before;
+      const res = await this.call('pane.attach', { pane, mode, station: station === this.station ? undefined : station, chan: this._name() });
+      if (handlers.gone && handlers.gone()) { this.send('pane.detach', { chan: res.chan }); return null; }
+      this.chans.set(res.chan, handlers);
+      const snapshot = Uint8Array.from(atob(res.snapshot_b64), c => c.charCodeAt(0));
+      // `client`: who this tab is at the pane's station. Through a gateway that
+      // is a name the gateway made for this tab; here it is this tab's own.
+      const client = typeof res.client === 'string' && res.client ? res.client : this.client;
+      return { chan: res.chan, info: res.info, exited: res.exited, snapshot, client };
+    } finally {
+      if (this.attaching.get(key) === mine) this.attaching.delete(key);
+      done();
+    }
   }
 
   detach(chan) {

@@ -69,6 +69,32 @@ days, not hours.
   Deck types names its pane by a channel number of its connection. Each connection
   starts counting at a random place, and a number it did not give is refused, so a key
   sent with a number from before a reconnect does not reach another pane.
+- **Attachment names are chosen by the page and never reused** (16 Nov 2026). A page
+  names each pane it attaches with a number it uses once in its life, across every
+  reconnect, and the station takes what is typed only for a name attached on that
+  connection: a key that carries a name from an earlier connection reaches no pane. A
+  station refuses a name that is already attached on the connection, and refuses a pane
+  without a name from a page that says it names them.
+- **A page that reconnects replaces only its own earlier connection** (16 Nov 2026). A
+  page sends at sign-in a value it made when it loaded (64 random bits, kept in memory
+  only, never stored). A new connection closes an older one only when it was let in as
+  the same caller and gives the same client id and the same value; through another
+  station, also only for the same pane. The client id alone is not enough (a duplicated
+  tab has it), an agent's token is never fenced and cannot close the owner's connection,
+  and another station can close only connections it made itself. A connection that
+  sends no such value is never closed by this rule. What the closed connection had
+  waiting to be typed is thrown away, never written later.
+- **What is typed is not delivered late** (16 Nov 2026). A page stamps what it types
+  with its own clock and the receiving station refuses it when it arrives more than two
+  seconds and twice the round trip after it was typed (ten seconds for a message from
+  the message box), and takes a numbered key once. This guards the owner against a link
+  that stalls and returns (keys typed minutes ago arriving in a shell), not against the
+  sender: the stamp and the round trip are the sender's own word, a sender can only make
+  its own input count as late or as fresh, and whoever can type into a pane could type
+  the same thing now. What is refused is reported as a count, a number and an age,
+  never as what was typed. The clock a station reads from a ping is a number of
+  milliseconds with no date in it, kept in memory for that connection (for another
+  station: for that station) and nowhere else.
 - **Agents are not the owner.** Each pane has its own token. Agents can message, delegate
   and search history; they never get a call that administers a station. Text from agents,
   other stations and session history is shown as text and labelled as quoted, never run

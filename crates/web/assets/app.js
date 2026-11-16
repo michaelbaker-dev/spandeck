@@ -20,6 +20,7 @@ import { lookEditor } from './lookedit.js';
 import { phoneLook } from './phonelook.js';
 import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook, refreshAsked, refreshCorrected } from './perf.js';
 import { qrSvg } from './qr.js';
+import { sendAct } from './typed.js';
 import { initChat, conversation, faceOf, chatToggle, termBox, chatBeforeRender, chatAfterRender, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
 
 // The page opens in the look this browser last had, before anything is asked.
@@ -573,9 +574,20 @@ async function pasteInto(term) {
   }
   dialog(`Paste into ${term.pane.name}`, (close) => {
     const box = h('textarea', { rows: 5, 'aria-label': 'Text to paste', placeholder: 'Press Cmd-V or Ctrl-V here, then Paste' });
-    return h('form', { onsubmit: (e) => { e.preventDefault(); const text = box.value; close(); term.pasteText(text).then((ok) => ok && term.focus()); } },
+    // One deliberate act: sent now or not at all. When it is not sent the
+    // dialog stays, with the text in it, and says why.
+    const said = h('p', { class: 'send-said', role: 'alert', hidden: true });
+    const go = h('button', { class: 'primary', type: 'submit' }, 'Paste');
+    const submit = async (e) => {
+      e.preventDefault();
+      if (!box.value || go.disabled) return;
+      go.disabled = true; go.textContent = 'Sending…'; said.hidden = true;
+      try { await term.pasteNow(box.value); close(); term.focus(); }
+      catch (err) { said.textContent = `${err.message} Your text is still here.`; said.hidden = false; go.disabled = false; go.textContent = 'Paste'; }
+    };
+    return h('form', { onsubmit: submit },
       h('p', { class: 'muted' }, 'This browser does not let a page read the clipboard here. Press Cmd-V or Ctrl-V in the box, then Paste. Nothing runs until you press Enter in the pane.'),
-      box, h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel'), h('button', { class: 'primary', type: 'submit' }, 'Paste')));
+      box, said, h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel'), go));
   });
 }
 
@@ -2161,11 +2173,24 @@ function sidebar() {
   h('div', { class: 'side-actions' }, h('button', { onclick: () => newPaneDialog(online(r.station) ? r.station : api.station) }, '＋ Pane'), h('button', { onclick: () => newProjectDialog(online(r.station) ? r.station : api.station) }, '＋ Project')));
 }
 
+// A terminal has been attached again (the page reconnected, or its pane's
+// station came back): the one that had the keyboard has it again, without a
+// click. (The audit: in a layout the terminal lost the keyboard after a
+// reconnect.) Never taken from a dialog, a menu or a box someone is typing in.
+function keyboardBack(st, term) {
+  if (S.focused !== `${st}/${term.pane.id}` || !term.control) return;
+  const a = document.activeElement;
+  if (document.querySelector('.dialog') || document.querySelector('.menu')) return;
+  if (a && a !== document.body && !term.el.contains(a)) return;
+  if (!term.el.isConnected) return;
+  term.focus();
+}
+
 function getTerm(st, p, where, mode) {
   const key = `${where}:${st}/${p.id}`;
   let t = S.terms.get(key);
   if (!t) {
-    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', face: where === 'leaf' || where === 'zoom' ? (term) => chatToggle(st, term.pane) : null, agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where, term), onUsage: (term) => usageDialog(st, term.pane), onFocus: (term) => { S.focused = `${st}/${term.pane.id}`; } });
+    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', face: where === 'leaf' || where === 'zoom' ? (term) => chatToggle(st, term.pane) : null, agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where, term), onUsage: (term) => usageDialog(st, term.pane), onFocus: (term) => { S.focused = `${st}/${term.pane.id}`; }, onAttached: (term) => keyboardBack(st, term) });
     S.terms.set(key, t);
     t._fresh = true;
     t.setLink(linkPaneWords(api.link()));
@@ -3025,14 +3050,30 @@ function composer(st, p) {
   let c = composers.get(key);
   if (c) return c;
   const box = h('textarea', { class: 'composer-box', rows: 2, placeholder: p.agent === 'shell' ? 'Type or paste a command' : 'Type, paste or dictate a message', 'aria-label': 'Message', enterkeyhint: 'send' });
+  // One deliberate act (typed or dictated): sent now or not at all, and
+  // refused by the station when it arrives more than ten seconds late. Not
+  // sent, or not known to be: the text stays in the box and the box says so.
+  const said = h('p', { class: 'send-said', role: 'alert', hidden: true });
+  const sendBtn = h('button', { class: 'primary', type: 'submit' }, 'Send');
+  let sending = false;
   const send = async () => {
     // Sent as a paste, so a message of several lines arrives as one.
     const text = box.value.trim();
-    if (!text) return;
-    await rpc(st, 'pane.paste', { pane: p.id, text, enter: true });
-    box.value = '';
+    if (!text || sending) return;
+    sending = true; sendBtn.disabled = true; sendBtn.textContent = 'Sending…'; said.hidden = true;
+    try {
+      await sendAct(api, st, 'pane.paste', { pane: p.id, text, enter: true });
+      box.value = '';
+      box.dispatchEvent(new Event('input'));
+      stationSoon(st || api.station, 60);
+    } catch (e) {
+      said.textContent = `${e.message} Your message is still in the box.`;
+      said.hidden = false;
+    } finally { sending = false; sendBtn.disabled = false; sendBtn.textContent = 'Send'; }
   };
-  const key1 = (bytes) => rpc(st, 'pane.input', { pane: p.id, data: bytes });
+  box.addEventListener('input', () => { if (!sending) said.hidden = true; });
+  // A key of the row: stamped like any key, so it is refused when late.
+  const key1 = (bytes) => rpc(st, 'pane.input', { pane: p.id, data: bytes, ...(api.stamps ? { t: performance.now() } : {}) });
   const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
   let listening = null;
   const mic = Speech ? h('button', { type: 'button', class: 'mic', title: 'Dictate', 'aria-label': 'Dictate', 'aria-pressed': 'false' }, '🎤') : null;
@@ -3051,7 +3092,8 @@ function composer(st, p) {
   };
   c = h('div', { class: 'composer' },
     h('div', { class: 'keys', role: 'group', 'aria-label': 'Keys' }, PHONE_KEYS.map(([label, bytes]) => h('button', { type: 'button', class: 'key', 'aria-label': KEY_NAMES[label] || label, onclick: () => key1(bytes) }, label))),
-    h('form', { class: 'composer-row', onsubmit: (e) => { e.preventDefault(); send(); } }, box, mic, h('button', { class: 'primary', type: 'submit' }, 'Send')));
+    said,
+    h('form', { class: 'composer-row', onsubmit: (e) => { e.preventDefault(); send(); } }, box, mic, sendBtn));
   composers.set(key, c);
   // What is being written goes with the owner between Chat and Terminal.
   termBox(st, p, box);
@@ -3607,7 +3649,15 @@ initChat({
   agentMark: (kind) => h('span', { class: 'ico-wrap' }, paneIcon(kind)),
 });
 
-api.onStatus(() => { linkTick(); render(); });
+// The page is drawn again when its connection changes: the terminal that
+// had the keyboard has it afterwards (see `keyboardBack`).
+api.onStatus(() => {
+  const active = document.activeElement;
+  const had = [...S.terms.values()].find(t => t.el.contains(active));
+  linkTick();
+  render();
+  if (had && had.el.isConnected && !document.querySelector('.dialog') && !had.el.contains(document.activeElement)) had.focus();
+});
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 api.connect().then((ok) => {
   if (!ok) return render();

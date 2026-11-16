@@ -81,6 +81,7 @@ pub mod sync;
 pub mod tailnet;
 pub mod tasks;
 pub mod trust;
+pub mod typed;
 pub mod usage;
 pub mod vault;
 pub mod wake;

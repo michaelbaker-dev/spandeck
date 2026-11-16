@@ -409,6 +409,15 @@ pub struct Perf {
     pub silent_decks: Count,
     pub silent_gateways: Count,
     pub silent_panes: Count,
+    /// Connections closed because the page they belonged to came back on
+    /// a newer one (a Control Deck's, or a gateway's for one pane).
+    pub fenced: Count,
+    /// What was typed with a stamp and not taken (typed.rs): it arrived
+    /// later than its limit; the connection had no baseline yet, or the
+    /// station it was for had said nothing; its number was taken already.
+    pub typed_late: Count,
+    pub typed_refused: Count,
+    pub typed_twice: Count,
     /// A message for another station: sent here, to stored there.
     pub msg_received: Hist,
     /// A message stored here, to its agent being told of it.
@@ -579,6 +588,13 @@ impl Perf {
     }
 
     /// What is known of a station's clock against this one's.
+    /// The latest round trip of a call to a station, in milliseconds.
+    pub fn rtt_ms_of(&self, station: &str) -> Option<u64> {
+        let links = self.links.lock().unwrap();
+        let link = links.values().find(|l| l.station == station)?;
+        link.last_rtt_us.map(|us| us / 1000)
+    }
+
     pub fn clock_of(&self, station: &str) -> Option<Clock> {
         let links = self.links.lock().unwrap();
         let link = links.values().find(|l| l.station == station)?;
@@ -664,7 +680,8 @@ impl Perf {
             "periodic": {"late": late, "work": self.tick_work.summary_at(now, FIVE_MIN).json(), "loops": loops},
             "look": self.look.summary_at(now, FIVE_MIN).json(),
             "terminal": {"resyncs": self.resyncs.json()},
-            "connections": {"closed_silent": {"decks": self.silent_decks.json(), "gateways": self.silent_gateways.json(), "panes_elsewhere": self.silent_panes.json()}},
+            "connections": {"closed_silent": {"decks": self.silent_decks.json(), "gateways": self.silent_gateways.json(), "panes_elsewhere": self.silent_panes.json()}, "replaced": self.fenced.json()},
+            "typed": {"late": self.typed_late.json(), "refused": self.typed_refused.json(), "twice": self.typed_twice.json()},
             "messages": {
                 "received": self.msg_received.summary_at(now, FIVE_MIN).json(),
                 "woken": self.msg_woken.summary_at(now, FIVE_MIN).json(),

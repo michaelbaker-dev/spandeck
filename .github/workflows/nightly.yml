@@ -35,6 +35,13 @@ jobs:
       # within 10 ms (they took 42 ms while each waited to be acknowledged).
       - name: The deck's socket (a stale channel number reaches no pane; answers are not held back)
         run: cargo test -p spandeck --test socket -- --ignored
+      # What is typed from a deck. Names the page chooses, a page that comes
+      # back replacing only its own connection, a duplicated tab in a real
+      # browser; and a link held still for one second and for five, at a
+      # station, through another, and in a real page at two widths: on time,
+      # or refused with the count, never late. About three minutes.
+      - name: What is typed (names, fencing, a duplicated tab; on time or refused, never late)
+        run: cargo test -p spandeck --test typed -- --ignored --nocapture
       # Four stations, one frozen and one behind a slow link: the local
       # mail wake-up and the healthy station's sync are timed against all
       # four healthy, and printed.

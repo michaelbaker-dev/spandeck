@@ -2659,6 +2659,16 @@ impl Daemon {
         if self.flag_on(crate::beat::FLAG, true) {
             caps.push(crate::beat::CAP);
         }
+        // An attachment is named by the page, and a page that comes back
+        // replaces its own earlier connection.
+        if self.flag_on(crate::typed::NAMES_FLAG, true) {
+            caps.push(crate::typed::NAMES_CAP);
+        }
+        // What is typed with a stamp is refused when it is late. The
+        // stamp is read against the pings, so only where those are answered.
+        if self.flag_on(crate::typed::INPUT_FLAG, true) && self.flag_on(crate::beat::FLAG, true) {
+            caps.push(crate::typed::INPUT_CAP);
+        }
         caps
     }
 
