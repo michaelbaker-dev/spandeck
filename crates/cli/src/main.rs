@@ -141,9 +141,10 @@ enum Cmd {
     },
     /// The fleet: every station under your Tailscale login.
     Fleet {
-        /// Ask this station to let this one into its fleet. Approve it there,
-        /// or at any station of that fleet. The stations of the fleet this
-        /// one is in come with it: afterwards there is one fleet.
+        /// Ask to be let into the fleet this station is in: any station of
+        /// that fleet, by its name or by the address it answers at. Approve
+        /// the code at any station of that fleet. The stations of the fleet
+        /// this one is in come with it: afterwards there is one fleet.
         #[arg(long, value_name = "STATION")]
         join: Option<String>,
         /// Remove a station from the fleet: its panes are closed, and the
@@ -1140,7 +1141,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             join: Some(station),
             ..
         } => {
-            c.call("fleet.refresh", json!({}))?;
+            // The station looks for the one named by itself, and goes on
+            // looking for a while when it does not see it yet.
             let v = c.call("fleet.join", json!({"station": station}))?;
             show(j, &v, |v| v["next"].as_str().unwrap_or("").to_string());
         }

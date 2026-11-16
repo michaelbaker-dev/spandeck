@@ -476,7 +476,7 @@ impl Daemon {
                 None,
                 &match joined {
                     "" => "This station's fleet joined another fleet".to_string(),
-                    j => format!("This station's fleet joined {j}'s fleet"),
+                    j => format!("This station's fleet joined the fleet {j} is in"),
                 },
                 &format!("{} was let into that fleet and brought this station with it: the stations of both are now one fleet. Browsers signed in to this station from other devices must sign in again.", caller.who),
             );

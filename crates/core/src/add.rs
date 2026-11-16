@@ -70,6 +70,16 @@ enum JoinBy {
     Code,
 }
 
+/// Why a job stopped, in the dialog's words: what did not work (`text`),
+/// what had worked before that (`worked`), and the one thing to do next.
+#[derive(Clone)]
+struct Problem {
+    kind: &'static str,
+    text: String,
+    worked: Option<String>,
+    next: Option<String>,
+}
+
 #[derive(Clone)]
 struct Job {
     id: String,
@@ -83,6 +93,14 @@ struct Job {
     with: Vec<String>,
     /// Join: whether the station there is new enough to bring its mates.
     brings_mates: bool,
+    /// The join step again, for a machine spandeck was installed on by the
+    /// try before this one: nothing is downloaded or installed.
+    rejoin: bool,
+    /// The version of spandeck that machine says it runs, once it runs.
+    version: Option<String>,
+    /// What spandeck there said when it could not ask to join. Text from
+    /// another machine: shown as text.
+    why: Option<String>,
     machine: String,
     name: String,
     address: String,
@@ -93,7 +111,7 @@ struct Job {
     /// stopping, removing: in progress. needs_password, failed, done:
     /// finished.
     stage: &'static str,
-    problem: Option<(&'static str, String)>,
+    problem: Option<Problem>,
     lines: VecDeque<String>,
     code: Option<String>,
     request: Option<String>,
@@ -110,6 +128,9 @@ impl Job {
             erase: false,
             with: vec![],
             brings_mates: false,
+            rejoin: false,
+            version: None,
+            why: None,
             machine: String::new(),
             name: name.to_string(),
             address: address.to_string(),
@@ -131,6 +152,20 @@ impl Job {
         !matches!(self.stage, "needs_password" | "failed" | "done")
     }
 
+    /// Whether "Try again" can go straight to the join step: spandeck was
+    /// installed and started there by this job (or the one it repeats), and
+    /// what failed came after that.
+    fn can_ask_again(&self) -> bool {
+        let Some(problem) = self.problem.as_ref().filter(|_| self.stage == "failed") else {
+            return self.rejoin && self.stage == "needs_password";
+        };
+        match self.kind {
+            "add" => matches!(problem.kind, "join" | "refused" | "expired"),
+            "join" if self.rejoin => problem.kind != "not_running",
+            _ => false,
+        }
+    }
+
     /// The ship's log entry this job writes.
     fn log_kind(&self) -> &'static str {
         match self.kind {
@@ -142,11 +177,13 @@ impl Job {
     fn view(&self) -> Value {
         json!({
             "id": self.id, "kind": self.kind, "erase": self.erase, "with": self.with,
-            "brings_mates": self.brings_mates,
+            "brings_mates": self.brings_mates, "rejoin": self.rejoin, "version": self.version,
+            "can_ask_again": self.can_ask_again(),
             "machine": self.machine, "name": self.name, "address": self.address,
             "os": self.os, "user": self.user, "by": self.by, "stage": self.stage,
             "running": self.running(),
-            "problem": self.problem.as_ref().map(|(kind, text)| json!({"kind": kind, "text": text})),
+            "problem": self.problem.as_ref().map(|p| json!({"kind": p.kind, "text": p.text,
+                "worked": p.worked, "next": p.next})),
             "lines": self.lines, "code": self.code, "request": self.request,
             "station": self.station, "started_ms": self.started_ms,
         })
@@ -429,12 +466,32 @@ impl Daemon {
     }
 
     fn add_fail(&self, id: &str, kind: &'static str) {
-        let station = self.station.clone();
+        // The stations of this fleet, this one first: any of them can be
+        // asked, and the words name them all.
+        let mut fleet = vec![self.station.clone()];
+        fleet.extend(self.fleet_members().into_iter().map(|p| p.station));
+        let stations = fleet.join(", ");
         let known = self.known_hosts_file().display().to_string();
         let changed = self.add_update(id, |j| {
             let name = &j.name;
             let windows = j.os == "Windows";
             let uninstall = j.kind == "uninstall";
+            // What had worked when the join step failed, and what to do.
+            let (mut worked, mut next) = (None, None);
+            if matches!(kind, "join" | "refused" | "expired") {
+                worked = Some(match (j.kind, &j.version) {
+                    ("add", Some(v)) => format!("spandeck {v} was installed on {name} and is running."),
+                    ("add", None) => format!("spandeck was installed on {name} and is running."),
+                    (_, Some(v)) => format!("spandeck {v} is installed on {name} and is running."),
+                    _ => format!("spandeck is running on {name}."),
+                });
+                let command = format!("Or on that machine: `spandeck fleet --join <any station of your fleet>` (its stations: {stations}).");
+                next = Some(if j.kind == "add" || j.rejoin {
+                    format!("Try again: it only asks again, and nothing is downloaded or installed a second time. {command}")
+                } else {
+                    format!("Try again. {command}")
+                });
+            }
             let text = match kind {
                 "not_running" => format!("spandeck's command was not found on {name}, or spandeck is not answering there: the last lines below say which. Start it on that machine (`spandeck daemon`), or use Add a machine to install it again."),
                 "stop" => format!("spandeck on {name} did not stop when it was asked to, so nothing was deleted there: the last lines below say why. Try again, or stop it on that machine."),
@@ -453,16 +510,21 @@ impl Daemon {
                 "network" => format!("{name} could not reach GitHub to download spandeck: check its internet connection and try again."),
                 "install" => format!("The install script failed on {name}: its last lines are below, and the install command in the README, run on that machine, shows the same."),
                 "start" => format!("spandeck was installed on {name} but did not start: on that machine run `spandeck daemon` to see why."),
-                "join" => format!("spandeck is running on {name} but could not ask to join this fleet: on that machine run `spandeck fleet --join {station}`."),
-                "refused" => format!("You refused {name}, so spandeck is installed there but it is not in this fleet: to ask again, run `spandeck fleet --join {station}` on it."),
-                "expired" => format!("Nobody approved {name} in time: run `spandeck fleet --join {station}` on it to get a new code."),
+                "join" => join_failure(name, &stations, j.why.as_deref()),
+                "refused" => format!("You refused {name}, so it is not in your fleet."),
+                "expired" => format!("Nobody approved {name} in time, so it is not in your fleet."),
                 "not_seen" => format!("{name} was approved but has not appeared yet: it should show up by itself, and if it does not, check that spandeck is still running there."),
                 "timeout" => format!("Adding {name} took more than ten minutes and was stopped: try again."),
                 "no_ssh" => "This station could not run its SSH command: install the OpenSSH client here (or fix add_machine_cmd in config.toml) and try again.".to_string(),
                 _ => format!("This station could not connect to {name} over SSH: the last lines below say why."),
             };
             j.stage = "failed";
-            j.problem = Some((kind, text));
+            j.problem = Some(Problem {
+                kind,
+                text,
+                worked,
+                next,
+            });
         });
         if changed {
             self.add_audit(id, &format!("failed: {kind}"));
@@ -494,6 +556,38 @@ impl Daemon {
         self.add_begin(
             Job {
                 machine: cand.id.clone(),
+                ..job
+            },
+            password,
+        )
+    }
+
+    /// "Try again" after the join step failed (the owner's report of 17 Nov
+    /// 2026: it downloaded and installed everything a second time, or, once
+    /// this station had seen spandeck running there, said the machine was
+    /// "already a station"). spandeck is installed and running on that
+    /// machine, so this connects to the address the last job had, which was
+    /// checked then, and only has spandeck there ask again.
+    pub fn add_again_start(&self, user: &str, password: Option<Secret>, by: &str) -> Result<Value> {
+        let user = self.add_checks(user)?;
+        let last = self
+            .adding
+            .job
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|j| j.can_ask_again())
+            .ok_or_else(|| {
+                invalid("there is no machine here whose request to join can be made again: use Add a machine")
+            })?;
+        let job = Job::new("join", &last.name, &last.address, &last.os, &user, by);
+        self.add_begin(
+            Job {
+                machine: last.machine,
+                rejoin: true,
+                version: last.version,
+                // What was installed is a release that brings its mates.
+                brings_mates: true,
                 ..job
             },
             password,
@@ -928,7 +1022,7 @@ impl Daemon {
             }
             _ => String::new(),
         };
-        let join_lines = unix_join_lines(&self.station, join);
+        let join_lines = unix_join_lines(&self.join_candidates(), join);
         format!(
             r#"main() {{
 set -u
@@ -972,6 +1066,7 @@ until "$bin" status >/dev/null 2>&1; do
   sleep 1
 done
 echo "spandeck is running."
+say "version $("$bin" --version 2>/dev/null | head -n 1)"
 say step join
 {join_lines}
 }}
@@ -984,9 +1079,9 @@ main </dev/null
     /// installed. The command is looked for where the installer puts it,
     /// then on the PATH, then where a build from source leaves it.
     fn join_script(&self, join: JoinBy, os: &str) -> String {
-        let station = &self.station;
+        let ask = self.join_candidates();
         if os == "Windows" {
-            let join_lines = windows_join_lines(station, join);
+            let join_lines = windows_join_lines(&ask, join);
             return format!(
                 r#"$ErrorActionPreference = 'Continue'
 function Say($m) {{ Write-Output "@spandeck $m" }}
@@ -1006,7 +1101,7 @@ exit 0
 "#
             );
         }
-        let join_lines = unix_join_lines(station, join);
+        let join_lines = unix_join_lines(&ask, join);
         format!(
             r#"main() {{
 set -u
@@ -1019,6 +1114,7 @@ for at in "${{SPANDECK_BIN_DIR:-$HOME/.local/bin}}/spandeck" "$(command -v spand
 done
 [ -n "$bin" ] || {{ echo "The spandeck command was not found on this machine."; fail not_running; }}
 "$bin" status >/dev/null 2>&1 || {{ echo "spandeck is not answering on this machine."; fail not_running; }}
+say "version $("$bin" --version 2>/dev/null | head -n 1)"
 {join_lines}
 }}
 main </dev/null
@@ -1031,16 +1127,137 @@ main </dev/null
     /// that starts spandeck at log on and runs it; a Windows station runs in
     /// the owner's logged-on session, never in the SSH session, which ends.
     fn add_script_windows(&self, join: JoinBy) -> String {
-        windows_script(&self.station, self.cfg.update.url.as_deref(), join)
+        windows_script(
+            &self.join_candidates(),
+            self.cfg.update.url.as_deref(),
+            join,
+        )
+    }
+
+    /// Whom a new station may ask to be let in: the stations of this fleet
+    /// are peers, and a request is approved at any of them. This station
+    /// is first (it is the one that is surely up), then up to three others
+    /// that answer now; each with the address this station reaches it at
+    /// when that is one the new station would look at by itself.
+    fn join_candidates(&self) -> Vec<(String, Option<String>)> {
+        let plain = |name: &str| {
+            !name.is_empty()
+                && !name.starts_with('-')
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        };
+        let mut all = vec![(self.station.clone(), self.own_address())];
+        let mut mates: Vec<Peer> = self
+            .fleet_members()
+            .into_iter()
+            .filter(|p| p.state == "online" && plain(&p.station))
+            .collect();
+        mates.sort_by(|a, b| a.station.cmp(&b.station));
+        all.extend(mates.into_iter().take(3).map(|p| {
+            let tailnet = p
+                .addr
+                .parse::<std::net::SocketAddr>()
+                .is_ok_and(|at| is_tailscale_address(at.ip()));
+            (p.station, tailnet.then_some(p.addr))
+        }));
+        all
+    }
+
+    /// Where this station answers on the tailnet, for a machine that does
+    /// not find it by name: its own Tailscale address (IPv4 first) and the
+    /// port its web server listens on. None when Tailscale has not said.
+    fn own_address(&self) -> Option<String> {
+        let ips = self.fleet.own_addrs.borrow().as_ref()?.ips.clone();
+        let ip = ips
+            .into_iter()
+            .filter(|ip| is_tailscale_address(*ip))
+            .min_by_key(|ip| ip.is_ipv6())?;
+        Some(std::net::SocketAddr::new(ip, self.cfg.web_port).to_string())
     }
 }
 
-/// The lines that make a station ask to join `station`'s fleet and say the
-/// code it was given. They use only what every release has.
-fn unix_join_lines(station: &str, join: JoinBy) -> String {
+/// The dialog's words when a station could not ask to join. `stations` are
+/// the fleet's, as a list; `why` is what spandeck on that machine said, if
+/// it said anything.
+fn join_failure(name: &str, stations: &str, why: Option<&str>) -> String {
+    match why {
+        // A release from before the join looked for the station by itself.
+        Some(w) if w.contains("no station called") => format!(
+            "It has not asked to join your fleet: spandeck on {name} looked several times for the fleet's stations ({stations}) among the machines under your Tailscale login and saw none of them. Check that Tailscale is connected on {name} and signed in to the same account as your other machines."
+        ),
+        Some(w) if w.contains("was not found") => format!(
+            "It has not asked to join your fleet, because it saw none of the fleet's stations ({stations}). What spandeck on {name} said: {w}"
+        ),
+        Some(w) => {
+            format!("It could not ask to join your fleet. What spandeck on {name} said: {w}")
+        }
+        None => "It could not ask to join your fleet: the last lines below say why.".to_string(),
+    }
+}
+
+/// The lines that make a station ask to join this fleet and say the code it
+/// was given. They use only what every release has: `fleet --join NAME` and
+/// `fleet`.
+///
+/// `ask` is the stations of this fleet that may be asked, by name and (where
+/// known) by address, the one that sends the script first. They are peers:
+/// each is asked in turn until one takes the request, so a new station joins
+/// when any one of them can be seen from it.
+///
+/// A station that has only just started may not see any of them yet (the
+/// owner's report of 17 Nov 2026). A release from this one on goes on
+/// looking by itself for twenty seconds and then says what it tried. An
+/// older one gives up at once ("no station called X was found"), so after
+/// that answer, and only after it, the names are gone through again, up to
+/// three times, with `spandeck fleet` between, which every release has and
+/// which makes the station look at the tailnet and wait for the look. Last,
+/// each is asked by its address: a release that takes an address asks there
+/// directly; an older one answers as it did for a name, at once, and what
+/// is shown is what it said of the first name.
+fn unix_join_lines(ask: &[(String, Option<String>)], join: JoinBy) -> String {
+    let names: Vec<&str> = ask.iter().map(|(n, _)| n.as_str()).collect();
+    let (listed, words) = (names.join(", "), names.join(" "));
+    let addresses: Vec<&str> = ask
+        .iter()
+        .filter_map(|(_, a)| a.as_deref())
+        .filter(|a| !a.contains(|c: char| c == '\'' || c.is_whitespace()))
+        .collect();
+    let by_address = if addresses.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"if [ "$joined" = no ]; then
+  for at in {}; do
+    echo "Asking at $at."
+    if out=$("$bin" --json fleet --join "$at" 2>&1); then joined=yes; break; fi
+  done
+fi
+"#,
+            addresses.join(" ")
+        )
+    };
     match join {
         JoinBy::Code => format!(
-            r#"out=$("$bin" --json fleet --join '{station}') || {{ printf '%s\n' "$out"; fail join; }}
+            r#"echo "Asking to join the fleet (looking for its stations: {listed})."
+tries=0 joined=no why=
+while [ "$joined" = no ]; do
+  tries=$((tries + 1)) again=no why=
+  for name in {words}; do
+    if out=$("$bin" --json fleet --join "$name" 2>&1); then joined=yes; break; fi
+    [ -n "$why" ] || why=$(printf '%s\n' "$out" | sed '/^[[:space:]]*$/d' | tail -n 1)
+    case "$out" in *"no station called"*) again=yes ;; esac
+  done
+  [ "$joined" = no ] && [ "$again" = yes ] && [ "$tries" -lt 3 ] || break
+  echo "None of them is seen from here yet. Looking again (try $((tries + 1)) of 3)."
+  sleep $((tries * 2))
+  "$bin" fleet >/dev/null 2>&1 || true
+done
+{by_address}if [ "$joined" = no ]; then
+  printf '%s\n' "$why"
+  say "why $why"
+  fail join
+fi
 code=$(printf '%s\n' "$out" | sed -n 's/.*"code": *"\([A-Z0-9]*\)".*/\1/p' | head -n 1)
 [ -n "$code" ] || fail join
 say "code $code""#
@@ -1048,11 +1265,61 @@ say "code $code""#
     }
 }
 
-fn windows_join_lines(station: &str, join: JoinBy) -> String {
+/// The same for Windows PowerShell 5.1. What a program writes to its error
+/// output arrives there as error records: `"$_"` is the text of each.
+fn windows_join_lines(ask: &[(String, Option<String>)], join: JoinBy) -> String {
+    let quoted = |items: Vec<&str>| {
+        items
+            .iter()
+            .map(|i| format!("'{i}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let names: Vec<&str> = ask.iter().map(|(n, _)| n.as_str()).collect();
+    let listed = names.join(", ");
+    let names = quoted(names);
+    let addresses: Vec<&str> = ask
+        .iter()
+        .filter_map(|(_, a)| a.as_deref())
+        .filter(|a| !a.contains(|c: char| c == '\'' || c.is_whitespace()))
+        .collect();
+    let by_address = if addresses.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"if (-not $joined) {{
+    foreach ($at in @({})) {{
+        Write-Output "Asking at $at."
+        $out = (& $bin --json fleet --join $at 2>&1 | ForEach-Object {{ "$_" }} | Out-String)
+        if ($LASTEXITCODE -eq 0) {{ $joined = $true; break }}
+    }}
+}}
+"#,
+            quoted(addresses)
+        )
+    };
     match join {
         JoinBy::Code => format!(
-            r#"$out = (& $bin --json fleet --join '{station}' 2>&1 | Out-String)
-if ($LASTEXITCODE -ne 0) {{ Write-Output $out; Fail 'join' }}
+            r#"Write-Output 'Asking to join the fleet (looking for its stations: {listed}).'
+$tries = 0; $joined = $false; $why = ''
+while (-not $joined) {{
+    $tries++; $again = $false; $why = ''
+    foreach ($name in @({names})) {{
+        $out = (& $bin --json fleet --join $name 2>&1 | ForEach-Object {{ "$_" }} | Out-String)
+        if ($LASTEXITCODE -eq 0) {{ $joined = $true; break }}
+        if (-not $why) {{ $why = "$(($out -split '\r?\n') | Where-Object {{ $_.Trim() }} | Select-Object -Last 1)" }}
+        if ($out -match 'no station called') {{ $again = $true }}
+    }}
+    if ($joined -or (-not $again) -or ($tries -ge 3)) {{ break }}
+    Write-Output "None of them is seen from here yet. Looking again (try $($tries + 1) of 3)."
+    Start-Sleep -Seconds ($tries * 2)
+    try {{ & $bin fleet *> $null }} catch {{ }}
+}}
+{by_address}if (-not $joined) {{
+    Write-Output $why
+    Say "why $why"
+    Fail 'join'
+}}
 if ($out -match '"code":\s*"([A-Z0-9]+)"') {{ Say "code $($Matches[1])" }} else {{ Fail 'join' }}"#
         ),
     }
@@ -1205,7 +1472,11 @@ main </dev/null
 /// standard input, then runs it as one script.
 const WINDOWS_READS_STDIN: &str = "\"[Console]::In.ReadToEnd() | Invoke-Expression\"";
 
-fn windows_script(station: &str, releases: Option<&str>, join: JoinBy) -> String {
+fn windows_script(
+    ask: &[(String, Option<String>)],
+    releases: Option<&str>,
+    join: JoinBy,
+) -> String {
     {
         let releases = match releases {
             Some(url) if !url.contains('\'') => {
@@ -1213,7 +1484,7 @@ fn windows_script(station: &str, releases: Option<&str>, join: JoinBy) -> String
             }
             _ => String::new(),
         };
-        let join_lines = windows_join_lines(station, join);
+        let join_lines = windows_join_lines(ask, join);
         format!(
             r#"$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -1263,6 +1534,7 @@ while ($true) {{
     Start-Sleep -Seconds 1
 }}
 Write-Output 'spandeck is running.'
+Say "version $(& $bin --version 2>$null | Select-Object -First 1)"
 Say 'step join'
 {join_lines}
 exit 0
@@ -1387,6 +1659,33 @@ impl Daemon {
                         self.add_update(id, |j| j.stage = stage);
                     }
                     ("code", c) => code = Some(c.to_string()),
+                    // "spandeck 0.4.10": the number is kept.
+                    ("version", v) => {
+                        let v: String = v
+                            .rsplit(' ')
+                            .next()
+                            .unwrap_or_default()
+                            .trim_start_matches('v')
+                            .chars()
+                            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+                            .take(24)
+                            .collect();
+                        if v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                            self.add_update(id, |j| j.version = Some(v));
+                        }
+                    }
+                    // What spandeck there said when it could not ask.
+                    ("why", w) => {
+                        let w: String = w
+                            .trim()
+                            .trim_start_matches("spandeck: ")
+                            .chars()
+                            .take(400)
+                            .collect();
+                        if !w.is_empty() {
+                            self.add_update(id, |j| j.why = Some(w));
+                        }
+                    }
                     ("done", _) => done = true,
                     ("fail", kind) => {
                         failed = Some(match kind {
@@ -1599,6 +1898,157 @@ mod tests {
         assert!(home.join("project/keep.txt").exists() && home.join(".local/state").exists());
     }
 
+    /// The owner's report of 17 Nov 2026: spandeck was installed and
+    /// started on a Mac, and its request to join ended at once with
+    /// "spandeck: no station called spark2 was found", which the dialog
+    /// showed as the reason with nothing about what had worked. And, the
+    /// same day: "What does spark2 have to do with adding this machine,
+    /// aren't they all peers."
+    ///
+    /// The lines that ask are run here as they are run there, against a
+    /// stand-in for the `spandeck` command (and a `sleep` that does not
+    /// wait). A release that gives up at once, as 0.4.10 does, is asked
+    /// again with `spandeck fleet` between the tries, and joins on the
+    /// third. When the station that sent the script is not seen and
+    /// another of the fleet is, that one is asked. A release that looked
+    /// by itself and says so is not gone through again by name; it is asked
+    /// by address. When nothing works the script says why, and the
+    /// dialog's words name the fleet's stations, not one of them.
+    #[test]
+    #[cfg(unix)]
+    fn a_new_station_asks_each_station_of_the_fleet_and_asks_again_on_an_old_release() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        // `standin` is the body of the stand-in for `spandeck`: `$n` is how
+        // many times it has been asked to join, and `$4` whom it is to ask.
+        let run = |standin: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let at = |p: &str| dir.path().join(p);
+            let script = |name: &str, text: &str| {
+                std::fs::write(at(name), format!("#!/bin/sh\n{text}\n")).unwrap();
+                std::fs::set_permissions(at(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            script("sleep", "exit 0");
+            script(
+                "spandeck",
+                &format!(
+                    "echo \"$*\" >> {calls}\n[ \"$1\" = --json ] || exit 0\nn=$(grep -c -- --join {calls})\n{standin}",
+                    calls = at("calls").display()
+                ),
+            );
+            let mut child = std::process::Command::new("sh")
+                .arg("-s")
+                .env_clear()
+                .env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let ask = [
+                ("spark2".to_string(), Some("100.64.0.1:7391".to_string())),
+                ("m4".to_string(), None),
+            ];
+            let text = format!(
+                "set -u\nsay() {{ printf '@spandeck %s\\n' \"$*\"; }}\nfail() {{ say \"fail $1\"; exit 1; }}\nbin={}\n{}\n",
+                at("spandeck").display(),
+                unix_join_lines(&ask, JoinBy::Code)
+            );
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(text.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            let calls = std::fs::read_to_string(at("calls")).unwrap_or_default();
+            (
+                String::from_utf8_lossy(&out.stdout).to_string(),
+                calls.lines().map(String::from).collect::<Vec<_>>(),
+            )
+        };
+        const OLD: &str = r#"echo "spandeck: no station called $4 was found" >&2; exit 1"#;
+        const CODE: &str = r#"echo '{ "station": "spark2", "code": "K7QM2X" }'"#;
+        let join = |whom: &str| format!("--json fleet --join {whom}");
+
+        // 0.4.10: nothing is seen at the first two looks, then spark2 is.
+        let (said, calls) = run(&format!("if [ \"$n\" -lt 5 ]; then {OLD}; fi\n{CODE}"));
+        assert!(said.contains("@spandeck code K7QM2X"), "{said}");
+        assert!(
+            said.contains("looking for its stations: spark2, m4"),
+            "{said}"
+        );
+        assert_eq!(
+            calls,
+            [
+                join("spark2"),
+                join("m4"),
+                "fleet".into(),
+                join("spark2"),
+                join("m4"),
+                "fleet".into(),
+                join("spark2")
+            ],
+            "{said}"
+        );
+
+        // spark2 is not seen from the new machine and m4 is: m4 is asked.
+        let (said, calls) = run(&format!("case \"$4\" in m4) {CODE} ;; *) {OLD} ;; esac"));
+        assert!(said.contains("@spandeck code K7QM2X"), "{said}");
+        assert_eq!(calls, [join("spark2"), join("m4")], "{said}");
+
+        // 0.4.10 that never sees any of them: three times through the
+        // names, then the address (which it does not take), and what it
+        // said of the first name is the reason.
+        let (said, calls) = run(OLD);
+        assert_eq!(calls.len(), 9, "{calls:?}");
+        assert_eq!(calls[8], join("100.64.0.1:7391"));
+        assert!(
+            said.contains("@spandeck why spandeck: no station called spark2 was found")
+                && said.ends_with("@spandeck fail join\n"),
+            "{said}"
+        );
+
+        // A release that looks by itself has already waited: the names are
+        // gone through once, then the address, which it takes.
+        let (said, calls) = run(&format!(
+            "case \"$4\" in 100.*) {CODE} ;; *) echo \"spandeck: $4 was not found among the 9 machines under your Tailscale login after 20 s of looking\" >&2; exit 1 ;; esac"
+        ));
+        assert!(said.contains("@spandeck code K7QM2X"), "{said}");
+        assert_eq!(
+            calls,
+            [join("spark2"), join("m4"), join("100.64.0.1:7391")],
+            "{said}"
+        );
+
+        // The dialog's words for the owner's case: the fleet and its
+        // stations, in plain words, never only the raw line.
+        let text = join_failure(
+            "monitoring",
+            "spark2, m4",
+            Some("no station called spark2 was found"),
+        );
+        assert!(
+            text.starts_with("It has not asked to join your fleet: spandeck on monitoring looked several times for the fleet's stations (spark2, m4)"),
+            "{text}"
+        );
+        // The Windows lines ask the same way.
+        let ask = [
+            ("spark2".to_string(), Some("100.64.0.1:7391".to_string())),
+            ("m4".to_string(), None),
+        ];
+        let windows = windows_join_lines(&ask, JoinBy::Code);
+        for piece in [
+            "foreach ($name in @('spark2', 'm4'))",
+            "fleet --join $name",
+            "-match 'no station called'",
+            "& $bin fleet *> $null",
+            "foreach ($at in @('100.64.0.1:7391'))",
+            "Say \"why $why\"",
+        ] {
+            assert!(windows.contains(piece), "{piece}: {windows}");
+        }
+    }
+
     // The host key rule: the address ssh is given must be a Tailscale
     // address. A bug here would let a status line point ssh anywhere.
     #[test]
@@ -1697,7 +2147,8 @@ mod tests {
     #[cfg_attr(not(windows), ignore = "needs Windows PowerShell")]
     fn the_windows_script_runs_from_standard_input_and_reports_its_steps() {
         use std::io::Write;
-        let script = windows_script("alpha", Some("http://127.0.0.1:9"), JoinBy::Code);
+        let ask = [("alpha".to_string(), None)];
+        let script = windows_script(&ask, Some("http://127.0.0.1:9"), JoinBy::Code);
         let mut child = std::process::Command::new("powershell.exe")
             .args(["-NoLogo", "-NoProfile", "-NonInteractive"])
             .args(["-ExecutionPolicy", "Bypass", "-Command"])
@@ -1727,7 +2178,7 @@ mod tests {
     #[test]
     fn install_ps1_can_be_carried_inside_the_windows_script() {
         assert!(!INSTALL_PS1.lines().any(|l| l.starts_with("'@")));
-        let script = windows_script("alpha", None, JoinBy::Code);
-        assert!(script.contains("fleet --join 'alpha'"));
+        let script = windows_script(&[("alpha".to_string(), None)], None, JoinBy::Code);
+        assert!(script.contains("foreach ($name in @('alpha'))"));
     }
 }

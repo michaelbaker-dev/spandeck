@@ -2036,6 +2036,11 @@ impl Daemon {
                 // A machine to install on, or a station that is running
                 // already and is only to be made to ask.
                 match opt(&params, "station") {
+                    // "Try again" after the join step failed: the machine
+                    // of the last job is only made to ask again.
+                    _ if flag(&params, "again") => {
+                        self.add_again_start(s(&params, "user")?, password, by)?
+                    }
                     Some(station) => {
                         self.add_station_start(station, s(&params, "user")?, password, by)?
                     }

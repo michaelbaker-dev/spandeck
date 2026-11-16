@@ -87,6 +87,57 @@ fn a_station_joins_the_fleet_only_when_the_owner_approves_it_there() {
     }
 }
 
+/// The owner's report of 17 Nov 2026, adding the Mac "monitoring" from
+/// spark2's deck: spandeck was installed and started there, and its request
+/// to join ended at once with "no station called spark2 was found". A
+/// station that has only just started has not seen the others yet.
+///
+/// Here bravo is told to join alpha before it can see it (alpha is not
+/// running yet). It goes on looking, and asks as soon as alpha is there:
+/// the code alpha shows is the one bravo was given. A station can also be
+/// named by the address it answers at.
+#[test]
+fn a_station_told_to_join_one_it_does_not_see_yet_goes_on_looking_for_it() {
+    let mut a = Station::not_started("alpha", "");
+    let b = Station::start_with(
+        "bravo",
+        &format!("peers = [\"127.0.0.1:{}\"]\n", a.port),
+        &[],
+    );
+    assert_eq!(b.sees("alpha"), None);
+    let (asked, waiting) = std::thread::scope(|s| {
+        let join = s.spawn(|| b.try_call("fleet.join", json!({"station": "alpha"})));
+        // Before this was fixed the answer came at once, and was the error.
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(!join.is_finished(), "it gave up without looking again");
+        a.launch();
+        let asked = join.join().unwrap().expect("the join, once alpha is there");
+        (asked, a.call("trust.status", json!({})))
+    });
+    assert_eq!(asked["station"], json!("alpha"), "{asked}");
+    let req = &waiting["requests"][0];
+    assert_eq!(
+        (req["name"].clone(), req["code"].clone()),
+        (json!("bravo"), asked["code"].clone()),
+        "{waiting}"
+    );
+    // By address: the one in bravo's own config. An address this station
+    // would not look at by itself is not asked.
+    let by_address = b.call(
+        "fleet.join",
+        json!({"station": format!("127.0.0.1:{}", a.port)}),
+    );
+    assert_eq!(by_address["station"], json!("alpha"), "{by_address}");
+    let err = b
+        .try_call("fleet.join", json!({"station": "192.0.2.7:7391"}))
+        .unwrap_err();
+    assert!(
+        err.message.contains("does not ask it") || err.message.contains("Tailscale did not answer"),
+        "{}",
+        err.message
+    );
+}
+
 /// A refused request hands over nothing.
 #[test]
 fn a_refused_station_stays_out() {
@@ -2821,6 +2872,63 @@ exec env -i PATH={remote_bin}:/usr/bin:/bin HOME={c}/home SPANDECK_STATE_DIR={c}
     );
     assert!(at("charlie/bin/spandeck").exists());
 
+    // ---- "Try again" after the step that asks (the owner's report of 17
+    // Nov 2026: the join failed on a machine spandeck had just been
+    // installed on). Here the request is refused, which ends the add at the
+    // same step. The dialog is told what had worked, and trying again only
+    // asks again: the machine is connected to, nothing is downloaded or
+    // installed, and a new code arrives.
+    a.call("trust.deny", json!({"request": v["request"]}));
+    let v = rest_at(&a, &["failed"]);
+    let problem = &v["problem"];
+    assert_eq!(
+        (&problem["kind"], &v["can_ask_again"], &problem["worked"]),
+        (
+            &json!("refused"),
+            &json!(true),
+            &json!(format!(
+                "spandeck {} was installed on charlie and is running.",
+                env!("CARGO_PKG_VERSION")
+            ))
+        ),
+        "{v}"
+    );
+    assert!(
+        problem["next"]
+            .as_str()
+            .unwrap()
+            .starts_with("Try again: it only asks again, and nothing is downloaded or installed a second time. Or on that machine: `spandeck fleet --join <any station of your fleet>` (its stations: alpha)."),
+        "{v}"
+    );
+    let binary = std::fs::metadata(at("charlie/bin/spandeck"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    a.call("fleet.add", json!({"again": true, "user": "sam"}));
+    rest_at(&a, &["needs_password"]);
+    a.call(
+        "fleet.add",
+        json!({"again": true, "user": "sam", "password": RIGHT}),
+    );
+    let v = rest_at(&a, &["approve"]);
+    assert_eq!(
+        (&v["kind"], &v["rejoin"], &v["station"]),
+        (&json!("join"), &json!(true), &json!("charlie")),
+        "{v}"
+    );
+    let said = v["lines"].to_string();
+    assert!(
+        !said.contains("Downloading") && !said.contains("Installed spandeck"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::metadata(at("charlie/bin/spandeck"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        binary
+    );
+
     // The owner approves it with the usual control, and it becomes a station.
     a.call("trust.approve", json!({"request": v["request"]}));
     rest_at(&a, &["done"]);
@@ -2929,7 +3037,7 @@ exec env -i PATH={remote_bin}:/usr/bin:/bin HOME={c}/home SPANDECK_STATE_DIR={c}
     assert!(said.contains("Add charlie to this fleet"), "{said}");
     fill(USER, "sam");
     press("Connect and ask");
-    dialog_says("the password to be asked for", "asks for a password");
+    dialog_says("the password to be asked for", "Password on charlie");
     fill(PASS, RIGHT);
     press("Connect and ask");
     dialog_says("charlie's code", "asks to join this fleet as");
@@ -5868,4 +5976,378 @@ fn pictures_of_the_phones_layout_view() {
         drop(phone);
         s.call("pane.close", json!({"pane": agent}));
     }
+}
+
+/// The owner's report of 17 Nov 2026, from an iPhone, adding the Mac
+/// "monitoring": "I don't see a place to enter a password ... What does turn
+/// off spark2 mean? What if spark2 is down?", "I can't even see what I am
+/// typing for username" (the box was behind the keyboard), a failure that
+/// said only that it "could not ask to join this fleet" over a log ending
+/// "no station called spark2 was found", and "aren't they all peers. It
+/// sound like spark2 is some master machine".
+///
+/// At a phone's size, with a keyboard the page is told of as an iPhone
+/// tells it (what is in sight gets shorter and begins further down): Add a
+/// machine is reached from the Recent list; the dialog says what happens
+/// with a password, who connects and why that station, and what to do if it
+/// is down; the switch for the feature is not among the buttons that act;
+/// a machine that is picked is one row, and it and the box being typed in
+/// are both in sight above the keyboard, in the user name step and in the
+/// password step, with the page itself not moved; the failed join says what
+/// worked, what did not and what to do, naming the fleet and not a station
+/// as its head; and "Try again" only asks again. The New session sheet
+/// keeps its box in sight the same way.
+///
+/// With `SPANDECK_SHOTS=<folder>` it also writes a picture of each state.
+#[test]
+#[ignore = "merge tier: a browser"]
+fn add_a_machine_on_a_phone_is_typed_in_sight_and_says_what_happened() {
+    use common::browser::Page;
+    const RIGHT: &str = "c0rrect-horse-staple-91";
+    let dir = tempfile::tempdir().unwrap();
+    let at = |p: &str| dir.path().join(p);
+    std::fs::create_dir_all(at("standin")).unwrap();
+    // A tailnet with a dozen machines to add: the one wanted is last.
+    let names = [
+        "atlas",
+        "bench",
+        "cedar",
+        "delta",
+        "ember",
+        "forge",
+        "garnet",
+        "harbor",
+        "iris",
+        "juniper",
+        "kestrel",
+        "monitoring",
+    ];
+    let peers: serde_json::Map<String, Value> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            (
+                format!("key-{name}"),
+                json!({"ID": format!("n-{name}"), "HostName": name, "DNSName": format!("{name}.tail0000.ts.net."),
+                    "OS": if i % 3 == 0 { "linux" } else { "macOS" }, "UserID": 7, "Online": true,
+                    "TailscaleIPs": [format!("100.64.0.{}", i + 20)]}),
+            )
+        })
+        .collect();
+    std::fs::write(
+        at("standin/status.json"),
+        json!({"Self": {"UserID": 7, "HostName": "alpha", "TailscaleIPs": ["100.64.0.1"]},
+            "User": {"7": {"LoginName": "owner@example.com"}}, "Peer": peers})
+        .to_string(),
+    )
+    .unwrap();
+    executable(
+        &at("standin/tailscale"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in version) echo 1.0 ;; status) cat {} ;; *) exit 1 ;; esac\n",
+            at("standin/status.json").display()
+        ),
+    );
+    // "ssh": it asks for the password as ssh does, and then prints what the
+    // owner's Mac printed: installed, running, and nobody found to ask.
+    executable(
+        &at("standin/ssh"),
+        &format!(
+            r#"#!/bin/sh
+user=$1 host=$2
+pw=$("$SSH_ASKPASS" "$user@$host's password: ") || pw=
+if [ "$pw" != "{RIGHT}" ]; then
+  echo "$user@$host: Permission denied (publickey,password)." >&2
+  exit 255
+fi
+cat >/dev/null
+echo "@spandeck step install"
+echo "Downloading spandeck-v0.4.10-aarch64-apple-darwin"
+echo "Installed spandeck v0.4.10 to /Users/michael/.local/bin (checksum verified)"
+echo "@spandeck step start"
+echo "spandeck is running."
+echo "@spandeck version spandeck 0.4.10"
+echo "@spandeck step join"
+echo "spandeck: no station called alpha was found"
+echo "@spandeck why spandeck: no station called alpha was found"
+echo "@spandeck fail join"
+exit 1
+"#
+        ),
+    );
+    let path = format!(
+        "{}:{}",
+        at("standin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let a = Station::start_with(
+        "alpha",
+        &format!(
+            "add_machine_cmd = [\"{}\", \"{{user}}\", \"{{host}}\"]\n",
+            at("standin/ssh").display()
+        ),
+        &[("PATH", &path)],
+    );
+    a.call("fleet.add_enable", json!({"on": true}));
+
+    let page = Page::open(&a, 390, 844);
+    page.phone_screen();
+    let shots = std::env::var_os("SPANDECK_SHOTS").map(std::path::PathBuf::from);
+    let shot = |name: &str| {
+        use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png;
+        if let Some(out) = &shots {
+            std::fs::create_dir_all(out).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            let png = page.tab.capture_screenshot(Png, None, None, true).unwrap();
+            std::fs::write(out.join(format!("{name}.png")), png).unwrap();
+        }
+    };
+    // The phone's keyboard, as the page is told of one (chat.rs does the
+    // same): what is in sight is `tall` high and begins `top` down the page.
+    let keyboard = |tall: u32, top: u32| {
+        page.js(&format!(
+            "(() => {{ const real = window.__vv || (window.__vv = window.visualViewport); \
+               const now = {{ height: {tall}, width: window.innerWidth, offsetTop: {top}, offsetLeft: 0, pageTop: {top}, pageLeft: 0, scale: 1 }}; \
+               Object.defineProperty(window, 'visualViewport', {{ configurable: true, get: () => now }}); \
+               real.dispatchEvent(new Event('resize')); return true; }})()"
+        ));
+    };
+    // Where the box being typed in is, and whether anything of the page moved.
+    const PLACE: &str = r#"(() => {
+        const vv = window.visualViewport, top = vv.offsetTop, bottom = vv.offsetTop + vv.height;
+        const box = (e) => { const r = e.getBoundingClientRect(); return [Math.round(r.top), Math.round(r.bottom)]; };
+        const within = (e) => { const r = e.getBoundingClientRect(); return r.height > 0 && r.top >= top - 0.5 && r.bottom <= bottom + 0.5; };
+        const el = document.activeElement, dialog = document.querySelector('.dialog'), picked = document.querySelector('.add-picked');
+        window.scrollTo(0, 300);
+        return {
+            typing: [el.tagName, el.getAttribute('aria-label') || el.className, within(el)],
+            field: box(el), sight: [Math.round(top), Math.round(bottom)], dialog: [...box(dialog), within(dialog)],
+            picked: picked ? within(picked) : null,
+            page: [document.scrollingElement.scrollTop, window.scrollY, document.documentElement.scrollWidth <= document.documentElement.clientWidth],
+            body: (b => [b.scrollHeight > b.clientHeight, getComputedStyle(b).overflowY])(dialog.querySelector('.dialog-body')),
+        };
+    })()"#;
+    let dialog_says = |what: &str, needle: &str| {
+        page.wait(
+            what,
+            &format!(
+                "(document.querySelector('.dialog')?.innerText || '').includes({}) && document.querySelector('.dialog').innerText",
+                json!(needle)
+            ),
+        )
+        .as_str()
+        .unwrap()
+        .to_string()
+    };
+    let press = |label: &str| {
+        page.wait(
+            &format!("the {label} button"),
+            &format!(
+                "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.dialog button')].find(b => b.innerText.trim() === {}))",
+                json!(label)
+            ),
+        );
+    };
+
+    // From the Recent list, which is what a phone opens on: the top bar's menu.
+    page.wait(
+        "the phone's list of sessions, most recent first",
+        "!!document.querySelector('.phone-recents') && !document.querySelector('.add-row')",
+    );
+    page.wait(
+        "the top bar's menu",
+        "(b => b ? (b.click(), true) : false)(document.querySelector('.top-more'))",
+    );
+    page.choose("Add a machine");
+    let said = dialog_says("the list of machines", "monitoring");
+    for words in [
+        // Who connects, why that station, and what if it is down.
+        "Any station of your fleet can add a machine. alpha does the connecting now because this page is open on it: if alpha is down, open the deck on another station and add the machine from there.",
+        // The switch: this feature, not the station.
+        "Adding machines is switched on at alpha (the station this page is open on)",
+        "Stop alpha from adding machines",
+        "That switches off only this feature: alpha and its panes keep running, and this dialog offers to turn it on again.",
+    ] {
+        assert!(said.contains(words), "{words:?} is not in: {said}");
+    }
+    assert!(!said.contains("Turn adding machines off"), "{said}");
+    // It is a quiet last line, not one of the buttons that act.
+    assert_eq!(
+        page.js("[[...document.querySelectorAll('.dialog .row.end button')].map(b => b.innerText.trim()), document.querySelector('.dialog .add-off button').innerText, !!document.querySelector('.dialog .add-off').previousElementSibling, !document.querySelector('.dialog .add-off').nextElementSibling]"),
+        json!([["Cancel"], "Stop alpha from adding machines", true, true])
+    );
+    // Twelve machines are more than the screen: the dialog is as tall as
+    // what is in sight allows and its body is what scrolls.
+    let open = page.js(PLACE);
+    assert_eq!(
+        (&open["dialog"][2], &open["body"], &open["page"]),
+        (&json!(true), &json!([true, "auto"]), &json!([0, 0, true])),
+        "{open}"
+    );
+    shot("1-as-it-opens");
+
+    // The machine is picked: the list is that one row, and the box for the
+    // user name has the keyboard. With the keyboard up, and the page slid
+    // by the browser as iOS slides it, the row and the box are in sight.
+    page.wait(
+        "monitoring's row",
+        "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.dialog .add-machine')].find(b => b.innerText.includes('monitoring')))",
+    );
+    let said = dialog_says("the user name", "Your user name on monitoring");
+    assert!(
+        said.contains("alpha (the station this page is open on) connects to monitoring over SSH as this user and runs the spandeck install script there. If monitoring asks for a password you will be asked for it next; it is used for that one connection and not kept."),
+        "{said}"
+    );
+    assert_eq!(
+        page.js("[document.querySelectorAll('.dialog .add-machine').length, document.querySelector('.add-picked .add-change').innerText, document.querySelector('.add-picked b').innerText]"),
+        json!([1, "Change", "monitoring"])
+    );
+    for (tall, top) in [(420, 0), (400, 130)] {
+        keyboard(tall, top);
+        let up = page.js(PLACE);
+        assert_eq!(
+            (
+                &up["typing"],
+                &up["picked"],
+                &up["dialog"][2],
+                &up["page"],
+                &up["sight"]
+            ),
+            (
+                &json!(["INPUT", "User name on that machine", true]),
+                &json!(true),
+                &json!(true),
+                &json!([0, 0, true]),
+                &json!([top, top + tall])
+            ),
+            "{up}"
+        );
+    }
+    shot("2-keyboard-up-machine-picked");
+    // "Change" brings the list back, and the box is still the one typed in.
+    press("Change");
+    page.wait(
+        "the whole list again",
+        "document.querySelectorAll('.dialog .add-machine').length === 12",
+    );
+    let listed = page.js(PLACE);
+    assert_eq!(
+        (&listed["typing"], &listed["page"]),
+        (
+            &json!(["INPUT", "User name on that machine", true]),
+            &json!([0, 0, true])
+        ),
+        "{listed}"
+    );
+    page.wait(
+        "monitoring's row",
+        "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.dialog .add-machine')].find(b => b.innerText.includes('monitoring')))",
+    );
+    page.wait(
+        "the one row",
+        "document.querySelectorAll('.dialog .add-machine').length === 1",
+    );
+
+    // The password step, keyboard still up: the password's box is in sight.
+    page.js("(document.querySelector(\".dialog input[aria-label='User name on that machine']\").value = 'michael', true)");
+    press("Connect and install");
+    dialog_says("the password to be asked for", "Password on monitoring");
+    let pass = page.js(PLACE);
+    assert_eq!(
+        (&pass["typing"], &pass["dialog"][2], &pass["page"]),
+        (
+            &json!(["INPUT", "Password on that machine", true]),
+            &json!(true),
+            &json!([0, 0, true])
+        ),
+        "{pass}"
+    );
+    shot("3-password-step");
+
+    // The join fails as the owner's did. What worked is said first.
+    page.js(&format!(
+        "(document.querySelector('.dialog input[type=password]').value = {}, true)",
+        json!(RIGHT)
+    ));
+    press("Connect and install");
+    let said = dialog_says("what happened", "It has not asked to join your fleet");
+    keyboard(844, 0);
+    assert_eq!(
+        page.js("[document.querySelector('.dialog .add-worked').innerText, document.querySelector('.dialog .add-problem').innerText, document.querySelector('.dialog .add-next').innerText, [...document.querySelectorAll('.dialog .row.end button')].map(b => b.innerText.trim())]"),
+        json!([
+            "✓ spandeck 0.4.10 was installed on monitoring and is running.",
+            "It has not asked to join your fleet: spandeck on monitoring looked several times for the fleet's stations (alpha) among the machines under your Tailscale login and saw none of them. Check that Tailscale is connected on monitoring and signed in to the same account as your other machines.",
+            "Try again: it only asks again, and nothing is downloaded or installed a second time. Or on that machine: `spandeck fleet --join <any station of your fleet>` (its stations: alpha).",
+            ["Close", "Try again"]
+        ]),
+        "{said}"
+    );
+    let failed = page.js(PLACE);
+    assert_eq!(
+        (&failed["dialog"][2], &failed["page"]),
+        (&json!(true), &json!([0, 0, true])),
+        "{failed}"
+    );
+    shot("4-the-join-failed");
+
+    // "Try again" only asks again: the station is not sent a machine to
+    // install on, and the job is the asking alone.
+    press("Try again");
+    let again = wait_for("the asking, again", 30, || {
+        let v = a.call("fleet.add_status", json!({}));
+        (v["rejoin"] == json!(true) && v["running"] == json!(false)).then_some(v)
+    });
+    assert_eq!(
+        (
+            &again["kind"],
+            &again["stage"],
+            &again["name"],
+            &again["version"]
+        ),
+        (
+            &json!("join"),
+            &json!("needs_password"),
+            &json!("monitoring"),
+            &json!("0.4.10")
+        ),
+        "{again}"
+    );
+    dialog_says("the password, for the asking", "Password on monitoring");
+    press("Cancel");
+    a.call("fleet.add_cancel", json!({}));
+
+    // Another dialog, a sheet: New session. Its Folder box, with the
+    // keyboard up and the page slid, is in sight above the row of buttons
+    // that stays at the sheet's foot; the sheet is what is in sight, no more.
+    page.wait("no dialog", "!document.querySelector('.dialog')");
+    page.wait(
+        "the New session button",
+        "(b => b ? (b.click(), true) : false)(document.querySelector('button.new-session'))",
+    );
+    page.wait(
+        "the sheet's Folder box",
+        "(i => i ? (i.focus(), true) : false)([...document.querySelectorAll('.dialog.sheet .field')].find(f => f.innerText.startsWith('Folder'))?.querySelector('input'))",
+    );
+    keyboard(400, 130);
+    let sheet = page.js(&format!(
+        "(() => {{ const p = {PLACE}; const foot = document.querySelector('.dialog.sheet .sheet-foot').getBoundingClientRect(); return {{ ...p, clear: document.activeElement.getBoundingClientRect().bottom <= foot.top + 0.5 }}; }})()"
+    ));
+    assert_eq!(
+        (
+            &sheet["typing"][0],
+            &sheet["typing"][2],
+            &sheet["dialog"],
+            &sheet["clear"],
+            &sheet["page"]
+        ),
+        (
+            &json!("INPUT"),
+            &json!(true),
+            &json!([130, 530, true]),
+            &json!(true),
+            &json!([0, 0, true])
+        ),
+        "{sheet}"
+    );
+    shot("5-new-session-keyboard-up");
 }
