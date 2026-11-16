@@ -204,7 +204,11 @@ fn an_agent_that_cannot_take_a_turn_is_nudged_less_and_less_then_left_alone_and_
         );
     }
     let gave_up = logged(&s, "msg.nudge_gave_up", &stuck);
-    assert!(gave_up[0] - nudged[3] >= 15_000, "{gave_up:?} {nudged:?}");
+    // (The log is written a moment after the nudge is counted from.)
+    assert!(
+        gave_up[0] + 1000 - nudged[3] >= 15_000,
+        "{gave_up:?} {nudged:?}"
+    );
     let screen = s.text(&stuck);
     assert_eq!(
         screen.matches("new spandeck message").count(),
