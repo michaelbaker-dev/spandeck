@@ -379,6 +379,13 @@ impl Agent {
     fn append_transcript(&mut self, line: &Value) {
         // Codex's file has Codex's lines: what the owner said, and no other.
         if self.codex.is_some() {
+            // (And a record of Codex's own, given whole: a turn's end.)
+            if matches!(line["type"].as_str(), Some("event_msg" | "response_item")) {
+                let mut line = line.clone();
+                line["timestamp"] = json!(iso(spandeck_core::paths::now_ms()));
+                self.write_line(&line);
+                return;
+            }
             if let (Some("user"), Some(text)) = (
                 line["type"].as_str(),
                 line.pointer("/message/content").and_then(|c| c.as_str()),

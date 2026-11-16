@@ -538,7 +538,7 @@ a.btn.wide { width: 100%; justify-content: center; text-align: center; }
   .chat-bar .chat-switch button { flex: 1; }
   .chat-bar button, .chat-bar .btn { min-height: 44px; min-width: 44px; justify-content: center; }
   .chat-bar .chat-switch button { min-height: 40px; }
-  #app.kbd .phone-chat .chat-switch, #app.kbd .phone-chat .chat-why, #app.kbd .phone-pane > .chat-bar { display: none; }
+  #app.kbd .phone-pane > .chat-bar { display: none; }
 }
 
 .chat-body { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; position: relative; font-size: calc(15px * var(--ui-scale)); line-height: 1.5; color: var(--text); }
@@ -562,9 +562,7 @@ a.btn.wide { width: 100%; justify-content: center; text-align: center; }
    terminal's text as it was laid out, and scrolls sideways by itself. */
 .chat-src { position: sticky; top: 0; z-index: 1; align-self: stretch; margin: -8px 0 0; padding: 6px 4px; border: none; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--bg); color: var(--muted); font-size: calc(12px * var(--ui-scale)); text-align: left; justify-content: flex-start; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 0; }
 .chat-src.open { white-space: normal; overflow-wrap: anywhere; }
-.chat-screen { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
-.chat-screen-text { align-self: stretch; margin: 0; font: calc(12px * var(--ui-scale))/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre; overflow-x: auto; overflow-y: hidden; background: var(--well); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
-.chat-screen.open .chat-screen-text { border-color: var(--accent-line); }
+.chat-screen { display: flex; flex-direction: column; gap: 4px; min-width: 0; } .chat-screen > .mini { align-self: flex-start; }
 .wait-keys.chat-keys { flex-wrap: nowrap; } .wait-keys.chat-keys .key { flex: 1 1 0; min-width: 34px; padding-left: 0; padding-right: 0; }
 .chat-keys[hidden] { display: none; }
 .chat-quiet.err { color: var(--red); } .chat-quiet.warn { color: var(--amber); }
@@ -623,6 +621,72 @@ button.ask-opt.on { border-color: var(--accent-line); background: var(--accent-b
 .chat-row button { flex: none; min-height: 44px; min-width: 44px; justify-content: center; border-radius: 22px; }
 .chat-plus { font-size: 20px; padding: 0; } .chat-send { padding: 0 13px; font-weight: 600; } .chat-mic { padding: 0; } .chat-mic.on { outline: 2px solid var(--mic); }
 .chat-slash { display: flex; flex-wrap: wrap; gap: 6px; } button.chip.slash { background: none; min-height: 32px; color: var(--text); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+
+/* ---- One chat for every pane (16 Nov 2026; DECISIONS.md) ----
+   Every pane's Chat is this one component. What follows is its look, for
+   every agent and every place it is shown. */
+:root { --ico-copy: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='9' y='9' width='11' height='11' rx='2'/%3E%3Cpath d='M5 15V6a2 2 0 0 1 2-2h9'/%3E%3C/svg%3E"); --ico-speak: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 10v4h3l5 4V6L7 10H4z'/%3E%3Cpath d='M16 9a4 4 0 0 1 0 6'/%3E%3Cpath d='M18.5 6.5a8 8 0 0 1 0 11'/%3E%3C/svg%3E"); --ico-stop: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='6' y='6' width='12' height='12' rx='2' fill='black'/%3E%3C/svg%3E"); --ico-send: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 19V5'/%3E%3Cpath d='M6 11l6-6 6 6'/%3E%3C/svg%3E"); --ico-plus: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E"); --ico-mic: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='9' y='3' width='6' height='11' rx='3'/%3E%3Cpath d='M5 11a7 7 0 0 0 14 0'/%3E%3Cpath d='M12 18v3'/%3E%3C/svg%3E"); --ico-keys: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='6' width='18' height='12' rx='2'/%3E%3Cpath d='M7 10h.01M11 10h.01M15 10h.01M7 14h10'/%3E%3C/svg%3E"); --ico-wait: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 12h.01M12 12h.01M18 12h.01'/%3E%3C/svg%3E"); }
+/* The page itself never scrolls: only a log does. The app is exactly what is
+   in sight (app.js gives it the visual viewport's height and place), so its
+   last row is directly above a phone's keyboard and its first at the top. */
+html, body { overflow: hidden; overscroll-behavior: none; }
+body { position: fixed; inset: 0; width: 100%; }
+#app { position: relative; padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); }
+#app.kbd .chat-dock { padding-bottom: 6px; }
+/* Reading. */
+.chat-body { line-height: 1.55; }
+.chat-log { gap: 12px; }
+.chat-bubble { border-radius: 18px 18px 5px 18px; padding: 8px 14px; } .chat-user.other .chat-bubble { border-radius: 18px 18px 18px 5px; }
+.chat-text .md > :last-child, .chat-parts > :last-child { margin-bottom: 0; }
+.chat-quiet { margin: 2px 0; }
+/* What a pane printed, as part of the conversation: prose like any reply,
+   and rows that are a layout in a reply's code block. A block never wraps
+   and scrolls sideways inside itself; that never moves the page. */
+.chat-parts { display: flex; flex-direction: column; gap: .65em; min-width: 0; } .chat-parts > * { min-width: 0; margin: 0; }
+.md-code.chat-mono { margin: 0; } .chat-mono pre, .md-code pre, .md-table, .chat-detail pre { overscroll-behavior-x: contain; }
+.chat-screen.open .chat-mono { border-color: var(--accent-line); }
+/* Under a reply: copy it, hear it. Marks, with their words for a reader. */
+.chat-acts { gap: 2px; margin: 2px 0 0 -9px; }
+.chat-act { font-size: 0; width: 36px; height: 32px; min-height: 0; padding: 0; justify-content: center; border-radius: 8px; }
+.chat-act::before, .chat-tools button::before { content: ''; width: 17px; height: 17px; background: currentColor; -webkit-mask: var(--ico) center / contain no-repeat; mask: var(--ico) center / contain no-repeat; }
+.act-copy { --ico: var(--ico-copy); } .act-speak { --ico: var(--ico-speak); } .act-speak[aria-pressed="true"] { --ico: var(--ico-stop); color: var(--blue); }
+.chat-act:hover:not(:disabled) { color: var(--text); border-color: transparent; background: var(--panel2); }
+/* The message box: one card. What is written, and under it what can be
+   added (left) and how it is sent (right). The same in every pane. */
+.chat-row { flex-direction: column; align-items: stretch; gap: 0; padding: 4px 6px 6px; border: 1px solid var(--line); border-radius: 20px; background: var(--panel); cursor: text; }
+.chat-row:focus-within { border-color: var(--blue); }
+.chat-box { flex: none; width: 100%; min-height: 40px; padding: 8px 8px 4px; border: none; border-radius: 14px; background: none; }
+.chat-box:focus-visible { outline: none; }
+.chat-tools { display: flex; align-items: center; gap: 4px; }
+.chat-row .chat-tools button { width: 36px; height: 36px; min-width: 36px; min-height: 36px; padding: 0; border-radius: 50%; border-color: transparent; background: none; color: var(--muted); font-size: 0; }
+.chat-row .chat-tools button:hover:not(:disabled) { color: var(--text); background: var(--panel2); border-color: transparent; }
+.chat-plus { --ico: var(--ico-plus); } .chat-mic { --ico: var(--ico-mic); } .chat-keys-btn { --ico: var(--ico-keys); }
+.chat-row .chat-tools .chat-keys-btn.on, .chat-row .chat-tools .chat-mic.on { color: var(--text); background: var(--panel2); }
+.chat-row .chat-tools .chat-send { --ico: var(--ico-send); background: var(--accent-bg); border-color: var(--accent-line); color: var(--on-accent); }
+.chat-row .chat-tools .chat-send.danger { --ico: var(--ico-stop); background: var(--red-bg); border-color: var(--red-line); color: var(--on-accent); }
+.chat-row .chat-tools .chat-send[data-stop="sending"] { --ico: var(--ico-wait); }
+.chat-row .chat-tools .chat-send:hover:not(:disabled) { color: var(--on-accent); background: var(--accent-bg); border-color: var(--blue); }
+.wait-keys.chat-keys { padding: 0 2px; }
+/* While it works: one quiet line. */
+.chat-activity { font-size: calc(12.5px * var(--ui-scale)); } .chat-activity .dot.working { animation: chat-pulse 1.4s ease-in-out infinite; }
+@keyframes chat-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .chat-activity .dot.working { animation: none; } }
+.act-peek { background: none; border-color: transparent; color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
+@media (max-width: 760px) {
+  /* A phone: the pane's bar is one row. The switch has a row of its own
+     only when "Next" needs the room. */
+  .chat-bar { row-gap: 4px; gap: 6px; padding: 4px 8px; }
+  .chat-bar .chat-switch { order: 0; flex: none; } .chat-bar .chat-switch button { flex: none; min-width: 0; min-height: 36px; padding: 3px 11px; }
+  .chat-bar.has-next .chat-switch { order: 9; flex: 1 0 100%; } .chat-bar.has-next .chat-switch button { flex: 1; }
+  .chat-bar .chat-back { min-width: 40px; padding: 0 6px; } .chat-bar .chat-more { min-width: 40px; }
+  /* A conversation has the screen to itself: the deck's top bar steps
+     aside, and what it holds is in the pane's menu. */
+  #app:has(> .phone-chat) > .topbar { display: none; }
+  .chat-log { padding-top: 12px; }
+  .chat-act { width: 40px; height: 36px; }
+  .chat-row .chat-tools button { width: 44px; height: 44px; min-width: 44px; min-height: 44px; }
+  .chat-dock { padding-top: 4px; }
+}
 
 /* An agent's markdown, drawn by md.js. */
 .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }

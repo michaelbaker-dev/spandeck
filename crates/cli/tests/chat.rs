@@ -930,4 +930,232 @@ mod in_a_browser {
         );
         shoot(&page, "desktop-codex-found-session");
     }
+
+    // ---- one chat for every pane (the owner's report of 16 Nov 2026) ----
+
+    /// What every agent of the scene answers: a heading, a paragraph, a
+    /// numbered list, bullets, code. The same words, so that the pictures
+    /// can be laid side by side.
+    const REPLY: &str = "### Herons by the weir\n\nThe survey counts **nine nests** this year, three more than last spring. Most are high in the alders on the east bank, where the water is slow and the fishing is easy.\n\n1. six on the east bank\n2. three on the island\n\n- they feed at dusk\n- `survey.md` has the dates\n\n```sh\ngrep -c heron survey.md\n```";
+    const ASKED: [&str; 3] = [
+        "How many herons nest by the weir?",
+        "And last spring?",
+        "Where do they feed?",
+    ];
+
+    /// A program that draws its screen itself, 120 columns wide, as the
+    /// agent programs do: a title in a frame, what it answered (indented,
+    /// wrapped by the program at its own width, markdown as it was
+    /// written, bullets drawn as dots, a table), its message box with the
+    /// cursor in it, and a status row.
+    pub fn drawn_screen() -> String {
+        let rule = "─".repeat(112);
+        let mut rows = vec![
+            format!("  ╭{rule}╮"),
+            format!("  │ {:<110} │", "Tern Code 9.9 · ~/mere"),
+            format!("  ╰{rule}╯"),
+            String::new(),
+            "  ### Herons by the weir".into(),
+            String::new(),
+            "  The survey counts **nine nests** this year, three more than last spring. Most are high in the alders on the east".into(),
+            "  bank, where the water is slow and the fishing is easy.".into(),
+            String::new(),
+            "  1. six on the east bank".into(),
+            "  2. three on the island".into(),
+            String::new(),
+            "  ● they feed at dusk".into(),
+            "  ● `survey.md` has the dates".into(),
+            String::new(),
+            "  bank          nests     seen at dusk".into(),
+            "  east          6         yes".into(),
+            "  island        3         no".into(),
+        ];
+        rows.resize(31, String::new());
+        rows.push(format!("  ╭{rule}╮"));
+        rows.push(format!("  │ {:<110} │", "> "));
+        rows.push(format!("  ╰{rule}╯"));
+        rows.push("  tern-2-low · 12% context left · /help for commands".into());
+        // Drawn row by row, each at its place, and the cursor left in the box.
+        let mut out = String::from("\x1b[?1049h\x1b[2J");
+        for (n, row) in rows.iter().enumerate() {
+            out.push_str(&format!("\x1b[{};1H{row}", n + 1));
+        }
+        out.push_str("\x1b[33;5H");
+        out
+    }
+
+    /// A pane of `agent` whose program draws that screen, 120 columns by
+    /// 36 rows, and draws it again after each message.
+    pub fn drawn_pane(s: &Station, agent: &str, name: &str, dir: &Path) -> String {
+        let go = format!("go-{name}");
+        let id = pane(
+            s,
+            agent,
+            name,
+            dir,
+            json!({"no_hooks": true, "steps": [{"wait_file": go}, {"raw": drawn_screen()}], "on_input": [{"raw": drawn_screen()}]}),
+        );
+        s.wait_text(&id, "[fake] session");
+        s.call("pane.resize", json!({"pane": id, "cols": 120, "rows": 36}));
+        std::fs::write(dir.join(go), "").unwrap();
+        s.wait_text(&id, "tern-2-low");
+        id
+    }
+
+    pub struct Chats {
+        pub s: Station,
+        /// A session file of Claude Code's kind, named by its hooks.
+        pub claude: String,
+        /// Codex's session file, found with no hook.
+        pub codex: String,
+        /// Antigravity's transcript, from its own store.
+        pub agy: String,
+        /// An agent with no conversation to read: its screen.
+        pub tui: String,
+        pub sh: String,
+    }
+
+    fn id_of(v: Value) -> String {
+        v["id"].as_str().unwrap().to_string()
+    }
+
+    /// One pane of each kind, each with the same three questions asked and
+    /// answered, where it is an agent.
+    pub fn chats() -> Chats {
+        let s = Station::start("alpha");
+        let dir = folder(&s, "mere");
+        let said = |text: &str| json!({"transcript": {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}});
+        let turn = |asked: &str| {
+            json!([
+                {"prompt": asked},
+                said("I will look at the survey notes."),
+                {"transcript": {"type": "assistant", "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": format!("toolu_{}", asked.len()), "name": "Bash", "input": {"command": "grep -c heron survey.md"}}]}}},
+                {"transcript": {"type": "user", "toolUseResult": {"stdout": "9", "stderr": ""}, "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": format!("toolu_{}", asked.len()), "content": "9"}]}}},
+                said(REPLY),
+                {"transcript": {"type": "system", "subtype": "turn_duration", "durationMs": 15000}},
+            ])
+        };
+        let mut steps: Vec<Value> = ASKED
+            .iter()
+            .flat_map(|a| turn(a).as_array().unwrap().clone())
+            .collect();
+        steps.push(json!({"turn_end": "ok"}));
+        let claude = pane(&s, "fake", "claude", &dir, json!({"steps": steps}));
+        let codex = pane(
+            &s,
+            "codex",
+            "codex",
+            &folder(&s, "weir"),
+            json!({"codex": true, "no_hooks": true, "steps": [], "on_input": [
+                {"codex_reply": REPLY},
+                {"transcript": {"type": "event_msg", "payload": {"type": "task_complete", "duration_ms": 15000}}}]}),
+        );
+        s.wait_text(&codex, "[fake] session");
+        for asked in ASKED {
+            send(&s, &codex, asked);
+        }
+        // Antigravity: nothing on its screen but the program; what was
+        // said is in its own store.
+        let fen = folder(&s, "fen");
+        let agy = drawn_pane(&s, "antigravity", "agy", &fen);
+        let at = "2099-01-01T00:00:00Z";
+        let steps: Vec<Value> = ASKED
+            .iter()
+            .enumerate()
+            .flat_map(|(n, asked)| {
+                let n = n as u64 * 4;
+                [
+                    agy_asked(n, at, asked),
+                    agy_step(n + 1, "PLANNER_RESPONSE", at, json!({"content": "I will look at the survey notes.",
+                        "tool_calls": [{"name": "run_command", "args": {"CommandLine": "grep -c heron survey.md"}}]})),
+                    agy_step(n + 2, "GENERIC", at, json!({"content": format!("Created At: {at}\nCompleted At: {at}\n9")})),
+                    agy_step(n + 3, "PLANNER_RESPONSE", at, json!({"content": REPLY})),
+                ]
+            })
+            .collect();
+        antigravity_conversation(
+            &s,
+            "0aaaaaaa-0000-4000-8000-00000000000a",
+            &fen,
+            &steps,
+            &steps,
+        );
+        // An agent whose conversation cannot be read: its screen.
+        let tui = drawn_pane(&s, "opencode", "tui", &dir);
+        send_quietly(&s, &tui, ASKED[0]);
+        let sh = id_of(s.call(
+            "pane.spawn",
+            json!({"program": "/bin/sh", "name": "shell", "cwd": dir}),
+        ));
+        s.call(
+            "pane.paste",
+            json!({"pane": sh, "text": "seq 1 40; printf '%s\\n' 'name          size     modified' 'survey.md     2 KB     today' 'a line that is much longer than a phone is wide, so that it has to be scrolled sideways inside its own block'", "enter": true}),
+        );
+        s.wait_text(&sh, "survey.md     2 KB");
+        s.call(
+            "deck.layout.save",
+            json!({"layout": {"name": "pair", "tree": {"dir": "row", "ratio": 500,
+                "a": {"id": claude, "station": "alpha"}, "b": {"id": tui, "station": "alpha"}}}}),
+        );
+        Chats {
+            s,
+            claude,
+            codex,
+            agy,
+            tui,
+            sh,
+        }
+    }
+
+    /// A message to a program that draws its own screen: nothing to wait
+    /// for but the screen drawn again.
+    fn send_quietly(s: &Station, pane: &str, text: &str) {
+        s.call(
+            "pane.paste",
+            json!({"pane": pane, "text": text, "enter": true}),
+        );
+        wait_for("the message taken", 10, || {
+            let a = conversation(s, pane, true);
+            a["items"]
+                .as_array()
+                .is_some_and(|i| i.iter().any(|x| x["kind"] == json!("user")))
+                .then_some(())
+        });
+    }
+
+    /// Pictures of each kind of pane's Chat, for a human to lay side by
+    /// side (`SPANDECK_SHOTS=/some/dir`): nothing is asserted.
+    #[test]
+    #[ignore = "pictures only: set SPANDECK_SHOTS"]
+    fn pictures_of_every_kind_of_chat() {
+        let c = chats();
+        let page = Page::open(&c.s, 390, 844);
+        for (name, id) in [
+            ("claude", &c.claude),
+            ("codex", &c.codex),
+            ("antigravity", &c.agy),
+            ("screen-agent", &c.tui),
+            ("shell", &c.sh),
+        ] {
+            page.goto(&format!("#/s/alpha/p/{id}"));
+            page.wait(
+                "the pane",
+                &format!("!!document.querySelector('.chat-bar') && location.hash.endsWith('{id}')"),
+            );
+            page.js("(b => b && b.click())([...document.querySelectorAll('.chat-switch button')].find(b => b.innerText === 'Chat'))");
+            page.wait("its conversation", "!!document.querySelector('.phone-chat .chat-log') && document.querySelectorAll('.chat-log > *').length > 1");
+            shoot(&page, &format!("phone-{name}"));
+            page.js("(l => { l.scrollTop = 0; })(document.querySelector('.chat-log'))");
+            shoot(&page, &format!("phone-{name}-top"));
+        }
+        let wide = Page::open(&c.s, 1400, 900);
+        wide.goto("#/l/pair");
+        wide.wait(
+            "the layout",
+            "document.querySelectorAll('.split .chat-pane').length === 2",
+        );
+        shoot(&wide, "desktop-layout");
+    }
 }

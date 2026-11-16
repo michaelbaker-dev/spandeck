@@ -10,8 +10,16 @@
 // station can read the agent's own conversation, Chat is that. Where it
 // cannot (a shell, an agent it cannot read, one whose session is not known
 // yet), Chat is made from the screen: what was sent to the pane and what it
-// printed after each, as plain text, by the same code and with the same
-// message box and cards. The station says which (`source`), and why.
+// printed after each, by the same code and with the same message box and
+// cards. The station says which (`source`), and why.
+//
+// One chat for every pane (DECISIONS.md, 16 Nov 2026). There is one log,
+// one renderer of items and one message box, whatever runs in the pane and
+// wherever it is shown (a phone, a phone's layout, a cell of a layout on a
+// computer, a pane at full size). What differs between agents is what the
+// station sends: the items. What an agent printed on its screen comes as
+// parts (`parts`), and is drawn as a reply is: prose through md.js, and rows
+// whose layout is their meaning in the block a reply's code has.
 //
 // Rules kept here:
 // - Everything from a session file is data. It is put on the page as text
@@ -43,8 +51,8 @@ let titlesAt = 0, titlesFor = '';
 const keyOf = (st, p) => `${st}/${p.id}`;
 const RUN = new Set(['tool', 'thinking', 'tasks']);
 const STATUS = ['running', 'ok', 'done', 'error', 'denied', 'interrupted'];
-// The keys a pane's Chat has when it is made from the screen: the program
-// may be at a prompt nothing here knows of. As on the terminal's face.
+// The keys under "Keys" in the message box, for a program that is at a
+// prompt nothing here knows of. As on the terminal's face.
 const SCREEN_KEYS = [['Esc', '\x1b'], ['Tab', '\t'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['←', '\x1b[D'], ['→', '\x1b[C'], ['⏎', '\r'], ['^C', '\x03']];
 const SCREEN_KEY_SAYS = { '↑': 'Up', '↓': 'Down', '←': 'Left', '→': 'Right', '⏎': 'Enter', '^C': 'Control C' };
 // Lines of a printed block shown before "Show earlier lines".
@@ -201,6 +209,7 @@ class Conv {
     this.bar = h('header', { class: 'chat-bar' });
     this.log = h('div', { class: 'chat-log', role: 'log', 'aria-live': 'off', 'aria-label': 'Conversation', tabIndex: 0 });
     this.log.addEventListener('scroll', () => this.scrolled(), { passive: true });
+    if (typeof ResizeObserver === 'function') new ResizeObserver(() => this.resized()).observe(this.log);
     // Completed replies are said here, once each; the log itself is silent,
     // so a screen reader is not read every tool call as it happens.
     this.said = h('div', { class: 'sr-only', 'aria-live': 'polite' });
@@ -357,6 +366,8 @@ class Conv {
   // draws no frames) would put the log back where it was told of last.
   note() {
     if (!this.log.isConnected || !this.log.clientHeight) return false;
+    // A log whose room changed has not been scrolled by the owner.
+    this.resized();
     this.stuck = this.log.scrollHeight - this.log.scrollTop - this.log.clientHeight < 48;
     this.top = this.log.scrollTop;
     return true;
@@ -374,7 +385,21 @@ class Conv {
     if (!this.log.isConnected) return;
     const to = this.stuck ? this.log.scrollHeight : this.top;
     if (Math.abs(this.log.scrollTop - to) > 1) this.log.scrollTop = to;
+    this.tall = this.log.clientHeight || this.tall;
     this.maybeRead();
+  }
+
+  // The log's room changed (a phone's keyboard came up or went, a card
+  // appeared, the keys were asked for): what was last in sight above the
+  // message box still is. At the end, it stays at the end; further up, the
+  // line at the bottom edge stays at the bottom edge.
+  resized() {
+    if (!this.log.isConnected) return;
+    const tall = this.log.clientHeight, was = this.tall;
+    this.tall = tall;
+    if (!tall || !was || tall === was) return;
+    this.log.scrollTop = this.stuck ? this.log.scrollHeight : Math.max(0, this.top + (was - tall));
+    this.top = this.log.scrollTop;
   }
 
   // The owner has seen the newest item: it is on screen and the page is in front.
@@ -387,7 +412,9 @@ class Conv {
 
   // ------------------------------------------------------------------- draw
 
-  draw() { this.drawBar(); this.drawLog(); this.drawDock(); }
+  // (The dock first: what it holds decides how much room the log has, and
+  // the log goes to its end in the room it will have.)
+  draw() { this.drawBar(); this.drawDock(); this.drawLog(); }
 
   rev(id) { return this.revs.get(id) || 0; }
   touch(id) { this.revs.set(id, this.rev(id) + 1); this.drawLog(); }
@@ -416,6 +443,7 @@ class Conv {
       const b = e.currentTarget.getBoundingClientRect();
       env.paneMenu({ clientX: e.clientX || b.left, clientY: e.clientY || b.bottom + 2, preventDefault() {}, stopPropagation() {} }, this.st, this.p, this.where === 'phone' ? 'zoom' : this.where);
     };
+    this.bar.classList.toggle('has-next', next.length > 0);
     sync(this.bar, [
       phone ? h('a', { class: 'btn chat-back', href: '#/fleet', 'aria-label': 'Back to the list' }, '‹') : null,
       h('span', { class: 'dot ' + state, title: p.needs_reason || STATE_LABEL[state] || state }),
@@ -458,8 +486,9 @@ class Conv {
         // A reply is complete when the turn went on to something that is not
         // more of it, or the agent is no longer working.
         const next = items[i + 1];
-        const done = it.kind === 'text' && (next ? !(RUN.has(next.kind) || next.kind === 'text') : !working);
-        if (done) lastDone = it;
+        const said = it.kind === 'text' || it.kind === 'screen';
+        const done = said && (next ? !(RUN.has(next.kind) || next.kind === 'text') : !working);
+        if (done && it.kind === 'text') lastDone = it;
         const heldId = it.kind === 'question' || it.kind === 'plan' ? this.heldFor(it.id)?.id || '' : '';
         one('i:' + it.id, `${it._v}.${this.rev(it.id)}.${done}.${heldId}`, () => this.itemEl(it, done));
         i += 1;
@@ -587,6 +616,14 @@ class Conv {
     } catch (e) { toast(e.message, 'error'); }
   }
 
+  // Under what an agent said, once it is whole: copy it, and hear it. Small
+  // marks, with their words for a screen reader and on a long press.
+  actsEl(text, body, copied) {
+    return h('div', { class: 'chat-acts' },
+      h('button', { type: 'button', class: 'chat-act act-copy', title: 'Copy', onclick: () => copyText(text, copied) }, 'Copy'),
+      canSpeak() ? h('button', { type: 'button', class: 'chat-act act-speak', title: 'Read aloud', 'aria-pressed': 'false', onclick: (e) => readAloud(body, e.currentTarget) }, 'Read aloud') : null);
+  }
+
   itemEl(it, done) {
     const text = this.full.get(it.id) ?? (typeof it.text === 'string' ? it.text : '');
     const rest = it.more && !this.full.has(it.id) ? h('button', { type: 'button', class: 'mini', onclick: () => this.whole(it) }, 'Show all of it') : null;
@@ -599,33 +636,43 @@ class Conv {
         label ? h('div', { class: 'chat-from' }, label) : null,
         h('div', { class: 'chat-bubble' }, text, it.images ? h('div', { class: 'chat-from' }, plural(Number(it.images) || 0, 'picture') + ' attached') : null), rest);
     }
-    // What the pane printed, from its terminal: plain text, as it was laid
-    // out. The end of a long block is shown, and the rest on request.
+    // What the pane printed, from its terminal. An agent's comes as parts:
+    // prose, drawn like any reply, and rows that are a layout, in the block
+    // a reply's code has. A shell's is its rows, in that block. The block
+    // never wraps and scrolls sideways inside itself.
     if (it.kind === 'screen') {
       // A block that turned out to hold nothing (only the prompt the next
       // message was typed at, which is the next block's): not drawn.
       if (!text) return h('div', { hidden: true });
       const flag = 's:' + it.id, open = this.open.has(flag);
-      const lines = text.split('\n'), long = lines.length > SCREEN_LINES;
-      const shown = open || !long ? text : lines.slice(-SCREEN_LINES).join('\n');
+      const mono = (t, says) => h('div', { class: 'md-code chat-mono' }, h('pre', { tabIndex: 0, 'aria-label': says }, h('code', {}, t)));
+      const says = it.open ? 'What the pane has printed since' : 'What the pane printed';
+      const parts = !this.full.has(it.id) && Array.isArray(it.parts) ? it.parts.filter(x => x && typeof x.text === 'string' && x.text) : null;
       const label = it.whole ? (it.open ? 'The screen now' : 'The screen then') : '';
+      let body, copy = text, more = null;
+      if (parts) {
+        // Nothing on its screen but its own frame and message box.
+        if (!parts.length) return it.open ? quiet('Nothing to read on its screen yet.') : h('div', { hidden: true });
+        body = h('div', { class: 'chat-parts' }, parts.map(x => (x.prose ? md(x.text) : mono(x.text, says))));
+        copy = parts.map(x => x.text).join('\n\n');
+      } else {
+        const lines = text.split('\n'), long = lines.length > SCREEN_LINES;
+        body = mono(open || !long ? text : lines.slice(-SCREEN_LINES).join('\n'), says);
+        if (long && !open) more = h('button', { type: 'button', class: 'mini', onclick: () => this.toggle(flag, it.id) }, `Show ${plural(lines.length - SCREEN_LINES, 'earlier line')}`);
+      }
       // A block still being printed is cut by the station to its last
       // lines: all of it is in the terminal.
-      const more = !it.more || this.full.has(it.id) ? null
+      more ||= !it.more || this.full.has(it.id) ? null
         : it.open ? h('button', { type: 'button', class: 'mini', onclick: () => setFace(this.st, this.p, 'terminal') }, 'Earlier lines are in the terminal')
           : h('button', { type: 'button', class: 'mini', onclick: () => { this.open.add(flag); this.whole(it); } }, 'Show all of it');
-      return h('div', { class: 'chat-screen' + (it.open ? ' open' : '') },
-        label ? h('div', { class: 'chat-from' }, label) : null,
-        long && !open ? h('button', { type: 'button', class: 'mini', onclick: () => this.toggle(flag, it.id) }, `Show ${plural(lines.length - SCREEN_LINES, 'earlier line')}`) : more,
-        h('pre', { class: 'chat-screen-text', tabIndex: 0, 'aria-label': it.open ? 'What the pane has printed since' : 'What the pane printed' }, shown));
+      return h('div', { class: 'chat-text chat-screen' + (it.open ? ' open' : '') },
+        label ? h('div', { class: 'chat-from' }, label) : null, more, body,
+        done ? this.actsEl(copy, body, 'Copied what it printed') : null);
     }
     if (it.kind === 'text') {
       const body = md(text);
-      const speak = (e) => readAloud(body, e.currentTarget);
       return h('div', { class: 'chat-text' + (it.phase === 'commentary' ? ' commentary' : '') }, body, rest,
-        done ? h('div', { class: 'chat-acts' },
-          h('button', { type: 'button', class: 'chat-act', onclick: () => copyText(text, 'Copied the reply') }, 'Copy'),
-          canSpeak() ? h('button', { type: 'button', class: 'chat-act', 'aria-pressed': 'false', onclick: speak }, 'Read aloud') : null) : null);
+        done ? this.actsEl(text, body, 'Copied the reply') : null);
     }
     if (it.kind === 'question') {
       const held = it.status === 'waiting' && this.heldFor(it.id);
@@ -758,8 +805,11 @@ class Conv {
     sync(this.cards, cards);
     for (const key of [...cache.keys()]) if (!used.has(key)) cache.delete(key);
     this.composer.hidden = !!exited || this.available !== true;
-    // The card for a pane that waits has the keys already.
-    this.keysEl.hidden = this.source !== 'screen' || blocked;
+    // The keys are shown when the owner asks for them. (A pane that waits
+    // in its terminal has a card with keys of its own.)
+    this.keysEl.hidden = !this.keysOpen;
+    this.keysBtn.setAttribute('aria-expanded', String(!!this.keysOpen));
+    this.keysBtn.classList.toggle('on', !!this.keysOpen);
     const says = this.p.agent === 'shell' ? 'Type or paste a command' : this.speech ? 'Message or hold to talk' : 'Message';
     if (this.box.placeholder !== says) this.box.placeholder = says;
     this.working = working;
@@ -767,6 +817,8 @@ class Conv {
     // Until when each held card waits here, by the station's clock.
     this.waits = held.map(q => ({ el: cache.get('held:' + q.id)?.el.querySelector('.ask-wait'), until: q.until_ms }));
     this.tick();
+    // What the dock holds may have changed the log's room.
+    this.resized();
   }
 
   // ---- a question or a plan the station holds for the owner ----
@@ -964,6 +1016,10 @@ class Conv {
     // keyboard has Send beside the box.
     this.box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !env.isPhone()) { e.preventDefault(); this.send(); } });
     this.sendBtn = h('button', { type: 'submit', class: 'primary chat-send' }, 'Send');
+    // Esc, Tab, the arrows, Enter and Ctrl-C for the pane: one tap away, in
+    // every pane's message box, and out of the way until asked for.
+    this.keysBtn = h('button', { type: 'button', class: 'chat-keys-btn', title: 'Keys for the terminal: Esc, Tab, the arrows, Enter, Ctrl-C', 'aria-label': 'Keys for the terminal', 'aria-expanded': 'false',
+      onclick: (e) => { e.currentTarget.blur(); this.keysOpen = !this.keysOpen; this.drawDock(); this.resized(); } }, 'Keys');
     // A message that was not sent: why, while its text stays in the box.
     this.sendSaid = h('p', { class: 'send-said', role: 'alert', hidden: true });
     this.slash = h('div', { class: 'chat-slash', role: 'group', 'aria-label': 'Commands', hidden: true });
@@ -1014,8 +1070,12 @@ class Conv {
         { label: 'Take a photo', action: () => pick(true) },
         { note: `It is saved on ${this.st} and its path is typed for the agent.` }]);
     };
+    // One card: what is written above, and under it what can be added on
+    // the left and how it is sent on the right. The same in every pane.
     this.composer = h('form', { class: 'chat-composer', onsubmit: (e) => { e.preventDefault(); this.working && !this.box.value.trim() ? this.stopTurn() : this.send(); } },
-      this.keysEl, this.slash, this.sendSaid, h('div', { class: 'chat-row' }, plus, this.box, mic, this.sendBtn));
+      this.keysEl, this.slash, this.sendSaid,
+      h('div', { class: 'chat-row', onclick: (e) => { if (e.target === e.currentTarget || e.target.classList.contains('chat-tools')) this.box.focus(); } },
+        this.box, h('div', { class: 'chat-tools' }, plus, this.keysBtn, h('span', { class: 'grow' }), mic, this.sendBtn)));
   }
 
   typed() {
@@ -1043,7 +1103,7 @@ class Conv {
     this.sendBtn.dataset.stop = String(stop);
     this.sendBtn.textContent = stop ? 'Stop' : 'Send';
     this.sendBtn.className = (stop ? 'danger' : 'primary') + ' chat-send';
-    this.sendBtn.title = stop ? 'Stop this turn. The agent stays.' : '';
+    this.sendBtn.title = stop ? 'Stop this turn. The agent stays.' : 'Send';
   }
 
   // Sent the way the phone's message box sends: as one paste, then Enter.
@@ -1175,6 +1235,13 @@ export function conversation(st, p, where) {
   c.drawBar();
   c.drawDock();
   return c;
+}
+
+// What is in sight changed its size (a phone's keyboard): every log on the
+// page keeps its place. Called by the page as soon as it knows, since a
+// browser tells a log of its new size only with its next frame.
+export function chatResized() {
+  for (const c of convs.values()) c.resized();
 }
 
 // (Only a log that moved since it was last told of: one that grew under an

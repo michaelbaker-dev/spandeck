@@ -81,13 +81,18 @@ impl Kept {
 /// What an agent program printed, as parts to read (reflow.rs).
 fn shape(printed: &spandeck_terminal::Printed, agent: bool) -> Option<Vec<Part>> {
     agent.then(|| {
-        reflow(&printed.lines, &printed.joined, printed.cursor)
-            .into_iter()
-            .map(|p| Part {
-                prose: p.prose,
-                text: clean(&p.text),
-            })
-            .collect()
+        reflow(
+            &printed.lines,
+            &printed.joined,
+            printed.cursor,
+            printed.whole,
+        )
+        .into_iter()
+        .map(|p| Part {
+            prose: p.prose,
+            text: clean(&p.text),
+        })
+        .collect()
     })
 }
 

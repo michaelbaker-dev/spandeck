@@ -19,6 +19,10 @@
 //!   its message box, and the few rows under it are its status: left out;
 //! - indentation that every row has is dropped, and a bullet the program
 //!   drew (`•`, `●`) is a list item;
+//! - on a screen the program draws itself the rows are its own wrapping,
+//!   so a row of a paragraph goes on from the row above it, as a
+//!   paragraph's lines do in markdown; in a log, where the terminal did
+//!   the wrapping and says so, every line the program ended stays a line;
 //! - a block (rows with no empty row between them) in which a row has
 //!   box-drawing characters or columns set apart by runs of blanks stays
 //!   mono.
@@ -111,10 +115,62 @@ fn bullet(line: &str) -> String {
     }
 }
 
+/// A row that begins something of its own in markdown: it never goes on
+/// from the row above it.
+fn begins(row: &str) -> bool {
+    let t = row.trim_start();
+    let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+    let numbered = (1..=9).contains(&digits)
+        && (t[digits..].starts_with(". ") || t[digits..].starts_with(") "));
+    numbered
+        || t.starts_with('#')
+        || t.starts_with("```")
+        || t.starts_with('>')
+        || t.starts_with('|')
+        || ["- ", "* ", "+ "].iter().any(|m| t.starts_with(m))
+}
+
+/// A row nothing goes on from: a heading, a fence, a row of a table.
+fn ends(row: &str) -> bool {
+    let t = row.trim_start();
+    t.starts_with('#') || t.starts_with("```") || t.starts_with('|')
+}
+
+/// The rows of a block of prose, as markdown source. `drawn`: the program
+/// laid the rows out itself, so where a row ends is where its own wrapping
+/// put it and not the end of a line: a row goes on from the one above
+/// (as a paragraph's lines do in markdown), unless it begins something.
+fn prose_of(block: &[&str], drawn: bool) -> String {
+    let mut out: Vec<String> = vec![];
+    let mut fenced = false;
+    for row in block {
+        let fence = row.trim_start().starts_with("```");
+        let row = if fenced || fence {
+            row.to_string()
+        } else {
+            bullet(row)
+        };
+        let goes_on = drawn
+            && !fenced
+            && !fence
+            && !begins(&row)
+            && out.last().is_some_and(|above| !ends(above));
+        match out.last_mut() {
+            Some(above) if goes_on => {
+                above.push(' ');
+                above.push_str(row.trim_start());
+            }
+            _ => out.push(row),
+        }
+        fenced ^= fence;
+    }
+    out.join("\n")
+}
+
 /// The rows of what a pane printed, as parts. `joined`: for each row,
 /// whether it goes on from the row before. `cursor`: on a screen the
-/// program draws itself, the row the cursor is on.
-pub fn reflow(lines: &[String], joined: &[bool], cursor: Option<usize>) -> Vec<Part> {
+/// program draws itself (`drawn`), the row the cursor is on.
+pub fn reflow(lines: &[String], joined: &[bool], cursor: Option<usize>, drawn: bool) -> Vec<Part> {
     // One line for each line the program printed.
     let mut rows: Vec<String> = Vec::with_capacity(lines.len());
     let mut at_cursor = None;
@@ -205,17 +261,13 @@ pub fn reflow(lines: &[String], joined: &[bool], cursor: Option<usize>) -> Vec<P
         let code = block.iter().any(|r| r.trim_start().starts_with("```"));
         let prose = code || !block.iter().any(|r| aligned(r));
         let text = if prose {
-            block
-                .iter()
-                .map(|r| bullet(r))
-                .collect::<Vec<_>>()
-                .join("\n")
+            prose_of(block, drawn)
         } else {
             block.join("\n")
         };
         match parts.last_mut() {
             Some(last) if last.prose == prose => {
-                last.text.push_str(if prose { "\n\n" } else { "\n" });
+                last.text.push_str("\n\n");
                 last.text.push_str(&text);
             }
             _ => parts.push(Part { prose, text }),
@@ -275,7 +327,7 @@ allows and waits for a fish.
         );
         let mut joined = vec![false; screen.len()];
         joined[6] = true;
-        let parts = reflow(&screen, &joined, Some(14));
+        let parts = reflow(&screen, &joined, Some(14), false);
         let part = |prose, text: &str| Part {
             prose,
             text: text.into(),
@@ -293,7 +345,7 @@ allows and waits for a fish.
         // is taken for a message box, and a frame keeps what is inside it.
         let log =
             rows("│ a note in a frame │\n\nplain words\n```\n  let x = 1;\n\n  x   +   1\n```");
-        let parts = reflow(&log, &[], None);
+        let parts = reflow(&log, &[], None, false);
         assert_eq!(
             parts,
             vec![part(
@@ -305,7 +357,19 @@ allows and waits for a fish.
         let picker = rows(
             "Trust this folder?\n  1. Yes\n  2. No\n  3. Ask each time\n  4. Never\n  5. Help",
         );
-        let parts = reflow(&picker, &[], Some(1));
+        let parts = reflow(&picker, &[], Some(1), true);
         assert!(parts[0].text.contains("1. Yes"), "{parts:?}");
+        // A screen the program drew: where a row of a paragraph ends is its
+        // own wrapping, so the paragraph is one line again, and a list
+        // item's second row is the item's; a heading, an item and a fence
+        // each still begin on a row of their own.
+        let drawn = rows("## Herons\nNine nests this year, three more than\nlast spring.\n● on the east\n  bank\n● on the island\n```\nwc -l\nsurvey.md\n```");
+        assert_eq!(
+            reflow(&drawn, &[], None, true),
+            vec![part(
+                true,
+                "## Herons\nNine nests this year, three more than last spring.\n- on the east bank\n- on the island\n```\nwc -l\nsurvey.md\n```"
+            )]
+        );
     }
 }
