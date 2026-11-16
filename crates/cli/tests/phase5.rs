@@ -1998,7 +1998,7 @@ fn the_pane_of_a_layout_is_the_pane_itself(s: &Station, page: &common::browser::
     // watched or attached any more.
     page.wait(
         "the message as a bubble, then the next pane",
-        &format!("document.querySelectorAll('.phone-layout .chat-user').length === 2 && document.querySelector('.chat-box').value === '' && (async () => {{ {log}.scrollTop = 40; await new Promise(r => setTimeout(r, 60)); const b = document.querySelector('.chat-box'); b.value = 'kept'; b.dispatchEvent(new Event('input')); document.querySelector('.lay-nav .lay-step:last-child').click(); return true; }})()"),
+        &format!("document.querySelectorAll('.phone-layout .chat-user').length === 2 && document.querySelector('.chat-box').value === '' && (async () => {{ {log}.scrollTop = 40; await new Promise(r => setTimeout(r, 60)); window.__top = {log}.scrollTop; const b = document.querySelector('.chat-box'); b.value = 'kept'; b.dispatchEvent(new Event('input')); document.querySelector('.lay-nav .lay-step:last-child').click(); return true; }})()"),
     );
     let shell_seen = page.wait(
         "the shell's terminal, then the pane before",
@@ -2008,9 +2008,11 @@ fn the_pane_of_a_layout_is_the_pane_itself(s: &Station, page: &common::browser::
         shell_seen,
         json!(["Terminal only: it runs a shell, not an agent", true, null])
     );
+    // (Where it was scrolled to is whatever the browser made of 40: with
+    // Windows' fonts the conversation may be too short to scroll that far.)
     page.wait(
         "the conversation where it was",
-        &format!("{showing} === 'pair › tallier · 1 of 2' && Math.abs({log}?.scrollTop - 40) <= 2 && document.querySelector('.chat-box').value === 'kept' && {watched} === '1 watched, 0 attached'"),
+        &format!("{showing} === 'pair › tallier · 1 of 2' && Math.abs({log}?.scrollTop - window.__top) <= 2 && document.querySelector('.chat-box').value === 'kept' && {watched} === '1 watched, 0 attached'"),
     );
     let pane = s.pane(&tallier);
     assert_eq!(
