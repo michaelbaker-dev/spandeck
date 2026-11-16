@@ -1054,7 +1054,7 @@ The owner's approval: "execute ... the mobile plan" (15 Nov 2026); this is the p
 - Processes do not survive a daemon crash; agents resume by session id.
 
 ## Testing rules (from the Build and test plan tab)
-- Test where spandeck can break: the terminal, each agent integration, the Guarantees, the link between stations, upgrades. Target 150 to 300 tests (raised from 250 on 15 Nov 2026, with the performance and continuity plan; its new cases that start a station are a few scenario tests with many assertions each, marked ignored and run with `--ignored`, not one test per case).
+- Test where spandeck can break: the terminal, each agent integration, the Guarantees, the link between stations, upgrades. Target 150 to 300 tests (raised from 250 on 15 Nov 2026, with the performance and continuity plan; its new cases that start a station are a few scenario tests with many assertions each, marked ignored and run with `--ignored`, not one test per case). Counted on 16 Nov 2026: 378 on Linux (306 in the every-change tier; 72 ignored, of which 12 are pictures and live canaries), and 18 more that run only on Windows. That is over the target, and the target was not raised for it: whether it is raised, or which tests go, is the owner's to say.
 - A test needs a reason: a Guarantee, a phase's acceptance criterion, or a real bug. No tests of trivial code, no mocks of our own modules.
 - Every-change tier under 90 seconds; merge tier under 10 minutes. A flaky test is fixed or deleted within a day.
 - The station link sits behind a swappable transport so the message relay runs under Turmoil.
