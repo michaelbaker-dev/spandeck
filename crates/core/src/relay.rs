@@ -122,6 +122,9 @@ pub fn retry_after_ms(attempts: u32) -> u64 {
 /// Who a note about a message that was not delivered is from.
 pub const NOTE_FROM: &str = "spandeck";
 
+/// The status of a message whose pane was closed before it read it.
+pub const RETURNED: &str = "undelivered: its pane was closed before it read this";
+
 /// Text from another station, to be shown or stored as text: no control
 /// characters, and bounded.
 fn plain(text: &str, max: usize) -> String {
@@ -472,6 +475,7 @@ impl MessageStore {
                 let mut stmt = c.prepare(
                     "SELECT id,thread,seq,ts,sender,recipient,kind,body,refs,task,project,status,read,acted FROM messages
                      WHERE recipient IN (SELECT value FROM json_each(?1)) AND received IS NOT NULL
+                       AND status NOT LIKE 'undelivered%'
                        AND (?2=0 OR read IS NULL) ORDER BY received, thread, seq LIMIT 200",
                 )?;
                 let rows = stmt.query_map(params![list, unread_only as i64], row_view)?;
@@ -507,7 +511,8 @@ impl MessageStore {
             .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT id, sender, body FROM messages WHERE recipient IN (SELECT value FROM json_each(?1))
-                     AND received IS NOT NULL AND read IS NULL AND (announced=0 OR announced < ?2) ORDER BY received",
+                     AND received IS NOT NULL AND read IS NULL AND status NOT LIKE 'undelivered%'
+                     AND (announced=0 OR announced < ?2) ORDER BY received",
                 )?;
                 let rows = stmt.query_map(params![list, told_before_ms as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
                 rows.collect()
@@ -523,7 +528,8 @@ impl MessageStore {
             .read(|c| {
                 let mut stmt = c.prepare(
                     "SELECT id, sender, announced FROM messages WHERE recipient IN (SELECT value FROM json_each(?1))
-                     AND received IS NOT NULL AND read IS NULL ORDER BY received",
+                     AND received IS NOT NULL AND read IS NULL AND status NOT LIKE 'undelivered%'
+                     ORDER BY received",
                 )?;
                 let rows = stmt.query_map(params![list], |r| {
                     Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)?.max(0) as u64))
@@ -531,6 +537,107 @@ impl MessageStore {
                 rows.collect()
             })
             .unwrap_or_default()
+    }
+
+    /// A pane was closed for good with mail it had not read. Mail is
+    /// addressed by name, and a name is free again once its pane is
+    /// closed: left as it was, that mail would be handed to whatever pane
+    /// is next given the name (found 16 Nov 2026: a new pane inherited a
+    /// closed pane's unread mail and was nudged about it at once). So it
+    /// goes back: each message is marked "undelivered", which no pane's
+    /// inbox shows, and each sender is told once, in its own inbox, in
+    /// the same transaction (a sender on another station through that
+    /// station's queue). A note of spandeck's own is not answered with
+    /// another. Returns each note, and how many messages went back.
+    pub fn return_unread(
+        &self,
+        names: &[String],
+        now: u64,
+    ) -> rusqlite::Result<(Vec<Envelope>, usize)> {
+        let list = json!(names.iter().map(|n| self.qualify(n)).collect::<Vec<_>>()).to_string();
+        let from_us = format!("{NOTE_FROM}@");
+        self.db.with_tx(|tx| {
+            let unread: Vec<Envelope> = {
+                let mut stmt = tx.prepare(
+                    "SELECT id,thread,seq,ts,sender,recipient,kind,body,refs,task,project,auth FROM messages
+                     WHERE recipient IN (SELECT value FROM json_each(?1)) AND received IS NOT NULL
+                       AND read IS NULL AND status='delivered' ORDER BY received LIMIT 500",
+                )?;
+                let rows = stmt.query_map(params![list], row_env)?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            let mut notes: Vec<Envelope> = vec![];
+            for env in &unread {
+                tx.execute(
+                    "UPDATE messages SET status=?2, announced=1 WHERE id=?1",
+                    params![env.id, RETURNED],
+                )?;
+                if env.sender.starts_with(&from_us) {
+                    continue;
+                }
+                // One note for each sender, naming its first message.
+                if let Some(note) = notes.iter_mut().find(|n| n.recipient == env.sender) {
+                    if let Some(refs) = note.refs.as_array_mut().filter(|r| r.len() < 20) {
+                        refs.push(json!(env.id));
+                    }
+                    continue;
+                }
+                notes.push(Envelope {
+                    id: new_id("m"),
+                    thread: env.thread.clone(),
+                    seq: 0,
+                    ts: now,
+                    sender: format!("{NOTE_FROM}@{}", self.station),
+                    recipient: env.sender.clone(),
+                    kind: "note".into(),
+                    body: plain(&env.body, 80),
+                    refs: json!([env.id]),
+                    task: env.task.clone(),
+                    project: env.project.clone(),
+                    auth: None,
+                    hops: 0,
+                });
+            }
+            for note in &mut notes {
+                let count = unread.iter().filter(|e| e.sender == note.recipient).count();
+                let first = unread
+                    .iter()
+                    .find(|e| e.sender == note.recipient)
+                    .expect("a note is made for a message");
+                let what = if count == 1 {
+                    format!("your {} \"{}\" ({})", first.kind, note.body, first.id)
+                } else {
+                    format!(
+                        "your {count} messages (the first: {} \"{}\", {})",
+                        first.kind, note.body, first.id
+                    )
+                };
+                note.body = format!(
+                    "Not delivered to {}: its pane was closed before it read {what}. Nothing was passed to another pane: send it again to a pane that is running, if it is still wanted.",
+                    first.recipient
+                );
+                note.seq = tx.query_row(
+                    "SELECT COALESCE(MAX(seq),0)+1 FROM messages WHERE thread=?1",
+                    [&note.thread],
+                    |r| r.get::<_, i64>(0),
+                )? as u64;
+                let dest = split_address(&note.recipient).1.unwrap_or(&self.station);
+                let local = dest == self.station;
+                insert(
+                    tx,
+                    note,
+                    if local { "delivered" } else { "queued" },
+                    local.then_some(now),
+                )?;
+                if !local {
+                    tx.execute(
+                        "INSERT INTO outbox(msg,dest,ord) VALUES(?1,?2,(SELECT COALESCE(MAX(ord),0)+1 FROM outbox))",
+                        params![note.id, dest],
+                    )?;
+                }
+            }
+            Ok((notes, unread.len()))
+        })
     }
 
     /// Remember when the recipient was told about these messages.

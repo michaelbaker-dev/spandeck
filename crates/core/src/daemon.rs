@@ -2027,6 +2027,7 @@ impl Daemon {
         self.look_forget_pane(&p.id, by);
         let m = p.meta();
         self.forget_ended(&m);
+        self.return_mail(&m);
         self.record(
             "pane.closed",
             Some(&p.id),

@@ -719,17 +719,18 @@ impl Daemon {
     /// Seven days after it ended with a restart, a pane leaves the list.
     pub(crate) fn prune_ended(&self) {
         let cutoff = now_ms().saturating_sub(ENDED_LISTED_MS);
-        let old: Vec<String> = self
+        let old: Vec<(String, PaneMeta)> = self
             .list_panes()
             .iter()
             .filter(|p| {
                 let m = p.meta.lock().unwrap();
                 m.ended_by.is_some() && m.ended_ms < cutoff
             })
-            .map(|p| p.id.clone())
+            .map(|p| (p.id.clone(), p.meta()))
             .collect();
-        for id in old {
+        for (id, meta) in old {
             self.panes.write().unwrap().remove(&id);
+            self.return_mail(&meta);
             self.emit(
                 "pane.closed",
                 Some(&id),
