@@ -49,10 +49,10 @@ fn a_screen_that_waits_for_the_owner_is_said_even_while_the_hooks_report_a_turn(
     let mut steps = vec![
         json!({"prompt": "count the egrets"}),
         json!({"say": "[fake] sign in: at the console"}),
-        json!({"sleep": 2000}),
+        json!({"sleep": 1200}),
     ];
     steps.extend((0..12).map(|n| json!({"say": format!("signed in, line {n}")})));
-    steps.push(json!({"sleep": 4000}));
+    steps.push(json!({"sleep": 2600}));
     steps.push(json!({"turn_end": "counted"}));
     let pane = s.fake(json!({ "steps": steps }), json!({}));
     let p = s.wait_state(&pane, "needs_you");
