@@ -1009,7 +1009,11 @@ pub mod browser {
                     .unwrap(),
             )
             .unwrap();
-            let tab = browser.new_tab().unwrap();
+            // A browser that has only just started may not answer in the
+            // library's own wait (seen once on a CI Mac runner): asked again.
+            let tab = (0..3)
+                .find_map(|_| browser.new_tab().ok())
+                .expect("the browser gave no tab in three tries");
             let page = Page {
                 _browser: browser,
                 tab,
