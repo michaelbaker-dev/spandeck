@@ -174,9 +174,9 @@ days, not hours.
   text, never as markup, but what it says is still whatever the agent, or anything that
   runs as you with that pane's token, chose to write: read it as you would read the
   prompt in the terminal. What you type as an answer goes to that agent as its tool's
-  result, as it would from the terminal. That an hour's timeout is honoured and that the
-  answer is taken as documented rests on Claude Code's hook reference and has not been
-  run with the real agent; if a hook is cancelled early, the prompt appears in the
+  result, as it would from the terminal. That the answer is taken as documented was seen
+  with Claude Code 2.1.325; that a timeout of more than ten minutes is honoured rests on
+  its hook reference. If a hook is cancelled early, the prompt appears in the
   terminal and the card can stay for up to ten minutes with nobody behind it.
 - A pane's conversation holds whatever its terminal showed, including a secret an agent
   printed or a file it read. Any signed-in browser can read it, and it crosses your

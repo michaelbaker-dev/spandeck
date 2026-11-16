@@ -10,8 +10,9 @@
 //! installs for those two tools (agents/install.rs) asks here, and this
 //! holds it for the owner, the way a permission request is held: a row in
 //! the approvals' book, found again by the hook's id after a restart,
-//! answered once (approvals.rs). Nothing of this was run with the real
-//! agent.
+//! answered once (approvals.rs). Run by hand with Claude Code 2.1.325 on
+//! 16 Nov 2026; that a hold of more than ten minutes is honoured was not
+//! known then.
 //!
 //! What never happens: an answer nobody gave. When the owner does not
 //! answer in time, lets it go ("Answer in the terminal instead"), or
@@ -65,6 +66,22 @@ pub fn kind_of_tool(name: &str) -> Option<&'static str> {
         "ExitPlanMode" => Some(PLAN),
         _ => None,
     }
+}
+
+/// What a pane says when its question or plan is the terminal's and the
+/// station never held it (or no longer knows why).
+pub fn in_terminal_words(kind: &str) -> &'static str {
+    match kind {
+        PLAN => "asks you to approve its plan, in the terminal",
+        _ => "asks you a question, in the terminal",
+    }
+}
+
+/// Is this reason one of the station's own for a question or a plan that
+/// waits in the terminal? Such a reason is not replaced by the agent's
+/// own, vaguer notice.
+pub fn says_in_terminal(reason: &str) -> bool {
+    reason.contains("is in the terminal now") || reason.ends_with(", in the terminal")
 }
 
 /// How long to hold, from the switch and the timeout the hook was told.
@@ -307,6 +324,26 @@ impl Daemon {
         rows.sort_by_key(|r| r["ts_ms"].as_i64().unwrap_or(0));
         rows.truncate(8);
         rows
+    }
+
+    /// The plan each held `ExitPlanMode` call of a pane was given by its
+    /// hook, by the call's own id. Claude Code writes a plan to a file and
+    /// puts what that file held into the call when the call is made; a
+    /// change to the file in the same step is not in it (seen with 2.1.325
+    /// on 16 Nov 2026: the second plan's record held the first plan). What
+    /// the hook was given is what the owner was shown and answered.
+    pub(crate) fn plans_given(&self, pane: &str) -> Vec<(String, String)> {
+        self.approvals
+            .held(false)
+            .iter()
+            .filter(|r| r["pane"] == pane && r["kind"] == PLAN)
+            .filter_map(|r| {
+                Some((
+                    r["detail"]["tool"]["id"].as_str()?.to_string(),
+                    r["detail"]["input"]["plan"].as_str()?.to_string(),
+                ))
+            })
+            .collect()
     }
 
     /// What kind of thing a pane is asking the owner, for the pane list:

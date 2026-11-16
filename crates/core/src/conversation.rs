@@ -306,12 +306,28 @@ impl Daemon {
             (None, Some(line)) => Range::Before(line),
             (None, None) => Range::Tail,
         };
-        let Some(page) = self.archive.conversation(&session, range, limit) else {
+        let Some(mut page) = self.archive.conversation(&session, range, limit) else {
             out["reason"] =
                 json!("no conversation for this pane: its session is not in the archive");
             out["live"] = self.conversation_live(&p, None);
             return Ok(out);
         };
+        // A plan that was held for the owner is shown as its hook was
+        // given it: the call's record can hold an earlier plan
+        // (questions.rs, `plans_given`).
+        let plan =
+            |i: &spandeck_archive::conversation::Item| i.kind == "plan" && i.tool_id.is_some();
+        if page.items.iter().chain(&page.updated).any(plan) {
+            let given = self.plans_given(&p.id);
+            for item in page.items.iter_mut().chain(page.updated.iter_mut()) {
+                let text = given
+                    .iter()
+                    .find(|(id, _)| item.kind == "plan" && Some(id) == item.tool_id.as_ref());
+                if let Some((_, text)) = text {
+                    item.set_text(text);
+                }
+            }
+        }
         let page = serde_json::to_value(page).map_err(|e| invalid(e.to_string()))?;
         if let (Some(out), Some(page)) = (out.as_object_mut(), page.as_object()) {
             out.extend(page.clone());
@@ -348,6 +364,28 @@ impl Daemon {
             .archive
             .conversation_detail(&session, item, offset)
             .ok_or_else(|| crate::daemon::Error::NotFound(format!("item {item}")))?;
+        // A plan: the call's id came along for this, and is not served.
+        let call = detail
+            .as_object_mut()
+            .and_then(|d| d.remove("tool_use_id"))
+            .and_then(|id| id.as_str().map(String::from));
+        if let Some(call) = call {
+            let given = self.plans_given(&p.id);
+            if let Some((_, text)) = given.iter().find(|(id, _)| *id == call) {
+                let clean = spandeck_archive::conversation::clean(text);
+                detail["text"] = spandeck_archive::conversation::paged(&clean, offset);
+                if let Some(item) = detail["item"].as_object_mut() {
+                    let (cut, more) = spandeck_archive::conversation::cap(
+                        &clean,
+                        spandeck_archive::conversation::TEXT_CAP,
+                    );
+                    item.insert("text".into(), json!(cut));
+                    if more {
+                        item.insert("more".into(), json!(true));
+                    }
+                }
+            }
+        }
         detail["pane"] = json!(p.id);
         detail["session"] = json!(session);
         Ok(detail)

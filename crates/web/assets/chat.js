@@ -583,7 +583,7 @@ class Conv {
       const plan = text || (held && typeof held.text === 'string' ? held.text : '');
       // Held: the plan is in the card below, with its buttons; not twice.
       if (held) return h('div', { class: 'chat-box-item held-item' }, h('div', { class: 'chat-from' }, 'The agent proposed a plan · ' + state));
-      return h('div', { class: 'chat-box-item' }, h('div', { class: 'chat-from' }, 'The agent proposed a plan' + (state ? ' · ' + state : '')), md(plan), rest);
+      return h('div', { class: 'chat-box-item' }, h('div', { class: 'chat-from' }, 'The agent proposed a plan' + (state ? ' · ' + state : '')), plan ? md(plan) : h('div', { class: 'muted small' }, 'The text of this plan is not in the session file: it was shown in the terminal.'), rest);
     }
     if (it.kind === 'notice') {
       const flag = 'n:' + it.id, open = this.open.has(flag);

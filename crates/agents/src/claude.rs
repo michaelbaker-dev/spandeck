@@ -220,8 +220,8 @@ pub(crate) fn reply_claude_dialect(raw_event: &str, d: &HookDecision) -> HookRep
                 // the Control Deck. Claude Code's hook reference, "Tools
                 // that require user interaction" (read 16 Nov 2026):
                 // allow alone is not enough for these; the answer goes
-                // back as the call's whole input. Not run with the real
-                // agent.
+                // back as the call's whole input. Seen to work with
+                // Claude Code 2.1.325 (16 Nov 2026, by hand).
                 json!({"hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "allow",

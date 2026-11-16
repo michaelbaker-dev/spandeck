@@ -106,7 +106,7 @@ fn one(question: &str) -> Value {
 ///   it stays paused; a Stop ends the hold with no answer; an answer from
 ///   the card releases a stopped agent as typing would.
 #[test]
-#[ignore = "merge tier: an agent asks nine times, and one question waits out its time"]
+#[ignore = "merge tier: an agent asks ten times, and one question waits out its time"]
 fn a_question_and_a_plan_are_answered_from_the_deck() {
     let s = Station::start("alpha");
     let plan = "# Tally plan\n\n1. Filter the rows to grey herons\n2. Run the tests again";
@@ -114,13 +114,15 @@ fn a_question_and_a_plan_are_answered_from_the_deck() {
     let asks = [
         json!({"ask": {"questions": herons(), "id": "toolu_q1"}}),
         json!({"plan": {"plan": plan, "id": "toolu_p1"}}),
-        json!({"plan": {"plan": plan, "id": "toolu_p2"}}),
+        // Its record holds an earlier plan, as Claude Code's can.
+        json!({"plan": {"plan": plan, "id": "toolu_p2", "recorded": "# An earlier plan"}}),
         json!({"ask": {"questions": one("Lapse?"), "id": "toolu_q2"}}),
         json!({"ask": {"questions": one("Let go?"), "id": "toolu_q3"}}),
         json!({"ask": {"questions": one("While paused?"), "id": "toolu_q4"}}),
         json!({"ask": {"questions": one("Stopped?"), "id": "toolu_q5"}}),
         json!({"ask": {"questions": one("After a stop?"), "id": "toolu_q6"}}),
         json!({"ask": {"questions": one("Twice?"), "id": "toolu_q7"}}),
+        json!({"permission": {"name": "Bash", "command": "rm -rf build"}}),
     ];
     for (n, ask) in asks.iter().enumerate() {
         steps.push(wait_go(n as u32 + 1));
@@ -311,9 +313,22 @@ fn a_question_and_a_plan_are_answered_from_the_deck() {
         "{}",
         s.text(&asker)
     );
-    wait_for("the plan to read not approved", 10, || {
-        (item(&s, &asker, &p["item"])["status"] == json!("rejected")).then_some(())
+    let sent_back = wait_for("the plan to read not approved", 10, || {
+        let i = item(&s, &asker, &p["item"]);
+        (i["status"] == json!("rejected")).then_some(i)
     });
+    // Found with the real Claude Code: the call's record can hold an
+    // earlier plan. The item shows the plan its hook was given, which is
+    // the one the owner read and answered; so does its detail.
+    assert_eq!(p["text"], json!(plan));
+    assert_eq!(sent_back["text"], json!(plan));
+    let detail = s.call(
+        "pane.conversation.detail",
+        json!({"pane": asker, "item": p["item"]}),
+    );
+    assert_eq!(detail["text"]["text"], json!(plan));
+    assert_eq!(detail["item"]["text"], json!(plan));
+    assert!(detail.get("tool_use_id").is_none(), "{detail}");
 
     // 4. Nobody answers in time: the prompt moves to the terminal, the
     // pane says so, and nothing was answered for the owner.
@@ -341,6 +356,16 @@ fn a_question_and_a_plan_are_answered_from_the_deck() {
         .unwrap_err();
     assert!(late.message.contains("no longer waiting"), "{late}");
     assert_eq!(s.log("question.lapsed").len(), 1);
+    // Found with the real Claude Code: when it shows its own prompt it
+    // also asks permission for that call, and says it needs permission.
+    // That is not an approval (nothing to allow or deny), is listed
+    // nowhere, and does not replace the reason above.
+    assert_eq!(s.call("approval.list", json!({})), json!([]));
+    assert!(!s.text(&asker).contains("the permission hook answered"));
+    assert_eq!(
+        s.pane(&asker)["needs_reason"],
+        json!("its question is in the terminal now (nobody answered it here in time)")
+    );
     s.call("pane.send_text", json!({"pane": asker, "text": "Yes"}));
     s.wait_text(&asker, "[fake] question answered in the terminal: Yes");
     s.wait_text(&asker, "settled 4");
@@ -450,6 +475,37 @@ fn a_question_and_a_plan_are_answered_from_the_deck() {
     assert!(third.get("error").is_some(), "{third}");
     s.wait_text(&asker, "settled 9");
     assert!(flat(&s, &asker).contains("\"answers\":{\"Twice?\":\"Yes\"}"));
+
+    // 10. Found with the real Claude Code: a permission request whose
+    // prompt the owner answered in the terminal stayed listed as waiting.
+    // When the tool call it was for has run (its hook says so), the
+    // request is over and leaves the list; a call of another command
+    // does not end it.
+    go(&s, 10);
+    let waiting = || s.call("approval.list", json!({}));
+    let asked = wait_for("the permission request", 10, || waiting().get(0).cloned());
+    assert_eq!(
+        (&asked["tool"], &asked["summary"]),
+        (&json!("Bash"), &json!("Bash: rm -rf build")),
+        "a row says what it is: {asked}"
+    );
+    let ran = |command: &str| {
+        s.call_as_pane(
+            &asker,
+            "hook.ingest",
+            json!({"agent": "fake", "payload": {"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                "tool_input": {"command": command}, "tool_use_id": "toolu_x", "tool_response": {}}}),
+        )
+        .unwrap();
+    };
+    ran("ls");
+    assert_eq!(waiting().as_array().unwrap().len(), 1, "another call");
+    ran("rm -rf build");
+    assert_eq!(waiting(), json!([]));
+    s.wait_text(&asker, "[fake] permission: none");
+    assert!(s
+        .try_call("approval.answer", json!({"id": asked["id"], "allow": true}))
+        .is_err());
 
     s.wait_state(&asker, "done");
     assert_eq!(

@@ -154,7 +154,7 @@ apply is absent, not null.
 | `thinking` | `duration_ms?` | Never the thinking. Codex gives no duration. |
 | `tool` | `name`, `summary`, `status`, `duration_ms?`, `added?`, `removed?`, `background?` | `summary` is one line, 200 characters at most: the command, the file, the pattern, the address. May be empty. `added` / `removed`: lines an edit changed. `background`: started and left running. |
 | `question` | `questions`, `status`, `answers?` | Claude Code's AskUserQuestion. `questions[]`: `header`, `question`, `multi`, `options[] {label, description?}`. `answers`: `[question, answer]` pairs, once answered. While it waits it may be held for the owner: see `live.questions`. |
-| `plan` | `text`, `status`, `more?` | Claude Code's ExitPlanMode. `text` is the plan, markdown source; it can be empty when Claude Code wrote the call without it (`live.questions` has it while the plan is held). `rejected`: the owner declined it in the terminal, or sent it back from the deck. |
+| `plan` | `text`, `status`, `more?` | Claude Code's ExitPlanMode. `text` is the plan, markdown source: for a plan that was held, the text its hook was given (what the owner was shown); else the plan the result of an approved call carries; else what the call's record holds, which can be an earlier plan when Claude Code changed the plan in the same step, or empty. The detail's `text` follows the same order. `rejected`: the owner declined it in the terminal, or sent it back from the deck. |
 | `tasks` | `name`, `summary`, `status`, `background?` | A sub-agent the agent started: `name` is its kind ("Explore"), `summary` what it was asked. One item per sub-agent; fold neighbours into "3 tasks". Which are running now is `live.subagents`. |
 | `notice` | `what`, and by `what`: | Something that happened, not something said. |
 | | `turn_ended`: `duration_ms?` | The agent finished its turn. |
@@ -232,7 +232,15 @@ A `question` or `plan` item with `status: "waiting"` that is **not** in `live.qu
 held: it waits in the terminal (the hold ran out, the owner let it go, the session was started
 before it could be held, or holding is switched off with `question_hold_s = 0`). Show it and
 send the owner to the terminal. `live.needs_reason` then begins `its question is in the
-terminal now` or `its plan is in the terminal now`, with why in brackets.
+terminal now` or `its plan is in the terminal now`, with why in brackets, or reads `asks you a
+question, in the terminal` / `asks you to approve its plan, in the terminal` when it was never
+held. It is never in `approvals`: Claude Code asks permission for these two tools when it shows
+its own prompt, and that request is not held (there is nothing to allow or deny).
+
+**`approvals` and `approval.list`.** A permission request leaves both when it is answered, when
+the tool call it was for has run (the owner answered the prompt in the terminal), and when its
+turn ends: `approval.resolved` with `status: "cancelled"`. A row of `approval.list` has `tool`
+(the tool's name) and `summary` at its top.
 
 **In the pane list.** `pane.list` and `pane.get` say `asks: null`, or
 `asks: {kind: "question" | "plan", until_ms}` for a pane with something held: which kind and
@@ -282,7 +290,7 @@ station's own call and the read-only caller. For a pane on another station:
   `expired`, `cancelled`) to decks connected to it; the stream sends the changed `live`.
 
 **What the agent is given** (Claude Code's hook reference, "Tools that require user
-interaction"; not run with the real agent). The call's whole input, with the answer in it:
+interaction"; run by hand with Claude Code 2.1.325 on 16 Nov 2026). The call's whole input, with the answer in it:
 
 ```json
 {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
@@ -442,7 +450,7 @@ an item of another session), `unreachable` (the pane's station, through the gate
 | Tool duration | Yes | Yes, from the times of the two records | | |
 | Diff of an edit | Yes | No | | |
 | Thinking duration | Yes | No | | |
-| Question, plan | Shown, with the answer once given; held for the owner and answered with `question.answer` (sessions started after 16 Nov 2026; not run with the real agent) | Not in its files; what Codex asks is in its terminal | The terminal | |
+| Question, plan | Shown, with the answer once given; held for the owner and answered with `question.answer` (sessions started after 16 Nov 2026) | Not in its files; what Codex asks is in its terminal | The terminal | |
 | Sub-agents as `tasks` | Yes | No (`live.subagents` still counts them from hooks) | | |
 | Compaction, turn end, interrupted, error | Yes | Turn end with duration; the others are written from Codex's public format and were not in the files read | | |
 | `live`, approvals, `unread` | Yes | Yes (approvals where Codex's hooks hold them) | `live` only | `live` only |

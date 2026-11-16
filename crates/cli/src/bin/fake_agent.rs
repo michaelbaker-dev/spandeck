@@ -13,6 +13,9 @@
 //!   {"permission": {"name":"Write","file":"p"}}
 //!   {"ask": {"questions":[…], "id":"toolu_1"}}   AskUserQuestion, as Claude Code asks
 //!   {"plan": {"plan":"markdown", "id":"toolu_2"}} ExitPlanMode
+//!       ("recorded": what the call's record in the session file holds as
+//!       the plan, when it is not the plan the hook is given: Claude Code
+//!       writes what its plan file held when the call was made)
 //!       Both go through PreToolUse twice, as with the entries spandeck
 //!       installs: the hook every tool call has, then the hook that may
 //!       wait for the owner. Answered by that hook, the input it was
@@ -140,9 +143,13 @@ impl Agent {
         } else {
             "plan"
         };
+        let mut recorded = input.clone();
+        if let Some(old) = spec.get("recorded") {
+            recorded["plan"] = old.clone();
+        }
         self.append_transcript(
             &json!({"type": "assistant", "message": {"role": "assistant",
-            "content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}}),
+            "content": [{"type": "tool_use", "id": id, "name": name, "input": recorded}]}}),
         );
         let payload = json!({"tool_name": name, "tool_input": input, "tool_use_id": id});
         let denied = |reply: &Value| {
@@ -193,6 +200,22 @@ impl Agent {
             }
         } else {
             // No decision: the prompt is the agent's own, in its terminal.
+            // As Claude Code does when it shows that prompt (seen with
+            // 2.1.325): it asks permission for the same call through its
+            // permission hook, and says that it needs the owner.
+            let asked = self.hook(
+                "PermissionRequest",
+                json!({"tool_name": name, "tool_input": input}),
+            );
+            if !asked.is_null() {
+                out(&format!(
+                    "[fake] {what}: the permission hook answered {asked}"
+                ));
+            }
+            self.hook(
+                "Notification",
+                json!({"notification_type": "permission_prompt", "message": "Claude needs your permission"}),
+            );
             out(&format!(
                 "[fake] {what} is in the terminal: type your answer"
             ));

@@ -415,10 +415,21 @@ impl ApprovalBook {
     /// `cancel_pane`, for the pane's questions and plans only: the turn
     /// they belonged to is over. A permission request is left alone.
     pub fn cancel_held(&self, pane: &str, now: u64) -> Vec<String> {
+        self.cancel_where(pane, now, held_kind)
+    }
+
+    /// Cancel the waiting rows of a pane that `which` picks (a row as it
+    /// is kept: `kind`, `detail`). Their hooks fall through with no answer.
+    pub fn cancel_where(
+        &self,
+        pane: &str,
+        now: u64,
+        which: impl Fn(&Value) -> bool,
+    ) -> Vec<String> {
         let ids: Vec<String> = self
             .raw(true)
             .iter()
-            .filter(|r| held_kind(r))
+            .filter(|r| which(r))
             .filter_map(row_of)
             .filter(|r| r.pane == pane)
             .map(|r| r.id)
@@ -585,6 +596,11 @@ impl ApprovalBook {
         for r in rows.iter_mut() {
             if let Some(detail) = r["detail"].as_object_mut() {
                 detail.remove("hook");
+            }
+            // What it is about, said at the top of the row: a list that
+            // shows a row says which tool it is for.
+            if !held {
+                r["tool"] = r["detail"]["tool"]["name"].clone();
             }
             if r["status"] == "pending" {
                 let attached = r["id"].as_str().is_some_and(|id| waiters.contains_key(id));
@@ -756,6 +772,9 @@ mod tests {
         assert!(!shown.contains(HOOK) && !shown.contains(&hook_mark(HOOK)));
         assert!(!shown.contains("\"hook\""), "{shown}");
         assert_eq!(b.list(false)[0]["detail"]["tool"]["name"], "Bash");
+        // A row says what it is: its tool at the top, and its summary.
+        assert_eq!(b.list(false)[0]["tool"], "Bash");
+        assert_eq!(b.list(false)[0]["summary"], "Bash: cargo publish");
         // Not an id: every ask is a new row, as with no id at all.
         for bad in [Some("short"), Some("has a space in it, and more"), None] {
             let (a1, ..) = waiting(ask(&b, "p3", bad, 6_000));
@@ -874,6 +893,25 @@ mod tests {
             b.answer(&id, true, Some("{}".into()), "you", 3_000, |_| true),
             Answer::NotWaiting { expired: None }
         );
+        // Found with the real Claude Code (16 Nov 2026): a permission
+        // request answered in the terminal stayed listed as waiting. The
+        // rows of a pane that a caller picks are cancelled: here the one
+        // for the tool call that has since run, not the other.
+        let (other, ..) = waiting(b.ask(
+            "p1",
+            None,
+            "permission",
+            "Bash: ls",
+            json!({"tool": {"name": "Bash", "command": "ls"}}),
+            None,
+            3_500,
+            LIMIT,
+        ));
+        let ran = |r: &Value| r["detail"]["tool"]["command"] == "ls";
+        assert_eq!(b.cancel_where("p2", 3_600, ran), Vec::<String>::new());
+        assert_eq!(b.cancel_where("p1", 3_600, ran), vec![other.clone()]);
+        assert_eq!(status(&b, &other), "cancelled");
+        assert_eq!(status(&b, &perm), "pending");
         assert!(matches!(
             b.ask(
                 "p1",

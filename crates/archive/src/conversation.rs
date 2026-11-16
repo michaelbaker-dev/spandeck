@@ -167,10 +167,15 @@ impl Item {
     }
 
     fn with_text(mut self, text: &str) -> Item {
+        self.set_text(text);
+        self
+    }
+
+    /// The item's text, cleaned and cut as every item's is.
+    pub fn set_text(&mut self, text: &str) {
         let (text, more) = cap(&clean(text), TEXT_CAP);
         self.text = Some(text);
         self.more = more;
-        self
     }
 
     fn notice(line: u64, block: usize, what: &'static str, ts_ms: Option<u64>) -> Item {
@@ -204,6 +209,9 @@ pub struct ToolResult {
     pub removed: Option<u32>,
     pub answers: Option<Vec<(String, String)>>,
     pub background: bool,
+    /// For a plan that was approved: the plan as the result has it. The
+    /// call's own record can hold an earlier text (see `settle`).
+    pub plan: Option<String>,
 }
 
 /// What one line of a session file adds to the conversation.
@@ -531,6 +539,7 @@ fn claude_result(v: &Value, block: &Value, ts: Option<u64>) -> Option<ToolResult
         added: counts.map(|c| c.0),
         removed: counts.map(|c| c.1),
         answers,
+        plan: tur.get("plan").and_then(|p| p.as_str()).map(String::from),
         background: tur["status"] == json!("async_launched")
             || tur["isAsync"] == json!(true)
             || tur.get("backgroundTaskId").is_some_and(|b| !b.is_null()),
@@ -963,6 +972,16 @@ fn settle(item: &mut Item, r: &ToolResult) {
     if item.kind == "question" {
         item.answers = r.answers.clone();
     }
+    // Claude Code keeps a plan in a file and puts what the file held into
+    // the call's record when the call is made. When the plan is changed in
+    // the same step, the record has the plan from before (seen with
+    // 2.1.325 on 16 Nov 2026: a second plan shown with the first one's
+    // text). The result of an approved plan has the plan that was approved.
+    if item.kind == "plan" {
+        if let Some(plan) = r.plan.as_deref().filter(|p| !p.trim().is_empty()) {
+            item.set_text(plan);
+        }
+    }
 }
 
 /// A call that never got a result: the turn went on without it.
@@ -975,7 +994,7 @@ fn abandon(item: &mut Item) {
 
 // ----------------------------------------------------------------- detail
 
-fn paged(full: &str, offset: usize) -> Value {
+pub fn paged(full: &str, offset: usize) -> Value {
     let mut start = offset.min(full.len());
     while !full.is_char_boundary(start) {
         start += 1;
@@ -1118,7 +1137,17 @@ fn detail_of(
         Dialect::Codex => codex_input(&call["payload"]),
     };
     if item.kind == "plan" {
-        out["text"] = paged(&clean(input["plan"].as_str().unwrap_or("")), offset);
+        // The plan that was approved, when the result has it; else what
+        // the call's record holds (see `settle`). The call's id goes with
+        // it for the station, which may have the text its hook was given;
+        // it is not served.
+        let approved = result_raw
+            .and_then(|r| serde_json::from_str::<Value>(r).ok())
+            .and_then(|r| r["toolUseResult"]["plan"].as_str().map(String::from))
+            .filter(|p| !p.trim().is_empty());
+        let plan = approved.unwrap_or_else(|| input["plan"].as_str().unwrap_or("").to_string());
+        out["text"] = paged(&clean(&plan), offset);
+        out["tool_use_id"] = json!(tool_id);
         return out;
     }
     out["input"] = input_fields(&input);
@@ -1663,6 +1692,53 @@ mod tests {
             .iter()
             .map(|i| i.what.unwrap_or(i.kind))
             .collect::<Vec<_>>()
+    }
+
+    /// Found with the real Claude Code 2.1.325 on 16 Nov 2026: a second plan
+    /// was shown with the first plan's text. Claude Code keeps a plan in a
+    /// file and writes what the file held into the call's record; when the
+    /// plan is changed in the same step the record has the plan from
+    /// before, and the result of the approved call has the plan that was
+    /// approved. The shapes are that session's: the refusal of a plan sent
+    /// back from the Control Deck, the record with the old text, and its
+    /// result.
+    #[test]
+    fn an_approved_plan_is_shown_as_it_was_approved() {
+        let old = "## Plan: add a one-line README.md";
+        let new = "## Plan: add a two-line README.md";
+        let call = |id: &str, plan: &str| {
+            json!({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": id, "name": "ExitPlanMode", "input": {"plan": plan, "planFilePath": "/home/ada/.claude/plans/p.md"}}]}})
+        };
+        let lines = [
+            json!({"type": "user", "message": {"role": "user", "content": "plan it"}}),
+            call("toolu_1", old),
+            json!({"type": "user", "toolDenialKind": "permission-rule",
+                "toolUseResult": "Error: PreToolUse:ExitPlanMode hook error: The owner read this plan in spandeck and did not approve it: keep planning, and do not start the work.",
+                "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "is_error": true,
+                    "content": "PreToolUse:ExitPlanMode hook error: The owner read this plan in spandeck and did not approve it: keep planning, and do not start the work."}]}}),
+            call("toolu_2", old),
+            json!({"type": "user", "toolUseResult": {"plan": new, "isAgent": false, "filePath": "/home/ada/.claude/plans/p.md"},
+                "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_2",
+                    "content": "User has approved your plan. You can now start coding."}]}}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        let (a, _dir) = following("claude", &text, usize::MAX);
+        let page = a.conversation("s1", Range::Tail, 200).unwrap();
+        let plans: Vec<_> = page
+            .items
+            .iter()
+            .filter(|i| i.kind == "plan")
+            .map(|i| (i.status.unwrap(), i.text.clone().unwrap()))
+            .collect();
+        assert_eq!(
+            plans,
+            vec![("rejected", old.to_string()), ("approved", new.to_string())]
+        );
+        let approved = page.items.iter().rfind(|i| i.kind == "plan").unwrap();
+        let detail = a.conversation_detail("s1", &approved.id, 0).unwrap();
+        assert_eq!(detail["text"]["text"], new);
+        assert_eq!(detail["tool_use_id"], "toolu_2");
     }
 
     /// Phase M1: a Claude Code session file becomes the items the view

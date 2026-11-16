@@ -245,6 +245,12 @@ impl Daemon {
                 | EventKind::SessionEnd
         ) {
             self.questions_moot(p);
+            self.approvals_overtaken(p, None);
+        }
+        // A tool call that has run was allowed, here or in the terminal: a
+        // permission request still waiting for that call is over.
+        if ev.kind == EventKind::ToolEnd {
+            self.approvals_overtaken(p, ev.tool.as_ref());
         }
 
         if session_changed {
@@ -338,6 +344,33 @@ impl Daemon {
                 }
             }
             EventKind::PermissionRequest => {
+                // Claude Code asks permission for its own question and its
+                // own plan at the moment it shows them in the terminal
+                // (seen with 2.1.325 on 16 Nov 2026). That is not a thing
+                // to allow or deny: its answer is one of its choices. So it
+                // is never held as an approval, and the hook says nothing at
+                // once: the prompt in the terminal is the only one. (Before,
+                // it was listed as an approval for as long as it waited.)
+                let asks = ev
+                    .tool
+                    .as_ref()
+                    .and_then(|t| crate::questions::kind_of_tool(&t.name));
+                if let Some(kind) = asks {
+                    // The reason the station gave when it let the question
+                    // go to the terminal says more: it stays.
+                    let said = meta
+                        .needs_reason
+                        .as_deref()
+                        .is_some_and(crate::questions::says_in_terminal);
+                    if !(said && meta.state == AgentState::NeedsYou) {
+                        self.set_state(
+                            p,
+                            AgentState::NeedsYou,
+                            Some(crate::questions::in_terminal_words(kind).to_string()),
+                        );
+                    }
+                    return HookDecision::none();
+                }
                 let summary = ev
                     .tool
                     .as_ref()
@@ -426,6 +459,17 @@ impl Daemon {
             // holds it for the owner: the pane needs the owner, and this
             // hook does not say "working" over that (the two run side by
             // side, in either order).
+        } else if ev.kind == EventKind::Notification
+            && ev.state == Some(AgentState::NeedsYou)
+            && meta.state == AgentState::NeedsYou
+            && meta
+                .needs_reason
+                .as_deref()
+                .is_some_and(crate::questions::says_in_terminal)
+        {
+            // The agent's own notice that its prompt is up ("Claude needs
+            // your permission") arrives after the pane already says which
+            // prompt it is and why it is in the terminal: that says more.
         } else if let Some(state) = ev.state {
             // A turn that is being continued with mail is still working.
             let state = if decision.continue_with.is_some() {
@@ -609,6 +653,35 @@ impl Daemon {
             json!({"id": id, "status": status, "reason": reason, "saved": saved, "delivered": delivered}),
         );
         Ok(Answered { saved, delivered })
+    }
+
+    /// A permission request that still waits although what it was about
+    /// has been settled without it: the owner answered the agent's own
+    /// prompt in the terminal and the tool ran (`tool`), or the turn it
+    /// belonged to is over (None: all of the pane's). It leaves the list.
+    /// Found with the real Claude Code on 16 Nov 2026: such a request
+    /// stayed listed as waiting until its five minutes were over.
+    fn approvals_overtaken(&self, p: &PaneEntry, tool: Option<&spandeck_agents::ToolCall>) {
+        if !self.approvals.any_waiting() {
+            return;
+        }
+        let same = |r: &Value| {
+            let asked = &r["detail"]["tool"];
+            r["kind"] == "permission"
+                && tool.is_none_or(|t| {
+                    asked["name"].as_str() == Some(t.name.as_str())
+                        && asked["command"].as_str() == t.command.as_deref()
+                        && asked["file_path"].as_str() == t.file_path.as_deref()
+                })
+        };
+        for id in self.approvals.cancel_where(&p.id, now_ms(), same) {
+            self.emit(
+                "approval.resolved",
+                Some(&p.id),
+                None,
+                json!({"id": id, "status": "cancelled", "why": "settled in the terminal"}),
+            );
+        }
     }
 
     pub(crate) fn cancel_pane_approvals(&self, pane: &str) {
