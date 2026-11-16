@@ -11,6 +11,11 @@
 //! nothing is pressed, restart a station or drive a browser are in the
 //! merge tier (`--ignored`).
 
+// On Windows spandeck answers no review of hooks: it cannot tell there whose
+// the hooks are (`hookstrust::only_ours`), so these scenarios have nothing to
+// press. Found by running them on a Windows station, 16 Nov 2026.
+#![cfg(unix)]
+
 mod common;
 
 use std::path::{Path, PathBuf};
