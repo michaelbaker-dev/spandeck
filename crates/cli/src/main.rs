@@ -1220,45 +1220,20 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
 }
 
 /// `spandeck hook <agent>`: forward one hook payload to the daemon and print
-/// its decision. It must never break the agent: any failure is a silent pass.
+/// its decision (core/guard.rs, which also says what a hook does when the
+/// daemon stays away). The agent's timeout for this hook is in the
+/// environment when the installed command line says it.
 fn hook_main(paths: &Paths, agent: &str) -> i32 {
-    // Antigravity expects a JSON object from every hook, even one with
-    // nothing to say; the others expect silence.
-    let nothing = || {
-        if matches!(agent, "antigravity" | "agy") {
-            println!("{{}}");
-        }
-        0
-    };
-    // Outside a spandeck pane this is a no-op, so a global install is harmless.
-    if std::env::var_os("SPANDECK_PANE").is_none() || std::env::var_os("SPANDECK_TOKEN").is_none() {
-        return nothing();
-    }
     let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() {
-        return nothing();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    let deadline = std::env::var(spandeck_agents::install::DEADLINE_ENV)
+        .ok()
+        .and_then(|secs| secs.trim().parse::<u64>().ok());
+    let reply = spandeck_core::guard::run(paths, agent, deadline, &input);
+    if !reply.stdout.is_empty() {
+        println!("{}", reply.stdout);
     }
-    let Ok(payload) = serde_json::from_str::<Value>(&input) else {
-        return nothing();
-    };
-    // A daemon that is starting again is waited for, for three seconds: it
-    // restores its panes before it listens, so a restored agent's first
-    // hook arrives too early. After that, silence, as before.
-    let Ok(mut client) = Client::from_env_waiting(paths, spandeck_core::client::HOOK_WAIT) else {
-        return nothing();
-    };
-    // A permission request may wait minutes for an answer from the phone.
-    client.set_timeout(Some(Duration::from_secs(400)));
-    match client.call("hook.ingest", json!({"agent": agent, "payload": payload})) {
-        Ok(reply) => {
-            match reply["stdout"].as_str().filter(|s| !s.is_empty()) {
-                Some(out) => println!("{out}"),
-                None => return nothing().max(reply["exit_code"].as_i64().unwrap_or(0) as i32),
-            }
-            reply["exit_code"].as_i64().unwrap_or(0) as i32
-        }
-        Err(_) => nothing(),
-    }
+    reply.exit_code
 }
 
 /// `spandeck service --stop`. Windows: the daemon has no console and no

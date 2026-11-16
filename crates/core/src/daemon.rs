@@ -15,7 +15,7 @@ use spandeck_terminal::{
     sys, ExitInfo, InputKind, Item, Mark, Pane, PaneEvent, PaneHandoff, ScreenInfo, Signal,
     SpawnSpec,
 };
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc};
 
 use crate::db::Db;
 use crate::paths::{new_id, now_ms, random_token, Config, Paths};
@@ -357,7 +357,8 @@ pub struct Inner {
     pub exe: PathBuf,
     pub home: PathBuf,
     pub(crate) msg_tx: mpsc::UnboundedSender<PaneMsg>,
-    pub(crate) approvals: Mutex<HashMap<String, oneshot::Sender<ApprovalAnswer>>>,
+    /// What agents asked the owner, and the hooks waiting for an answer.
+    pub(crate) approvals: crate::approvals::ApprovalBook,
     /// client id -> last input time: who is "at a keyboard".
     pub(crate) presence: Mutex<HashMap<String, u64>>,
     /// When each client last had its typing into a pane written to the log.
@@ -516,6 +517,7 @@ impl Daemon {
                 &cfg.station,
             )),
             rids: crate::rids::Rids::new(db.clone()),
+            approvals: crate::approvals::ApprovalBook::new(db.clone(), &cfg.station),
             trust,
             stops: crate::stops::StopsState::new(db.clone(), &cfg.station),
             paths,
@@ -530,7 +532,6 @@ impl Daemon {
             exe,
             home,
             msg_tx,
-            approvals: Mutex::new(HashMap::new()),
             presence: Mutex::new(HashMap::new()),
             typed: Mutex::new(HashMap::new()),
             keep_awake: Mutex::new(None),
@@ -638,6 +639,14 @@ impl Daemon {
                 }
             });
         }
+        // An approval that was waiting when the last daemon went is left
+        // for its hook to find again (approvals.rs). One whose hook has
+        // not come back by now never will: it leaves the list.
+        let d = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(crate::approvals::REATTACH_WAIT).await;
+            d.expire_detached_approvals();
+        });
         // Stops that wait for a station: a task of their own, so a slow
         // tick cannot hold one up. Every two seconds, and at once when the
         // list of stations changes (a station that was away is back).
@@ -718,6 +727,11 @@ impl Daemon {
         let d = self.clone();
         spawn(&self.perf, local("upkeep", 10_000), move |n| {
             d.restore_alive();
+            // Each pane's guard, on a thread of its own (it reads the
+            // orders files): what a hook does while this daemon is away,
+            // and by its age, for how long it has been (guard.rs).
+            let g = d.clone();
+            tokio::task::spawn_blocking(move || g.guards_refresh());
             if n % 6 == 1 {
                 d.prices_refresh();
             }
@@ -803,6 +817,8 @@ impl Daemon {
         // For the next start: when this one was last running.
         if n % 20 == 3 {
             self.restore_alive();
+            let g = self.clone();
+            tokio::task::spawn_blocking(move || g.guards_refresh());
         }
         if n % 1200 == 40 {
             self.prune_ended();
@@ -1227,6 +1243,9 @@ impl Daemon {
         panes.insert(id.clone(), entry.clone());
         drop(panes);
         self.save_pane(&entry);
+        // What its hooks do if this daemon is away (guard.rs): written
+        // before the agent can have made its first tool call.
+        self.guard_write(&entry);
         let m = entry.meta();
         self.record(
             "pane.created",

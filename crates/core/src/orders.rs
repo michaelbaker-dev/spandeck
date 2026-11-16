@@ -248,9 +248,9 @@ impl Daemon {
         let meta = p.meta();
         let (orders, problems) = self.orders_for(&meta);
         let caps = adapter(meta.agent).map(|a| a.capabilities());
-        let can_block = caps
-            .as_ref()
-            .is_some_and(|c| c.block_tools && c.verified && meta.agent.is_agent());
+        // The one answer to "can a rule be enforced on this pane", also
+        // written into the pane's guard for its hooks (guard.rs).
+        let can_block = Self::can_block(&meta);
         let list: Vec<Value> = orders
             .iter()
             .map(|o| {

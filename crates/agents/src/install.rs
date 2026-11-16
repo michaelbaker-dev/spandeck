@@ -14,7 +14,18 @@ use serde_json::{json, Map, Value};
 use crate::AgentKind;
 
 /// Bump when the set of hooked events or the command line changes.
-pub const HOOKS_VERSION: u32 = 1;
+/// 2 (16 Nov 2026): a hook that can block is given 75 seconds and told so.
+pub const HOOKS_VERSION: u32 = 2;
+/// How the hook command is told how long its agent gives it (seconds): in
+/// its environment, set by the installed command line itself. Not an
+/// argument: a `spandeck` from before this (after going back a version)
+/// would refuse an argument it does not know and exit 2, which Claude Code
+/// and Codex read as "block this tool call"; a variable it ignores.
+pub const DEADLINE_ENV: &str = "SPANDECK_HOOK_DEADLINE";
+/// What a tool-call hook is given since version 2 of the entries. Before:
+/// 10 seconds, which a session started before the update keeps.
+pub const TOOL_HOOK_SECS: u64 = 75;
+pub const PERMISSION_HOOK_SECS: u64 = 330;
 const MARKER: &str = "# spandeck-managed v";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,14 +42,19 @@ pub struct Status {
 fn events(kind: AgentKind) -> &'static [(&'static str, u64)] {
     // (event, timeout seconds). PermissionRequest holds while a remote answer
     // is awaited; the daemon gives up first and the terminal prompt appears.
+    // PreToolUse is where a rule is enforced: it is given long enough to
+    // wait for a spandeckd that is away for a minute and still answer
+    // (core/guard.rs). Both agents' documentation says a hook that reaches
+    // its timeout is cancelled and the tool call goes ahead, so the hook
+    // must answer before it.
     match kind {
         AgentKind::Claude => &[
             ("SessionStart", 10),
             ("UserPromptSubmit", 10),
-            ("PreToolUse", 10),
+            ("PreToolUse", TOOL_HOOK_SECS),
             ("PostToolUse", 10),
             ("PostToolUseFailure", 10),
-            ("PermissionRequest", 330),
+            ("PermissionRequest", PERMISSION_HOOK_SECS),
             ("Notification", 10),
             ("Stop", 10),
             ("StopFailure", 10),
@@ -51,9 +67,9 @@ fn events(kind: AgentKind) -> &'static [(&'static str, u64)] {
         AgentKind::Codex => &[
             ("SessionStart", 10),
             ("UserPromptSubmit", 10),
-            ("PreToolUse", 10),
+            ("PreToolUse", TOOL_HOOK_SECS),
             ("PostToolUse", 10),
-            ("PermissionRequest", 330),
+            ("PermissionRequest", PERMISSION_HOOK_SECS),
             ("Stop", 10),
             ("Interrupt", 1),
             ("SubagentStart", 10),
@@ -73,20 +89,46 @@ fn takes_matcher(event: &str) -> bool {
     )
 }
 
-fn hook_command(kind: AgentKind, bin: &str, windows: bool) -> String {
+/// Can the agent wait on this hook's answer before it acts? Those hooks
+/// are told their timeout, so that they answer before it.
+pub fn blocking(event: &str) -> bool {
+    matches!(event, "PreToolUse" | "PermissionRequest")
+}
+
+/// The timeout the entries of this version give an agent's hook, in
+/// seconds: what a session started with them will wait.
+pub fn timeout_secs(kind: AgentKind, event: &str) -> Option<u64> {
+    let kind = if kind == AgentKind::Fake {
+        AgentKind::Claude
+    } else {
+        kind
+    };
+    events(kind)
+        .iter()
+        .find(|(e, _)| *e == event)
+        .map(|(_, secs)| *secs)
+}
+
+fn hook_command(kind: AgentKind, bin: &str, windows: bool, deadline: Option<u64>) -> String {
     if windows {
         // PowerShell: `&` runs a quoted path, a quote inside single quotes
         // is doubled, and `#` starts a comment as it does in sh.
+        let told = deadline
+            .map(|secs| format!("$env:{DEADLINE_ENV}='{secs}'; "))
+            .unwrap_or_default();
         return format!(
-            "& '{}' hook {} {}{}",
+            "{told}& '{}' hook {} {}{}",
             bin.replace('\'', "''"),
             kind.as_str(),
             MARKER,
             HOOKS_VERSION
         );
     }
+    let told = deadline
+        .map(|secs| format!("{DEADLINE_ENV}={secs} "))
+        .unwrap_or_default();
     format!(
-        "'{}' hook {} {}{}",
+        "{told}'{}' hook {} {}{}",
         bin.replace('\'', "'\\''"),
         kind.as_str(),
         MARKER,
@@ -100,9 +142,9 @@ fn hook_command(kind: AgentKind, bin: &str, windows: bool) -> String {
 /// in both, so the entry names PowerShell, which every Windows has. Codex
 /// documents no way to name the shell there: the same line is written and
 /// is unverified (DECISIONS.md, "Windows").
-fn hook_entry(kind: AgentKind, bin: &str, timeout: u64, windows: bool) -> Value {
-    let mut entry =
-        json!({"type": "command", "command": hook_command(kind, bin, windows), "timeout": timeout});
+fn hook_entry(kind: AgentKind, bin: &str, event: &str, timeout: u64, windows: bool) -> Value {
+    let deadline = blocking(event).then_some(timeout);
+    let mut entry = json!({"type": "command", "command": hook_command(kind, bin, windows, deadline), "timeout": timeout});
     if windows && kind == AgentKind::Claude {
         entry["shell"] = json!("powershell");
     }
@@ -124,7 +166,7 @@ fn hooks_block_for(kind: AgentKind, bin: &str, windows: bool) -> Value {
         }
         group.insert(
             "hooks".into(),
-            json!([hook_entry(kind, bin, *timeout, windows)]),
+            json!([hook_entry(kind, bin, event, *timeout, windows)]),
         );
         hooks.insert(event.to_string(), json!([Value::Object(group)]));
     }
@@ -305,7 +347,7 @@ mod tests {
         assert_eq!(
             command,
             format!(
-                r"& 'C:\Users\Mary O''Neil\AppData\Local\Programs\spandeck\spandeck.exe' hook claude # spandeck-managed v{HOOKS_VERSION}"
+                r"$env:SPANDECK_HOOK_DEADLINE='75'; & 'C:\Users\Mary O''Neil\AppData\Local\Programs\spandeck\spandeck.exe' hook claude # spandeck-managed v{HOOKS_VERSION}"
             )
         );
         assert!(is_ours(entry));
@@ -373,6 +415,59 @@ mod tests {
         fs::write(&path, "{ not json").unwrap();
         assert!(install(AgentKind::Claude, home.path(), "spandeck").is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "{ not json");
+    }
+
+    /// REVIEW2 blocker 8: PreToolUse was installed with a 10 second
+    /// timeout, so a hook that waits for spandeckd and then refuses never
+    /// got to refuse: the agent cancels it first and runs the tool. The
+    /// entry gives it 75 seconds and the command tells the hook so; a hook
+    /// that cannot block is told nothing. The variable is set by the
+    /// command line, never passed as an argument: a `spandeck` from before
+    /// this would exit 2 on an argument it does not know, and exit 2
+    /// blocks the tool call.
+    #[test]
+    fn a_hook_that_can_block_is_given_time_and_told_how_much() {
+        for kind in [AgentKind::Claude, AgentKind::Codex] {
+            let block = hooks_block_for(kind, "/usr/local/bin/spandeck", false);
+            let entry = |event: &str| block[event][0]["hooks"][0].clone();
+            assert_eq!(entry("PreToolUse")["timeout"], 75);
+            assert_eq!(
+                entry("PreToolUse")["command"],
+                format!(
+                    "SPANDECK_HOOK_DEADLINE=75 '/usr/local/bin/spandeck' hook {} # spandeck-managed v2",
+                    kind.as_str()
+                )
+            );
+            assert_eq!(entry("PermissionRequest")["timeout"], 330);
+            assert!(entry("PermissionRequest")["command"]
+                .as_str()
+                .unwrap()
+                .starts_with("SPANDECK_HOOK_DEADLINE=330 '"));
+            assert_eq!(
+                entry("PostToolUse")["command"],
+                format!(
+                    "'/usr/local/bin/spandeck' hook {} # spandeck-managed v2",
+                    kind.as_str()
+                )
+            );
+            for event in ["PreToolUse", "PermissionRequest", "Stop"] {
+                let e = entry(event);
+                assert!(is_ours(&e));
+                assert_eq!(marker_version(e["command"].as_str().unwrap()), Some(2));
+                assert_eq!(timeout_secs(kind, event), e["timeout"].as_u64());
+            }
+        }
+        // Version 1's entries are found again, as outdated, and replaced.
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".claude/settings.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"'/usr/local/bin/spandeck' hook claude # spandeck-managed v1","timeout":10}]}]}}"#).unwrap();
+        assert!(status(AgentKind::Claude, home.path()).unwrap().outdated);
+        let st = install(AgentKind::Claude, home.path(), "/usr/local/bin/spandeck").unwrap();
+        assert!(st.installed && !st.outdated);
+        let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(after["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"], 75);
     }
 
     #[test]

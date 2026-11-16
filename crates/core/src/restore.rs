@@ -447,6 +447,12 @@ impl Daemon {
             .set_push(self.flag_on(crate::relay::SWITCH, true));
     }
 
+    /// `hooks_when_down` is read by a hook while this daemon is away, so
+    /// it is written into every pane's guard (guard.rs).
+    fn flags_told(&self) {
+        self.guards_refresh();
+    }
+
     /// A switch as it stands now, if the config or the owner set it.
     pub fn flag(&self, name: &str) -> Option<Value> {
         self.restore.flags.read().unwrap().get(name).cloned()
@@ -500,6 +506,7 @@ impl Daemon {
         }
         self.db.kv_set(KV_FLAGS, &json!(mine).to_string());
         self.flags_load();
+        self.flags_told();
         self.record(
             "station.flags",
             None,
@@ -859,7 +866,9 @@ impl Daemon {
     /// After a restart: an approval that was waiting has nobody waiting for
     /// its answer when its agent's program went with the daemon. It is
     /// expired, so it leaves every list. One whose pane was kept alive
-    /// (`kept`) is left as it is. Returns how many.
+    /// (`kept`) is left for its hook to find again; if none has come back
+    /// a while later it is expired then (`expire_detached_approvals`).
+    /// Returns how many.
     pub(crate) fn expire_ghost_approvals(&self, kept: &[String]) -> usize {
         let waiting: Vec<(String, String)> = self
             .db
@@ -896,27 +905,6 @@ impl Daemon {
             None,
             json!({"id": id, "status": "expired", "why": "restart"}),
         );
-    }
-
-    /// The owner answered an approval nobody is waiting on: its pane was
-    /// kept through a restart, but the hook that asked was cut off, and the
-    /// agent went on to ask in its own terminal. It cannot be answered, so
-    /// it is expired and leaves the list instead of staying for ever. The
-    /// pane's state is not changed: the agent may well still be asking.
-    pub(crate) fn expire_unanswerable(&self, id: &str) {
-        let pane: Option<String> = self
-            .db
-            .read(|c| {
-                c.query_row(
-                    "SELECT pane FROM approvals WHERE id=?1 AND status='pending'",
-                    [id],
-                    |r| r.get(0),
-                )
-            })
-            .ok();
-        if let Some(pane) = pane {
-            self.expire_approval(id, &pane);
-        }
     }
 
     // --------------------------------------------------------------- report

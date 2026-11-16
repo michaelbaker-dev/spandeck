@@ -1113,13 +1113,16 @@ impl Daemon {
                         &id,
                         s(&params, "agent")?,
                         params.get("payload").cloned().unwrap_or(Value::Null),
+                        // The hook's own id for this firing: what it asks
+                        // the owner is found again by it (approvals.rs).
+                        opt(&params, "hook_id"),
                     )
                     .await?;
                 json!(reply)
             }
             "approval.list" => json!(self.approvals(!flag(&params, "all"))),
             "approval.answer" => {
-                let saved = self.answer_approval(
+                let done = self.answer_approval(
                     s(&params, "id")?,
                     params
                         .get("allow")
@@ -1130,7 +1133,13 @@ impl Daemon {
                 )?;
                 // `saved: false`: the agent has its answer; who gave it is
                 // held in memory until the database can be written.
-                json!({"ok": true, "saved": saved})
+                // `delivered: false`: the agent's hook is not connected at
+                // this moment; it is given the answer when it is back.
+                let mut out = json!({"ok": true, "saved": done.saved, "delivered": done.delivered});
+                if !done.delivered {
+                    out["note"] = json!(crate::approvals::RECORDED);
+                }
+                out
             }
             "integration.status" => json!([AgentKind::Claude, AgentKind::Codex]
                 .iter()

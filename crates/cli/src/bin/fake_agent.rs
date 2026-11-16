@@ -20,6 +20,10 @@
 //!   {"transcript": {…}}                  append a line to the session file
 //!   {"repeat": n, "steps": [...]}
 //!   {"exit": code}
+//! Beside the steps, `"hook_deadline"`: how long this agent gives a hook
+//! that can block, in seconds, and tells it (default: what spandeck
+//! installs now, 75 for a tool call); `"old"`: 10 seconds and the hook is
+//! told nothing, as in a session started before 16 Nov 2026.
 //! After the steps it idles at a prompt; each input line runs `on_input`.
 
 use std::io::{Read, Write};
@@ -38,6 +42,8 @@ struct Agent {
     input: Receiver<u8>,
     round: usize,
     interrupted: bool,
+    /// The script's `hook_deadline`.
+    hook_deadline: Value,
 }
 
 fn out(s: &str) {
@@ -49,15 +55,8 @@ fn out(s: &str) {
 
 impl Agent {
     fn rpc(&self, method: &str, params: Value) -> Result<Value, String> {
-        // A hook waits for a daemon that is starting, exactly as
-        // `spandeck hook` does (it is what this stands in for); a tool
-        // call does not.
-        let wait = if method == "hook.ingest" {
-            spandeck_core::client::HOOK_WAIT
-        } else {
-            Duration::ZERO
-        };
-        let mut c = Client::from_env_waiting(&self.paths, wait).map_err(|e| e.to_string())?;
+        let mut c =
+            Client::from_env_waiting(&self.paths, Duration::ZERO).map_err(|e| e.to_string())?;
         c.set_timeout(Some(Duration::from_secs(400)));
         c.call(method, params).map_err(|e| e.to_string())
     }
@@ -69,16 +68,22 @@ impl Agent {
         obj.insert("session_id".into(), json!(self.session));
         obj.insert("transcript_path".into(), json!(self.transcript));
         obj.insert("cwd".into(), json!(self.cwd));
-        match self.rpc("hook.ingest", json!({"agent": "fake", "payload": extra})) {
-            Ok(reply) => reply["stdout"]
-                .as_str()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or(Value::Null),
-            Err(e) => {
-                out(&format!("[fake] hook error: {e}"));
-                Value::Null
-            }
+        // The hook itself is `spandeck hook`'s own code (core/guard.rs):
+        // what it does while the daemon is away is what a real agent's
+        // hook does. What a real agent adds is its timeout, which this
+        // one only tells the hook.
+        use spandeck_agents::{install, AgentKind};
+        let deadline = match &self.hook_deadline {
+            Value::String(old) if old == "old" => None,
+            Value::Number(secs) if event == "PreToolUse" => secs.as_u64(),
+            _ => install::timeout_secs(AgentKind::Fake, event).filter(|_| install::blocking(event)),
+        };
+        let (reply, outcome) =
+            spandeck_core::guard::run_told(&self.paths, "fake", deadline, &extra.to_string());
+        if let spandeck_core::guard::Outcome::Unanswered(why) = outcome {
+            out(&format!("[fake] hook error: {why}"));
         }
+        serde_json::from_str(&reply.stdout).unwrap_or(Value::Null)
     }
 
     fn show_context(reply: &Value) {
@@ -381,6 +386,7 @@ fn main() {
         input: rx,
         round,
         interrupted: false,
+        hook_deadline: script["hook_deadline"].clone(),
     };
 
     match &resume {

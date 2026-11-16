@@ -145,6 +145,21 @@ impl Paths {
     pub fn orders_file(&self) -> PathBuf {
         self.config_dir.join("orders.toml")
     }
+    /// Where each pane's guard is kept: what its hooks do while the
+    /// daemon is away (guard.rs).
+    pub fn guard_dir(&self) -> PathBuf {
+        self.state_dir.join("panes")
+    }
+    /// A pane's guard. The pane's id comes from a hook's environment: it
+    /// is cut to letters, digits, `-` and `_`, so it is never a path.
+    pub fn guard_file(&self, pane: &str) -> PathBuf {
+        let name: String = pane
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            .take(96)
+            .collect();
+        self.guard_dir().join(format!("{name}.guard"))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

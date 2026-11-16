@@ -11,18 +11,32 @@ use serde_json::{json, Value};
 use spandeck_agents::{
     adapter, AgentEvent, AgentKind, AgentState, EventKind, HookDecision, HookReply,
 };
-use tokio::sync::oneshot;
 
+use crate::approvals::{Answer, Asked};
 use crate::daemon::{invalid, ApprovalAnswer, Daemon, PaneEntry, PaneMeta, Result, TurnStats};
-use crate::db::Op;
-use crate::paths::{new_id, now_ms};
+use crate::paths::now_ms;
+
+/// What answering an approval came to, for whoever answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Answered {
+    /// The answer is in the database (false: held in memory, and written
+    /// when the database takes it).
+    pub saved: bool,
+    /// The hook that asked has the answer. False: it is not connected at
+    /// this moment, and will be given the answer when it is back.
+    pub delivered: bool,
+}
 
 impl Daemon {
+    /// `hook_id`: the id the hook made for this one firing, sent again with
+    /// every try. What it asks the owner is found again by it after the
+    /// connection was lost (approvals.rs).
     pub async fn hook_ingest(
         &self,
         pane_id: &str,
         vendor: &str,
         payload: Value,
+        hook_id: Option<&str>,
     ) -> Result<HookReply> {
         let p = self.pane(pane_id)?;
         let kind =
@@ -87,14 +101,24 @@ impl Daemon {
                 );
             }
         }
-        let decision = self.apply_agent_event(&p, &ev).await;
+        let decision = self.apply_hook_event(&p, &ev, hook_id).await;
         Ok(a.reply(&ev.raw_event, &decision))
     }
 
     /// Apply a normalized event to a pane and decide what to tell the agent.
     /// Hook-driven and API-driven agents both end up here.
-    #[allow(clippy::collapsible_match)]
     pub async fn apply_agent_event(&self, p: &PaneEntry, ev: &AgentEvent) -> HookDecision {
+        self.apply_hook_event(p, ev, None).await
+    }
+
+    /// `apply_agent_event`, for an event a hook sent under an id of its own.
+    #[allow(clippy::collapsible_match)]
+    pub async fn apply_hook_event(
+        &self,
+        p: &PaneEntry,
+        ev: &AgentEvent,
+        hook_id: Option<&str>,
+    ) -> HookDecision {
         let now = now_ms();
         let mut stuck: Option<String> = None;
         let (meta, session_changed) = {
@@ -315,7 +339,7 @@ impl Daemon {
                     Some(format!("wants to run {summary}")),
                 );
                 let answer = self
-                    .request_approval(p, "permission", &summary, json!({"tool": ev.tool}))
+                    .request_approval(p, "permission", &summary, json!({"tool": ev.tool}), hook_id)
                     .await;
                 return match answer {
                     Some(ApprovalAnswer { allow: true, .. }) => {
@@ -395,160 +419,162 @@ impl Daemon {
     // -------------------------------------------------------------- approvals
 
     /// Ask the user, wherever they are. None when nobody answered in time.
+    ///
+    /// `hook_id`: the id of the hook that asks, when it sent one. A hook
+    /// that lost its connection while it waited (the daemon was upgraded,
+    /// started again, or ended) asks again with the same id and waits on
+    /// the same approval, or is given the answer the owner gave meanwhile.
     pub async fn request_approval(
         &self,
         p: &PaneEntry,
         kind: &str,
         summary: &str,
         detail: Value,
+        hook_id: Option<&str>,
     ) -> Option<ApprovalAnswer> {
         let meta = p.meta();
-        let id = new_id("a");
-        let (tx, rx) = oneshot::channel();
-        self.approvals.lock().unwrap().insert(id.clone(), tx);
-        // The hook does not wait for the database: the request is listed
-        // from memory until its row is written (db.rs).
-        self.db.put(Op::ApprovalNew {
-            id: id.clone(),
-            ts: now_ms() as i64,
-            pane: p.id.clone(),
-            project: meta.project.clone(),
-            kind: kind.to_string(),
-            summary: summary.to_string(),
-            detail: detail.to_string(),
-        });
-        self.record(
-            "approval.requested",
-            Some(&p.id),
+        let asked = self.approvals.ask(
+            &p.id,
             meta.project.as_deref(),
-            meta.task.as_deref(),
-            None,
-            json!({"id": id, "kind": kind, "summary": summary, "pane_name": meta.name}),
-        );
-        self.notify(
-            "approval",
-            Some(&p.id),
-            meta.project.as_deref(),
-            &format!("{} needs approval", meta.name),
+            kind,
             summary,
+            detail,
+            hook_id,
+            now_ms(),
+            Duration::from_secs(self.cfg.approval_timeout_secs),
         );
+        let (id, waiter, rx, left, new) = match asked {
+            Asked::Wait {
+                id,
+                waiter,
+                rx,
+                left,
+                new,
+            } => (id, waiter, rx, left, new),
+            Asked::Answered { id, answer } => {
+                self.record(
+                    "approval.collected",
+                    Some(&p.id),
+                    meta.project.as_deref(),
+                    meta.task.as_deref(),
+                    None,
+                    json!({"id": id, "allow": answer.allow}),
+                );
+                return Some(answer);
+            }
+            Asked::Gone => return None,
+        };
+        if new {
+            self.record(
+                "approval.requested",
+                Some(&p.id),
+                meta.project.as_deref(),
+                meta.task.as_deref(),
+                None,
+                json!({"id": id, "kind": kind, "summary": summary, "pane_name": meta.name}),
+            );
+            self.notify(
+                "approval",
+                Some(&p.id),
+                meta.project.as_deref(),
+                &format!("{} needs approval", meta.name),
+                summary,
+            );
+        } else {
+            // The same approval, waited on again: nobody is told twice.
+            self.record(
+                "approval.reattached",
+                Some(&p.id),
+                meta.project.as_deref(),
+                meta.task.as_deref(),
+                None,
+                json!({"id": id}),
+            );
+        }
         if let Some(task) = &meta.task {
             self.task_follow(task, "running", None);
             self.task_follow(task, "waiting_for_approval", Some(summary));
         }
-        let answer =
-            tokio::time::timeout(Duration::from_secs(self.cfg.approval_timeout_secs), rx).await;
-        self.approvals.lock().unwrap().remove(&id);
+        let answer = tokio::time::timeout(left, rx).await;
         if let Some(task) = &meta.task {
             self.task_follow(task, "running", None);
         }
         match answer {
             Ok(Ok(a)) => Some(a),
             _ => {
-                self.db.put(Op::ApprovalStatus {
-                    id: id.clone(),
-                    status: "expired".into(),
-                    at: now_ms() as i64,
-                    by: None,
-                    reason: None,
-                    only_pending: true,
-                });
-                self.emit(
-                    "approval.resolved",
-                    Some(&p.id),
-                    None,
-                    json!({"id": id, "status": "expired"}),
-                );
+                // Its time ran out with this hook still the one waiting.
+                // (Not when the hook was replaced by itself coming back,
+                // or the pane's approvals were cancelled.)
+                if self.approvals.finish(&id, waiter) {
+                    self.approvals.expire(&id, now_ms());
+                    self.emit(
+                        "approval.resolved",
+                        Some(&p.id),
+                        None,
+                        json!({"id": id, "status": "expired"}),
+                    );
+                }
                 None
             }
         }
     }
 
-    /// Returns whether the answer is saved: false when the database could
-    /// not be written within a second (the agent has its answer all the
-    /// same, and the row is written when it can be).
+    /// The owner's answer. The hook that waits is answered at once and
+    /// never waits for the database. One whose hook is not connected at
+    /// this moment (the station has just started again and the agent's
+    /// hook is finding its way back) has the answer kept for it:
+    /// `delivered` is then false.
     pub fn answer_approval(
         &self,
         id: &str,
         allow: bool,
         reason: Option<String>,
         by: &str,
-    ) -> Result<bool> {
-        let tx = self.approvals.lock().unwrap().remove(id);
-        let Some(tx) = tx else {
-            // Still listed as waiting with nobody waiting for it: it leaves
-            // the list now, instead of staying there for ever.
-            self.expire_unanswerable(id);
-            return Err(invalid(
-                "that request is no longer waiting (answered, expired, or the agent moved on)",
-            ));
-        };
+    ) -> Result<Answered> {
         let status = if allow { "allowed" } else { "denied" };
-        let pane = self.approval_pane(id);
-        // The agent is answered first, and at once: it never waits for the
-        // database, and neither does a second answer find it still waiting.
-        let _ = tx.send(ApprovalAnswer {
-            allow,
-            reason: reason.clone(),
-        });
-        // Who answered, and what: kept until it is written, and listed from
-        // memory meanwhile. The owner is told when it is not saved yet.
-        let saved = self.db.write_ack(Op::ApprovalStatus {
-            id: id.to_string(),
-            status: status.to_string(),
-            at: now_ms() as i64,
-            by: Some(by.to_string()),
-            reason: reason.clone(),
-            only_pending: false,
-        });
+        let alive = |pane: &str| {
+            self.pane(pane)
+                .is_ok_and(|p| p.meta.lock().unwrap().exit.is_none())
+        };
+        let (pane, delivered) =
+            match self
+                .approvals
+                .answer(id, allow, reason.clone(), by, now_ms(), alive)
+            {
+                Answer::Delivered { pane } => (pane, true),
+                Answer::Recorded { pane } => (Some(pane), false),
+                Answer::NotWaiting { expired } => {
+                    // Still listed as waiting with nobody who can come back
+                    // for it: it has left the list now, instead of staying
+                    // there for ever.
+                    if let Some(pane) = expired {
+                        self.emit(
+                            "approval.resolved",
+                            Some(&pane),
+                            None,
+                            json!({"id": id, "status": "expired", "why": "restart"}),
+                        );
+                    }
+                    return Err(invalid(
+                    "that request is no longer waiting (answered, expired, or the agent moved on)",
+                ));
+                }
+            };
+        // The owner is told when it is not saved yet.
+        let saved = self.approvals.saved(id);
         self.record(
             "approval.resolved",
             pane.as_deref(),
             None,
             None,
             Some(by),
-            json!({"id": id, "status": status, "reason": reason, "saved": saved}),
+            json!({"id": id, "status": status, "reason": reason, "saved": saved, "delivered": delivered}),
         );
-        Ok(saved)
-    }
-
-    /// The pane an approval is for: from its row, or from the request that
-    /// is not written yet.
-    fn approval_pane(&self, id: &str) -> Option<String> {
-        self.db
-            .pending()
-            .into_iter()
-            .find_map(|op| match op {
-                Op::ApprovalNew { id: new, pane, .. } if new == id => Some(pane),
-                _ => None,
-            })
-            .or_else(|| {
-                self.db
-                    .read(|c| {
-                        c.query_row("SELECT pane FROM approvals WHERE id=?1", [id], |r| r.get(0))
-                    })
-                    .ok()
-            })
+        Ok(Answered { saved, delivered })
     }
 
     pub(crate) fn cancel_pane_approvals(&self, pane: &str) {
-        let ids: Vec<String> = self
-            .approvals(true)
-            .iter()
-            .filter(|a| a["pane"] == pane)
-            .filter_map(|a| a["id"].as_str().map(String::from))
-            .collect();
-        for id in ids {
-            // Dropping the sender makes the waiting hook fall through.
-            self.approvals.lock().unwrap().remove(&id);
-            self.db.put(Op::ApprovalStatus {
-                id: id.clone(),
-                status: "cancelled".into(),
-                at: now_ms() as i64,
-                by: None,
-                reason: None,
-                only_pending: true,
-            });
+        for id in self.approvals.cancel_pane(pane, now_ms()) {
             self.emit(
                 "approval.resolved",
                 Some(pane),
@@ -558,94 +584,23 @@ impl Daemon {
         }
     }
 
-    /// What the database does not have yet is laid over what it gave, so
-    /// an approval just asked for is listed and one just answered never
-    /// shows as waiting again (db.rs).
-    pub(crate) fn approvals_overlaid(
-        &self,
-        mut rows: Vec<Value>,
-        pending_only: bool,
-    ) -> Vec<Value> {
-        for op in self.db.pending() {
-            match op {
-                Op::ApprovalNew {
-                    id,
-                    ts,
-                    pane,
-                    project,
-                    kind,
-                    summary,
-                    detail,
-                } => {
-                    if !rows.iter().any(|r| r["id"] == id.as_str()) {
-                        rows.insert(
-                            0,
-                            json!({
-                                "id": id, "ts": ts, "pane": pane, "project": project,
-                                "kind": kind, "summary": summary,
-                                "detail": serde_json::from_str::<Value>(&detail).unwrap_or(Value::Null),
-                                "status": "pending", "answered_by": null, "reason": null,
-                                "station": self.station,
-                            }),
-                        );
-                    }
-                }
-                Op::ApprovalStatus {
-                    id,
-                    status,
-                    by,
-                    reason,
-                    only_pending,
-                    ..
-                } => {
-                    if let Some(r) = rows.iter_mut().find(|r| r["id"] == id.as_str()) {
-                        if !only_pending || r["status"] == "pending" {
-                            r["status"] = json!(status);
-                            r["answered_by"] = json!(by);
-                            r["reason"] = json!(reason);
-                            // Held in memory: lost if this station ends
-                            // before it is written.
-                            r["saved"] = json!(false);
-                        }
-                    }
-                }
-                _ => {}
-            }
+    /// A while after a start: the approvals whose hook did not come back
+    /// (its agent went with the daemon, or gave up) leave the list.
+    pub(crate) fn expire_detached_approvals(&self) -> usize {
+        let gone = self.approvals.expire_detached(now_ms());
+        for (id, pane) in &gone {
+            self.emit(
+                "approval.resolved",
+                Some(pane),
+                None,
+                json!({"id": id, "status": "expired", "why": "restart"}),
+            );
         }
-        if pending_only {
-            rows.retain(|r| r["status"] == "pending");
-        }
-        rows.sort_by_key(|r| std::cmp::Reverse(r["ts"].as_i64().unwrap_or(0)));
-        rows
+        gone.len()
     }
 
     pub fn approvals(&self, pending_only: bool) -> Vec<Value> {
-        // An answer that is not written yet may be for a row that still
-        // reads as waiting: every row is read then, and the waiting ones
-        // are picked after what is unwritten is laid over them.
-        let unwritten = self.db.stats().waiting > 0;
-        let rows = self
-            .db
-            .read(|c| {
-                let mut stmt = c.prepare(
-                    "SELECT id,ts,pane,project,kind,summary,detail,status,answered_by,reason FROM approvals
-                     WHERE (?1=0 OR status='pending') ORDER BY ts DESC LIMIT 200",
-                )?;
-                let rows = stmt.query_map([(pending_only && !unwritten) as i64], |r| {
-                    let detail: String = r.get(6)?;
-                    Ok(json!({
-                        "id": r.get::<_, String>(0)?, "ts": r.get::<_, i64>(1)?,
-                        "pane": r.get::<_, String>(2)?, "project": r.get::<_, Option<String>>(3)?,
-                        "kind": r.get::<_, String>(4)?, "summary": r.get::<_, String>(5)?,
-                        "detail": serde_json::from_str::<Value>(&detail).unwrap_or(Value::Null),
-                        "status": r.get::<_, String>(7)?, "answered_by": r.get::<_, Option<String>>(8)?,
-                        "reason": r.get::<_, Option<String>>(9)?, "station": self.station,
-                    }))
-                })?;
-                rows.collect::<rusqlite::Result<Vec<Value>>>()
-            })
-            .unwrap_or_default();
-        self.approvals_overlaid(rows, pending_only)
+        self.approvals.list(pending_only)
     }
 }
 

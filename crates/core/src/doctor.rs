@@ -191,14 +191,14 @@ impl Daemon {
             );
             if let Ok(st) = install::status(kind, &self.home) {
                 let detail = match (st.installed, st.outdated, kind) {
-                    (true, true, _) => "hooks installed but out of date: run `spandeck integration install`".to_string(),
+                    (true, true, _) => format!("hooks installed but out of date (v{}): a rule check is cut off after 10 seconds. Run `spandeck integration install {}`{}", st.version.unwrap_or(0), kind.as_str(), if kind == AgentKind::Codex { ", then trust the hooks again in Codex with /hooks" } else { "" }),
                     (true, false, _) => format!("hooks installed (v{}){}", st.version.unwrap_or(0), st.note.map(|n| format!("; {n}")).unwrap_or_default()),
                     (false, _, AgentKind::Claude) => "not installed globally; panes spandeck starts are hooked at launch anyway".to_string(),
                     (false, _, _) => "not installed: run `spandeck integration install codex`, then trust the hooks in Codex with /hooks".to_string(),
                 };
                 add(
                     &format!("{} hooks", kind.display()),
-                    st.installed && !st.outdated || kind == AgentKind::Claude,
+                    st.installed && !st.outdated || (kind == AgentKind::Claude && !st.installed),
                     false,
                     detail,
                 );

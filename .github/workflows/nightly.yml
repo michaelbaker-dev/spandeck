@@ -40,6 +40,16 @@ jobs:
       # four healthy, and printed.
       - name: A frozen station and a slow one delay nobody else
         run: cargo test -p spandeck --test isolation -- --ignored --nocapture
+      # An idle agent is woken when its mail arrives: eight sends on one
+      # station and eight across two, each told within 250 ms (the look
+      # once a second took 424 ms at the median), and the times printed.
+      - name: An idle agent is told of its mail when it arrives (timings; nobody held is woken)
+        run: cargo test -p spandeck --test wake -- --ignored --nocapture
+      # The daemon is ended under running agents (the pane host keeps them):
+      # a rule check waits and gets its answer, or is refused at its
+      # deadline; an approval is found again by its hook after a restart.
+      - name: While spandeck is away (rules hold; an approval survives a restart)
+        run: cargo test -p spandeck --test away -- --ignored --nocapture
       # The deck's refresh in a real browser: a station frozen and one that
       # answers as 0.4.5 did; and what an idle deck asks, counted against
       # the 816 calls a minute of before.

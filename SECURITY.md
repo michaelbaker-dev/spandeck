@@ -77,7 +77,10 @@ days, not hours.
   sends by itself (focus, the mouse, its answers to the program) does not count as you
   typing. A message for a held agent is stored and waits; it is not dropped.
 - **Rules.** A standing order is shown as enforced only where the agent's hooks can
-  really block it. Elsewhere it is guidance the agent may ignore.
+  really block it. Elsewhere it is guidance the agent may ignore. Where one is
+  enforced, it is not skipped because spandeck is not running: the agent's tool call
+  waits (a minute; 8 seconds in a session started before 16 Nov 2026) and is then
+  refused. See Known limits for what that rests on.
 - **History.** Session transcripts are copied to the station that ran them and stay
   there. Other agents and stations see a copy with secrets scrubbed by pattern, which is
   best-effort.
@@ -94,6 +97,26 @@ days, not hours.
   hold them. See `docs/vault.md`, including what that does not protect against.
 
 ## Known limits
+
+- What an agent's hook does while spandeck is not running rests on a file,
+  `<state>/panes/<pane>.guard`, that says whether a rule is enforced for that pane. It
+  is private to your account, and any program running as you can change or delete it,
+  an agent included (an agent's own shell runs as you). Deleting or damaging it makes
+  the hook refuse; rewriting it to say "not enforced" makes the hook allow. So this
+  closes an accident (spandeck is down, and a rule silently stops applying), not an
+  attack by an agent that sets out to get round a rule: such an agent could as well
+  edit its own hook settings. Hooks are a guardrail, as their vendors say.
+- While spandeck is not running, every tool call of a Claude Code pane with an
+  enforced rule is refused, not only the calls the rule names: the hook cannot check
+  the rule. Two checks are not covered at all and are not applied then: raw API keys
+  in a command (with a vault connected) and sign-off before push. The agent's timeout
+  for a hook is the vendor's to honour: if an agent cancels the hook sooner than it
+  says, the tool call goes ahead. Codex, OpenCode and Antigravity are never refused
+  this way (their rules are guidance).
+- An approval's hook finds its approval again after a restart by a random id it made.
+  A hash of the id is stored with the approval and the id is in no list. Any program
+  with the pane's own token could ask with an id, but only for that pane, and only the
+  hook that made an id knows it.
 
 - A pane's conversation holds whatever its terminal showed, including a secret an agent
   printed or a file it read. Any signed-in browser can read it, and it crosses your

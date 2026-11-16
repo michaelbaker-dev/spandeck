@@ -38,6 +38,7 @@
 
 pub mod add;
 pub mod agents;
+pub mod approvals;
 pub mod client;
 pub mod conversation;
 pub mod daemon;
@@ -47,6 +48,7 @@ pub mod doctor;
 pub mod fleet;
 pub mod fonts;
 pub mod git;
+pub mod guard;
 pub mod holds;
 pub mod hooks;
 pub mod http;
