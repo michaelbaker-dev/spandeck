@@ -3375,8 +3375,10 @@ function phoneTerm(v, st, p, guest) {
   const whole = !fitted && phoneWhole.has(fitKey);
   if (!fitted) t.setWhole(whole);
   // Why it is not fitted, beside the button that fits it.
-  const why = fitted || p.exited ? '' : phoneTaken.has(fitKey) || (p.holders || []).length ? `Open in ${holderWords(st, p)}: Fit takes its size.`
-    : fitOff[fitKey] ? 'Not fitted to this phone: you turned that off for this pane.'
+  // (The owner's own choice first: just after "Fitted" is turned off the
+  // station still counts this page among the pane's holders for a moment.)
+  const why = fitted || p.exited ? '' : fitOff[fitKey] ? 'Not fitted to this phone: you turned that off for this pane.'
+    : phoneTaken.has(fitKey) || (p.holders || []).length ? `Open in ${holderWords(st, p)}: Fit takes its size.`
       : !Array.isArray(p.holders) ? `${st} runs an older spandeck, which does not say whether this pane is open elsewhere: Fit resizes it for everyone.` : '';
   if (guest !== undefined) t.setGuest(guest);
   const canStop = !p.exited && (p.state === 'working' || p.state === 'needs_you');
