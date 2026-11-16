@@ -213,18 +213,16 @@ fn a_command_is_typed_into_idle_agents_and_busy_ones_are_skipped() {
     // One pane, by name: how you run /login in the agent that needs it.
     // The agent has to have finished the turn the first command began, or
     // this one is rightly skipped as "in the middle of a turn".
-    wait_for("the agent to finish its turn", 10, || {
-        (a.pane(&idle_a)["state"] != json!("working")).then_some(())
+    // (Asked again until it is taken: looked at too soon, the agent had not
+    // yet been seen to start that turn, and began it between the look and
+    // the command. Seen on a CI runner, 17 Nov 2026.)
+    wait_for("the command to be taken by the one pane", 10, || {
+        let one = a.call(
+            "agents.command",
+            json!({"command": "/login", "pane": idle_a}),
+        );
+        (one["stations"][0]["sent"].as_array().unwrap().len() == 1).then_some(())
     });
-    let one = a.call(
-        "agents.command",
-        json!({"command": "/login", "pane": idle_a}),
-    );
-    assert_eq!(
-        one["stations"][0]["sent"].as_array().unwrap().len(),
-        1,
-        "{one}"
-    );
     a.wait_text(&idle_a, "[fake] got: /login");
     assert!(!b.text(&idle_b).contains("/login"));
 }
