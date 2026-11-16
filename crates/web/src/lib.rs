@@ -2999,6 +2999,7 @@ fn steady(answer: &Value) -> Value {
     json!([
         answer["available"],
         answer["reason"],
+        answer["source"],
         answer["session"],
         answer["title"],
         answer["not_understood"],
@@ -3026,6 +3027,7 @@ async fn watch_local(
     let mut was = steady(&first);
     let mut session = first["session"].as_str().unwrap_or("").to_string();
     let mut cursor = first["cursor"].as_u64().unwrap_or(0);
+    let screen = params.get("screen").and_then(|s| s.as_bool()) == Some(true);
     let d = daemon.clone();
     let task = tokio::spawn(async move {
         let text = |v: Value| Message::Text(v.to_string().into());
@@ -3036,7 +3038,11 @@ async fn watch_local(
             tick.tick().await;
             // An empty session name is never the pane's: when the pane gets
             // a session, the answer starts again from its newest items.
-            let ask = json!({"pane": pane, "session": session, "after": cursor, "limit": 200});
+            let mut ask = json!({"pane": pane, "session": session, "after": cursor, "limit": 200});
+            // A deck that shows the screen as a conversation said so.
+            if screen {
+                ask["screen"] = json!(true);
+            }
             let next = match conversation_of(&d, &pane, ask).await {
                 Ok(next) => next,
                 Err(e) => {

@@ -238,6 +238,8 @@ pub const CODEX_FILES_READ: usize = 200;
 struct CodexMeta {
     id: Option<String>,
     cwd: Option<String>,
+    /// When the conversation began, as Codex wrote it (UTC).
+    timestamp: Option<String>,
     /// "cli", "vscode", "exec"; an object for a conversation Codex started
     /// itself (a sub-agent), which is not the user's to go back to.
     source: Option<serde_json::Value>,
@@ -333,6 +335,133 @@ pub fn codex_last(
     // the same moment, the one started later.)
     found.sort_by_key(|s| std::cmp::Reverse(s.last_used_ms));
     found.into_iter().find(|s| !taken(&s.id))
+}
+
+/// A Codex session file that was written to since some moment: what its
+/// first line says of it. For finding the session of a pane whose Codex
+/// reports nothing (its hooks were never reviewed in Codex).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexFile {
+    pub id: String,
+    pub path: PathBuf,
+    /// The folder it was started in, as Codex recorded it.
+    pub cwd: String,
+    /// When it was started, as Codex recorded it (`2026-11-15T12:00:00.000Z`).
+    pub started: String,
+    pub modified_ms: u64,
+}
+
+/// How many day folders, newest first, are looked into for files written
+/// to since a moment. A pane is rarely older than that many days on which
+/// Codex was used; for one that is, its session is not found.
+pub const CODEX_DAYS_READ: usize = 14;
+
+/// Codex's own conversations (not the ones it starts itself for a
+/// sub-agent) whose file was written to at or after `since_ms`, among the
+/// `CODEX_DAYS_READ` newest day folders. Only each file's first line is
+/// read. `sessions` is `codex_sessions_dir`.
+pub fn codex_since(sessions: &Path, since_ms: u64) -> Vec<CodexFile> {
+    let mut out = vec![];
+    let mut days = 0;
+    'walk: for year in names_newest_first(sessions) {
+        let year = sessions.join(year);
+        for month in names_newest_first(&year) {
+            let month = year.join(month);
+            for day in names_newest_first(&month) {
+                if days == CODEX_DAYS_READ {
+                    break 'walk;
+                }
+                days += 1;
+                let day = month.join(day);
+                for name in names_newest_first(&day) {
+                    if !(name.starts_with("rollout-") && name.ends_with(".jsonl")) {
+                        continue;
+                    }
+                    let path = day.join(name);
+                    let Ok(meta) = std::fs::metadata(&path) else {
+                        continue;
+                    };
+                    let modified_ms = modified_ms(&meta);
+                    if modified_ms < since_ms {
+                        continue;
+                    }
+                    if let Some(first) = codex_first_line(&path) {
+                        if let (Some(id), Some(cwd), Some(started)) =
+                            (first.id, first.cwd, first.timestamp)
+                        {
+                            out.push(CodexFile {
+                                id,
+                                path,
+                                cwd,
+                                started,
+                                modified_ms,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The first line of a Codex session file, when it is whole and is the
+/// record of one of the user's own conversations.
+fn codex_first_line(path: &Path) -> Option<CodexMeta> {
+    let file = File::open(path).ok()?;
+    let mut reader = BufReader::new(file.take(4 << 20));
+    let mut line = Vec::new();
+    reader.read_until(b'\n', &mut line).ok()?;
+    if line.last() != Some(&b'\n') {
+        return None;
+    }
+    let first: CodexFirstLine = serde_json::from_slice(&line).ok()?;
+    if first.kind.as_deref() != Some("session_meta") {
+        return None;
+    }
+    let meta = first.payload?;
+    if meta.source.as_ref().is_some_and(|s| s.is_object()) {
+        return None;
+    }
+    Some(meta)
+}
+
+/// The file of the Codex conversation `id` (a pane that was started into a
+/// saved conversation knows its id and not its file). The id is the end of
+/// the file's name, and is checked against the file's first line. Among
+/// the `CODEX_FILES_READ` newest names.
+pub fn codex_file_of(sessions: &Path, id: &str) -> Option<PathBuf> {
+    if id.is_empty() {
+        return None;
+    }
+    let end = format!("-{id}.jsonl");
+    let mut seen = 0;
+    for year in names_newest_first(sessions) {
+        let year = sessions.join(year);
+        for month in names_newest_first(&year) {
+            let month = year.join(month);
+            for day in names_newest_first(&month) {
+                let day = month.join(day);
+                for name in names_newest_first(&day) {
+                    if !(name.starts_with("rollout-") && name.ends_with(".jsonl")) {
+                        continue;
+                    }
+                    seen += 1;
+                    if seen > CODEX_FILES_READ * 10 {
+                        return None;
+                    }
+                    if !name.ends_with(&end) {
+                        continue;
+                    }
+                    let path = day.join(name);
+                    if codex_first_line(&path).and_then(|m| m.id).as_deref() == Some(id) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

@@ -254,6 +254,8 @@ impl Daemon {
         }
 
         if session_changed {
+            // What was found among its files counts for nothing now.
+            self.forget_found(&p.id);
             self.save_pane(p);
             if let (Some(sid), Some(path)) = (&meta.session_id, &meta.transcript_path) {
                 self.archive.follow(

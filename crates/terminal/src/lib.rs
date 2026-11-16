@@ -15,4 +15,4 @@ pub use hosted::HostClient;
 pub use input::{Discarded, Interrupt, Item, Kind as InputKind, Mark};
 pub use pane::{Pane, PaneEvent, PaneHandoff, Sink};
 pub use pty::{pid_alive, ExitInfo, Pty, Signal, SpawnSpec};
-pub use screen::{Screen, ScreenEvent, ScreenInfo, DEFAULT_HISTORY};
+pub use screen::{Printed, Screen, ScreenEvent, ScreenInfo, DEFAULT_HISTORY};

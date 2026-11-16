@@ -557,6 +557,16 @@ a.btn.wide { width: 100%; justify-content: center; text-align: center; }
 .chat-act { background: none; border-color: transparent; color: var(--muted); padding: 2px 8px; font-size: calc(12px * var(--ui-scale)); }
 .chat-quiet { color: var(--muted); font-size: calc(12.5px * var(--ui-scale)); text-align: center; overflow-wrap: anywhere; }
 .chat-quiet.thought { text-align: left; font-style: italic; }
+/* A conversation made from the screen: the note that says so stays at the top
+   of the log, on one line until it is tapped; a printed block is the
+   terminal's text as it was laid out, and scrolls sideways by itself. */
+.chat-src { position: sticky; top: 0; z-index: 1; align-self: stretch; margin: -8px 0 0; padding: 6px 4px; border: none; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--bg); color: var(--muted); font-size: calc(12px * var(--ui-scale)); text-align: left; justify-content: flex-start; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 0; }
+.chat-src.open { white-space: normal; overflow-wrap: anywhere; }
+.chat-screen { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+.chat-screen-text { align-self: stretch; margin: 0; font: calc(12px * var(--ui-scale))/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre; overflow-x: auto; overflow-y: hidden; background: var(--well); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.chat-screen.open .chat-screen-text { border-color: var(--accent-line); }
+.wait-keys.chat-keys { flex-wrap: nowrap; } .wait-keys.chat-keys .key { flex: 1 1 0; min-width: 34px; padding-left: 0; padding-right: 0; }
+.chat-keys[hidden] { display: none; }
 .chat-quiet.err { color: var(--red); } .chat-quiet.warn { color: var(--amber); }
 .chat-older { align-self: center; }
 .chat-run, .chat-log > .chat-tool, .chat-box-item { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; }

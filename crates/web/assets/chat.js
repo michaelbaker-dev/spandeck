@@ -6,6 +6,13 @@
 // the phone and for a pane's frame on a computer, and the phone's list of
 // sessions that leads to it.
 //
+// Every pane has both faces (DECISIONS.md, "Chat for every pane"). Where the
+// station can read the agent's own conversation, Chat is that. Where it
+// cannot (a shell, an agent it cannot read, one whose session is not known
+// yet), Chat is made from the screen: what was sent to the pane and what it
+// printed after each, as plain text, by the same code and with the same
+// message box and cards. The station says which (`source`), and why.
+//
 // Rules kept here:
 // - Everything from a session file is data. It is put on the page as text
 //   nodes (`h()`), and an agent's markdown goes through md.js, which builds
@@ -36,6 +43,12 @@ let titlesAt = 0, titlesFor = '';
 const keyOf = (st, p) => `${st}/${p.id}`;
 const RUN = new Set(['tool', 'thinking', 'tasks']);
 const STATUS = ['running', 'ok', 'done', 'error', 'denied', 'interrupted'];
+// The keys a pane's Chat has when it is made from the screen: the program
+// may be at a prompt nothing here knows of. As on the terminal's face.
+const SCREEN_KEYS = [['Esc', '\x1b'], ['Tab', '\t'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['←', '\x1b[D'], ['→', '\x1b[C'], ['⏎', '\r'], ['^C', '\x03']];
+const SCREEN_KEY_SAYS = { '↑': 'Up', '↓': 'Down', '←': 'Left', '→': 'Right', '⏎': 'Enter', '^C': 'Control C' };
+// Lines of a printed block shown before "Show earlier lines".
+const SCREEN_LINES = 30;
 const WAIT_KEYS = [['1', '1'], ['2', '2'], ['3', '3'], ['Enter', '\r'], ['Esc', '\x1b'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['←', '\x1b[D'], ['→', '\x1b[C']];
 const KEY_SAYS = { '↑': 'Up', '↓': 'Down', '←': 'Left', '→': 'Right' };
 // Text commands an agent takes as a message (not its terminal-only pickers).
@@ -87,14 +100,15 @@ const FACES = 'spandeck.face';
 let faces = {};
 try { faces = JSON.parse(localStorage.getItem(FACES) || '{}') || {}; } catch (e) { faces = {}; }
 
-// 'chat' or 'terminal'. A shell, and an agent whose station says it has no
-// conversation, is its terminal. On a phone an agent opens as its
-// conversation; on a computer a pane is its terminal until Chat is chosen.
+// 'chat' or 'terminal'. Every pane has both; one whose station cannot give
+// a conversation at all (a station from before this) is its terminal. Until
+// the owner chooses: on a phone an agent opens as its conversation; a shell,
+// and any pane on a computer, as its terminal.
 export function faceOf(st, p) {
-  if (!p || p.agent === 'shell') return 'terminal';
+  if (!p) return 'terminal';
   const key = keyOf(st, p), c = convs.get(key);
   if (c && c.available === false) return 'terminal';
-  return faces[key] === 'chat' || faces[key] === 'terminal' ? faces[key] : env.isPhone() ? 'chat' : 'terminal';
+  return faces[key] === 'chat' || faces[key] === 'terminal' ? faces[key] : env.isPhone() && p.agent !== 'shell' ? 'chat' : 'terminal';
 }
 
 export function setFace(st, p, face) {
@@ -116,7 +130,8 @@ export function termBox(st, p, box) { termBoxes.set(keyOf(st, p), box); box.valu
 
 // "Chat" on a terminal's title bar, on a computer.
 export function chatToggle(st, p) {
-  if (!p || p.agent === 'shell') return null;
+  if (!p) return null;
+  if (p.agent === 'shell') return h('button', { class: 'mini face-btn', title: 'Show this pane as a conversation: what you sent it and what it printed after each, as text. The terminal is one click back.', onclick: () => setFace(st, p, 'chat') }, 'Chat');
   // A question or a plan held for the owner is answered in the conversation:
   // while it is held, the terminal does not show the agent's own prompt.
   if (p.asks && !p.exited) return h('button', { class: 'mini face-btn attn', title: `${p.name} ${asksWords(p)}. It is held for you in its conversation; the terminal shows its own prompt only if nobody answers there in time.`, onclick: () => setFace(st, p, 'chat') }, 'Answer in Chat');
@@ -165,13 +180,14 @@ function openLink(url) {
 class Conv {
   constructor(st, p) {
     this.st = st; this.p = p; this.key = keyOf(st, p);
-    this.shell = p.agent === 'shell';
     this.items = []; this.byId = new Map(); this.ver = 0;
     this.session = null; this.cursor = 0; this.first = null; this.moreBefore = false;
     this.title = null; this.notUnderstood = 0; this.olderDropped = false;
-    // null until the station has answered; a shell is known without asking.
-    this.available = this.shell ? false : null;
-    this.reason = this.shell ? NO_CONV + 'it runs a shell, not an agent' : '';
+    // null until the station has answered. `source`: 'transcript' (the
+    // agent's own conversation) or 'screen' (made from the terminal's text).
+    this.available = null;
+    this.reason = '';
+    this.source = 'transcript';
     this.live = null; this.liveAt = 0;
     this.chan = null; this.state = 'off'; this.problem = '';
     this.open = new Set(); this.revs = new Map(); this.nodes = new Map(); this.dockNodes = new Map();
@@ -199,11 +215,13 @@ class Conv {
   // -------------------------------------------------------------- the stream
 
   async watch() {
-    if (this.shell || this.disposed || this.state !== 'off' || !env.api.connected) return;
+    if (this.disposed || this.state !== 'off' || !env.api.connected) return;
     this.state = 'opening';
     clearTimeout(this.retry);
     this.retry = null;
-    const api = env.api, params = { pane: this.p.id, limit: 50 };
+    // `screen`: this deck can show the screen as a conversation. A station
+    // from before this does not know the word and answers as it always did.
+    const api = env.api, params = { pane: this.p.id, limit: 50, screen: true };
     if (this.st !== api.station) params.station = this.st;
     if (this.session) { params.session = this.session; params.after = this.cursor; }
     try {
@@ -292,6 +310,8 @@ class Conv {
       const fresh = a.reset === true || was !== true || (this.session && a.session !== this.session);
       if (fresh) { this.items = []; this.byId.clear(); this.first = null; this.details.clear(); this.full.clear(); this.stuck = true; this.seeded = false; }
       this.available = true;
+      this.source = a.source === 'screen' ? 'screen' : 'transcript';
+      this.reason = this.source === 'screen' && typeof a.reason === 'string' ? a.reason : '';
       this.session = a.session;
       const empty = !this.items.length;
       for (const it of a.items || []) this.put(it);
@@ -315,7 +335,7 @@ class Conv {
     if (!this.moreBefore || this.paging || this.first === null || !this.session) return;
     this.paging = true;
     try {
-      const a = await env.api.on(this.st, 'pane.conversation', { pane: this.p.id, session: this.session, before: this.first, limit: 50 });
+      const a = await env.api.on(this.st, 'pane.conversation', { pane: this.p.id, session: this.session, before: this.first, limit: 50, screen: true });
       if (a.available !== true || a.reset || a.session !== this.session) return;
       const height = this.log.scrollHeight, top = this.log.scrollTop;
       for (const it of a.items || []) this.put(it);
@@ -358,7 +378,7 @@ class Conv {
 
   // The owner has seen the newest item: it is on screen and the page is in front.
   maybeRead() {
-    if (this.available !== true || !this.live?.unread || !this.stuck || !this.cursor || this.readTo >= this.cursor) return;
+    if (this.available !== true || this.source === 'screen' || !this.live?.unread || !this.stuck || !this.cursor || this.readTo >= this.cursor) return;
     if (document.visibilityState !== 'visible' || !this.log.isConnected || !this.log.clientHeight) return;
     this.readTo = this.cursor;
     env.api.on(this.st, 'pane.read', { pane: this.p.id, upto: this.cursor }).catch(() => { this.readTo = -1; });
@@ -387,7 +407,7 @@ class Conv {
     const title = this.title || titles.get(this.key) || p.name;
     const sub = [p.agent === 'shell' ? 'shell' : p.agent_name, this.st, p.project].filter(Boolean).join(' · ');
     const state = stateOf(p);
-    const sig = JSON.stringify([phone, title, sub, state, p.needs_reason, face, this.available, this.reason, next.length, next[0] && keyOf(next[0].st, next[0].p), this.where, p.name]);
+    const sig = JSON.stringify([phone, title, sub, state, p.needs_reason, face, this.available, this.available === false ? this.reason : '', next.length, next[0] && keyOf(next[0].st, next[0].p), this.where, p.name]);
     if (sig === this.barSig) return;
     this.barSig = sig;
     const pick = (to) => h('button', { type: 'button', class: face === to ? 'on' : '', 'aria-pressed': String(face === to), onclick: (e) => { e.currentTarget.blur(); if (face !== to) setFace(this.st, p, to); } }, to === 'chat' ? 'Chat' : 'Terminal');
@@ -417,7 +437,11 @@ class Conv {
       if (this.problem) one('problem', this.problem, () => quiet(this.problem, 'warn'));
       if (this.moreBefore) one('older', '', () => h('button', { type: 'button', class: 'chat-older', onclick: () => this.older() }, 'Show earlier messages'));
       else if (this.olderDropped) one('dropped', '', () => quiet('The start of this conversation is too far back to show here.'));
-      if (!this.items.length) one('empty', '', () => quiet('Nothing has been said in this conversation yet. Write below to start.'));
+      // Made from the screen: said at the top, with why, where "Terminal
+      // only" used to be said. A tap shows all of a long reason.
+      if (this.source === 'screen') one('src', `${this.reason}|${this.open.has('src')}`, () => h('button', { type: 'button', class: 'chat-src' + (this.open.has('src') ? ' open' : ''), 'aria-expanded': String(this.open.has('src')), title: 'Chat is made from what this pane\'s terminal shows: what you sent, and what it printed after each. The terminal has everything.',
+        onclick: () => { this.open.has('src') ? this.open.delete('src') : this.open.add('src'); this.drawLog(); } }, 'From the screen: ' + this.why()));
+      if (!this.items.length) one('empty', this.source, () => quiet(this.source === 'screen' ? 'Nothing has been sent or printed here yet. Write below to start.' : 'Nothing has been said in this conversation yet. Write below to start.'));
       const items = this.items, working = this.live?.state === 'working';
       let lastDone = null;
       for (let i = 0; i < items.length;) {
@@ -574,6 +598,26 @@ class Conv {
         label ? h('div', { class: 'chat-from' }, label) : null,
         h('div', { class: 'chat-bubble' }, text, it.images ? h('div', { class: 'chat-from' }, plural(Number(it.images) || 0, 'picture') + ' attached') : null), rest);
     }
+    // What the pane printed, from its terminal: plain text, as it was laid
+    // out. The end of a long block is shown, and the rest on request.
+    if (it.kind === 'screen') {
+      // A block that turned out to hold nothing (only the prompt the next
+      // message was typed at, which is the next block's): not drawn.
+      if (!text) return h('div', { hidden: true });
+      const flag = 's:' + it.id, open = this.open.has(flag);
+      const lines = text.split('\n'), long = lines.length > SCREEN_LINES;
+      const shown = open || !long ? text : lines.slice(-SCREEN_LINES).join('\n');
+      const label = it.whole ? (it.open ? 'The screen now' : 'The screen then') : '';
+      // A block still being printed is cut by the station to its last
+      // lines: all of it is in the terminal.
+      const more = !it.more || this.full.has(it.id) ? null
+        : it.open ? h('button', { type: 'button', class: 'mini', onclick: () => setFace(this.st, this.p, 'terminal') }, 'Earlier lines are in the terminal')
+          : h('button', { type: 'button', class: 'mini', onclick: () => { this.open.add(flag); this.whole(it); } }, 'Show all of it');
+      return h('div', { class: 'chat-screen' + (it.open ? ' open' : '') },
+        label ? h('div', { class: 'chat-from' }, label) : null,
+        long && !open ? h('button', { type: 'button', class: 'mini', onclick: () => this.toggle(flag, it.id) }, `Show ${plural(lines.length - SCREEN_LINES, 'earlier line')}`) : more,
+        h('pre', { class: 'chat-screen-text', tabIndex: 0, 'aria-label': it.open ? 'What the pane has printed since' : 'What the pane printed' }, shown));
+    }
     if (it.kind === 'text') {
       const body = md(text);
       const speak = (e) => readAloud(body, e.currentTarget);
@@ -651,7 +695,8 @@ class Conv {
     this.askSoon = waiting.length > asked.length;
     const blocked = !exited && this.available === true && !approvals.length && !asked.length && !held.length && (L.state === 'needs_you' || L.state === 'error');
     // A banner that waits in the terminal shows the terminal's last lines.
-    if (blocked && !this.wasBlocked) this.peekOpen = true;
+    // (Made from the screen, the conversation already ends with them.)
+    if (blocked && !this.wasBlocked && this.source !== 'screen') this.peekOpen = true;
     if (!blocked && this.wasBlocked && !working) this.peekOpen = false;
     this.wasBlocked = blocked;
     this.clocks = [];
@@ -712,6 +757,10 @@ class Conv {
     sync(this.cards, cards);
     for (const key of [...cache.keys()]) if (!used.has(key)) cache.delete(key);
     this.composer.hidden = !!exited || this.available !== true;
+    // The card for a pane that waits has the keys already.
+    this.keysEl.hidden = this.source !== 'screen' || blocked;
+    const says = this.p.agent === 'shell' ? 'Type or paste a command' : this.speech ? 'Message or hold to talk' : 'Message';
+    if (this.box.placeholder !== says) this.box.placeholder = says;
     this.working = working;
     this.sendState();
     // Until when each held card waits here, by the station's clock.
@@ -904,6 +953,9 @@ class Conv {
   buildComposer() {
     const p = this.p;
     const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+    this.speech = !!Speech;
+    this.keysEl = h('div', { class: 'wait-keys chat-keys', role: 'group', 'aria-label': 'Keys for the terminal', hidden: true },
+      SCREEN_KEYS.map(([label, bytes]) => h('button', { type: 'button', class: 'key', 'aria-label': SCREEN_KEY_SAYS[label] || label, onclick: () => this.key1(bytes) }, label)));
     this.box = h('textarea', { class: 'chat-box', rows: 1, placeholder: Speech ? 'Message or hold to talk' : 'Message', 'aria-label': 'Message', enterkeyhint: 'send', dataset: { keep: 'chat:' + this.key } });
     this.box.value = drafts.get(this.key) || '';
     this.box.addEventListener('input', () => this.typed());
@@ -962,7 +1014,7 @@ class Conv {
         { note: `It is saved on ${this.st} and its path is typed for the agent.` }]);
     };
     this.composer = h('form', { class: 'chat-composer', onsubmit: (e) => { e.preventDefault(); this.working && !this.box.value.trim() ? this.stopTurn() : this.send(); } },
-      this.slash, this.sendSaid, h('div', { class: 'chat-row' }, plus, this.box, mic, this.sendBtn));
+      this.keysEl, this.slash, this.sendSaid, h('div', { class: 'chat-row' }, plus, this.box, mic, this.sendBtn));
   }
 
   typed() {

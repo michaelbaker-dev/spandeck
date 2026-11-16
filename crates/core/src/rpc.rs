@@ -979,6 +979,7 @@ impl Daemon {
                     self.release_by_typing(&id, by);
                     self.folder_trust_owner_typed(&id);
                 }
+                self.screen_sent(&id, text, caller.is_owner(), &caller.who);
                 self.send_text_from(&id, text, enter, Some(&caller.client))?;
                 if caller.is_owner() {
                     self.note_input(&id, &caller.who, &caller.client);
@@ -993,6 +994,7 @@ impl Daemon {
                 let text = s(&params, "text")?;
                 self.release_by_typing(&id, by);
                 self.folder_trust_owner_typed(&id);
+                self.screen_sent(&id, text, true, &caller.who);
                 self.paste_from(&id, text, flag(&params, "enter"), Some(&caller.client))?;
                 self.note_input(&id, &caller.who, &caller.client);
                 json!({"ok": true})

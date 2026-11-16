@@ -674,6 +674,7 @@ impl Daemon {
             meta: Mutex::new(meta),
             wake: Default::default(),
             screen_needs: Default::default(),
+            talk: Default::default(),
         });
         self.panes
             .write()

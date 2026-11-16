@@ -1087,11 +1087,12 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
         .unwrap()
         .to_string();
     open("phone-sh");
-    // A shell has no conversation: it is its terminal, and the bar says why
-    // where the choice of Chat or Terminal would be.
+    // A shell opens as its terminal, and has the choice of Chat or Terminal
+    // like every pane (16 Nov 2026; its Chat is in `chat.rs`). Until then
+    // the bar said "Terminal only: it runs a shell, not an agent" there.
     assert_eq!(
-        page.js("[document.querySelector('.phone-pane .chat-why')?.innerText, !!document.querySelector('.chat-switch')]"),
-        json!(["Terminal only: it runs a shell, not an agent", false])
+        page.wait("the shell's bar", "(b => b.length === 2 && [!!document.querySelector('.phone-pane .chat-why'), b.map(x => x.innerText + (x.classList.contains('on') ? '*' : '')).join(' ')])([...document.querySelectorAll('.phone-pane .chat-switch button')])"),
+        json!([false, "Chat Terminal*"])
     );
     set("sleep 300");
     page.js("document.querySelector('.composer-row button[type=submit]').click()");
@@ -2018,21 +2019,19 @@ fn the_pane_of_a_layout_is_the_pane_itself(s: &Station, page: &common::browser::
     );
     s.wait_text(&tallier, "[fake] got: wrens, then");
 
-    // Scrolled up, and something half written: then on to the shell. It is
-    // its terminal, the bar says why, and nothing of the agent's pane is
-    // watched or attached any more.
+    // Scrolled up, and something half written: then on to the shell. It
+    // opens as its terminal, with the same choice on its bar, and nothing of
+    // the agent's pane is watched or attached any more (what is watched is
+    // the shell's own conversation, as for any pane on screen).
     page.wait(
         "the message as a bubble, then the next pane",
         &format!("document.querySelectorAll('.phone-layout .chat-user').length === 2 && document.querySelector('.chat-box').value === '' && (async () => {{ {log}.scrollTop = 40; await new Promise(r => setTimeout(r, 60)); window.__top = {log}.scrollTop; const b = document.querySelector('.chat-box'); b.value = 'kept'; b.dispatchEvent(new Event('input')); document.querySelector('.lay-nav .lay-step:last-child').click(); return true; }})()"),
     );
     let shell_seen = page.wait(
         "the shell's terminal, then the pane before",
-        &format!("{showing} === 'pair › scratch · 2 of 2' && !!document.querySelector('.phone-layout .xterm-rows') && !document.querySelector('.phone-layout .chat-log') && {watched} === '0 watched, 1 attached' && [document.querySelector('.phone-layout > .chat-bar .chat-why').innerText, !!document.querySelector('.phone-layout .composer .keys'), document.querySelector('.lay-nav .lay-step').click()]"),
+        &format!("{showing} === 'pair › scratch · 2 of 2' && !!document.querySelector('.phone-layout .xterm-rows') && !document.querySelector('.phone-layout .chat-log') && {watched} === '1 watched, 1 attached' && document.querySelectorAll('.phone-layout > .chat-bar .chat-switch button').length === 2 && [document.querySelector('.phone-layout > .chat-bar .chat-switch button.on').innerText, !!document.querySelector('.phone-layout .composer .keys'), document.querySelector('.lay-nav .lay-step').click()]"),
     );
-    assert_eq!(
-        shell_seen,
-        json!(["Terminal only: it runs a shell, not an agent", true, null])
-    );
+    assert_eq!(shell_seen, json!(["Terminal", true, null]));
     // (Where it was scrolled to is whatever the browser made of 40: with
     // Windows' fonts the conversation may be too short to scroll that far.)
     page.wait(

@@ -432,6 +432,21 @@ impl Pane {
         self.screen.lock().unwrap().full_text(max_history)
     }
 
+    /// What the pane printed since the last mark, and a new mark here, in
+    /// one step: nothing printed between the two is in neither. See
+    /// `Screen::mark` and `Screen::printed`.
+    pub fn printed_and_mark(&self, max: usize) -> crate::screen::Printed {
+        let mut screen = self.screen.lock().unwrap();
+        let printed = screen.printed(true, max);
+        screen.mark();
+        printed
+    }
+
+    /// What the pane printed since the last mark, to the end of its screen.
+    pub fn printed(&self, max: usize) -> crate::screen::Printed {
+        self.screen.lock().unwrap().printed(false, max)
+    }
+
     /// Run `f` with the screen locked. Output cannot interleave while it runs,
     /// which is how a late joiner gets a snapshot and a clean stream cut point.
     pub fn with_screen<R>(&self, f: impl FnOnce(&mut Screen) -> R) -> R {

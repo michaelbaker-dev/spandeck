@@ -28,7 +28,13 @@ fn read_key(pane: &str) -> String {
 
 impl Daemon {
     /// The session a pane's conversation is read from, or why it has none.
-    fn conversation_session(&self, meta: &PaneMeta) -> std::result::Result<String, String> {
+    /// With how it is known: `hooks` (the agent's hooks named it),
+    /// `resume` (the pane was started into it), or `files` (found among
+    /// the program's own session files: discover.rs).
+    fn conversation_session(
+        &self,
+        meta: &PaneMeta,
+    ) -> std::result::Result<(String, &'static str), String> {
         if !meta.agent.is_agent() {
             return Err("it runs a shell, not an agent".into());
         }
@@ -38,16 +44,31 @@ impl Daemon {
                 meta.agent.display()
             ));
         }
-        let Some(session) = meta.session_id.clone() else {
-            return Err(format!(
-                "{} has not said which session it is in yet (nothing has come from its hooks)",
-                meta.agent.display()
-            ));
+        let unsaid = format!(
+            "{} has not said which session it is in yet (nothing has come from its hooks)",
+            meta.agent.display()
+        );
+        // A session a hook named always wins. With none, the program's
+        // own files are looked through, where that is known how.
+        let (session, file, from) = match meta.session_id.clone() {
+            Some(session) => {
+                let from = if meta.hooks_seen { "hooks" } else { "resume" };
+                (session, None, from)
+            }
+            None => match self.find_session(meta) {
+                Some(Ok((session, file))) => (session, Some(file), "files"),
+                Some(Err(why)) => return Err(format!("{unsaid}, and {why}")),
+                None => return Err(unsaid),
+            },
         };
         if self.archive.session(&session).is_none() {
             // A pane from before a restart whose session the archive was
-            // never told of: follow it now, if it says where its file is.
-            let Some(path) = meta.transcript_path.as_deref() else {
+            // never told of: follow it now, if it says where its file is,
+            // or its file is found by the session's id.
+            let path = file
+                .or_else(|| meta.transcript_path.clone())
+                .or_else(|| self.session_file(meta, &session));
+            let Some(path) = path else {
                 return Err(format!(
                     "{} has not said where its session file is",
                     meta.agent.display()
@@ -56,12 +77,12 @@ impl Daemon {
             self.archive.follow(
                 &session,
                 meta.agent.as_str(),
-                path,
+                &path,
                 meta.project.as_deref(),
                 Some(&meta.id),
             );
         }
-        Ok(session)
+        Ok((session, from))
     }
 
     /// The line of a pane's session the owner has read to. A mark made in
@@ -90,13 +111,19 @@ impl Daemon {
     /// Has the pane's agent said something the owner has not read? Kept at
     /// the pane's station, so it is the same from every station's deck.
     pub(crate) fn conversation_unread(&self, meta: &PaneMeta) -> bool {
-        let Some(session) = meta.session_id.as_deref() else {
+        // A session found among the program's files counts once someone
+        // has looked at the pane's conversation: nothing is read here.
+        let Some(session) = meta
+            .session_id
+            .clone()
+            .or_else(|| self.found_session(&meta.id))
+        else {
             return false;
         };
         if Dialect::of(meta.agent.as_str()).is_none() {
             return false;
         }
-        self.archive.last_reply_line(session) > self.read_line(&meta.id, session)
+        self.archive.last_reply_line(&session) > self.read_line(&meta.id, &session)
     }
 
     /// `pane.read`: the owner has read this pane's conversation up to a
@@ -104,7 +131,7 @@ impl Daemon {
     pub fn conversation_read(&self, pane: &str, upto: Option<u64>) -> Result<Value> {
         let p = self.pane(pane)?;
         let meta = p.meta();
-        let session = self
+        let (session, _) = self
             .conversation_session(&meta)
             .map_err(|why| invalid(format!("no conversation for this pane: {why}")))?;
         self.archive.poll_session(&session);
@@ -154,6 +181,7 @@ impl Daemon {
     /// A closed pane's read mark is of no more use.
     pub(crate) fn conversation_forget(&self, pane: &str) {
         self.read_marks.lock().unwrap().remove(pane);
+        self.forget_found(pane);
         self.db.put(crate::db::Op::KvDel { k: read_key(pane) });
     }
 
@@ -161,7 +189,7 @@ impl Daemon {
     /// station: the pane's state, its tool and since when, and what waits
     /// for the owner. Times are this station's; `now_ms` is its clock, so
     /// the view never compares the browser's clock with a station's.
-    fn conversation_live(&self, p: &PaneEntry, session: Option<&str>) -> Value {
+    pub(crate) fn conversation_live(&self, p: &PaneEntry, session: Option<&str>) -> Value {
         // With what is not written yet laid over the rows (hooks.rs): a
         // request just made is here, one just answered is not.
         let mut pending: Vec<Value> = self
@@ -285,8 +313,12 @@ impl Daemon {
             "pane": p.id, "station": self.station, "agent": meta.agent,
             "available": false, "items": [], "updated": [],
         });
-        let session = match self.conversation_session(&meta) {
+        // A caller that can show the screen as a conversation says so
+        // (`screen: true`); one from before is answered as before.
+        let screen = params.get("screen").and_then(|v| v.as_bool()) == Some(true);
+        let (session, from) = match self.conversation_session(&meta) {
             Ok(s) => s,
+            Err(why) if screen => return self.screen_conversation(&p, &meta, params, &why, out),
             Err(why) => {
                 out["reason"] = json!(format!("no conversation for this pane: {why}"));
                 out["live"] = self.conversation_live(&p, None);
@@ -308,6 +340,10 @@ impl Daemon {
             (None, None) => Range::Tail,
         };
         let Some(mut page) = self.archive.conversation(&session, range, limit) else {
+            if screen {
+                let why = "its session is not in the archive";
+                return self.screen_conversation(&p, &meta, params, why, out);
+            }
             out["reason"] =
                 json!("no conversation for this pane: its session is not in the archive");
             out["live"] = self.conversation_live(&p, None);
@@ -334,6 +370,8 @@ impl Daemon {
             out.extend(page.clone());
         }
         out["available"] = json!(true);
+        out["source"] = json!("transcript");
+        out["session_from"] = json!(from);
         out["session"] = json!(session);
         out["reset"] = json!(reset);
         out["live"] = self.conversation_live(&p, Some(&session));
@@ -348,7 +386,15 @@ impl Daemon {
             .get("item")
             .and_then(|i| i.as_str())
             .ok_or_else(|| invalid("missing parameter: item"))?;
-        let session = self
+        // An item of the screen's conversation (screentalk.rs).
+        if params
+            .get("session")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| s.starts_with("screen:"))
+        {
+            return self.screen_detail(&p, &meta, params);
+        }
+        let (session, _) = self
             .conversation_session(&meta)
             .map_err(|why| invalid(format!("no conversation for this pane: {why}")))?;
         if params

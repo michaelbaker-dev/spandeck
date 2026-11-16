@@ -3406,8 +3406,10 @@ function phonePaneView(st, id) {
   if (!p) return h('main', { class: 'phone' }, h('p', {}, 'That pane is gone.'), h('a', { href: '#/fleet' }, 'Back'));
   // A pane has two faces. Its conversation (chat.js) never attaches to the
   // pane, so it sets no size; the terminal below is as it always was, under
-  // the same bar, which is where Chat and Terminal are chosen. A shell, or an
-  // agent with no conversation, is its terminal, and the bar says why.
+  // the same bar, which is where Chat and Terminal are chosen. Every pane
+  // has both: a shell's conversation, and that of an agent the station
+  // cannot read, is made from its screen. A pane on a station from before
+  // that is its terminal, and the bar says why.
   const conv = conversation(st, p, 'phone');
   if (faceOf(st, p) === 'chat') return conv.phoneMain();
   const fitKey = `${st}/${p.id}`;
