@@ -984,7 +984,10 @@ fn messages_and_recall_cross_stations() {
 /// announced once, in a place the agent could not act on, and never again.
 #[test]
 fn mail_that_is_not_read_is_nudged_again_and_mail_sent_at_startup_is_not_lost() {
-    let s = Station::start_with("alpha", "nudge_secs = 2\n", &[]);
+    // The waits between nudges are one `nudge_secs`, then two (wake.rs),
+    // and the station looks once a second: with one second, the second
+    // nudge comes one to two seconds after the first.
+    let s = Station::start_with("alpha", "nudge_secs = 1\n", &[]);
     let repo = project(&s, "demo", &[], "");
     // This agent acknowledges input but never reads its inbox.
     let ignorer = agent(
@@ -1010,10 +1013,12 @@ fn mail_that_is_not_read_is_nudged_again_and_mail_sent_at_startup_is_not_lost() 
         !s.text(&ignorer).contains("stork"),
         "the payload is never typed"
     );
-    // Once it is read, the nudging stops.
+    // Once it is read, the nudging stops: nothing through the time in
+    // which the next nudge would have come (two seconds after the last
+    // one, and the second between two looks).
     s.call_as_pane(&ignorer, "msg.inbox", json!({})).unwrap();
     let count = s.text(&ignorer).matches("new spandeck message").count();
-    std::thread::sleep(Duration::from_millis(4500));
+    std::thread::sleep(Duration::from_millis(3300));
     assert_eq!(
         s.text(&ignorer).matches("new spandeck message").count(),
         count

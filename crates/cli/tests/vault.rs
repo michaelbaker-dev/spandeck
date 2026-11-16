@@ -866,7 +866,7 @@ fn the_control_deck_offers_to_connect_once_and_shows_what_each_check_found() {
     page.wait("Connect", &prompt_button("Connect"));
     let opened = page.wait(
         "the pop-up to be pointed at the vault",
-        "window.__opened.length && window.__opened[0]",
+        "window.__opened[0] || null",
     );
     assert!(
         opened

@@ -399,8 +399,10 @@ fn the_station_is_held_awake_only_while_an_agent_works() {
         s.call("station.info", json!({}))["keep_awake"],
         json!(false)
     );
+    // The agent's turn ends when it is typed to: it is working for as long
+    // as the restart below takes, on any machine.
     let pane = s.fake(
-        json!({"steps": [{"prompt": "go"}, {"work": 4000}, {"turn_end": "done"}]}),
+        json!({"steps": [{"prompt": "go"}], "on_input": [{"turn_end": "done"}]}),
         json!({}),
     );
     s.wait_state(&pane, "working");
@@ -432,6 +434,7 @@ fn the_station_is_held_awake_only_while_an_agent_works() {
         });
         assert_eq!(helpers(), 1, "one helper, not one per restart");
     }
+    s.call("pane.send_text", json!({"pane": pane, "text": "enough"}));
     s.wait_state(&pane, "done");
     wait_for("keep-awake off", 5, || {
         (s.call("station.info", json!({}))["keep_awake"] == json!(false)).then_some(())
