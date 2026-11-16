@@ -21,7 +21,13 @@ const ASKS: &str = "asks whether to trust this folder: answer in the terminal";
 fn folder(s: &Station, name: &str) -> PathBuf {
     let dir = s.root.join(name);
     std::fs::create_dir_all(&dir).unwrap();
-    dir.canonicalize().unwrap()
+    // Windows spells a resolved path with a `\\?\` in front; the station
+    // names folders without it.
+    let full = dir.canonicalize().unwrap();
+    match full.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(plain) => PathBuf::from(plain),
+        None => full,
+    }
 }
 
 /// What a pane of `agent` is asked to run: the stand-in, showing `screen`
