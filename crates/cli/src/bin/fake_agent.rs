@@ -33,6 +33,7 @@
 //!   {"exit": code}
 //!   {"trust_screen": {"as":"claude"|"antigravity"|"codex-hooks", "focus":"exit"|"trust",
 //!                     "extra":["a line Claude Code adds"], "reword":"another question",
+//!                     "status":"Antigravity's model row" | false,
 //!                     "wait":true}}
 //!       a program's folder-trust screen, drawn as the program draws it
 //!       (agents/foldertrust.rs). Waiting, the arrow keys move its marker
@@ -502,13 +503,20 @@ impl Agent {
         };
         let draw = |focus: Focus| {
             let mut lines = match program {
-                "antigravity" => drawn::antigravity(&self.cwd, focus),
+                // As 1.5.9 draws it, with its model under the hint;
+                // `"status": false` leaves that row out, another string
+                // puts another model there.
+                "antigravity" => match &spec["status"] {
+                    Value::Bool(false) => drawn::antigravity_with(&self.cwd, focus, None),
+                    Value::String(s) => drawn::antigravity_with(&self.cwd, focus, Some(s)),
+                    _ => drawn::antigravity(&self.cwd, focus),
+                },
                 "codex-hooks" => drawn::codex_hooks(),
                 _ => drawn::claude(&self.cwd, focus, 110, &extra),
             };
             if let Some(words) = spec["reword"].as_str() {
                 let at = if program == "antigravity" { 4 } else { 6 };
-                lines[at] = format!("    {words}");
+                lines[at] = format!("{}{words}", if program == "antigravity" { "" } else { " " });
             }
             clear();
             let mut o = std::io::stdout();

@@ -25,10 +25,13 @@
 //!   claude-code-tui.110x36.bin`, 13 Nov 2026) and the same words and
 //!   options in the program text of 2.1.325 (`TrustDialog`: `cancelFirst`,
 //!   `focus: "cancel"`). Its own choice is "No, exit": Enter alone leaves.
-//! - Antigravity: the owner's capture on 1.5.9 (16 Nov 2026), Google's
-//!   codelab "Hands-on with Antigravity CLI" (1.1.27), and the same words in
-//!   the program text of the installed 1.5.9. Its own choice is "Yes, I
-//!   trust this folder".
+//! - Antigravity: read from a real 1.5.9 pane on 16 Nov 2026 (the rows are
+//!   in this file's tests), Google's codelab "Hands-on with Antigravity
+//!   CLI" (1.1.27), and the same words in the program text of the installed
+//!   1.5.9. Its own choice is "Yes, I trust this folder". 1.5.9 draws one
+//!   more row straight under its hint: the model and effort, at the right
+//!   edge ("Gemini 4 Carbon · medium"). That one row is allowed for, by
+//!   its shape (`status_row`), and nothing else is.
 //! - Codex (0.169.0) asks "Trust this folder?" too, but its screen has not
 //!   been captured, so it has no shape here: it is only ever `Mentioned`.
 
@@ -69,6 +72,8 @@ pub struct Shape {
     /// The trusting choice is the upper one.
     trust_first: bool,
     hint: &'static str,
+    /// The program draws a status row (its model) straight under the hint.
+    status: bool,
 }
 
 const CLAUDE: Shape = Shape {
@@ -83,6 +88,7 @@ const CLAUDE: Shape = Shape {
     marker: '❯',
     trust_first: false,
     hint: "Enter to confirm · Esc to cancel",
+    status: false,
 };
 
 const ANTIGRAVITY: Shape = Shape {
@@ -96,6 +102,7 @@ const ANTIGRAVITY: Shape = Shape {
     marker: '>',
     trust_first: true,
     hint: "↑/↓ Navigate · enter Confirm",
+    status: true,
 };
 
 /// What the owner is told a program's folder trust allows, from the
@@ -183,13 +190,48 @@ pub fn read(kind: AgentKind, lines: &[String], folders: &[String]) -> Option<See
         .map(|l| clean(l))
         .filter(|l| !l.is_empty())
         .collect();
-    if let Some(seen) = shape(kind).and_then(|s| read_shape(s, &rows, folders)) {
-        return Some(seen);
+    if let Some(s) = shape(kind) {
+        if let Some(seen) = read_shape(s, &rows, folders) {
+            return Some(seen);
+        }
+        // The same screen with the program's one status row under it.
+        if s.status && under_hint(s, lines) {
+            if let Some(seen) = read_shape(s, &rows[..rows.len() - 1], folders) {
+                return Some(seen);
+            }
+        }
     }
     mentions(&rows).then_some(Seen {
         level: Level::Mentioned,
         focus: None,
     })
+}
+
+/// Is the last thing on the screen one status row, on the row straight
+/// after the program's hint?
+fn under_hint(s: &Shape, lines: &[String]) -> bool {
+    let Some(last) = lines.iter().rposition(|l| !l.trim().is_empty()) else {
+        return false;
+    };
+    last >= 1 && clean(&lines[last - 1]) == s.hint && status_row(&lines[last])
+}
+
+/// A status row as Antigravity 1.5.9 draws it: short, at the right edge
+/// (more room before it than it is long), and nothing that could be a
+/// choice, a question or a list: no marker, no question mark, no "1.".
+fn status_row(line: &str) -> bool {
+    let text = line.trim();
+    let before = line.chars().take_while(|c| *c == ' ').count();
+    let len = text.chars().count();
+    let listed = text
+        .trim_start_matches(|c: char| c.is_ascii_digit())
+        .starts_with(['.', ')'])
+        && text.starts_with(|c: char| c.is_ascii_digit());
+    (1..=40).contains(&len)
+        && before >= len
+        && !text.contains(['>', '❯', '›', '?', '\u{1b}'])
+        && !listed
+        && !text.chars().any(|c| ('\u{2500}'..='\u{257f}').contains(&c))
 }
 
 fn read_shape(s: &Shape, rows: &[String], folders: &[String]) -> Option<Seen> {
@@ -310,26 +352,36 @@ pub mod drawn {
         out
     }
 
-    /// Antigravity's screen (1.1.27 in Google's codelab, 1.5.9 as the
-    /// owner saw it).
+    /// Antigravity 1.5.9's screen as a real pane showed it (16 Nov 2026),
+    /// at 120 columns, with the model it was set to.
     pub fn antigravity(folder: &str, focus: Focus) -> Vec<String> {
-        vec![
+        antigravity_with(folder, focus, Some("Gemini 4 Carbon · medium"))
+    }
+
+    /// `status`: the row 1.5.9 draws under its hint, at the right edge.
+    /// `None`: the screen as Google's codelab shows 1.1.27, without it.
+    pub fn antigravity_with(folder: &str, focus: Focus, status: Option<&str>) -> Vec<String> {
+        let mut out = vec![
             "Accessing workspace:".into(),
             String::new(),
-            format!("    {folder}"),
+            folder.to_string(),
             String::new(),
-            "    Do you trust the contents of this project?".into(),
+            "Do you trust the contents of this project?".into(),
             String::new(),
-            "    Antigravity CLI requires permission to read, edit, and execute files here.".into(),
+            "Antigravity CLI requires permission to read, edit, and execute files here.".into(),
             String::new(),
             format!(
-                "    {}Yes, I trust this folder",
+                "{}Yes, I trust this folder",
                 mark(focus == Focus::Trust, ">")
             ),
-            format!("    {}No, exit", mark(focus == Focus::Exit, ">")),
+            format!("{}No, exit", mark(focus == Focus::Exit, ">")),
             String::new(),
-            "     ↑/↓ Navigate · enter Confirm".into(),
-        ]
+            "  ↑/↓ Navigate · enter Confirm".into(),
+        ];
+        if let Some(status) = status {
+            out.push(format!("{status:>120}"));
+        }
+        out
     }
 
     /// Codex's review of new hooks, from the words in 0.169.0's program
@@ -443,6 +495,113 @@ mod tests {
             .collect()
     }
 
+    /// The rows of a real Antigravity 1.5.9 pane at its trust question
+    /// (`pane.text`, 32 rows, 16 Nov 2026), each on the row it was on.
+    fn real_antigravity(status: &str) -> Vec<String> {
+        let mut rows = vec![String::new(); 32];
+        for (at, text) in [
+            (0, "Accessing workspace:"),
+            (2, "/tmp/sd-trust-2687471/a1"),
+            (4, "Do you trust the contents of this project?"),
+            (
+                6,
+                "Antigravity CLI requires permission to read, edit, and execute files here.",
+            ),
+            (8, "> Yes, I trust this folder"),
+            (9, "  No, exit"),
+            (11, "  ↑/↓ Navigate · enter Confirm"),
+            (12, status),
+        ] {
+            rows[at] = text.to_string();
+        }
+        rows
+    }
+
+    /// Found with the real Antigravity 1.5.9 (16 Nov 2026): a ticked
+    /// folder was not answered, because the program draws its model at
+    /// the right edge of the row under its hint and the screen was held to
+    /// end at the hint. That one row is the program's own; anything else
+    /// under the hint is still not the screen.
+    #[test]
+    fn the_real_antigravity_screen_with_its_status_row_is_read_exactly() {
+        let f = folders("/tmp/sd-trust-2687471/a1");
+        let exact = Some(Seen {
+            level: Level::Exact,
+            focus: Some(Focus::Trust),
+        });
+        let seen = "                                                                                                Gemini 4 Carbon · medium";
+        assert_eq!(
+            read(AgentKind::Antigravity, &real_antigravity(seen), &f),
+            exact
+        );
+        // Another model, another effort: the row is known by its shape.
+        let other = format!("{:>120}", "Gemini 3.8 Flash (Medium) · high");
+        assert_eq!(
+            read(AgentKind::Antigravity, &real_antigravity(&other), &f),
+            exact
+        );
+        // What this file draws for the stand-in agent is that screen.
+        let text = |l: &[String]| {
+            l.iter()
+                .map(|l| l.trim_end().to_string())
+                .collect::<Vec<_>>()
+        };
+        let drawn = drawn::antigravity("/tmp/sd-trust-2687471/a1", Focus::Trust);
+        assert_eq!(text(&real_antigravity(seen))[..13], text(&drawn)[..]);
+
+        // Everything else under the hint leaves the two choices readable
+        // (the owner's one tap) and is never exact.
+        let choices = Some(Seen {
+            level: Level::Choices,
+            focus: Some(Focus::Trust),
+        });
+        let level = |rows: &[String]| read(AgentKind::Antigravity, rows, &f);
+        for odd in [
+            // At the left edge: text, a prompt, a choice.
+            "Gemini 4 Carbon · medium".to_string(),
+            "> ".to_string(),
+            format!("{:>120}", "> Yes, I trust this folder"),
+            format!("{:>120}", "Allow calling this tool?"),
+            format!("{:>120}", "1. Yes"),
+            format!(
+                "{:>130}",
+                "a row that is far too long to be the name of a model and its effort"
+            ),
+        ] {
+            let got = level(&real_antigravity(&odd));
+            assert_ne!(got, exact, "{odd:?}");
+            assert!(got.is_none_or(|s| s.level < Level::Exact), "{odd:?}");
+        }
+        // Not on the row straight under the hint.
+        let mut apart = real_antigravity("");
+        apart[13] = seen.to_string();
+        assert_ne!(level(&apart), exact);
+        // Two rows under the hint.
+        let mut two = real_antigravity(seen);
+        two[13] = seen.to_string();
+        assert_ne!(level(&two), exact);
+        // The status row does not make another folder's screen, or a
+        // reworded one, exact; its choices are still readable.
+        assert_eq!(
+            read(
+                AgentKind::Antigravity,
+                &real_antigravity(seen),
+                &folders("/elsewhere")
+            ),
+            choices
+        );
+        let mut reworded = real_antigravity(seen);
+        reworded[4] = "Do you trust the files in this folder?".into();
+        assert_eq!(level(&reworded), choices);
+        // Claude Code draws no such row: one under its hint is not its screen.
+        let mut claude = drawn::claude("/x", Focus::Trust, 110, &[]);
+        claude.push(seen.to_string());
+        assert_ne!(
+            read(AgentKind::Claude, &claude, &folders("/x")).map(|s| s.level),
+            Some(Level::Exact)
+        );
+    }
+
     /// The boundary: what is and is not the question, per program.
     #[test]
     fn only_a_programs_own_whole_screen_for_the_panes_folder_is_exact() {
@@ -462,6 +621,15 @@ mod tests {
             }
         }
         for focus in [Focus::Exit, Focus::Trust] {
+            // 1.1.27 as the codelab shows it, without the status row.
+            assert_eq!(
+                read(
+                    AgentKind::Antigravity,
+                    &drawn::antigravity_with(f, focus, None),
+                    &folders(f)
+                ),
+                exact(focus)
+            );
             let lines = drawn::antigravity(f, focus);
             assert_eq!(
                 read(AgentKind::Antigravity, &lines, &folders(f)),
@@ -477,7 +645,7 @@ mod tests {
         let long = format!("/home/me/{}", "deep/".repeat(40));
         let mut lines = drawn::antigravity(&long, Focus::Trust);
         let (a, b) = long.split_at(70);
-        lines.splice(2..3, [format!("    {a}"), format!("    {b}")]);
+        lines.splice(2..3, [a.to_string(), b.to_string()]);
         assert_eq!(
             read(AgentKind::Antigravity, &lines, &folders(&long)),
             exact(Focus::Trust)
@@ -499,7 +667,7 @@ mod tests {
         assert_eq!(level(AgentKind::Claude, &warned), Some(Level::Choices));
         // A version that words the question differently.
         let mut reworded = drawn::antigravity(f, Focus::Trust);
-        reworded[4] = "    Do you trust the files in this folder?".into();
+        reworded[4] = "Do you trust the files in this folder?".into();
         assert_eq!(
             level(AgentKind::Antigravity, &reworded),
             Some(Level::Choices)
@@ -516,7 +684,7 @@ mod tests {
         assert_eq!(level(AgentKind::Antigravity, &before), Some(Level::Choices));
         // Both choices marked, or neither: unreadable.
         let mut both = drawn::antigravity(f, Focus::Trust);
-        both[9] = "    > No, exit".into();
+        both[9] = "> No, exit".into();
         assert_eq!(level(AgentKind::Antigravity, &both), Some(Level::Mentioned));
         // The words in an agent's reply are not the screen.
         let said: Vec<String> = [
