@@ -3,9 +3,9 @@
 //
 // - choose the deck's theme, which is the fleet's: it goes through `look.set`
 //   like the editor's Save, so it is the same on every device and station;
-// - set the size of the text in a conversation and in a terminal, which is
-//   this device's own (look.js, "this device's own text sizes"): kept in this
-//   browser, never sent to a station;
+// - set the size of text, which is this device's own (look.js, "this
+//   device's own text size"): one size for every pane and both of its faces,
+//   kept in this browser, never sent to a station;
 // - choose the terminal's font from the ones that are drawn on this device,
 //   which is the fleet's like the theme.
 //
@@ -19,6 +19,9 @@ import { KEYS, BASE, DEFAULT_THEME, DEVICE_SIZES, lookState, allThemes, themeByI
 
 const SAME = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const SYSTEM = ['ui-monospace', 'monospace'];
+// Monospace fonts a device may have of its own (an iPhone has Menlo and
+// Courier New and no other): each is offered only where it is drawn.
+const KNOWN = ['Menlo', 'SF Mono', 'Monaco', 'Courier New', 'Consolas', 'Cascadia Mono', 'Roboto Mono', 'DejaVu Sans Mono', 'Liberation Mono', 'JetBrains Mono', 'Fira Code'];
 // What a theme decides and a choice of theme must show: a single change to
 // one of these, made in the editor on top of the last theme, goes when
 // another theme is chosen here (as it does in the editor). Fonts, sizes and
@@ -69,29 +72,19 @@ export function phoneLook(env, scope = {}) {
     return b;
   };
 
-  // ---- text size: this device's own ----
-  const sizeRow = (which, label, read, sample, note) => {
-    const b = DEVICE_SIZES[which];
-    const value = h('output', { class: 'pl-value', 'aria-live': 'polite' });
-    const step = (by) => { setDeviceSize(which, read().px + by); env.apply(); draw(); };
-    const less = h('button', { type: 'button', class: 'pl-step', 'aria-label': `${label} text smaller`, onclick: () => step(-1) }, 'A−');
-    const more = h('button', { type: 'button', class: 'pl-step', 'aria-label': `${label} text larger`, onclick: () => step(1) }, 'A+');
-    const el = h('div', { class: 'pl-size', role: 'group', 'aria-label': `${label} text size`, dataset: { size: which } },
-      h('div', { class: 'pl-size-row' }, h('b', {}, label), h('span', { class: 'grow' }), less, value, more), sample, note ? h('small', { class: 'muted' }, note) : null);
-    return { el, sync: () => {
-      const s = read();
-      value.textContent = `${s.px} px`;
-      value.title = s.chosen ? `This device's own. The deck's is ${s.deck} px.` : 'The deck\'s size';
-      less.disabled = s.px <= b.min;
-      more.disabled = s.px >= b.max;
-    } };
-  };
+  // ---- text size: this device's own, one for every pane and face ----
+  const b = DEVICE_SIZES.chat;
+  const value = h('output', { class: 'pl-value', 'aria-live': 'polite' });
+  const step = (by) => { setDeviceSize('chat', chatSize(pageLook(scope.layoutKey)).px + by); env.apply(); draw(); };
+  const less = h('button', { type: 'button', class: 'pl-step', 'aria-label': 'Text smaller', onclick: () => step(-1) }, 'A−');
+  const more = h('button', { type: 'button', class: 'pl-step', 'aria-label': 'Text larger', onclick: () => step(1) }, 'A+');
   const termSample = h('pre', { class: 'pl-term-sample', 'aria-hidden': 'true' }, 'you@station:~/code$ git status\nOn branch main   => != 0O 1lI');
-  const chat = sizeRow('chat', 'Conversation', () => chatSize(pageLook(scope.layoutKey)),
-    h('div', { class: 'pl-chat-sample', 'aria-hidden': 'true' }, h('div', { class: 'chat-bubble' }, 'Count the herons.'), h('div', {}, 'There are ', h('b', {}, '37'), ' herons in ', h('code', { class: 'md-code-in' }, 'survey.csv'), '.')));
-  const term = sizeRow('term', 'Terminal', () => termSize(pageLook(scope.layoutKey)), termSample,
-    'For a pane fitted to this screen ("Fit to screen"). A pane you are only watching keeps its own size and is shown whole, shrunk to fit.');
-  const reset = h('button', { type: 'button', class: 'pl-reset', onclick: () => { setDeviceSize('chat', null); setDeviceSize('term', null); env.apply(); draw(); } }, 'Reset to the deck\'s size');
+  const monoNote = h('small', { class: 'muted pl-mono-note' });
+  const size = h('div', { class: 'pl-size', role: 'group', 'aria-label': 'Text size', dataset: { size: 'chat' } },
+    h('div', { class: 'pl-size-row' }, h('b', {}, 'Text'), h('span', { class: 'grow' }), less, value, more),
+    h('div', { class: 'pl-chat-sample', 'aria-hidden': 'true' }, h('div', { class: 'chat-bubble' }, 'Count the herons.'), h('div', {}, 'There are ', h('b', {}, '37'), ' herons in ', h('code', { class: 'md-code-in' }, 'survey.csv'), '.')),
+    termSample, monoNote);
+  const reset = h('button', { type: 'button', class: 'pl-reset', onclick: () => { setDeviceSize('chat', null); env.apply(); draw(); } }, 'Reset to the deck\'s size');
 
   // ---- the terminal's font ----
   const fonts = h('div', { class: 'pl-fonts', role: 'radiogroup', 'aria-label': 'Terminal font' });
@@ -99,20 +92,21 @@ export function phoneLook(env, scope = {}) {
   const drawnAs = (list) => list.find(n => fontHere(n) === 'yes') || 'monospace';
   const fontRows = () => {
     const mine = themed()['font.family'], now = look()['font.family'];
-    const rows = [{ label: 'The theme\'s font', list: mine, set: null }];
+    const rows = [{ key: 'theme', label: 'The theme\'s font', list: mine, set: null }];
     const families = lookState.doc.fonts.map(f => f.name).filter((n, i, all) => all.findIndex(o => sameFont(o, n)) === i && fontHere(n) === 'yes');
-    for (const n of families) rows.push({ label: n, list: [n, ...mine.filter(m => !sameFont(m, n))].slice(0, 8) });
-    if (!SAME(mine, SYSTEM)) rows.push({ label: 'Each device\'s own monospace', list: SYSTEM });
+    for (const n of families) rows.push({ key: n, label: n, list: [n, ...mine.filter(m => !sameFont(m, n))].slice(0, 8) });
+    for (const n of KNOWN) if (!families.some(f => sameFont(f, n)) && fontHere(n) === 'yes') rows.push({ key: n, label: n, list: [n, ...SYSTEM] });
+    if (!SAME(mine, SYSTEM)) rows.push({ key: 'system', label: 'Each device\'s own monospace', list: SYSTEM });
     // What the deck has now, when it is none of these: chosen on a computer.
-    if (!rows.some(r => SAME(r.list, now))) rows.push({ label: 'The deck\'s font now', list: now });
+    if (!rows.some(r => SAME(r.list, now))) rows.push({ key: 'now', label: 'The deck\'s font now', list: now });
     return rows.map((r) => {
       const on = SAME(r.list, now), shown = drawnAs(r.list);
       const sample = h('span', { class: 'pl-font-sample' }, 'Sphinx of black quartz 0O 1lI => !=');
       sample.style.setProperty('--pl-font', fontList(r.list));
-      return h('button', { type: 'button', class: 'pl-font' + (on ? ' on' : ''), role: 'radio', 'aria-checked': String(on),
+      return h('button', { type: 'button', class: 'pl-font' + (on ? ' on' : ''), role: 'radio', 'aria-checked': String(on), dataset: { font: r.key },
         onclick: () => { if (on) return; const set = { ...(deck().set || {}) }; if (r.set === null) delete set['font.family']; else set['font.family'] = r.list; save({ theme: deck().theme, set }); } },
       h('span', { class: 'pl-font-text' }, h('span', { class: 'pl-name' }, r.label), sample,
-        h('span', { class: 'muted small' }, sameFont(shown, r.list[0]) ? `${shown} on this device` : `${r.list[0]} is not on this device: drawn in ${shown} here`)),
+        h('span', { class: sameFont(shown, r.list[0]) ? 'muted small' : 'warn-text small pl-font-missing' }, sameFont(shown, r.list[0]) ? `${shown} on this device` : `${r.list[0]} is not on this device: text here is drawn in ${shown}. Upload its file on a computer to have it everywhere.`)),
       h('span', { class: 'pl-tick', 'aria-hidden': 'true' }, on ? '✓' : ''));
     });
   };
@@ -125,13 +119,17 @@ export function phoneLook(env, scope = {}) {
       scope.paneKey && lookState.doc.panes[scope.paneKey] ? `${scope.name || 'This pane'} has a look of its own, which stays as it is. It is changed on a computer.` : ''].filter(Boolean);
     ownNote.textContent = own.join(' ');
     ownNote.hidden = !own.length;
-    chat.sync();
-    term.sync();
+    const c = chatSize(page), t = termSize(page);
+    value.textContent = `${c.px} px`;
+    value.title = c.chosen ? `This device's own. The deck's is ${c.deck} px.` : 'The deck\'s size';
+    less.disabled = c.px <= b.min;
+    more.disabled = c.px >= b.max;
+    monoNote.textContent = `Every pane on this device, as a conversation and as a terminal. A terminal, a block of code and what a pane printed are a step smaller: ${t.px} px.`;
     termSample.style.setProperty('--pl-font', fontList(page['font.family']));
     termSample.style.setProperty('--pl-px', termSize(page).px + 'px');
     termSample.style.setProperty('--pl-bg', page['term.background']);
     termSample.style.setProperty('--pl-fg', page['term.foreground']);
-    reset.disabled = !chatSize(page).chosen && !termSize(page).chosen;
+    reset.disabled = !c.chosen;
     fonts.replaceChildren(...fontRows());
   }
 
@@ -139,7 +137,7 @@ export function phoneLook(env, scope = {}) {
     draw();
     return h('div', { class: 'phone-look' },
       h('section', {}, h('h3', {}, 'Theme'), h('p', { class: 'muted small' }, 'Changes the theme everywhere: on every device and station.'), themes, warnBox, ownNote),
-      h('section', {}, h('h3', {}, 'Text size'), h('p', { class: 'muted small' }, 'Only on this device.'), chat.el, term.el, reset),
+      h('section', {}, h('h3', {}, 'Text size'), h('p', { class: 'muted small' }, 'Only on this device.'), size, reset),
       h('section', {}, h('h3', {}, 'Terminal font'), h('p', { class: 'muted small' }, 'Changes the font everywhere. These are the fonts this device can draw.'), fonts),
       h('p', { class: 'muted' }, 'More (colours, per-pane looks, importing themes) is on a computer.'),
       h('div', { class: 'row end sheet-foot' }, h('button', { type: 'button', class: 'primary', onclick: close }, 'Done')));

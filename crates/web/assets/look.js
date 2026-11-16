@@ -247,6 +247,12 @@ export function applyPage(look) {
   root.style.setProperty('color-scheme', look['deck.scheme']);
   root.style.setProperty('--ui-font', fontList(look['ui.family']));
   root.style.setProperty('--ui-scale', String(look['ui.size'] / 13));
+  // Text that is not a terminal's but is set like one (a block of code in a
+  // conversation, what a pane printed) is in the terminal's font; and on a
+  // phone at the terminal's size there, which follows this device's one
+  // text size.
+  root.style.setProperty('--mono-font', fontList(look['font.family']) + ', ' + SYMBOLS);
+  if (narrow()) root.style.setProperty('--mono-px', termSize(look).px + 'px'); else root.style.removeProperty('--mono-px');
   // The shades worked out from these colours (a pressed button, a chip's
   // border) are written out for Spandeck Dark and computed for any other.
   if (sameFrame(look, BASE)) delete root.dataset.themed; else root.dataset.themed = '1';
@@ -358,18 +364,23 @@ export function fontFromFile(fileName) {
   return { name: name || 'My font', face: face.trim() || 'regular' };
 }
 
-// ---- this device's own text sizes ----
-// A phone needs another size than a 27-inch screen, so the size of the text
-// in a conversation and in a terminal can be this device's own: a number of
-// pixels kept in this browser, used in place of the deck's while the deck is
-// shown at a phone's width (the phone's Appearance sheet, phonelook.js, sets
-// them). Nothing of it is in the look document or reaches a station. A
-// terminal follows the sizing rule as for any font change: in control it
-// fits the pane again, watching it only scales what it shows.
+// ---- this device's own text size ----
+// A phone needs another size than a 27-inch screen, so the size of text can
+// be this device's own: one number of pixels kept in this browser, used in
+// place of the deck's while the deck is shown at a phone's width (the
+// phone's Appearance sheet, phonelook.js, sets it). It is the size of a
+// conversation's prose; a terminal, a block of code and what a pane printed
+// are set at four fifths of it, whichever pane and whichever face (the
+// owner, 16 Nov 2026: "Two different windows with 2 differ t fonts , should
+// be mobile wide font"). Nothing of it is in the look document or reaches a
+// station. A terminal follows the sizing rule as for any font change: in
+// control it fits the pane again.
 
 const DEVICE = 'spandeck.look.device';
 const CHAT_BASE = 15;
-export const DEVICE_SIZES = { chat: { min: 12, max: 24 }, term: { min: 8, max: 24 } };
+export const DEVICE_SIZES = { chat: { min: 12, max: 24 } };
+// A terminal's text beside a conversation's, on a phone.
+const MONO = 0.8;
 const narrow = () => matchMedia('(max-width: 760px)').matches;
 let device = {};
 try { device = JSON.parse(localStorage.getItem(DEVICE) || '{}') || {}; } catch (e) { device = {}; }
@@ -412,14 +423,18 @@ export function chatSize(look) {
   const b = DEVICE_SIZES.chat, deck = Math.min(b.max, Math.max(b.min, Math.round(CHAT_BASE * (look['ui.size'] / 13) * scale))), mine = ownSize('chat');
   return { px: mine ?? deck, deck, own: mine !== null || scale !== 1, chosen: mine !== null };
 }
-// The same for a terminal's text.
+// The same for a terminal's text (and for code, and for what a pane
+// printed): at a phone's width it follows the conversation's, so that one
+// control moves both and no pane is read at another size than the next.
 export function termSize(look) {
-  const deck = look['font.size'], mine = ownSize('term');
-  return { px: mine ?? deck, deck, own: mine !== null, chosen: mine !== null };
+  const deck = look['font.size'];
+  if (!narrow()) return { px: deck, deck, own: false, chosen: false };
+  const chat = chatSize(look);
+  return { px: Math.max(8, Math.round(chat.px * MONO)), deck, own: true, chosen: chat.chosen };
 }
 
-// The terminal's options for a look. `smaller` is the phone-sized terminal.
-export function termOptions(look, smaller) {
+// The terminal's options for a look.
+export function termOptions(look) {
   return {
     theme: {
       background: look['term.background'], foreground: look['term.foreground'], cursor: look['term.cursor'], cursorAccent: look['term.cursorAccent'],
@@ -427,7 +442,7 @@ export function termOptions(look, smaller) {
       ...Object.fromEntries(TERM_COLOURS.slice(5).map(c => [c, look['term.' + c]])),
     },
     fontFamily: fontList(look['font.family']) + ', ' + SYMBOLS,
-    fontSize: ownSize('term') ?? Math.max(6, look['font.size'] - (smaller ? 2 : 0)),
+    fontSize: termSize(look).px,
     lineHeight: look['font.lineHeight'],
     letterSpacing: look['font.letterSpacing'],
     fontWeight: look['font.weight'], fontWeightBold: look['font.weightBold'],

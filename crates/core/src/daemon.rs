@@ -273,9 +273,46 @@ pub struct PaneEntry {
     /// What was sent to this pane and what it printed after each
     /// (screentalk.rs): its Chat face when it has no transcript.
     pub talk: Mutex<crate::screentalk::Talk>,
+    /// The clients that have this pane's terminal open to size it (attached
+    /// in control), and how many attachments each has. A phone asks before
+    /// it fits a pane to itself: it takes the size from nobody.
+    pub holders: Mutex<std::collections::BTreeMap<String, u32>>,
+}
+
+/// One attachment in control, for as long as it is kept.
+pub struct Holding {
+    pane: Arc<PaneEntry>,
+    client: String,
+}
+
+impl Drop for Holding {
+    fn drop(&mut self) {
+        let mut h = self.pane.holders.lock().unwrap();
+        if let Some(n) = h.get_mut(&self.client) {
+            *n -= 1;
+            if *n == 0 {
+                h.remove(&self.client);
+            }
+        }
+    }
 }
 
 impl PaneEntry {
+    /// `client` has this pane's terminal open in control until what is
+    /// returned is dropped.
+    pub fn hold(self: &Arc<Self>, client: &str) -> Holding {
+        *self
+            .holders
+            .lock()
+            .unwrap()
+            .entry(client.to_string())
+            .or_insert(0) += 1;
+        Holding {
+            pane: self.clone(),
+            client: client.to_string(),
+        }
+    }
+
     pub fn meta(&self) -> PaneMeta {
         self.meta.lock().unwrap().clone()
     }
@@ -294,6 +331,7 @@ impl PaneEntry {
             "parent_pane": m.parent_pane, "hooks_seen": m.hooks_seen, "muted": m.muted,
             "watch": m.watch, "slot": m.slot, "last_message": m.last_message,
             "cols": info.cols, "rows": info.rows, "controller": m.controller,
+            "holders": self.holders.lock().unwrap().keys().collect::<Vec<_>>(),
             "subagents": m.subagents, "resumed": m.resumed,
             "ended_by": m.ended_by, "ended_ms": m.ended_ms, "held_back": m.held_back,
             "last_output_ms": self.term.last_output_ms(), "pid": self.term.pid(),
@@ -1310,6 +1348,7 @@ impl Daemon {
             wake: Default::default(),
             screen_needs: Default::default(),
             talk: Default::default(),
+            holders: Default::default(),
         });
         panes.insert(id.clone(), entry.clone());
         drop(panes);
@@ -2382,6 +2421,7 @@ impl Daemon {
                         wake: Default::default(),
                         screen_needs: Default::default(),
                         talk: Default::default(),
+                        holders: Default::default(),
                     });
                     self.panes.write().unwrap().insert(h.id.clone(), entry);
                     self.record(
@@ -2718,6 +2758,7 @@ impl Daemon {
                         wake: Default::default(),
                         screen_needs: Default::default(),
                         talk: Default::default(),
+                        holders: Default::default(),
                     });
                     self.panes.write().unwrap().insert(id, entry.clone());
                     self.save_pane(&entry);
@@ -2786,6 +2827,7 @@ impl Daemon {
                     wake: Default::default(),
                     screen_needs: Default::default(),
                     talk: Default::default(),
+                    holders: Default::default(),
                 });
                 self.panes.write().unwrap().insert(id, entry);
             }

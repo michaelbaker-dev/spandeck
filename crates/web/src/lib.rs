@@ -869,6 +869,9 @@ enum Chan {
         /// taken: a number is taken once (typed.rs).
         iseq: u64,
         task: tokio::task::JoinHandle<()>,
+        /// In control: the pane counts this client among those that have
+        /// its terminal open, until the channel is closed.
+        _held: Option<spandeck_core::daemon::Holding>,
     },
     Remote {
         tx: mpsc::Sender<ToPeer>,
@@ -1212,6 +1215,10 @@ impl Conn {
                         .map_err(|e| error_json(&e))?;
                 let pane = result["pane"].as_str().unwrap_or(&pane).to_string();
                 daemon.note_attach(&pane, &who.who, &who.client, control);
+                let held = match daemon.pane(&pane) {
+                    Ok(entry) if control => Some(entry.hold(&who.client)),
+                    _ => None,
+                };
                 self.opened(
                     chan,
                     Chan::Local {
@@ -1219,6 +1226,7 @@ impl Conn {
                         control,
                         iseq: 0,
                         task,
+                        _held: held,
                     },
                 )?;
                 Ok(result)

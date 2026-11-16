@@ -6,6 +6,9 @@
   --blue: #6cb6ff; --green: #57d38c; --amber: #f0b65a; --red: #ff6b6b; --violet: #c792ea;
   --focus: #6cb6ff; --focus-w: 0px; --term-bg: #0f1318;
   --ui-font: system-ui, -apple-system, "Segoe UI", sans-serif; --ui-scale: 1;
+  /* The terminal's font, for text set like a terminal's (look.js sets it,
+     and --mono-px at a phone's width: this device's size for such text). */
+  --mono-font: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   color-scheme: dark;
 }
 /* Shades worked out from those colours: a pressed button, a chip's border, a
@@ -68,7 +71,7 @@ h1, h2, h3 { margin: 0 0 8px; font-weight: 600; }
 h2 { font-size: calc(15px * var(--ui-scale)); } h3 { font-size: calc(13px * var(--ui-scale)); margin-top: 16px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 p { margin: 0 0 10px; }
 .muted { color: var(--muted); } .small { font-size: calc(12px * var(--ui-scale)); } .block { display: block; }
-.mono, .pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.mono, .pre { font-family: var(--mono-font); white-space: pre-wrap; word-break: break-word; }
 .grow { flex: 1 1 auto; }
 .warn-text { color: var(--amber); }
 .row { display: flex; align-items: center; gap: 8px; } .row.end { justify-content: flex-end; margin-top: 12px; }
@@ -119,7 +122,7 @@ input, select, textarea { width: 100%; } textarea { resize: vertical; }
 .tile-stats { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; } .tile-stats .needs { color: var(--amber); }
 .agent-line { display: flex; gap: 8px; align-items: center; min-width: 0; } .agent-line .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .needs-line { color: var(--amber); font-size: calc(12px * var(--ui-scale)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.thumb { margin: 0; height: 168px; overflow: hidden; font: calc(9px * var(--ui-scale))/1.34 ui-monospace, Menlo, Consolas, monospace, "Spandeck Symbols"; color: var(--thumb-text); background: var(--bg); border-radius: 6px; padding: 6px; white-space: pre; }
+.thumb { margin: 0; height: 168px; overflow: hidden; font: calc(9px * var(--ui-scale))/1.34 var(--mono-font); color: var(--thumb-text); background: var(--bg); border-radius: 6px; padding: 6px; white-space: pre; }
 .stops { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 .stop { border-radius: 6px; padding: 1px 8px; border: 1px solid var(--line); }
 .stop.confirmed { color: var(--green); } .stop.requested { color: var(--blue); } .stop.unreachable { color: var(--red); border-style: dashed; }
@@ -204,12 +207,16 @@ button.toggle { padding: 2px 10px; } button.toggle.on { background: var(--toggle
 .trust-warn { color: var(--amber); }
 .sheet .trust-note { margin-left: 0; }
 .trust-card, .trust-said { flex: 1 0 100%; box-sizing: border-box; } .phone-pane > .row, .lay-term > .row { flex-wrap: wrap; }
-.term-body { flex: 1; min-height: 0; overflow: hidden; padding: 4px 0 0 6px; }
+.term-body { flex: 1; min-height: 0; overflow: hidden; padding: 4px 0 0 6px; touch-action: none; }
 /* One cell the size of the body: a terminal larger than it is centred over it
    (a cell sized by the terminal would start at the left edge, and the
    terminal, shrunk about its own centre, was drawn off to the right). */
 .term-body.letterbox { display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; padding: 0; background: var(--well); }
 .term-body.letterbox .xterm { transform-origin: center; flex: none; }
+/* A pane watched on a phone: at this device's text size, and scrolled both
+   ways (term.js moves it under a finger), never shrunk to fit. */
+.term-body.natural { overflow: auto; padding: 0; scrollbar-width: thin; } .term-body.natural .xterm { flex: none; }
+.fit-note { flex: 1 0 100%; color: var(--amber); font-size: calc(12px * var(--ui-scale)); }
 .term-note { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; display: flex; gap: 10px; align-items: center; }
 .term-note[hidden] { display: none; }
 /* The page's own link is down (api.js, the heartbeat): said on every pane, at
@@ -254,7 +261,7 @@ button.toggle { padding: 2px 10px; } button.toggle.on { background: var(--toggle
 .approval { background: var(--panel2); border: 1px solid var(--amber); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
 .table { width: 100%; border-collapse: collapse; } .table th, .table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .table th { color: var(--muted); font-weight: 500; font-size: calc(12px * var(--ui-scale)); }
-.diff, .stat { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow: auto; max-height: 60vh; font: calc(12px * var(--ui-scale))/1.45 ui-monospace, Menlo, Consolas, monospace; margin: 0 0 10px; }
+.diff, .stat { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow: auto; max-height: 60vh; font: calc(12px * var(--ui-scale))/1.45 var(--mono-font); margin: 0 0 10px; }
 .diff .add { color: var(--green); } .diff .del { color: var(--red); } .diff .hunk { color: var(--violet); } .diff .file { color: var(--blue); font-weight: 600; }
 #toasts { position: fixed; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 8px; max-width: min(440px, 92vw); }
 .toast { background: var(--panel2); border: 1px solid var(--line); border-left: 3px solid var(--blue); border-radius: 8px; padding: 8px 12px; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
@@ -282,7 +289,7 @@ button.toggle { padding: 2px 10px; } button.toggle.on { background: var(--toggle
 .composer .keys { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
 .composer .key { min-width: 0; min-height: 44px; padding: 0; font: 500 calc(13px * var(--ui-scale)) ui-monospace, SFMono-Regular, Menlo, monospace; }
 .composer-row { display: flex; gap: 8px; align-items: flex-end; }
-.composer-box { flex: 1; min-height: 48px; max-height: 40dvh; font-size: 16px; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: inherit; resize: vertical; }
+.composer-box { flex: 1; min-height: 48px; max-height: 40dvh; font-size: max(16px, calc(15px * var(--chat-scale, var(--ui-scale)))); padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: inherit; resize: vertical; }
 .composer-row button { min-height: 48px; min-width: 56px; }
 .composer .mic.on { outline: 2px solid var(--mic); }
 .phone-pane .pane { min-height: 38dvh; }
@@ -563,7 +570,8 @@ a.btn.wide { width: 100%; justify-content: center; text-align: center; }
 .chat-src { position: sticky; top: 0; z-index: 1; align-self: stretch; margin: -8px 0 0; padding: 6px 4px; border: none; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--bg); color: var(--muted); font-size: calc(12px * var(--ui-scale)); text-align: left; justify-content: flex-start; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 0; }
 .chat-src.open { white-space: normal; overflow-wrap: anywhere; }
 .chat-screen { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
-.chat-screen-text { align-self: stretch; margin: 0; font: calc(12px * var(--ui-scale))/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre; overflow-x: auto; overflow-y: hidden; background: var(--well); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.chat-screen-text { align-self: stretch; margin: 0; font: var(--mono-px, calc(12px * var(--ui-scale)))/1.4 var(--mono-font); white-space: pre; overflow-x: auto; overflow-y: hidden; background: var(--well); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.chat-screen-text, .md-code pre { -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
 .chat-screen.open .chat-screen-text { border-color: var(--accent-line); }
 .wait-keys.chat-keys { flex-wrap: nowrap; } .wait-keys.chat-keys .key { flex: 1 1 0; min-width: 34px; padding-left: 0; padding-right: 0; }
 .chat-keys[hidden] { display: none; }
@@ -579,13 +587,13 @@ a.btn.wide { width: 100%; justify-content: center; text-align: center; }
 .tool-mark { flex: none; width: 1.1em; text-align: center; color: var(--muted); }
 .chat-tool.ok .tool-mark, .chat-tool.done .tool-mark { color: var(--green); } .chat-tool.error .tool-mark, .tool-note.error { color: var(--red); }
 .chat-tool.denied .tool-mark, .tool-note.denied, .tool-note.interrupted { color: var(--amber); } .chat-tool.running .tool-mark, .tool-note.running { color: var(--blue); }
-.tool-sum { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; font: calc(12px * var(--ui-scale)) ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.tool-sum { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; font: var(--mono-px, calc(12px * var(--ui-scale))) var(--mono-font); }
 .tool-note { flex: none; font-size: calc(12px * var(--ui-scale)); } .chev { flex: none; width: 1em; text-align: center; }
 .chat-detail { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px; border-top: 1px solid var(--line); background: var(--bg); font-size: calc(13px * var(--ui-scale)); }
-.chat-detail pre, .chat-peek { margin: 0; font: calc(12px * var(--ui-scale))/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--well); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; max-height: 50dvh; overflow: auto; }
+.chat-detail pre, .chat-peek { margin: 0; font: var(--mono-px, calc(12px * var(--ui-scale)))/1.45 var(--mono-font); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--well); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; max-height: 50dvh; overflow: auto; }
 .chat-cmd::before { content: '$ '; color: var(--muted); }
 .chat-clamp, .chat-field { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; } .chat-clamp, .chat-clamp pre, .chat-field > .chat-clamp { align-self: stretch; }
-.diff-name { font: calc(12px * var(--ui-scale)) ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: var(--muted); overflow-wrap: anywhere; margin-bottom: 2px; }
+.diff-name { font: var(--mono-px, calc(12px * var(--ui-scale))) var(--mono-font); color: var(--muted); overflow-wrap: anywhere; margin-bottom: 2px; }
 .chat-detail pre.diff-lines { white-space: pre; overflow-wrap: normal; padding: 6px 0; } .diff-lines span { display: block; padding: 0 8px; min-width: max-content; }
 .diff-add { background: color-mix(in srgb, var(--green) 20%, transparent); } .diff-del { background: color-mix(in srgb, var(--red) 20%, transparent); } .diff-hunk { color: var(--muted); }
 
@@ -635,11 +643,11 @@ button.ask-opt.on { border-color: var(--accent-line); background: var(--accent-b
 .md-n { flex: none; min-width: 1.4em; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; } .md-item { flex: 1 1 0; min-width: 0; } .md-task { flex: none; } .md-task.done { color: var(--green); }
 .md blockquote { margin: 0 0 .65em; padding: 2px 0 2px 12px; border-left: 3px solid var(--line); color: var(--muted); }
 .md hr { border: none; border-top: 1px solid var(--line); margin: .8em 0; }
-.md-code-in { font: .9em ui-monospace, "SF Mono", Menlo, Consolas, monospace; background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; padding: 0 4px; overflow-wrap: anywhere; }
+.md-code-in { font: .9em var(--mono-font); background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; padding: 0 4px; overflow-wrap: anywhere; }
 .md-code { border: 1px solid var(--line); border-radius: 8px; margin: 0 0 .65em; overflow: hidden; background: var(--well); }
 .md-code-head { display: flex; align-items: center; justify-content: space-between; min-height: 30px; padding: 0 2px 0 10px; background: var(--panel2); border-bottom: 1px solid var(--line); color: var(--muted); font-size: calc(12px * var(--ui-scale)); }
 .md-copy { background: none; border: none; color: var(--muted); padding: 2px 10px; font-size: calc(12px * var(--ui-scale)); min-height: 30px; }
-.md-code pre { margin: 0; padding: 8px 10px; overflow-x: auto; white-space: pre; font: calc(12.5px * var(--ui-scale))/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.md-code pre { margin: 0; padding: 8px 10px; overflow-x: auto; white-space: pre; font: var(--mono-px, calc(12.5px * var(--ui-scale)))/1.5 var(--mono-font); }
 .md-table { overflow-x: auto; margin: 0 0 .65em; } .md-table table { border-collapse: collapse; font-size: .93em; }
 .md-table th, .md-table td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; } .md-table th { background: var(--panel2); } .md-table .md-c { text-align: center; } .md-table .md-r { text-align: right; }
 a.md-link { color: var(--blue); text-decoration: underline; overflow-wrap: anywhere; }

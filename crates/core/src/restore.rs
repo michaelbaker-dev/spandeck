@@ -675,6 +675,7 @@ impl Daemon {
             wake: Default::default(),
             screen_needs: Default::default(),
             talk: Default::default(),
+            holders: Default::default(),
         });
         self.panes
             .write()

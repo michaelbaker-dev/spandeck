@@ -20,6 +20,7 @@ import { keyTyped, paneWrote, keysNotSent } from './perf.js';
 import { HOLD_MS, isTyping, isPaste, holdTake, heldTooLong, keysWords, wasWere, offWords, droppedWords, sendAct } from './typed.js';
 import { retryIn } from './api.js';
 import { BASE, termOptions, applyPaneFrame, SIZING } from './look.js';
+import { axisOf, speedOf, glide, linesOf, framer, REST_SPEED } from './touch.js';
 
 // A terminal as every pane has it. Emoji take two cells, as the programs
 // that print them expect: the terminal's own table (Unicode 6) gives them
@@ -38,7 +39,9 @@ export function remeasureTerminal(term) {
 }
 
 export class PaneTerm {
-  // opts: {mode: 'control'|'watch', onMenu(ev, pane), onFocus(), compact}
+  // opts: {mode: 'control'|'watch', onMenu(ev, pane), onFocus(),
+  //   natural: watched, it is drawn at its text size and scrolled, not shrunk (a phone),
+  //   onLost(term): another client took this pane's size}
   constructor(api, station, pane, opts = {}) {
     this.api = api;
     this.station = station;
@@ -85,7 +88,7 @@ export class PaneTerm {
     this.el.paneTerm = this;
 
     this.term = newTerminal({
-      ...termOptions(BASE, opts.compact), scrollback: 5000,
+      ...termOptions(BASE), scrollback: 5000,
       disableStdin: !this.control && !opts.typeWhileWatching, macOptionIsMeta: true,
       // A full-screen agent listens for the mouse, so a plain drag goes to it
       // and selects nothing. Option (Mac) or Shift makes the drag a selection.
@@ -117,48 +120,92 @@ export class PaneTerm {
       if (files.length && this.control) { e.preventDefault(); e.stopPropagation(); files.forEach(f => this._upload(f)); }
     }, true);
 
-    // A finger drags the history up and down. The terminal library has its
-    // own touch handling, which sees the finger first and did not scroll on a
-    // real iPhone. So this listens ahead of it (capture) and scrolls the
-    // history directly; the library never sees a drag. A tap still reaches
-    // it, to focus the terminal and bring up the keyboard.
-    let touchY = null, carry = 0, dragging = false, moved = 0, events = 0, from = 0, lastReport = 0;
+    // A finger drags the history up and down, and a pane wider than a
+    // phone sideways (touch.js has the arithmetic, and why it is done here
+    // and not left to the browser). The terminal library has its own touch
+    // handling, which sees the finger first and did not scroll on a real
+    // iPhone. So this listens ahead of it (capture); the library never sees
+    // a drag. A tap still reaches it, to focus the terminal and bring up the
+    // keyboard. A move only adds up how far the finger went: the view is
+    // moved once a frame, by the pixel, and goes on after the finger lifts.
+    let at = null, axis = null, samples = [], pend = { x: 0, y: 0 }, gliding = null, stopped = false;
+    let moved = 0, events = 0, from = 0, lastReport = 0;
+    this.carry = 0;
     const lineHeight = () => {
       const row = this.term.element?.querySelector('.xterm-rows')?.firstElementChild;
       return (row && row.getBoundingClientRect().height) || 17;
     };
+    const apply = (now) => {
+      if (axis && (pend.x || pend.y)) {
+        if (axis === 'x') this.body.scrollLeft += pend.x; else moved += this._pan(pend.y).lines;
+        pend = { x: 0, y: 0 };
+      }
+      if (!gliding) return;
+      const g = glide(gliding.speed, now - gliding.t);
+      gliding.speed = g.speed;
+      gliding.t = now;
+      let went = true;
+      if (gliding.axis === 'x') { const was = this.body.scrollLeft; this.body.scrollLeft += g.moved; went = Math.abs(this.body.scrollLeft - was) > 0.01 || Math.abs(g.moved) < 0.5; }
+      else went = this._pan(g.moved).went;
+      if (!went || Math.abs(g.speed) < REST_SPEED) { gliding = null; this._rest(); } else frame();
+    };
+    const frame = framer(apply);
+    this._stopGlide = () => { const was = !!gliding; gliding = null; return was; };
     this.body.addEventListener('touchstart', (e) => {
-      touchY = e.touches.length === 1 ? e.touches[0].clientY : null;
-      carry = 0; dragging = false; moved = 0; events = 0; from = this.term.buffer.active.viewportY;
+      // A touch stops what was still moving, and is not a tap then.
+      stopped = this._stopGlide();
+      if (stopped) this._rest();
+      const t = e.touches.length === 1 ? e.touches[0] : null;
+      at = t ? { x: t.clientX, y: t.clientY } : null;
+      axis = null; samples = []; pend = { x: 0, y: 0 }; moved = 0; events = 0; from = this.term.buffer.active.viewportY;
+      if (at) this._panned = Date.now();
     }, { capture: true, passive: true });
     this.body.addEventListener('touchmove', (e) => {
-      if (touchY === null || e.touches.length !== 1) return;
-      const y = e.touches[0].clientY;
-      carry += touchY - y;
-      touchY = y;
-      if (!dragging && Math.abs(carry) < 6) return;
-      dragging = true;
-      const line = lineHeight();
-      const lines = Math.trunc(carry / line);
+      if (!at || e.touches.length !== 1) return;
+      const t = e.touches[0], dx = at.x - t.clientX, dy = at.y - t.clientY;
+      if (!axis) {
+        // Until it has gone one way, it may still be a tap.
+        axis = axisOf(dx, dy, this.body.classList.contains('natural'));
+        if (!axis) return;
+        this.el.classList.add('dragging');
+      }
+      at = { x: t.clientX, y: t.clientY };
+      pend.x += dx; pend.y += dy;
       events += 1;
-      if (lines) { this._scrollBy(lines); carry -= lines * line; moved += lines; }
-      e.preventDefault();
+      samples.push({ t: performance.now(), x: -t.clientX, y: -t.clientY });
+      if (samples.length > 40) samples.splice(0, 20);
+      frame();
+      // The page is told not to pan under the finger (touch-action), and
+      // where a browser pans all the same this stops it, as it has on a
+      // real iPhone since the first version; the library never sees a drag.
+      if (e.cancelable) e.preventDefault();
       e.stopPropagation();
     }, { capture: true, passive: false });
     const endTouch = (e) => {
-      // The end of a drag is not a tap: do not let it move the cursor or focus.
-      if (dragging) { e.preventDefault(); e.stopPropagation(); }
+      const dragging = !!axis;
+      // The end of a drag is not a tap, nor is the touch that stopped a
+      // glide: do not let it move the cursor or focus.
+      if (dragging || stopped) { if (e.cancelable) e.preventDefault(); e.stopPropagation(); }
+      if (dragging) {
+        const now = performance.now();
+        apply(now);
+        const speed = e.type === 'touchend' ? speedOf(samples, now, axis) : 0;
+        if (speed) { gliding = { axis, speed, t: now }; frame(); } else this._rest();
+        this._panned = Date.now();
+      }
+      this.el.classList.remove('dragging');
       // Touch scrolling cannot be tested on a real phone from the station, so
       // the page says what a drag did. Read with: spandeck rpc log.query '{"kind":"client.report"}'
       if (events && Date.now() - lastReport > 4000) {
         lastReport = Date.now();
         const b = this.term.buffer.active;
         this.api.call('client.report', { what: 'touch-drag', build: this.api.build, mode: this.mode, control: this.control,
-          events, asked: moved, from, to: b.viewportY, base: b.baseY, rows: this.term.rows, alt: b.type,
+          events, asked: moved, from, to: b.viewportY, base: b.baseY, rows: this.term.rows, alt: b.type, axis, glide: gliding ? Math.round(gliding.speed * 100) / 100 : 0,
           mouse: this.term.modes?.mouseTrackingMode, line: Math.round(lineHeight() * 10) / 10, ua: navigator.userAgent.slice(0, 120) }).catch(() => {});
       }
-      touchY = null; dragging = false;
+      at = null; axis = null; stopped = false;
     };
+    this._lineHeight = lineHeight;
     this.body.addEventListener('touchend', endTouch, { capture: true, passive: false });
     this.body.addEventListener('touchcancel', endTouch, { capture: true, passive: false });
 
@@ -394,7 +441,7 @@ export class PaneTerm {
         // and nothing typed into it is sent.
         onClosed: () => { this.chan = null; },
         onDropped: (d) => this._dropped(d),
-        onData: (b) => { paneWrote(this); this.term.write(b); },
+        onData: (b) => { paneWrote(this); this.term.write(b); if (this.opts.natural && !this._kc) this._kc = setTimeout(() => { this._kc = null; if (!this.disposed) this._keepCursor(); }, 120); },
         onResync: (b) => { this.term.reset(); this.term.write(b); },
         onExit: (info) => this._note(`This pane's process ended (${describeExit(info)}).`),
         // The pane's station said nothing to the one serving this page
@@ -499,10 +546,66 @@ export class PaneTerm {
     this._send(one.repeat(n));
   }
 
-  // Fit (in control) or letterbox (watching).
+  // Move what is seen by `d` pixels, towards later output when positive:
+  // { lines: whole lines of history moved, went: something could move }.
+  // The terminal draws its history a line at a time, so the part of a line
+  // is kept and the rows are shifted by it: the text follows the finger by
+  // the pixel. A pane shown larger than its frame (watched on a phone) is
+  // moved inside the frame first on the way back, and last on the way on.
+  // A full-screen program is told to scroll, a line at a time.
+  _pan(d) {
+    const b = this.term.buffer.active, alt = b.type === 'alternate', body = this.body;
+    if (body.classList.contains('natural')) {
+      if (d < 0 && body.scrollTop > 0) { const take = Math.min(-d, body.scrollTop); body.scrollTop -= take; d += take; }
+      else if (d > 0 && (alt || b.viewportY >= b.baseY)) {
+        const room = body.scrollHeight - body.clientHeight - body.scrollTop;
+        if (room > 0.5) { const take = Math.min(d, room); body.scrollTop += take; d -= take; }
+      }
+      if (!d) return { lines: 0, went: true };
+    }
+    const { whole, rest } = linesOf(this.carry + d, this._lineHeight());
+    this.carry = rest;
+    if (alt) { if (whole) this._scrollBy(whole); return { lines: whole, went: true }; }
+    if (whole) this.term.scrollLines(whole);
+    const y = this.term.buffer.active.viewportY;
+    // At either end there is nothing further to show a part of.
+    const end = (y <= 0 && this.carry < 0) || (y >= b.baseY && this.carry > 0);
+    if (end) this.carry = 0;
+    this._shift();
+    return { lines: whole, went: !end };
+  }
+  _shift() {
+    const rows = this.term.element?.querySelector('.xterm-rows');
+    if (rows) rows.style.transform = this.carry ? `translateY(${-this.carry}px)` : '';
+  }
+  // The view has stopped: on a whole line, the nearer one.
+  _rest() {
+    const line = this._lineHeight();
+    if (this.term.buffer.active.type !== 'alternate' && Math.abs(this.carry) >= line / 2) this.term.scrollLines(Math.sign(this.carry));
+    this.carry = 0;
+    this._shift();
+  }
+
+  // A pane shown larger than its frame: the row the cursor is on is in the
+  // frame, unless a finger moved the view a moment ago.
+  _keepCursor() {
+    const body = this.body;
+    if (!body.classList.contains('natural') || Date.now() - (this._panned || 0) < 5000) return;
+    const line = this._lineHeight(), top = this.term.buffer.active.cursorY * line;
+    if (top < body.scrollTop) body.scrollTop = Math.max(0, top - line);
+    else if (top + 2 * line > body.scrollTop + body.clientHeight) body.scrollTop = top + 2 * line - body.clientHeight;
+  }
+
+  // Watched on a phone: the whole pane shrunk into its frame, or (the
+  // rule) at this device's text size and scrolled.
+  setWhole(whole) { if (!!this.whole !== !!whole) { this.whole = !!whole; this.layout(); } }
+
+  // Fit (in control); watching, letterbox, or on a phone the pane at its
+  // text size inside a frame that scrolls.
   layout() {
     if (this.disposed || !this.term.element) return;
     const xterm = this.term.element;
+    this.body.classList.toggle('natural', !this.control && !!this.opts.natural && !this.whole);
     if (this.control) {
       xterm.style.transform = '';
       xterm.style.width = '';
@@ -516,9 +619,16 @@ export class PaneTerm {
       }
     } else {
       if (this.term.cols !== this.size.cols || this.term.rows !== this.size.rows) this.term.resize(this.size.cols, this.size.rows);
+      const screen = xterm.querySelector('.xterm-screen');
+      if (this.body.classList.contains('natural')) {
+        this.body.classList.remove('letterbox');
+        xterm.style.transform = '';
+        xterm.style.width = (screen?.offsetWidth || 1) + 'px';
+        this._keepCursor();
+        return;
+      }
       this.body.classList.add('letterbox');
       xterm.style.transform = '';
-      const screen = xterm.querySelector('.xterm-screen');
       const w = screen?.offsetWidth || 1, hh = screen?.offsetHeight || 1;
       const scale = Math.min(1, this.body.clientWidth / w, this.body.clientHeight / hh);
       xterm.style.width = w + 'px';
@@ -532,10 +642,10 @@ export class PaneTerm {
   // fitted again only when the change moves how many cells fit.
   setLook(look, page) {
     applyPaneFrame(this.el, look, page);
-    const next = termOptions(look, this.opts.compact);
+    const next = termOptions(look);
     const sig = JSON.stringify(next);
     if (sig === this._lookSig) return;
-    const was = this._lookSig ? JSON.parse(this._lookSig) : termOptions(BASE, this.opts.compact);
+    const was = this._lookSig ? JSON.parse(this._lookSig) : termOptions(BASE);
     this._lookSig = sig;
     let sizing = false;
     for (const [k, v] of Object.entries(next)) {
@@ -570,6 +680,7 @@ export class PaneTerm {
       this.control = false;
       this.term.options.disableStdin = true;
       this._lostControl = true;
+      if (this.opts.onLost) this.opts.onLost(this);
     }
     this.layout();
     this.renderStrip();
@@ -716,6 +827,8 @@ export class PaneTerm {
     for (const x of (this.says || new Map()).values()) clearTimeout(x.timer);
     clearTimeout(this._lateTimer);
     clearTimeout(this._lostTimer);
+    clearTimeout(this._kc);
+    this._stopGlide();
     this._offStatus();
     this._offEvents();
     this.ro.disconnect();
