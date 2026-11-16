@@ -84,6 +84,17 @@ days, not hours.
   and another station can close only connections it made itself. A connection that
   sends no such value is never closed by this rule. What the closed connection had
   waiting to be typed is thrown away, never written later.
+- **What is typed is not delivered late** (16 Nov 2026). A page stamps what it types
+  with its own clock and the receiving station refuses it when it arrives more than two
+  seconds and twice the round trip after it was typed (ten seconds for a message from
+  the message box), and takes a numbered key once. This guards the owner against a link
+  that stalls and returns (keys typed minutes ago arriving in a shell), not against the
+  sender: the stamp and the round trip are the sender's own word, a sender can only make
+  its own input count as late or as fresh, and whoever can type into a pane could type
+  the same thing now. What is refused is reported as a count, a number and an age,
+  never as what was typed. The clock a station reads from a ping is a number of
+  milliseconds with no date in it, kept in memory for that connection (for another
+  station: for that station) and nowhere else.
 - **Agents are not the owner.** Each pane has its own token. Agents can message, delegate
   and search history; they never get a call that administers a station. Text from agents,
   other stations and session history is shown as text and labelled as quoted, never run

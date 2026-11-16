@@ -1168,6 +1168,22 @@ pub mod wire {
             let _ = sink.send(Message::Text(text.to_string().into())).await;
         }
 
+        /// Sent exactly as written (a ping is known by how it begins).
+        pub async fn text(&self, text: String) {
+            let mut sink = self.sink.lock().await;
+            let _ = sink.send(Message::Text(text.into())).await;
+        }
+
+        /// What was said on a channel of things typed that were not taken.
+        pub fn dropped(&self, chan: u64) -> Vec<Value> {
+            let seen = self.seen.lock().unwrap();
+            seen.said
+                .iter()
+                .filter(|v| v["chan"] == json!(chan) && v.get("input_dropped").is_some())
+                .cloned()
+                .collect()
+        }
+
         pub async fn ask(&self, method: &str, params: Value) -> u64 {
             let id = 1 + self.id.fetch_add(1, Ordering::SeqCst);
             self.raw(json!({"id": id, "method": method, "params": params}))

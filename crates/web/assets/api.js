@@ -68,6 +68,12 @@ export const ASLEEP = 2000;
 // With nothing heard for this long while the page is being looked at, it
 // asks: a ping. A healthy idle link so carries one small frame a second.
 export const PING_AFTER = 1000;
+// And at least this often whatever is heard, where the station reads this
+// page's clock from its pings (what is typed is stamped with that clock, and
+// a reading must not grow old on a link that is busy printing).
+export const PING_EVERY = 5000;
+// A key was sent and nothing has come back for this long: ask now.
+export const PROBE_AFTER = 300;
 // Trying again after a lost connection: at once, then these, each 30% either
 // way so that many pages do not come back in step, then every 5 s for ever.
 export const RETRY = [0, 100, 200, 400, 800, 1600, 3200, 5000];
@@ -150,8 +156,19 @@ export class Api {
     // background, a phone that was locked or a laptop that slept concludes
     // nothing from the time it was away.
     this.pings = false;      // the station answers pings (`caps`)
+    // What is typed (typed.js, term.js). `stamps`: the station judges what
+    // is typed by its stamp (`caps`: `input`), so keys may be held for a
+    // moment and sent after a reconnect. `based`: the station has answered
+    // a ping of this connection since the page was last away, so it knows
+    // how this page's clock stands; nothing stamped is sent before that.
+    this.stamps = false;
+    this.based = false;
+    this.framePerf = 0;      // when the last frame came, by the page's clock
+    this.pingedAwake = 0;    // when the last ping went, on the awake clock
+    this.probing = null;     // the timer of a key waiting for something back
     this.awake = 0;
     this.beatAt = performance.now();
+    this.beatWall = Date.now();
     this.wasHidden = document.visibilityState !== 'visible';
     this.frameAwake = 0;     // when the last frame came, on that clock
     this.frameWall = 0;      // and by the clock on the wall ("as of")
@@ -213,12 +230,24 @@ export class Api {
   // Connected, and answering as far as this page knows: what is typed is
   // sent only then.
   get live() { return this.connected && !this.silent; }
+  // And the station can tell how old something typed is (or does not judge
+  // it, as a station from before): what is typed may be sent.
+  get ready() { return this.live && (!this.stamps || this.based); }
+  // Why what is typed cannot be sent now, or null (typed.js, `offWords`).
+  get offWhy() { return !this.connected ? 'closed' : this.silent ? 'silent' : this.stamps && !this.based ? 'clock' : null; }
   // This connection's round trip: the median of the last 8 pings.
   rtt() { return median(this.rtts); }
   // What the bounds are worked out from: that, or the latest one when it
   // is longer, so that a link that has just turned slow is given the time
   // of a slow link at once and not five pings later.
   _trip() { return Math.max(this.rtt() || 0, this.rtts[this.rtts.length - 1] || 0); }
+  // The round trip a key's limit is worked out from (the station adds it
+  // twice to its two seconds): the middle one of the last 8, or the latest
+  // when that is longer, but then counted as at most a second more than
+  // twice the middle one. So a link that has just turned slow can be typed
+  // over at once, and one answer that came late because the link stood
+  // still does not make the next keys' limit long.
+  _way() { const mid = this.rtt() || 0; return Math.max(mid, Math.min(this.rtts[this.rtts.length - 1] || 0, 2 * mid + 1000)); }
   _now() { return this.awake + (this.wasHidden ? 0 : Math.min(performance.now() - this.beatAt, ASLEEP)); }
   // What the screen is drawn from (see linkLevel).
   link() {
@@ -231,9 +260,13 @@ export class Api {
   // Every half second, and at once when the page is shown again or the
   // browser says the network is back (`wake`).
   _beat(wake = false) {
-    const now = performance.now(), dt = now - this.beatAt;
+    // By the page's clock or the clock on the wall, whichever says longer:
+    // on some machines the page's clock stands still while the machine
+    // sleeps, and a tick after an hour's sleep would look on time.
+    const now = performance.now(), wall = Date.now(), dt = Math.max(now - this.beatAt, wall - this.beatWall);
     const kind = tickKind(document.visibilityState === 'visible', this.wasHidden || wake, dt);
     this.beatAt = now;
+    this.beatWall = wall;
     this.wasHidden = kind === 'hidden';
     if (kind === 'hidden') return;
     if (kind === 'woke') return this._woke();
@@ -245,7 +278,9 @@ export class Api {
     // to this page is full): the frames were the proof, and the next
     // quiet second asks again.
     if (this.pingOut && this.frameAwake > this.pingOut.awake && at - this.pingOut.awake >= slowAfter(this._trip())) this.pingOut = null;
-    if (!this.pingOut && quiet >= PING_AFTER) this._ping();
+    // (And at once while the station has not read this page's clock: the
+    // answer to the ping that was to say so may have been dropped.)
+    if (!this.pingOut && (quiet >= PING_AFTER || (this.stamps && (!this.based || at - this.pingedAwake >= PING_EVERY)))) this._ping();
     const unanswered = this.pingOut && this.frameAwake <= this.pingOut.awake ? at - this.pingOut.awake : 0;
     if (unanswered >= slowAfter(this._trip())) {
       // After waking, the one ping decides: the socket of a machine that
@@ -260,15 +295,42 @@ export class Api {
   _woke() {
     this.frameAwake = this.awake;
     this.pingOut = null;
+    // This page's clock may have stood still: the station is told so by
+    // the next ping (`fresh`), and nothing typed is sent until it answers.
+    this.based = false;
     if (this.connected && this.pings) { this.deciding = true; this._ping(); }
     else if (!this.connected && this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; this.connect(); }
     this._emit('page.woke');
   }
 
+  // `t`: this page's clock, which the station reads from here and nowhere
+  // else. `rtt`: this connection's round trip (`_way`), which is added twice
+  // to how late a key may be. `fresh`: no ping has been answered since this page
+  // signed in or was last away, so the readings from before count for
+  // nothing.
   _ping() {
     if (!this.connected) return;
     this.pingOut = { n: ++this.pingN, t: performance.now(), awake: this._now() };
-    try { this.ws.send(JSON.stringify({ ping: this.pingOut.n, t: this.pingOut.t })); } catch (e) { /* closing: the close says so */ }
+    this.pingedAwake = this.pingOut.awake;
+    const ping = { ping: this.pingOut.n, t: this.pingOut.t, rtt: Math.round(this._way()) };
+    if (!this.based) ping.fresh = true;
+    try { this.ws.send(JSON.stringify(ping)); } catch (e) { /* closing: the close says so */ }
+  }
+
+  // A key was sent (term.js). When nothing at all comes back within 300 ms
+  // the page asks at once, instead of at the next quiet second, and judges
+  // the answer by the same bound as ever (`slowAfter`): typing is off from
+  // then, and the connection is kept. Any frame turns typing back on.
+  typed() {
+    if (!this.pings || this.probing) return;
+    const sent = this._now();
+    this.probing = setTimeout(() => {
+      this.probing = null;
+      if (!this.connected || this.frameAwake > sent) return;
+      if (!this.pingOut) this._ping();
+      const left = slowAfter(this._trip()) - (this._now() - this.pingOut.awake);
+      setTimeout(() => this._beat(), Math.max(0, left) + 20);
+    }, PROBE_AFTER);
   }
 
   // Ask now, for a caller that wants to know whether the link answers (what
@@ -287,6 +349,7 @@ export class Api {
   _heard() {
     this.frameAwake = this._now();
     this.frameWall = Date.now();
+    this.framePerf = performance.now();
     this.deciding = false;
     if (this.silent) { this.silent = false; this._back(); this._status(); }
   }
@@ -319,6 +382,7 @@ export class Api {
     if (was && performance.now() - this.openedAt > 3000) { this.tries = 0; this.timeouts = 0; }
     this.connected = false;
     this.silent = false;
+    this.based = false;
     this.pingOut = null;
     this.deciding = false;
     if (was) this.gapFrom ??= this._now();
@@ -395,6 +459,10 @@ export class Api {
           // does not answer a ping: it is then not sent one, and nothing is
           // concluded from its silence, as before.
           this.pings = Array.isArray(msg.auth.caps) && msg.auth.caps.includes('ping');
+          // And one that does not say `input` takes what is typed as it
+          // comes, however late: towards it nothing is held to be sent later.
+          this.stamps = this.pings && msg.auth.caps.includes('input');
+          this.based = false;
           this.everConnected = true;
           this.connected = true;
           this.openedAt = performance.now();
@@ -404,6 +472,9 @@ export class Api {
           if (!this.rtts.length) this.rtts.push((performance.now() - began) / 2);
           this._heard();
           this._back();
+          // The station reads this page's clock from this, before anything
+          // typed is sent.
+          if (this.stamps) this._ping();
           this.call('events.subscribe', {}).catch(() => {});
           this._status();
           for (const fn of this.settle || []) fn(true);
@@ -420,6 +491,8 @@ export class Api {
             this.pingOut = null;
             const told = this.probes?.get(msg.pong);
             if (told) { this.probes.delete(msg.pong); told(ms); }
+            // The station has this page's clock: what is typed may go.
+            if (!this.based) { this.based = true; this._emit('input.ready'); this._status(); }
           }
           return;
         }
@@ -440,6 +513,14 @@ export class Api {
           // What was typed for a pane of another station was not sent: that
           // station is not taking it, and too much already waits.
           if (c && msg.input_refused) c.onRefused && c.onRefused(String(msg.station || '').slice(0, 64));
+          // Something typed and stamped was not taken: which (its number),
+          // why, and how late. Numbers and a name from a station: whole
+          // numbers or nothing, a bounded name, a reason from a short list.
+          if (c && msg.input_dropped) {
+            const n = (v) => (Number.isFinite(v) && v >= 0 ? Math.round(v) : null);
+            c.onDropped && c.onDropped({ iseq: n(msg.iseq), why: ['late', 'silent', 'not_ready'].includes(msg.why) ? msg.why : 'refused',
+              ageMs: n(msg.age_ms), limitMs: n(msg.limit_ms), quietMs: n(msg.quiet_ms), station: String(msg.station || '').slice(0, 64) });
+          }
           // A watched conversation (chat.js): what is new, or that it ended.
           if (c && msg.conversation) c.onConversation && c.onConversation(msg.conversation);
           if (c && msg.conversation_end) c.onEnd && c.onEnd(msg.conversation_end);
@@ -449,7 +530,10 @@ export class Api {
         if (!p) return;
         this.pending.delete(msg.id);
         clearTimeout(p.limit);
-        if (msg.error) p.reject(Object.assign(new Error(msg.error.message || 'error'), { code: msg.error.code }));
+        // `late`: something typed that reached the station after its limit
+        // (typed.js): how late, and the limit, as whole numbers or nothing.
+        if (msg.error) p.reject(Object.assign(new Error(msg.error.message || 'error'), { code: msg.error.code },
+          msg.error.code === 'late' && Number.isFinite(msg.error.age_ms) && Number.isFinite(msg.error.limit_ms) ? { late: { ageMs: Math.round(msg.error.age_ms), limitMs: Math.round(msg.error.limit_ms), station: String(msg.error.station || '').slice(0, 64) } } : {}));
         else p.resolve(msg.result);
       };
       ws.onclose = () => { clearTimeout(limit); this._closed(ws); };
