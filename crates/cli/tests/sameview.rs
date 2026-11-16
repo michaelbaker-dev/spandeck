@@ -141,11 +141,12 @@ fn a_deck_opened_on_either_station_shows_the_same() {
     // serving it. One issued at alpha is on bravo's deck.
     a.call("stop.all", json!({"scope": "station"}));
     page.goto("#/fleet");
-    let stop = page.wait(
-        "alpha's stop on bravo's deck",
-        "document.querySelector('.stops .stop')?.innerText",
+    // (Confirmed, which it is a moment after it is first shown: on a slow
+    // machine the deck says "stop requested — waiting for alpha" first.)
+    page.wait(
+        "alpha's stop, confirmed, on bravo's deck",
+        "document.querySelector('.stops .stop')?.innerText === 'alpha: stop confirmed (0 stopped)'",
     );
-    assert_eq!(stop, json!("alpha: stop confirmed (0 stopped)"));
 
     // ---- Fault 2: the owner at a deck counted as "at a keyboard" for the
     // station serving it only, so the others pushed to the phone meanwhile.
