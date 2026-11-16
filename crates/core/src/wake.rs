@@ -101,40 +101,197 @@ pub struct PaneWake {
     /// The earliest later look that is set, so that a burst of mail for a
     /// pane that is not yet idle long enough sets one, not one each.
     pub(crate) timer_at: Mutex<Option<u64>>,
+    /// The owner typed into the pane: the count of nudges it did not take
+    /// starts again. Set without the turn (typing waits for nothing), and
+    /// read at the next look.
+    pub(crate) owner_acted: std::sync::atomic::AtomicBool,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Turn {
     pub last_nudge_ms: Option<u64>,
+    /// The nudge last typed into this pane, while nothing shows that the
+    /// agent took it.
+    pub typed: Option<Typed>,
+    /// How many times in a row this pane was nudged without anything
+    /// changing: its state, new mail, the owner typing into it.
+    pub tries: u32,
+    /// The pane's `state_since_ms` those nudges are counted under.
+    pub tries_since_ms: u64,
+    /// It was nudged as often as it is going to be, and the owner told.
+    pub gave_up: bool,
+}
+
+/// The waits between nudges for mail that is not taken, in units of the
+/// station's `nudge_secs` (a minute): after the first nudge one, then two,
+/// five and fifteen; after that the pane is not nudged again until
+/// something changes. (Found 16 Nov 2026: an OpenCode that was out of
+/// quota was nudged every minute for as long as it sat there.)
+pub const BACKOFF: [u64; 4] = [1, 2, 5, 15];
+
+/// What a look at a pane's unread mail decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Due {
+    /// Nothing to say now.
+    Nothing,
+    /// Tell the agent: type the nudge (or press Enter on an unsent one).
+    Nudge,
+    /// It has been told as often as it will be: say so to the owner, once.
+    GiveUp,
+}
+
+/// Is a nudge due? `told`: for each unread message, when its agent was
+/// last told of it (0: never). `state_since_ms`: when the pane's state
+/// last changed; `owner_acted`: the owner typed into it since the last
+/// look. A change of state, new mail or the owner starts the count again.
+pub fn due(
+    told: &[u64],
+    turn: &mut Turn,
+    state_since_ms: u64,
+    owner_acted: bool,
+    now: u64,
+    nudge_ms: u64,
+) -> Due {
+    let fresh = told.contains(&0);
+    if told.is_empty() || fresh || owner_acted || turn.tries_since_ms != state_since_ms {
+        turn.tries = 0;
+        turn.gave_up = false;
+        turn.tries_since_ms = state_since_ms;
+    }
+    if told.is_empty() {
+        return Due::Nothing;
+    }
+    if fresh {
+        return Due::Nudge;
+    }
+    if turn.gave_up {
+        return Due::Nothing;
+    }
+    let last = told.iter().copied().max().unwrap_or(0);
+    let step = (turn.tries.max(1) as usize - 1).min(BACKOFF.len() - 1);
+    if now.saturating_sub(last) < BACKOFF[step] * nudge_ms {
+        return Due::Nothing;
+    }
+    if turn.tries as usize >= BACKOFF.len() {
+        turn.gave_up = true;
+        return Due::GiveUp;
+    }
+    Due::Nudge
+}
+
+/// A pane that keeps not taking its mail, in words for its state: said
+/// from the second nudge it did not take.
+pub fn not_taken_words(turn: &Turn, state_since_ms: u64) -> Option<String> {
+    if turn.tries_since_ms != state_since_ms || (turn.tries < 2 && !turn.gave_up) {
+        return None;
+    }
+    let mut words = format!("has mail it has not taken: nudged {} times", turn.tries);
+    if turn.gave_up {
+        words.push_str(
+            ", and not again until it changes state, new mail arrives or you type into it",
+        );
+    }
+    Some(words)
+}
+
+/// A nudge as it was typed: when, and the pane's `state_since_ms` at that
+/// moment. An agent that takes the nudge starts a turn, which changes its
+/// state; one whose state has not changed since has not been seen to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Typed {
+    pub at_ms: u64,
+    pub state_since_ms: u64,
+    /// Enter was pressed once more for it.
+    pub entered_again: bool,
+}
+
+/// A nudge whose Enter the program did not take is given one more Enter
+/// this long after it was typed (found 16 Nov 2026: Codex left the nudge
+/// in its input box once in five, and it sat there for the full minute
+/// until the next nudge).
+pub const ENTER_AGAIN_MS: u64 = 2000;
+
+/// How many of the bottom lines of a pane's screen an agent's input box
+/// is looked for in.
+const BOX_LINES: usize = 10;
+
+/// Is the typed nudge on the pane's screen, near the bottom, where an
+/// agent's input box is? `mark`: what every nudge has in it.
+pub fn on_screen(lines: &[String], mark: &str) -> bool {
+    let end = lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    lines[end.saturating_sub(BOX_LINES)..end]
+        .iter()
+        .any(|l| l.contains(mark))
+}
+
+/// Is the nudge last typed still sitting in the program's input, unsent?
+/// It is taken to be when the pane has not changed state since it was
+/// typed (no turn began) and its text is still on the screen. Then a
+/// second copy is never typed on top of it (found 16 Nov 2026: OpenCode's
+/// input box held five nudges after five minutes): Enter is pressed.
+pub fn unsent(typed: Option<&Typed>, state_since_ms: u64, shown: bool) -> bool {
+    shown && typed.is_some_and(|t| t.state_since_ms == state_since_ms)
+}
+
+/// Is it time for the one more Enter?
+pub fn enter_again(typed: Option<&Typed>, state_since_ms: u64, shown: bool, now: u64) -> bool {
+    unsent(typed, state_since_ms, shown)
+        && typed.is_some_and(|t| !t.entered_again && now >= t.at_ms + ENTER_AGAIN_MS)
+}
+
+/// When a look at a pane's mail was made, and what it is judged by.
+#[derive(Debug, Clone, Copy)]
+pub struct Look {
+    pub now: u64,
+    /// The station's `nudge_secs`, in ms.
+    pub nudge_ms: u64,
+    pub state_since_ms: u64,
+    pub owner_acted: bool,
 }
 
 /// One look at one pane's mail, with its turn held: if mail waits that the
-/// agent was not told of (or was told of before `told_before_ms` and has
-/// not read), `type_it` is asked to type the nudge, with the first
-/// sender's name. Only when it says it did is anything announced: `told`
-/// is given the messages' ids first (for the Performance page), then they
-/// are marked. Returns how many were announced.
+/// agent was not told of, or was told of long enough ago by the back-off
+/// (`due`) and has not read, `type_it` is asked to type the nudge, with
+/// how many messages there are and who sent them (never what they say).
+/// Only when it says it did is anything announced: `told` is given the
+/// messages' ids first (for the Performance page), then they are marked.
+/// Returns how many were announced, and `Due::GiveUp` the one time the
+/// pane has been nudged as often as it will be.
 pub fn announce(
     mail: &MessageStore,
     names: &[String],
-    now: u64,
-    told_before_ms: u64,
+    look: Look,
     turn: &mut Turn,
-    type_it: impl FnOnce(&str) -> bool,
+    type_it: impl FnOnce(usize, &[String]) -> bool,
     told: impl FnOnce(&[String]),
-) -> usize {
-    let waiting = mail.unannounced(names, told_before_ms);
-    let Some((_, sender, _)) = waiting.first() else {
-        return 0;
-    };
-    if !type_it(sender) {
-        return 0;
+) -> (usize, Due) {
+    let waiting = mail.unread_told(names);
+    let times: Vec<u64> = waiting.iter().map(|w| w.2).collect();
+    let what = due(
+        &times,
+        turn,
+        look.state_since_ms,
+        look.owner_acted,
+        look.now,
+        look.nudge_ms,
+    );
+    if what != Due::Nudge {
+        return (0, what);
     }
-    turn.last_nudge_ms = Some(now);
+    let senders: Vec<String> = waiting.iter().map(|w| w.1.clone()).collect();
+    if !type_it(waiting.len(), &senders) {
+        return (0, Due::Nothing);
+    }
+    turn.last_nudge_ms = Some(look.now);
+    turn.tries += 1;
     let ids: Vec<String> = waiting.iter().map(|w| w.0.clone()).collect();
     told(&ids);
-    mail.mark_announced(&ids, now);
-    ids.len()
+    mail.mark_announced(&ids, look.now);
+    (ids.len(), Due::Nudge)
 }
 
 #[cfg(test)]
@@ -252,6 +409,118 @@ mod tests {
         );
     }
 
+    /// Found with real agents on 16 Nov 2026. Codex did not take the
+    /// nudge's Enter once in five: the line sat in its input box for a
+    /// minute. OpenCode, which could not take a turn, had five copies of
+    /// the nudge in its input box after five minutes. So: a nudge that is
+    /// still on the screen of a pane that has not changed state since is
+    /// unsent; it gets one more Enter after two seconds, once; and while
+    /// it is unsent no second copy is typed.
+    #[test]
+    fn an_unsent_nudge_gets_one_more_enter_and_never_a_second_copy() {
+        let mark = "new spandeck message";
+        let screen = |text: &str| -> Vec<String> { text.lines().map(String::from).collect() };
+        let in_box = screen("codex\n\n> You have 1 new spandeck message from a@x. Read it\n  with the spandeck inbox tool\n\n  ? for shortcuts\n\n\n");
+        assert!(on_screen(&in_box, mark));
+        assert!(!on_screen(&screen("> \n"), mark));
+        // Scrolled far up the screen, it is history, not the input box.
+        let mut old = vec!["> You have 1 new spandeck message from a@x.".to_string()];
+        old.extend((0..12).map(|n| format!("line {n}")));
+        assert!(!on_screen(&old, mark));
+
+        let typed = Typed {
+            at_ms: 10_000,
+            state_since_ms: 4_000,
+            entered_again: false,
+        };
+        // Nothing typed, or a turn since (the state changed), or no longer
+        // on the screen: not unsent.
+        assert!(!unsent(None, 4_000, true));
+        assert!(!unsent(Some(&typed), 10_050, true));
+        assert!(!unsent(Some(&typed), 4_000, false));
+        assert!(unsent(Some(&typed), 4_000, true));
+        // One more Enter: not before two seconds, and once.
+        assert!(!enter_again(Some(&typed), 4_000, true, 11_999));
+        assert!(enter_again(Some(&typed), 4_000, true, 12_000));
+        let again = Typed {
+            entered_again: true,
+            ..typed
+        };
+        assert!(!enter_again(Some(&again), 4_000, true, 60_000));
+        assert!(
+            unsent(Some(&again), 4_000, true),
+            "and still no second copy"
+        );
+    }
+
+    /// Found with real agents on 16 Nov 2026: an OpenCode that was out of
+    /// quota (and any program stuck at a sign-in screen) was nudged every
+    /// 60 seconds for ever. Now a pane that does not take its mail is
+    /// nudged after 1, 2, 5 and 15 minutes more, each wait longer, and
+    /// then left alone and the owner told, once; a change of the pane's
+    /// state, new mail, or the owner typing into it starts again.
+    #[test]
+    fn mail_that_is_not_taken_is_nudged_less_and_less_and_then_not_at_all() {
+        const MIN: u64 = 60_000;
+        let mut turn = Turn::default();
+        let since = 500;
+        let mut told = vec![0u64, 0];
+        let mut nudged_at = vec![];
+        let mut gave_up_at = vec![];
+        // An hour, looked at once a second, the mail never read.
+        for now in (1_000..3_600_000).step_by(1_000) {
+            match due(&told, &mut turn, since, false, now, MIN) {
+                Due::Nudge => {
+                    turn.tries += 1;
+                    told = vec![now, now];
+                    nudged_at.push((now - 1_000) / MIN);
+                }
+                Due::GiveUp => gave_up_at.push((now - 1_000) / MIN),
+                Due::Nothing => {}
+            }
+        }
+        assert_eq!(
+            nudged_at,
+            [0, 1, 3, 8],
+            "at once, then after 1, 2 and 5 minutes"
+        );
+        assert_eq!(gave_up_at, [23], "15 minutes after the fourth, said once");
+        assert_eq!(
+            not_taken_words(&turn, since).as_deref(),
+            Some("has mail it has not taken: nudged 4 times, and not again until it changes state, new mail arrives or you type into it")
+        );
+        let later = 4_000_000;
+        assert_eq!(
+            due(&told, &mut turn, since, false, later, MIN),
+            Due::Nothing
+        );
+        // Each of the three things that change starts it again.
+        let mut again = turn.clone();
+        assert_eq!(due(&told, &mut again, since, true, later, MIN), Due::Nudge);
+        assert_eq!((again.tries, again.gave_up), (0, false));
+        let mut again = turn.clone();
+        assert_eq!(
+            due(&told, &mut again, since + 9, false, later, MIN),
+            Due::Nudge
+        );
+        let mut again = turn.clone();
+        let with_new = [told[0], told[1], 0];
+        assert_eq!(
+            due(&with_new, &mut again, since, false, later, MIN),
+            Due::Nudge
+        );
+        // Read: nothing is due and nothing is said of the pane.
+        assert_eq!(due(&[], &mut turn, since, false, later, MIN), Due::Nothing);
+        assert_eq!(not_taken_words(&turn, since), None);
+        // One nudge not yet taken is not worth saying.
+        let once = Turn {
+            tries: 1,
+            tries_since_ms: since,
+            ..Turn::default()
+        };
+        assert_eq!(not_taken_words(&once, since), None);
+    }
+
     fn store() -> MessageStore {
         MessageStore::new(Arc::new(Db::memory().unwrap()), "alpha")
     }
@@ -291,7 +560,13 @@ mod tests {
             send(&mail, n, now);
         }
         // The hold landed first: nothing is typed, and nothing is announced.
-        let told = announce(&mail, &names, now, 0, &mut turn, |_| false, |_| {});
+        let look = |now| Look {
+            now,
+            nudge_ms: 60_000,
+            state_since_ms: 7,
+            owner_acted: false,
+        };
+        let (told, _) = announce(&mail, &names, look(now), &mut turn, |_, _| false, |_| {});
         assert_eq!((told, turn.last_nudge_ms), (0, None));
         assert_eq!(mail.unannounced(&names, 0).len(), 50);
 
@@ -301,11 +576,11 @@ mod tests {
             announce(
                 &mail,
                 &names,
-                now,
-                0,
+                look(now),
                 &mut turn,
-                |sender| {
-                    assert_eq!(sender, "you@alpha");
+                |count, senders| {
+                    assert_eq!(count, 50);
+                    assert_eq!(senders[0], "you@alpha");
                     typed += 1;
                     true
                 },
@@ -325,10 +600,9 @@ mod tests {
             announce(
                 &mail,
                 &names,
-                later,
-                later - 60_000,
+                look(later),
                 &mut turn,
-                |_| {
+                |_, _| {
                     again += 1;
                     true
                 },

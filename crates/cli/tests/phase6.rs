@@ -59,8 +59,8 @@ fn a_message_is_a_record_and_only_a_nudge_is_typed() {
     // The idle reader is woken by one typed line, then pulls the message itself.
     let screen = s.wait_text(&reader, "heron module");
     assert!(
-        screen.contains("[fake] got: You have mail from demo/writer@alpha"),
-        "{screen}"
+        screen.contains("[fake] got: You have 1 new spandeck message from demo/writer@alpha. Read it with the spandeck inbox tool and act on it"),
+        "the nudge tells the agent to act on its mail, not only to look: {screen}"
     );
     let typed: Vec<&str> = screen
         .lines()
@@ -134,6 +134,152 @@ fn a_working_agent_gets_mail_through_its_hooks_not_its_keyboard() {
     );
 }
 
+/// Found with a real Codex on 16 Nov 2026: the nudge was typed as plain
+/// text with Enter 30 ms later, and one time in five Codex did not take
+/// the Enter, so the nudge sat in its input box until the next one a
+/// minute later; a paste (marked as one, Enter after 60 ms) never failed.
+/// So the nudge goes the way a paste goes to a program that asked for
+/// pastes to be marked; and when its Enter is not taken, Enter is pressed
+/// once more two seconds on. The agent here asks for marked pastes and
+/// does not take the first Enter.
+#[test]
+fn the_nudge_is_sent_as_a_paste_and_an_enter_that_was_not_taken_is_pressed_again() {
+    let s = Station::start("alpha");
+    let mut script = reads_mail();
+    script["paste"] = json!(true);
+    script["drop_enters"] = json!(1);
+    let pane = s.fake(script, json!({"name": "codexlike"}));
+    s.wait_text(&pane, "[fake] session");
+    s.call(
+        "msg.send",
+        json!({"to": "codexlike", "body": "is the egret count right?"}),
+    );
+    let screen = s.wait_text(&pane, "is the egret count right?");
+    assert!(
+        screen.contains("[fake] (that line was pasted)"),
+        "the nudge came as a marked paste: {screen}"
+    );
+    // Once as it was typed at the prompt, once as the line that was taken.
+    assert_eq!(
+        screen.matches("You have 1 new spandeck message").count(),
+        2,
+        "typed once, not once and again on top: {screen}"
+    );
+    let enters = s
+        .log("msg.nudge_enter")
+        .iter()
+        .filter(|e| e["pane"] == json!(pane))
+        .count();
+    assert_eq!(enters, 1, "one more Enter, once");
+}
+
+/// Found on 16 Nov 2026: a new pane given a closed pane's name inherited
+/// that pane's unread mail and was nudged about it at once. A name is
+/// free once its pane is closed, so the mail goes back: the sender is
+/// told, the owner gets a notice, and the new pane has nothing. A pane
+/// that is restarted keeps its id and its mail. And a pane a project
+/// starts by name is a role: the next one the project starts under that
+/// name takes the mail the last one left.
+#[test]
+fn a_new_pane_does_not_inherit_a_closed_panes_mail_but_a_restarted_one_and_a_projects_own_keep_theirs(
+) {
+    let s = Station::start("alpha");
+    let never_reads = || json!({"steps": [], "on_input": [{"turn_end": "ok"}]});
+    let writer = s.fake(reads_mail(), json!({"name": "writer"}));
+    let reader = s.fake(never_reads(), json!({"name": "reader"}));
+    s.wait_text(&reader, "[fake] session");
+    s.call("pane.pause", json!({"pane": reader}));
+    let sent = s
+        .call_as_pane(
+            &writer,
+            "msg.send",
+            json!({"to": "reader", "body": "how many egrets?"}),
+        )
+        .unwrap();
+    // (Asked again for a moment: a pane just started or restarted has a
+    // token the station's database has yet to be given.)
+    let unread = |pane: &str| {
+        wait_for("the pane's inbox", 10, || {
+            s.call_as_pane(pane, "msg.inbox", json!({"peek": true}))
+                .ok()
+        })
+        .as_array()
+        .unwrap()
+        .len()
+    };
+    // Restarted: the same pane, and its mail is still its own.
+    // It is told of it once it is no longer paused, and does not read it.
+    s.call("pane.restart", json!({"pane": reader, "fresh": true}));
+    s.call("pane.pause", json!({"pane": reader, "paused": false}));
+    s.wait_text(
+        &reader,
+        "[fake] got: You have 1 new spandeck message from writer@alpha",
+    );
+
+    s.call("pane.close", json!({"pane": reader}));
+    let note = s.wait_text(&writer, "Not delivered to reader@alpha");
+    assert!(
+        note.replace('\n', "")
+            .contains("its pane was closed before it read your note"),
+        "{note}"
+    );
+    let unrelated = s.fake(reads_mail(), json!({"name": "reader"}));
+    s.wait_text(&unrelated, "[fake] session");
+    assert_eq!(
+        unread(&unrelated),
+        0,
+        "another pane, though it has the name"
+    );
+    let row = s.call("msg.thread", json!({"thread": sent["thread"]}));
+    assert_eq!(
+        row[0]["status"],
+        json!("undelivered: its pane was closed before it read this")
+    );
+    let notices = s.call("notify.list", json!({})).to_string();
+    assert!(
+        notices.contains("Mail for reader was not read before its pane was closed"),
+        "{notices}"
+    );
+
+    // A pane the project starts by name: closed, and started again by the
+    // project under a new id, it has the mail its role was sent.
+    let repo = s.git_repo("demo");
+    let script = s.script_file(&never_reads());
+    s.call(
+        "project.new",
+        json!({"path": repo, "open": true, "panes": [
+            {"name": "keeper", "agent": "fake", "args": ["--script", script]}
+        ]}),
+    );
+    let keeper = |s: &Station| {
+        s.call("pane.list", json!({}))
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == json!("keeper") && p["exited"] != json!(true))
+            .map(|p| p["id"].as_str().unwrap().to_string())
+    };
+    let first = wait_for("the project's pane", 10, || keeper(&s));
+    s.call("pane.pause", json!({"pane": first}));
+    s.call(
+        "msg.send",
+        json!({"to": "demo/keeper", "body": "keep the gate"}),
+    );
+    s.call("pane.close", json!({"pane": first}));
+    s.call("project.open", json!({"name": "demo"}));
+    let second = wait_for("the project's pane, started again", 10, || {
+        keeper(&s).filter(|id| *id != first)
+    });
+    assert_eq!(unread(&second), 1, "the role's mail is the role's");
+    // Never typed into the pane that only had the name. (It is idle for
+    // long past the 1.2 s after which mail is announced.)
+    assert!(
+        !s.text(&unrelated).contains("new spandeck message"),
+        "{}",
+        s.text(&unrelated)
+    );
+}
+
 #[test]
 fn a_paused_agent_is_not_given_new_work_until_it_is_unpaused() {
     let s = Station::start("alpha");
@@ -147,7 +293,7 @@ fn a_paused_agent_is_not_given_new_work_until_it_is_unpaused() {
     );
     std::thread::sleep(Duration::from_millis(2500));
     assert!(
-        !s.text(&pane).contains("You have mail"),
+        !s.text(&pane).contains("new spandeck message"),
         "pause: no new work is delivered"
     );
     s.call("pane.pause", json!({"pane": pane, "paused": false}));
@@ -855,7 +1001,7 @@ fn mail_that_is_not_read_is_nudged_again_and_mail_sent_at_startup_is_not_lost() 
     );
     wait_for("a second nudge for the unread message", 20, || {
         (s.text(&ignorer)
-            .matches("You have mail from you@alpha")
+            .matches("[fake] got: You have 1 new spandeck message from you@alpha")
             .count()
             >= 2)
             .then_some(())
@@ -866,9 +1012,12 @@ fn mail_that_is_not_read_is_nudged_again_and_mail_sent_at_startup_is_not_lost() 
     );
     // Once it is read, the nudging stops.
     s.call_as_pane(&ignorer, "msg.inbox", json!({})).unwrap();
-    let count = s.text(&ignorer).matches("You have mail").count();
+    let count = s.text(&ignorer).matches("new spandeck message").count();
     std::thread::sleep(Duration::from_millis(4500));
-    assert_eq!(s.text(&ignorer).matches("You have mail").count(), count);
+    assert_eq!(
+        s.text(&ignorer).matches("new spandeck message").count(),
+        count
+    );
 }
 
 /// Layouts, step 2 (agreed 14 Nov 2026): a pane shows the agents working
@@ -1125,6 +1274,40 @@ fn a_link_between_stations_is_known_on_both_and_carries_messages_and_findings() 
     for s in [&a, &b] {
         assert_eq!(s.call("approval.list", json!({"all": true})), json!([]));
     }
+    // Found 16 Nov 2026: the sender's copy stayed "delivered" while the
+    // recipient's said "answered". Alpha's copy says what alpha knows
+    // (stored at bravo; read is bravo's to say), and is answered when
+    // the reply to it arrives.
+    let asked = |s: &Station| {
+        s.call("msg.recent", json!({}))
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["body"].as_str().unwrap().contains("gannet contract"))
+            .cloned()
+            .unwrap()
+    };
+    let mine = wait_for("alpha to know it was stored", 10, || {
+        Some(asked(&a)).filter(|m| m["status"] == json!("delivered"))
+    });
+    assert_eq!(asked(&b)["status"], json!("read"));
+    assert!(
+        mine["status_words"]
+            .as_str()
+            .unwrap()
+            .starts_with("stored at bravo, as alpha knows it"),
+        "{mine}"
+    );
+    b.call_as_pane(
+        &keeper,
+        "msg.reply",
+        json!({"id": mine["id"], "body": "name and scope, as I said"}),
+    )
+    .unwrap();
+    wait_for("alpha's copy to be answered", 10, || {
+        (asked(&a)["status"] == json!("answered")).then_some(())
+    });
+    assert_eq!(asked(&b)["status"], json!("answered"));
 
     // The link opens vault and nothing else on bravo. A pane of another
     // project there, addressed by its bare name, passes alpha's route

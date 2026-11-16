@@ -140,7 +140,11 @@ fn a_ticked_folder_is_answered_once_and_an_unticked_one_waits_for_the_owner() {
     assert_ne!(s.pane(&ticked)["needs_reason"], json!(ASKS));
     let notices = s.call("notify.list", json!({}));
     assert!(
-        !notices.to_string().contains(&ticked),
+        !notices
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["pane"] == json!(ticked) && n["kind"] == json!("needs_you")),
         "a notice for a question spandeck answered: {notices}"
     );
     // The choice is remembered for that folder and that program only.
@@ -216,14 +220,7 @@ fn a_ticked_folder_is_answered_once_and_an_unticked_one_waits_for_the_owner() {
         vec![(no.display().to_string(), "antigravity".to_string())]
     );
     assert_eq!(ask(&yes)["on"], json!(false));
-    // Unticking at a start forgets the folder too, and that pane waits.
-    let unticked = start(&s, "antigravity", &no, json!({"trust_folder": false}));
-    assert_eq!(
-        wait_asks(&s, &unticked)["trust"]["asks"]["why"],
-        json!("not_chosen")
-    );
-    assert!(listed(&s).is_empty());
-    assert_eq!(s.log("foldertrust.removed").len(), 2);
+    assert_eq!(s.log("foldertrust.removed").len(), 1);
     assert_eq!(s.log("foldertrust.remembered").len(), 2);
 }
 
@@ -235,28 +232,6 @@ fn a_ticked_folder_is_answered_once_and_an_unticked_one_waits_for_the_owner() {
 #[test]
 fn claude_codes_marker_is_moved_only_for_the_owners_tap_and_an_unknown_screen_is_left_alone() {
     let s = Station::start("alpha");
-    let dir = folder(&s, "claude-new");
-    let pane = start(&s, "claude", &dir, json!({"trust_folder": true}));
-    let p = wait_asks(&s, &pane);
-    assert_eq!(p["trust"]["asks"]["why"], json!("own_choice_is_no"), "{p}");
-    assert_eq!(p["trust"]["asks"]["button"], json!(true));
-    assert_eq!(p["needs_reason"], json!(ASKS));
-    assert!(answers(&s, &pane).is_empty());
-    let c = s.call("foldertrust.choice", json!({"agent": "claude", "cwd": dir}));
-    assert_eq!(c["on"], json!(true));
-    assert_eq!(
-        c["pressed"],
-        json!(false),
-        "the dialog says a tap is needed"
-    );
-
-    s.call("pane.trust_folder", json!({"pane": pane}));
-    s.wait_text(&pane, TRUSTED);
-    s.wait_text(&pane, "[fake] session");
-    assert!(!s.text(&pane).contains("left: the folder was not trusted"));
-    assert_eq!(answers(&s, &pane)[0]["data"]["how"], json!("tap"));
-    assert!(s.pane(&pane)["exit"].is_null());
-
     // A ticked folder whose program words its question differently, and
     // one where Claude Code lists what the folder's settings switch on:
     // nothing is pressed for either.
@@ -288,6 +263,30 @@ fn claude_codes_marker_is_moved_only_for_the_owners_tap_and_an_unknown_screen_is
         .as_str()
         .unwrap()
         .to_string();
+
+    let dir = folder(&s, "claude-new");
+    let pane = start(&s, "claude", &dir, json!({"trust_folder": true}));
+    let p = wait_asks(&s, &pane);
+    assert_eq!(p["trust"]["asks"]["why"], json!("own_choice_is_no"), "{p}");
+    assert_eq!(p["trust"]["asks"]["button"], json!(true));
+    assert_eq!(p["needs_reason"], json!(ASKS));
+    assert!(answers(&s, &pane).is_empty());
+    let c = s.call("foldertrust.choice", json!({"agent": "claude", "cwd": dir}));
+    assert_eq!(c["on"], json!(true));
+    assert_eq!(
+        c["pressed"],
+        json!(false),
+        "the dialog says a tap is needed"
+    );
+
+    s.call("pane.trust_folder", json!({"pane": pane}));
+    s.wait_text(&pane, TRUSTED);
+    s.wait_text(&pane, "[fake] session");
+    assert!(!s.text(&pane).contains("left: the folder was not trusted"));
+    assert_eq!(answers(&s, &pane)[0]["data"]["how"], json!("tap"));
+    assert!(s.pane(&pane)["exit"].is_null());
+
+    // The two odd screens, which have stood all this while.
     for pane in [&reworded, &warned] {
         let p = wait_asks(&s, pane);
         assert_eq!(
@@ -420,6 +419,19 @@ fn nothing_but_the_first_screen_of_a_chosen_folder_is_answered() {
     }
     assert_eq!(trust(&s, &typed)["asks"]["why"], json!("switched_off"));
     assert_eq!(trust(&s, &revoked)["asks"]["why"], json!("not_chosen"));
+    // Unticking at a start forgets the folder, and that pane waits.
+    assert!(listed(&s).contains(&(dir.display().to_string(), "antigravity".to_string())));
+    let unticked = spawn(
+        "antigravity",
+        &dir,
+        json!({"trust_screen": {"as": "antigravity"}, "steps": []}),
+        json!({"trust_folder": false}),
+    );
+    assert_eq!(
+        wait_asks(&s, &unticked)["trust"]["asks"]["why"],
+        json!("not_chosen")
+    );
+    assert!(!listed(&s).contains(&(dir.display().to_string(), "antigravity".to_string())));
     wait_for("the late screen", 40, || {
         s.text(&late)
             .contains("Do you trust the contents of this project?")

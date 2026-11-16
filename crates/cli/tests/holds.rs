@@ -12,7 +12,7 @@ use common::*;
 use serde_json::{json, Value};
 
 /// The nudge that wakes an idle agent with mail, as its terminal shows it.
-const NUDGE: &str = "[fake] got: You have mail from";
+const NUDGE: &str = "[fake] got: You have ";
 /// The notice a hook gives an agent in a turn.
 const NOTICE: &str = "new spandeck message";
 

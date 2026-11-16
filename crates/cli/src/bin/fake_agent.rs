@@ -69,6 +69,13 @@ struct Agent {
     hook_deadline: Value,
     /// The script's `question_deadline`.
     question_deadline: Option<u64>,
+    /// The script's `paste`: this program asks for pastes to be marked,
+    /// as the real agents do, and says when a line came as one.
+    paste: bool,
+    /// The script's `drop_enters`: how many Enters at a line that has text
+    /// are not taken, as a program that missed the key, or one that cannot
+    /// take a turn (a sign-in screen, no quota left).
+    drop_enters: u64,
 }
 
 fn out(s: &str) {
@@ -300,15 +307,42 @@ impl Agent {
 
     fn read_line(&mut self) -> Option<String> {
         let mut line = Vec::new();
+        let mut pasted = false;
         loop {
             match self.input.recv() {
                 Ok(b'\r') | Ok(b'\n') => {
                     if line.is_empty() {
                         continue;
                     }
+                    if self.drop_enters > 0 {
+                        self.drop_enters -= 1;
+                        continue;
+                    }
                     let _ = std::io::stdout().write_all(b"\r\n");
                     let _ = std::io::stdout().flush();
+                    if pasted {
+                        out("[fake] (that line was pasted)");
+                    }
                     return Some(String::from_utf8_lossy(&line).to_string());
+                }
+                // A paste's markers, for a program that asked for them:
+                // `ESC[200~` before and `ESC[201~` after.
+                Ok(0x1b) if self.paste => {
+                    let mut seq = Vec::new();
+                    while seq.len() < 5 {
+                        match self.input.recv_timeout(Duration::from_millis(50)) {
+                            Ok(b) => seq.push(b),
+                            Err(_) => break,
+                        }
+                    }
+                    match seq.as_slice() {
+                        b"[200~" => pasted = true,
+                        b"[201~" => {}
+                        _ => {
+                            out("[fake] (escape at prompt)");
+                            line.clear();
+                        }
+                    }
                 }
                 Ok(0x1b) => {
                     out("[fake] (escape at prompt)");
@@ -663,7 +697,12 @@ fn main() {
         interrupted: false,
         hook_deadline: script["hook_deadline"].clone(),
         question_deadline: script["question_deadline"].as_u64(),
+        paste: script["paste"].as_bool().unwrap_or(false),
+        drop_enters: script["drop_enters"].as_u64().unwrap_or(0),
     };
+    if agent.paste {
+        let _ = std::io::stdout().write_all(b"\x1b[?2004h");
+    }
 
     // Where the real programs ask about the folder: before anything else.
     if let Some(spec) = script.get("trust_screen") {

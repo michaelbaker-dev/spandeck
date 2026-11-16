@@ -36,6 +36,38 @@ fn hooks_drive_the_pane_state_and_capture_the_session() {
     assert_eq!(states, vec!["working", "done"]);
 }
 
+/// Found with the real programs on 16 Nov 2026: a Codex whose hooks were
+/// reporting sat at a question in its terminal and was shown as working,
+/// and an Antigravity (whose hooks report every turn) sat at "Allow
+/// calling this tool?" the same way: no hook tells of such a screen. A
+/// screen the adapter knows by name is believed while the hooks report,
+/// with its reason; when it is gone and no hook has spoken, the pane is
+/// what it was before. spandeck answers nothing: it only says so.
+#[test]
+fn a_screen_that_waits_for_the_owner_is_said_even_while_the_hooks_report_a_turn() {
+    let s = Station::start("alpha");
+    let mut steps = vec![
+        json!({"prompt": "count the egrets"}),
+        json!({"say": "[fake] sign in: at the console"}),
+        json!({"sleep": 1200}),
+    ];
+    steps.extend((0..12).map(|n| json!({"say": format!("signed in, line {n}")})));
+    steps.push(json!({"sleep": 2600}));
+    steps.push(json!({"turn_end": "counted"}));
+    let pane = s.fake(json!({ "steps": steps }), json!({}));
+    let p = s.wait_state(&pane, "needs_you");
+    assert_eq!(p["hooks_seen"], json!(true));
+    assert_eq!(
+        p["needs_reason"],
+        json!("asks you to sign in (at the console)")
+    );
+    // The screen has moved on and no hook has said anything: working, as
+    // before, and then the turn's own end.
+    let p = s.wait_state(&pane, "working");
+    assert_eq!(p["needs_reason"], json!(null));
+    s.wait_state(&pane, "done");
+}
+
 /// Done when: a fake agent that loops is flagged as stuck.
 #[test]
 fn an_agent_repeating_a_failing_command_is_flagged_as_stuck() {
@@ -243,7 +275,7 @@ fn an_agent_cannot_use_methods_that_administer_the_station() {
 
 #[test]
 fn integration_install_is_reversible_through_the_api() {
-    let s = Station::start("alpha");
+    let s = Station::start_with("alpha", AGENT_HOME, &[]);
     let st = s.call("integration.install", json!({"agent": "claude"}));
     assert_eq!(st["installed"], json!(true));
     let settings = s.root.join("home/.claude/settings.json");
