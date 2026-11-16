@@ -108,11 +108,16 @@ fn backoff(failures: u32) -> Duration {
 /// was written, which only the daemon that wrote it, or the daemon it was
 /// written for, can be. Otherwise the station is asked on its pipe, which
 /// only a daemon of this state folder answers.
+/// The pid the pid file names, running or not.
+fn named(paths: &Paths) -> Option<u32> {
+    std::fs::read_to_string(paths.pid_file())
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
 fn current(paths: &Paths) -> Option<u32> {
     let file = paths.pid_file();
-    let named = std::fs::read_to_string(&file)
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok());
+    let named = named(paths);
     let written = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
     if let (Some(pid), Some(written)) = (named, written) {
         if sys::process_started(pid).is_some_and(|started| started <= written) {
@@ -192,14 +197,36 @@ fn supervise(claim: &sys::Supervisor, paths: &Paths, spandeck: &Path, log: &Log)
             }
             let deadline = Instant::now() + HANDOVER;
             let mut next = None;
-            while next.is_none() && Instant::now() < deadline {
+            // The daemon that took over may itself have ended before this
+            // one's end was seen here (found on a slow machine, 16 Nov 2026:
+            // thirty seconds were then spent waiting for a daemon that had
+            // come and gone). The pid file names it; it is not waited for.
+            let mut came_and_went = None;
+            while next.is_none() && came_and_went.is_none() && Instant::now() < deadline {
                 if claim.leave_within(Duration::from_millis(250)) {
                     log.say("another supervisor takes over");
                     return 0;
                 }
                 next = current(paths);
+                if next.is_none() {
+                    came_and_went = named(paths)
+                        .filter(|&after| after != pid && sys::process_started(after).is_none());
+                }
             }
             if next.is_some() {
+                continue;
+            }
+            if let Some(after) = came_and_went {
+                if spandeck_core::restore::stopped_clean(paths) == Some(true) {
+                    log.say(&format!(
+                        "the daemon that took over (pid {after}) was stopped on purpose: not started again"
+                    ));
+                    return 0;
+                }
+                log.say(&format!(
+                    "the daemon that took over (pid {after}) has ended too"
+                ));
+                failures += 1;
                 continue;
             }
             // Started again only when the station says it was not stopped.
