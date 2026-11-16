@@ -398,7 +398,15 @@ fn a_restarted_session_waits_for_the_owner() {
     {
         let page = common::browser::Page::open(&s, 1200, 800);
         let inbox = "[...document.querySelectorAll('.topbar button')].find(x => x.innerText.startsWith('Inbox'))";
-        page.wait("the inbox button", &format!("!!{inbox}"));
+        // The inbox shows what the page knew when it was opened: it is
+        // opened once the page has the notice (the button counts it) and
+        // the station.
+        page.wait(
+            "the inbox button, with the notice counted",
+            &format!(
+                "!!{inbox}?.querySelector('.count') && !!document.querySelector('a.tile.station')"
+            ),
+        );
         page.js(&format!("({inbox}.click(), true)"));
         let release = "[...document.querySelectorAll('button')].find(b => b.innerText.trim() === 'Release all on alpha')";
         page.wait(

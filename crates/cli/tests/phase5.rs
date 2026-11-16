@@ -3417,7 +3417,7 @@ fn a_request_is_seen_and_answered_at_any_station_of_the_fleet() {
             "{visited}"
         );
     }
-    assert!(relayed(b).is_none());
+    assert_eq!(relayed(b), None, "bravo was asked nothing");
     assert_eq!(devices(b), left);
     // A window that was not opened by the deck is told nothing, and the
     // window that was is answered once.
