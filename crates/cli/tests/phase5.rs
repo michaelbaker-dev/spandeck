@@ -1954,10 +1954,10 @@ fn a_pane_on_a_phone_is_read_at_the_phones_text_size() {
     // Its conversation, made from its screen: what was sent, and what the
     // pane printed, which is text set like the terminal's.
     click(&phone, "Chat", &button("Chat"));
-    let faces = "(q => [q('.chat-bubble'), q('.chat-screen-text'), q('.chat-box')].map(e => e && [parseFloat(getComputedStyle(e).fontSize), getComputedStyle(e).fontFamily.split(',')[0].trim()]))(x => document.querySelector('.phone-chat ' + x))";
+    let faces = "(q => [q('.chat-bubble'), q('.chat-screen .chat-mono pre'), q('.chat-box')].map(e => e && [parseFloat(getComputedStyle(e).fontSize), getComputedStyle(e).fontFamily.split(',')[0].trim()]))(x => document.querySelector('.phone-chat ' + x))";
     phone.wait(
         "what the pane printed, in the conversation",
-        "(document.querySelector('.phone-chat .chat-screen-text')?.innerText || '').includes('printed-42')",
+        "(document.querySelector('.phone-chat .chat-screen .chat-mono pre')?.innerText || '').includes('printed-42')",
     );
     let got = phone.js(faces);
     assert_eq!(
@@ -5202,7 +5202,7 @@ fn pictures_of_a_pane_at_the_phones_text_size() {
     click(&phone, "Chat", &face("Chat"));
     phone.wait(
         "what it printed",
-        "!!document.querySelector('.phone-chat .chat-screen-text')",
+        "!!document.querySelector('.phone-chat .chat-screen .chat-mono pre')",
     );
     shot(&phone, "2-conversation-open-on-a-computer");
     desk.goto("#/fleet");

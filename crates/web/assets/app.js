@@ -3275,7 +3275,7 @@ function phoneChatFit(st, p, conv) {
   cellProbe ||= document.createElement('canvas').getContext('2d');
   cellProbe.font = `${px}px ${getComputedStyle(document.documentElement).getPropertyValue('--mono-font') || 'monospace'}`;
   const cell = cellProbe.measureText('MMMMMMMMMM').width / 10;
-  const block = conv.body.querySelector('.chat-screen-text');
+  const block = (conv.body.querySelector('.chat-screen .chat-mono pre') || conv.body.querySelector('.chat-screen'));
   const width = (block && block.clientWidth > 60 ? block.clientWidth : innerWidth - 26) - 22;
   const cols = Math.floor(width / cell), rows = Math.max(12, Math.min(60, Math.floor(innerHeight * 0.6 / (px * 1.4))));
   if (!(cell > 0) || cols < 20 || cols > 500) return;
