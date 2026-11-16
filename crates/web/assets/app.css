@@ -68,6 +68,10 @@ html, body { height: 100%; margin: 0; }
    two or three sizes. The page is laid out for the screen it is on, and its
    sizes are the owner's (--ui-scale), so the browser leaves them alone. */
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+/* Two quick taps are two taps, never the browser's double-tap zoom (the owner, on a phone: a second
+   press of the up-arrow key enlarged the page). Pinching still zooms. It holds for everything on the
+   page: an element's own rule can only narrow it. */
+html { touch-action: manipulation; }
 body { background: var(--bg); color: var(--text); font: calc(13px * var(--ui-scale))/1.45 var(--ui-font); overflow: hidden; }
 body.dragging { user-select: none; cursor: grabbing; }
 #app { display: flex; flex-direction: column; height: 100dvh; }

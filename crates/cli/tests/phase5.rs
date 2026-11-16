@@ -2023,6 +2023,14 @@ fn a_terminals_history_on_a_phone_is_scrolled_by_the_phone() {
         .to_string();
     let phone = Page::open(&s, 390, 844);
     phone.phone_screen();
+    // The owner, 17 Nov 2026: "when I try and hit a up arrow in a terminal
+    // to quick instead of taking it as another up arrow, it reading it as a
+    // double tap on the app to enlarge the screen". Two taps are two taps,
+    // everywhere on the page.
+    assert_eq!(
+        phone.js("getComputedStyle(document.documentElement).touchAction"),
+        json!("manipulation")
+    );
     phone.touches();
     phone.goto(&format!("#/s/alpha/p/{pane}"));
     phone.wait(
