@@ -47,6 +47,7 @@ pub mod db;
 pub mod deck;
 pub mod doctor;
 pub mod fleet;
+pub mod foldertrust;
 pub mod fonts;
 pub mod git;
 pub mod guard;

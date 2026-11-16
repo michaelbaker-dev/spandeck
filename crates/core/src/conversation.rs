@@ -262,6 +262,7 @@ impl Daemon {
             "tool": meta.tool, "tool_since_ms": meta.tool_since_ms,
             "subagents": meta.subagents, "paused": meta.paused,
             "held": self.held_view(meta),
+            "trust": self.folder_trust_view(meta),
             "exited": meta.exit.is_some(), "resumed": meta.resumed,
             "hooks_seen": meta.hooks_seen,
             "approvals": approvals,

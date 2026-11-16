@@ -132,6 +132,9 @@ impl Daemon {
         // A question or a plan its hook holds for the owner: which, and
         // until when; null when none. Never what it says (questions.rs).
         v["asks"] = self.asks_view(&meta.id);
+        // Its program's folder-trust question: on the screen now, or
+        // answered, and by whom (foldertrust.rs); null when neither.
+        v["trust"] = self.folder_trust_view(&meta);
         // A deck from before holds shows only this: said where the pane
         // has no reason of its own to show.
         if meta.needs_reason.is_none() && meta.exit.is_none() {

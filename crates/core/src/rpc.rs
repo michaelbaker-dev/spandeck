@@ -212,6 +212,8 @@ const OWNER_READS: &[&str] = &[
     "tailnet.view",
     "tailnet.signin",
     "fleet.add_status",
+    "foldertrust.choice",
+    "foldertrust.list",
 ];
 
 /// Does this method only read? Such a call changes nothing, so a Control
@@ -299,6 +301,11 @@ const REPEATABLE: &[&str] = &[
     "client.report",
     // Kill: the process ends. Ending it twice is ending it.
     "pane.kill",
+    // The owner's folder-trust choices: read, or set to what they are.
+    "foldertrust.choice",
+    "foldertrust.list",
+    "foldertrust.remove",
+    "foldertrust.project",
 ];
 
 /// Changes that are done once by their request id, the answer kept for a
@@ -817,7 +824,38 @@ impl Daemon {
                     opts.cwd = self.project_path(project).map(PathBuf::from);
                 }
                 opts.cwd = opts.cwd.map(|c| self.expand_path(&c));
+                // The folder-trust choice is the owner's (rule 7): this
+                // method is on no agent's list and no station's, and a
+                // caller that is not the owner is given no choice even if
+                // it were. Forwarded, it is the owner's request.
+                let asked = opts.trust_folder.take();
+                opts.trust_choice = None;
+                let mut keep = None;
+                if caller.authority == Authority::Owner {
+                    let agent = opts.agent.unwrap_or_else(|| {
+                        opts.program
+                            .as_deref()
+                            .map(spandeck_agents::kind_from_command)
+                            .unwrap_or(AgentKind::Shell)
+                    });
+                    let cwd = opts.cwd.clone().unwrap_or_else(|| self.home.clone());
+                    if cwd.is_dir() {
+                        opts.trust_choice = self.folder_trust_at_start(
+                            asked,
+                            agent,
+                            &cwd,
+                            opts.project.as_deref(),
+                            &caller.who,
+                        );
+                        keep = Some((agent, cwd));
+                    }
+                }
                 let pane = self.spawn_pane(opts)?;
+                // The tick is kept once the pane has started, and well
+                // before its program can have drawn its question.
+                if let Some((agent, cwd)) = keep {
+                    self.folder_trust_keep(asked, agent, &cwd, &caller.who);
+                }
                 self.write_instructions(&pane.meta());
                 let mut view = self.pane_view(&pane);
                 // `saved: false`: the pane runs; its record is held in
@@ -825,6 +863,34 @@ impl Daemon {
                 // with no record is not started again after a crash.
                 view["saved"] = json!(self.pane_saved(&pane.id));
                 view
+            }
+            // The folder-trust question (foldertrust.rs). All of these are
+            // the owner's: on no agent's list, no station's and not the
+            // read-only one.
+            "foldertrust.choice" => {
+                let agent = AgentKind::parse(s(&params, "agent")?)
+                    .ok_or_else(|| invalid("unknown agent"))?;
+                let project = opt(&params, "project").filter(|p| !p.is_empty());
+                let cwd = self.spawn_folder(project, opt(&params, "cwd"));
+                self.folder_trust_choice(agent, &cwd, project)
+            }
+            "foldertrust.list" => self.folder_trust_list(),
+            "foldertrust.remove" => {
+                self.folder_trust_remove(s(&params, "folder")?, s(&params, "agent")?, by)?
+            }
+            "foldertrust.project" => {
+                self.folder_trust_project(s(&params, "project")?, flag(&params, "on"), by)?
+            }
+            "pane.trust_folder" => {
+                let pane = s(&params, "pane")?;
+                let done = self
+                    .folder_trust_tap(pane, flag(&params, "remember"), by)
+                    .await?;
+                // The owner pressed keys in the pane: as with anything
+                // they type, a held pane is released. A tap that pressed
+                // nothing releases nothing.
+                self.release_by_typing(pane, by);
+                done
             }
             // What a new pane asked to continue the last conversation
             // (`pane.spawn` with `resume_last`) would go back to. Reads only;
@@ -911,6 +977,7 @@ impl Daemon {
                 let text = s(&params, "text")?;
                 if caller.is_owner() {
                     self.release_by_typing(&id, by);
+                    self.folder_trust_owner_typed(&id);
                 }
                 self.send_text_from(&id, text, enter, Some(&caller.client))?;
                 if caller.is_owner() {
@@ -925,6 +992,7 @@ impl Daemon {
                 }
                 let text = s(&params, "text")?;
                 self.release_by_typing(&id, by);
+                self.folder_trust_owner_typed(&id);
                 self.paste_from(&id, text, flag(&params, "enter"), Some(&caller.client))?;
                 self.note_input(&id, &caller.who, &caller.client);
                 json!({"ok": true})
@@ -937,6 +1005,7 @@ impl Daemon {
                 // at a pane never releases it.
                 if caller.is_owner() && crate::holds::is_typing(data) {
                     self.release_by_typing(&pane.id, by);
+                    self.folder_trust_owner_typed(&pane.id);
                 }
                 self.type_keys(&pane.id, data, Some(&caller.client))?;
                 self.note_input(&pane.id, &caller.who, &caller.client);
@@ -2420,6 +2489,26 @@ mod tests {
         }
         assert!(allowed(Authority::Owner, "question.answer"));
         assert!(!not_forwarded("question.answer") && !reads("question.answer"));
+        // The folder-trust choice (16 Nov 2026) is the owner's alone, by
+        // the same rule: starting a pane with it, the one tap, the list
+        // and the project's switch are on no agent's list, no station's
+        // and not the read-only one, and reach another station only as
+        // the owner's forwarded request. The key itself is pressed once
+        // and never a second time for a second try.
+        for m in [
+            "pane.spawn",
+            "pane.trust_folder",
+            "foldertrust.choice",
+            "foldertrust.list",
+            "foldertrust.remove",
+            "foldertrust.project",
+        ] {
+            for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
+                assert!(!allowed(who, m), "{who:?} {m}");
+            }
+            assert!(allowed(Authority::Owner, m) && !not_forwarded(m), "{m}");
+        }
+        assert_eq!(class("pane.trust_folder", &none), Class::Never);
         for (m, params) in [
             ("pane.kill", none.clone()),
             ("pane.pause", json!({"pane": "p"})),

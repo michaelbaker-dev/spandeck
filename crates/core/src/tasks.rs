@@ -402,6 +402,10 @@ impl Daemon {
             task: Some(task.clone()),
             parent_pane: requester_meta.as_ref().map(|m| m.id.clone()),
             prompt: Some(brief),
+            // A helper's folder-trust question is answered only in a
+            // project the owner switched that on for; nothing a caller
+            // of `delegate` sends has a say in it.
+            trust_choice: self.folder_trust_for_helper(agent, &project, &requester),
             ..Default::default()
         });
         let pane = match pane {

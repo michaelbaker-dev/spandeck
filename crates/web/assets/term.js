@@ -14,7 +14,7 @@
 // symbols font) is the same case: the terminal measured its cells with the
 // font that stood in for it, so it measures again and then does as above.
 
-import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge, heldWords, RELEASE_SAYS } from './ui.js';
+import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge, heldWords, RELEASE_SAYS, trustAsksWords, trustAnsweredWords } from './ui.js';
 import { paneIcon, iconName, hideIcon } from './icons.js';
 import { keyTyped, paneWrote, keysNotSent } from './perf.js';
 import { HOLD_MS, isTyping, isPaste, holdTake, heldTooLong, keysWords, wasWere, offWords, droppedWords, sendAct } from './typed.js';
@@ -652,7 +652,12 @@ export class PaneTerm {
       p.role ? h('span', { class: 'chip' }, p.role) : null,
       this.guest ? h('span', { class: 'chip guest', title: `A guest in this layout: this pane is ${this.guest}` }, this.guest) : null,
       h('span', { class: 'strip-activity' }, activity),
-      p.needs_reason && s === 'needs_you' ? h('span', { class: 'strip-reason', title: p.needs_reason }, p.needs_reason) : null,
+      p.needs_reason && s === 'needs_you' ? h('span', { class: 'strip-reason', title: trustAsksWords(p) || p.needs_reason }, p.needs_reason) : null,
+      // The program asks whether to trust the folder, and spandeck can
+      // read its choices: the owner's one tap answers it.
+      p.trust?.asks?.button && !p.exited ? h('button', { class: 'mini trust-tap', title: trustAsksWords(p) + ' The pane\'s menu can also remember it for this folder.',
+        onclick: () => rpc('pane.trust_folder') }, 'Trust this folder') : null,
+      trustAnsweredWords(p) ? h('span', { class: 'strip-note', title: 'It is in the ship\'s log. The folders you chose are listed in Agent setup.' }, trustAnsweredWords(p)) : null,
       h('span', { class: 'grow' }),
       // The model and how full its context is. The first things a narrow strip drops.
       ...usageGauge(p.usage, this.opts.onUsage ? () => this.opts.onUsage(this) : null),

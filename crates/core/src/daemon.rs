@@ -201,6 +201,17 @@ pub struct PaneMeta {
     /// owner before it takes mail (holds.rs).
     #[serde(default)]
     pub held_restored: Option<crate::holds::HeldRestored>,
+    /// The owner's standing choice this pane was started with: if its
+    /// program asks whether to trust the folder, the answer is yes
+    /// (foldertrust.rs). Kept through a restart of the program.
+    #[serde(default)]
+    pub trust_choice: Option<crate::foldertrust::Choice>,
+    /// The program's folder-trust question was answered, by whom and how.
+    #[serde(default)]
+    pub trust_answered: Option<crate::foldertrust::Answered>,
+    /// The question is on the screen now and nothing was pressed.
+    #[serde(default)]
+    pub trust_asks: Option<crate::foldertrust::Asks>,
 }
 
 /// What came of stopping one pane.
@@ -293,6 +304,14 @@ pub struct SpawnOpts {
     pub prompt: Option<String>,
     pub slot: Option<String>,
     pub extra_args: Vec<String>,
+    /// The New pane dialog's tick, "Trust this folder for <agent> if it
+    /// asks", as the caller sent it. Read by `pane.spawn` for the owner
+    /// only, and by nothing else (foldertrust.rs).
+    pub trust_folder: Option<bool>,
+    /// The standing choice the pane starts with. Never read from a
+    /// caller's parameters: whoever starts the pane works it out.
+    #[serde(skip)]
+    pub trust_choice: Option<crate::foldertrust::Choice>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,6 +382,8 @@ pub struct Inner {
     pub(crate) presence: Mutex<HashMap<String, u64>>,
     /// When each client last had its typing into a pane written to the log.
     pub(crate) typed: Mutex<HashMap<String, u64>>,
+    /// Panes that may still be at their program's folder-trust question.
+    pub(crate) folder_trust: crate::foldertrust::State,
     pub(crate) keep_awake: Mutex<Option<std::process::Child>>,
     /// pane -> (session, line): how far the owner has read each pane's
     /// conversation. Kept in the key-value table; this is its copy in memory.
@@ -534,6 +555,7 @@ impl Daemon {
             msg_tx,
             presence: Mutex::new(HashMap::new()),
             typed: Mutex::new(HashMap::new()),
+            folder_trust: Default::default(),
             keep_awake: Mutex::new(None),
             read_marks: Mutex::new(HashMap::new()),
             keep_awake_held: std::sync::atomic::AtomicBool::new(false),
@@ -1231,6 +1253,9 @@ impl Daemon {
             held_back: false,
             held_stopped: None,
             held_restored: None,
+            trust_choice: opts.trust_choice.clone(),
+            trust_answered: None,
+            trust_asks: None,
         };
         let entry = Arc::new(PaneEntry {
             id: id.clone(),
@@ -1502,12 +1527,15 @@ impl Daemon {
 
     /// Fallback observer for agent panes whose hooks have not reported.
     fn detect_screens(&self) {
+        // A program's folder-trust question is read first, and what such
+        // a pane says comes from there (foldertrust.rs).
+        let trust = self.folder_trust_look();
         for p in self.list_panes() {
             let (agent, hooks_seen, exited) = {
                 let m = p.meta.lock().unwrap();
                 (m.agent, m.hooks_seen, m.exit.is_some())
             };
-            if exited || hooks_seen {
+            if exited || hooks_seen || trust.contains(&p.id) {
                 continue;
             }
             let Some(a) = adapter(agent) else { continue };
@@ -1666,6 +1694,9 @@ impl Daemon {
                 parent_pane: meta.parent_pane.clone(),
                 resume: resume.clone(),
                 slot: meta.slot.clone(),
+                // The same rule for the program started again, and only
+                // for a pane that was started with the choice.
+                trust_choice: meta.trust_choice.clone(),
                 ..Default::default()
             })
             .inspect_err(|_| {
@@ -2351,6 +2382,7 @@ impl Daemon {
                 parent_pane: meta.parent_pane.clone(),
                 resume: self.resumable(&meta),
                 slot: meta.slot.clone(),
+                trust_choice: meta.trust_choice.clone(),
                 ..Default::default()
             };
             match self.spawn_pane(opts) {
@@ -2648,6 +2680,9 @@ impl Daemon {
         if self.flag_on("holds", true) {
             caps.push(crate::holds::CAP);
         }
+        // The folder-trust tick, the one tap and the list: a deck offers
+        // them only for a station that says so.
+        caps.push(crate::foldertrust::CAP);
         // A question and a plan are held for the owner, and
         // `question.answer` answers them.
         caps.push(crate::questions::CAP);

@@ -476,6 +476,10 @@ pub fn route(own: &str, method: &str, params: &Value) -> Route {
     let all = params.get("all").and_then(|a| a.as_bool()) == Some(true);
     let (lane, scope) = match method {
         "pane.input" | "pane.paste" | "pane.send_text" | "pane.resize" => (Lane::Input, pane()),
+        // The owner's "Trust this folder" presses keys in the pane: in the
+        // order of what is typed there, and nothing typed lands between
+        // its keys.
+        "pane.trust_folder" => (Lane::Input, pane()),
         "pane.stop" | "pane.kill" | "pane.pause" => (Lane::Urgent, pane()),
         "pane.release" if all => (Lane::Urgent, Some(Scope::AllPanes)),
         "pane.release" => (Lane::Urgent, pane()),

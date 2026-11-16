@@ -31,12 +31,22 @@
 //!   {"transcript": {…}}                  append a line to the session file
 //!   {"repeat": n, "steps": [...]}
 //!   {"exit": code}
+//!   {"trust_screen": {"as":"claude"|"antigravity"|"codex-hooks", "focus":"exit"|"trust",
+//!                     "extra":["a line Claude Code adds"], "reword":"another question",
+//!                     "wait":true}}
+//!       a program's folder-trust screen, drawn as the program draws it
+//!       (agents/foldertrust.rs). Waiting, the arrow keys move its marker
+//!       and Enter takes the choice: trusting goes on, leaving exits 1.
+//!       `"wait": false` only prints it, as an agent quoting it would.
+//!       `"after_ms"`: shown only after that long.
 //! Beside the steps, `"hook_deadline"`: how long this agent gives a hook
 //! that can block, in seconds, and tells it (default: what spandeck
 //! installs now, 75 for a tool call); `"old"`: 10 seconds and the hook is
 //! told nothing, as in a session started before 16 Nov 2026;
 //! `"question_deadline"`: what the hook that may wait for the owner is
 //! given, in seconds (default: what spandeck installs, an hour).
+//! `"trust_screen"` beside the steps: the same, shown before the session
+//! starts, where the real programs ask.
 //! After the steps it idles at a prompt; each input line runs `on_input`.
 
 use std::io::{Read, Write};
@@ -426,10 +436,105 @@ impl Agent {
             for _ in 0..n {
                 self.run_steps(&steps);
             }
+        } else if let Some(spec) = step.get("trust_screen") {
+            self.trust_screen(spec);
         } else if let Some(code) = step.get("exit").and_then(|s| s.as_i64()) {
             self.hook("SessionEnd", json!({"reason": "other"}));
             restore_terminal();
             std::process::exit(code as i32);
+        }
+    }
+
+    /// A program's folder-trust screen (see the top of this file).
+    fn trust_screen(&mut self, spec: &Value) {
+        use spandeck_agents::foldertrust::{drawn, Focus};
+        let program = spec["as"].as_str().unwrap_or("claude");
+        if let Some(ms) = spec["after_ms"].as_u64() {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+        // Each program's own choice when it first draws the screen.
+        let mut focus = match (spec["focus"].as_str(), program) {
+            (Some("trust"), _) => Focus::Trust,
+            (Some("exit"), _) => Focus::Exit,
+            (_, "claude") => Focus::Exit,
+            _ => Focus::Trust,
+        };
+        let extra: Vec<&str> = spec["extra"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|l| l.as_str()).collect())
+            .unwrap_or_default();
+        let clear = || {
+            let _ = std::io::stdout().write_all(b"\x1b[2J\x1b[H");
+        };
+        let draw = |focus: Focus| {
+            let mut lines = match program {
+                "antigravity" => drawn::antigravity(&self.cwd, focus),
+                "codex-hooks" => drawn::codex_hooks(),
+                _ => drawn::claude(&self.cwd, focus, 110, &extra),
+            };
+            if let Some(words) = spec["reword"].as_str() {
+                let at = if program == "antigravity" { 4 } else { 6 };
+                lines[at] = format!("    {words}");
+            }
+            clear();
+            let mut o = std::io::stdout();
+            let _ = o.write_all(lines.join("\r\n").as_bytes());
+            let _ = o.flush();
+        };
+        draw(focus);
+        if spec["wait"] == json!(false) {
+            out("");
+            return;
+        }
+        // The key that moves the marker towards the lower choice.
+        let trust_is_lower = program != "antigravity";
+        let drawn_at = Instant::now();
+        loop {
+            let key = match self.input.recv() {
+                Ok(b) => b,
+                Err(_) => std::process::exit(0),
+            };
+            // Claude Code takes no key in the first moment its prompt is
+            // up, so that one typed for something else is not an answer.
+            if program == "claude" && drawn_at.elapsed() < Duration::from_millis(250) {
+                continue;
+            }
+            match key {
+                b'\r' | b'\n' if program == "codex-hooks" => {
+                    clear();
+                    out("[fake] hooks screen answered");
+                    return;
+                }
+                b'\r' | b'\n' if focus == Focus::Trust => {
+                    clear();
+                    out("[fake] folder trusted");
+                    return;
+                }
+                b'\r' | b'\n' => {
+                    clear();
+                    out("[fake] left: the folder was not trusted");
+                    restore_terminal();
+                    std::process::exit(1);
+                }
+                0x1b => {
+                    let wait = Duration::from_millis(50);
+                    if self.input.recv_timeout(wait) != Ok(b'[') {
+                        continue;
+                    }
+                    let down = match self.input.recv_timeout(wait) {
+                        Ok(b'B') => true,
+                        Ok(b'A') => false,
+                        _ => continue,
+                    };
+                    focus = if down == trust_is_lower {
+                        Focus::Trust
+                    } else {
+                        Focus::Exit
+                    };
+                    draw(focus);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -560,6 +665,10 @@ fn main() {
         question_deadline: script["question_deadline"].as_u64(),
     };
 
+    // Where the real programs ask about the folder: before anything else.
+    if let Some(spec) = script.get("trust_screen") {
+        agent.trust_screen(spec);
+    }
     match &resume {
         Some(id) => out(&format!("[fake] RESUMED {id}")),
         None => out(&format!("[fake] session {}", agent.session)),

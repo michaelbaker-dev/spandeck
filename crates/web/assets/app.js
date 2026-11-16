@@ -13,7 +13,7 @@
 
 import { Api } from './api.js';
 import { PaneTerm } from './term.js';
-import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText, heldWords } from './ui.js';
+import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText, heldWords, trustTick, trustCard, trustAnsweredWords, TRUST_WARNING } from './ui.js';
 import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
 import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners } from './look.js';
 import { lookEditor } from './lookedit.js';
@@ -636,6 +636,8 @@ function paneMenu(e, st, p, where, term) {
     agent && alive && { label: 'Stop this turn', action: act('pane.stop'), disabled: !(s === 'working' || s === 'needs_you') },
     agent && alive && { label: p.paused ? 'Unpause (deliver work again)' : 'Pause (no new work)', action: act('pane.pause', { paused: !p.paused }) },
     agent && alive && p.held && { label: 'Release (take mail again)', hint: heldWords(p.held), action: act('pane.release') },
+    agent && alive && p.trust?.asks?.button && { label: 'Trust this folder', hint: 'answers its question, this once', action: act('pane.trust_folder') },
+    agent && alive && p.trust?.asks?.button && { label: `Trust this folder and remember it for ${p.agent_name}`, action: act('pane.trust_folder', { remember: true }) },
     agent && { label: p.watch ? 'Stop notifying when it finishes' : 'Notify me when it finishes', action: act('pane.set', { watch: !p.watch }) },
     { label: p.muted ? 'Unmute notifications' : 'Mute notifications', action: act('pane.set', { muted: !p.muted }) },
     '-',
@@ -667,6 +669,49 @@ function pickPane(then, ctx) {
     options.length ? null : h('p', { class: 'muted' }, 'Every running pane is already in this layout.')));
 }
 
+// ---- folder trust: what the owner chose, per station ----
+const hasCap = (st, cap) => (S.fleet.stations.find(s => s.station === st)?.caps || []).includes(cap);
+
+// The folders trusted for agents on one station, each with Remove.
+// `under`: only those in this folder (a project's own).
+function trustedFolders(st, list, redraw, under) {
+  const rows = (list.folders || []).filter(f => !under || f.folder === under || f.folder.startsWith(under + '/'));
+  if (!rows.length) return h('p', { class: 'muted small trusted-none' }, under ? 'No folder of this project is on the list.' : `No folder is trusted for an agent on ${st}.`);
+  return h('table', { class: 'table trusted-folders' }, h('tbody', {}, rows.map(f => h('tr', {},
+    h('td', { class: 'mono' }, f.folder, f.there === false ? h('span', { class: 'muted' }, ' (not there now)') : null),
+    h('td', {}, f.agent_name),
+    h('td', { class: 'muted' }, `${st} · since ${new Date(Number(f.at_ms) || 0).toLocaleDateString()}`),
+    h('td', {}, h('button', { class: 'mini danger', 'aria-label': `Stop trusting ${f.folder} for ${f.agent_name}`,
+      onclick: async () => { await rpc(st, 'foldertrust.remove', { folder: f.folder, agent: f.agent }); toast(`${f.agent_name} will be left to ask about ${f.folder} again. What it already recorded for itself is its own.`); redraw(); } }, 'Remove'))))));
+}
+
+// A project's switch, and its folders on the list.
+async function folderTrustDialog(st, project) {
+  let list = await api.on(st, 'foldertrust.list', {});
+  const path = (S.projects.get(st) || []).find(p => p.name === project)?.path;
+  dialog(`Folder trust: ${project} on ${st}`, (close, body) => {
+    const draw = () => {
+      const on = (list.projects || []).some(p => p.project === project);
+      const box = h('input', { type: 'checkbox', checked: on, style: { width: 'auto' } });
+      box.addEventListener('change', async () => {
+        try { await rpc(st, 'foldertrust.project', { project, on: box.checked }); } catch (e) { /* said by rpc */ }
+        list = await api.on(st, 'foldertrust.list', {});
+        body.replaceChildren(draw());
+      });
+      const redraw = async () => { list = await api.on(st, 'foldertrust.list', {}); body.replaceChildren(draw()); };
+      return h('div', {},
+        h('label', { class: 'row' }, box, h('b', {}, 'Agents may be started in this project\'s folders without asking me to trust them')),
+        h('p', { class: 'muted small' }, `Off until you turn it on. On: when an agent's program started in ${path || 'the project\'s folder'}, a folder under it, or a worktree spandeck made for one of this project's helpers, asks whether to trust the folder, spandeck answers yes for you, once, and writes it in the ship's log. That goes for helpers an agent asks for too. It is kept on ${st}, not in the project's files: a repository cannot switch it on for itself.`),
+        h('p', { class: 'muted small' }, (list.programs || []).map(p => `${p.agent_name}: ${p.allows} ${p.reach}`).join(' ')),
+        h('p', { class: 'small trust-warn' }, TRUST_WARNING.replace('tick it', 'turn it on')),
+        h('h3', {}, 'Folders of this project you ticked'),
+        trustedFolders(st, list, redraw, path),
+        h('div', { class: 'row end' }, h('button', { class: 'primary', onclick: close }, 'Done')));
+    };
+    return draw();
+  }, { wide: true });
+}
+
 // ------------------------------------------------------------------ dialogs
 
 const AGENT_CHOICES = [['claude', 'Claude Code'], ['codex', 'Codex'], ['opencode', 'OpenCode'], ['antigravity', 'Antigravity'], ['shell', 'Shell']];
@@ -693,10 +738,15 @@ function newPaneDialog(st, project, then) {
     last.addEventListener('change', () => setPref('newPane.resumeLast', last.checked));
     const lastNote = h('small', { class: 'muted', style: { display: 'block', margin: '2px 0 0 24px' } });
     const lastRow = h('div', { style: { marginBottom: '10px' } }, h('label', { class: 'row' }, last, 'Continue the last conversation in this folder'), lastNote);
+    // "Trust this folder for <agent> if it asks": off for a folder never
+    // used, on where the owner ticked it before or switched it on for the
+    // project. The station says which, and what it allows.
+    const trust = trustTick((q) => api.on(st, 'foldertrust.choice', q), () => ({ agent: agent.value, project: proj.value, cwd: cwd.value.trim() }));
     let canContinue = true, asked = 0, askTimer = null;
     const ask = async () => {
       const n = ++asked;
       const isAgent = agent.value !== 'shell';
+      trust.refresh();
       lastRow.style.display = isAgent && canContinue ? '' : 'none';
       if (!isAgent || !canContinue) return;
       lastNote.textContent = '';
@@ -717,14 +767,14 @@ function newPaneDialog(st, project, then) {
     const submit = async () => {
       clearTimeout(askTimer);
       const resumeLast = agent.value !== 'shell' && canContinue && last.checked;
-      const params = { agent: agent.value, name: name.value.trim() || undefined, project: proj.value || undefined, cwd: cwd.value || undefined, resume_last: resumeLast || undefined };
+      const params = { agent: agent.value, name: name.value.trim() || undefined, project: proj.value || undefined, cwd: cwd.value || undefined, resume_last: resumeLast || undefined, trust_folder: trust.value() };
       const pane = await rpc(st, 'pane.spawn', params);
       close();
       if (resumeLast && !pane.resumed) toast('No saved conversation to continue here: a new one was started');
       then ? then(pane.id) : go(paneUrl(st, pane.id));
     };
     return h('form', { onsubmit: (e) => { e.preventDefault(); submit(); } },
-      field('Run', agent), field('Name', name, 'A name is used once in a project.'), field('Project', proj), field('Folder', cwd), lastRow,
+      field('Run', agent), field('Name', name, 'A name is used once in a project.'), field('Project', proj), field('Folder', cwd), lastRow, trust.row,
       h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel'), h('button', { class: 'primary', type: 'submit' }, 'Start')));
   });
 }
@@ -1175,6 +1225,11 @@ async function agentsPanel() {
 async function setupPanel() {
   let view;
   try { view = await api.call('setup.get'); } catch (e) { return toast(e.message, 'error'); }
+  // What the owner chose about folder trust, on each station that answers.
+  const trustLists = new Map();
+  const loadTrust = () => Promise.all(onlineStations().filter(st => hasCap(st, 'folder_trust')).map(st =>
+    api.on(st, 'foldertrust.list', {}).then(l => trustLists.set(st, l)).catch(() => trustLists.delete(st))));
+  await loadTrust();
   const setup = view.setup;
   setup.mcp_servers ||= {}; setup.skills ||= {}; setup.defaults ||= {};
   dialog('Agent setup', (close, body) => {
@@ -1230,6 +1285,13 @@ async function setupPanel() {
             h('td', { class: 'muted' }, a.installed_version || ({ missing: 'not installed', broken: 'installed but not working', no_answer: 'installed, version not known' })[a.health] || 'installed, version not read'),
             h('td', {}, a.running.length ? a.running.map(r => h('span', { class: 'chip ' + (r.state === 'needs_you' ? 'warn' : ''), title: r.needs_reason || '' }, r.name)) : h('span', { class: 'muted' }, 'none')))))),
         h('p', { class: 'muted small' }, 'Agents that are already running keep their settings. To change them now, use "Run a command in agents" (for example /model opus).'),
+        h('h3', {}, 'Folders trusted for agents'),
+        h('p', { class: 'muted small' }, 'Where you ticked "Trust this folder" when starting a pane: if that program asks about that folder again, spandeck answers yes for you. Each station has its own list. Removing one stops spandeck answering; what the program recorded for itself is its own.'),
+        h('div', { class: 'trusted-all' }, [...trustLists].map(([st, list]) => h('div', {},
+          h('div', { class: 'muted small' }, `Folders trusted for agents on ${st}`),
+          trustedFolders(st, list, () => loadTrust().then(draw)),
+          (list.projects || []).length ? h('p', { class: 'muted small' }, 'Projects whose agents start without asking: ',
+            list.projects.map(p => h('button', { class: 'mini', title: 'Open this project\'s folder trust', onclick: () => folderTrustDialog(st, p.project) }, p.project))) : null))),
         h('div', { class: 'row end' },
           h('button', { onclick: () => { close(); commandDialog(api.station, null); } }, 'Run a command in agents…'),
           h('span', { class: 'grow' }), h('button', { onclick: close }, 'Cancel'), h('button', { class: 'primary', onclick: save }, 'Save for every station')));
@@ -2083,6 +2145,7 @@ function projMenu(e, st, pr) {
     { label: 'New layout…', action: () => newLayoutDialog(st, pr.name) },
     { label: 'New pane in this project…', action: () => newPaneDialog(st, pr.name) },
     { label: 'Tasks, reviews and sign-off', action: () => tasksPanel(st, pr.name).catch(er => toast(er.message, 'error')) },
+    hasCap(st, 'folder_trust') && { label: 'Folder trust for this project…', action: () => folderTrustDialog(st, pr.name).catch(er => toast(er.message, 'error')) },
     '-',
     { label: 'Link with another project…', action: () => linkDialog(st, pr) },
     ...linksOf(pr).map(l => ({ label: `Unlink from ${linkName(st, l)}`, action: () => rpc(st, 'project.unlink', { project: pr.name, with: l.with, ...(l.station && l.station !== st ? { station: l.station } : {}) }).then(() => toast(`${pr.name} and ${l.with} are no longer linked`)) })),
@@ -3143,7 +3206,10 @@ function phoneTerm(v, st, p, guest) {
   const canStop = !p.exited && (p.state === 'working' || p.state === 'needs_you');
   const pu = p.usage;
   const brief = pu && pu.model ? [pu.model.replace(/^.*\//, ''), contextText(pu) ? 'context ' + contextText(pu) : '', fmtTokens(pu.total_tokens) + ' tokens', pu.cost_estimate !== null && pu.cost_estimate !== undefined ? 'est. ' + fmtCost(pu.cost_estimate) : ''].filter(Boolean).join(' · ') : '';
-  const sig = `${fitKey}|${fitted}|${p.exited}|${canStop}|${brief}`;
+  // Its program's folder-trust question: the owner's one tap, or the note
+  // that spandeck answered it. A strip this narrow has no room for either.
+  const asks = !p.exited && p.trust?.asks, answered = trustAnsweredWords(p);
+  const sig = `${fitKey}|${fitted}|${p.exited}|${canStop}|${brief}|${JSON.stringify(asks || null)}|${answered}`;
   if (v.sig !== sig) {
     v.sig = sig;
     // replaceChildren would print a missing piece as the word "null".
@@ -3151,7 +3217,9 @@ function phoneTerm(v, st, p, guest) {
       p.exited ? null : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: (e) => { e.currentTarget.blur(); fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
       brief ? h('button', { class: 'phone-usage', title: usageTitle(p.usage), 'aria-label': `Usage: ${brief}`, onclick: (e) => { e.currentTarget.blur(); usageDialog(st, p); } }, brief, h('span', { class: 'muted' }, ' ›')) : null,
       h('span', { class: 'grow' }),
-      h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(st, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn')].filter(Boolean));
+      h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(st, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn'),
+      asks ? trustCard(p, (remember) => rpc(st, 'pane.trust_folder', { pane: p.id, remember }).catch(() => {})) : null,
+      answered ? h('div', { class: 'muted small trust-said' }, answered + '. It is in the ship\'s log.') : null].filter(Boolean));
   }
   if (v.slot.firstChild !== t.el) v.slot.replaceChildren(t.el);
   const foot = p.exited ? (v.ended ||= h('p', { class: 'muted small' }, 'This pane has ended.')) : composer(st, p);

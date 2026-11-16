@@ -136,6 +136,76 @@ export function heldWords(held) {
   parts.push(held.mail > 0 ? `mail is waiting (${Number(held.mail)})` : 'takes no mail until released');
   return parts.join(' · ');
 }
+// ---- the folder-trust question (the station's foldertrust.rs) ----
+// What a pane says while its program asks whether to trust the folder and
+// nothing was pressed for the owner, by the station's reason.
+export function trustAsksWords(p) {
+  const asks = p?.trust?.asks;
+  if (!asks) return '';
+  const name = p.agent_name || 'The program';
+  return ({
+    not_chosen: `${name} asks whether to trust this folder. You did not choose that when the pane was started, so nothing was pressed.`,
+    own_choice_is_no: `${name} asks whether to trust this folder. Its own choice on that screen is "No, exit", so spandeck pressed nothing: one tap here moves it to "Yes" and confirms.`,
+    not_the_known_screen: `${name} asks whether to trust this folder, and its screen is not the one spandeck knows (it may list what the folder's settings switch on, or be a newer version). Read it before you answer; nothing was pressed.`,
+    switched_off: `${name} asks whether to trust this folder. Nothing is pressed for you here: you typed into this pane, or it is switched off on this station.`,
+  })[asks.why] || `${name} asks whether to trust this folder.`;
+}
+// Said on a pane for ten minutes after spandeck answered for the owner.
+export function trustAnsweredWords(p) {
+  const a = p?.trust?.answered;
+  if (!a || a.how !== 'standing' || Date.now() - Number(a.at_ms || 0) > 600000) return '';
+  return `spandeck answered ${p.agent_name || 'the program'}'s folder-trust question, as you chose for this ${p.trust.chosen?.why === 'project' ? 'project' : 'folder'}`;
+}
+// The card a pane shows on a phone, and in its conversation, while its
+// program asks: the words, the folder, the owner's one tap with the choice
+// to remember it, and (where given) the way to the terminal.
+export function trustCard(p, tap, terminal) {
+  const asks = p.trust.asks;
+  const keep = h('input', { type: 'checkbox', style: { width: 'auto' } });
+  return h('div', { class: 'chat-card wait trust-card' },
+    h('b', {}, trustAsksWords(p)),
+    h('div', { class: 'muted small mono trust-folder' }, p.trust.folder || p.cwd || ''),
+    asks.button ? h('label', { class: 'row' }, keep, `Remember this for ${p.agent_name || 'this program'} in this folder`) : null,
+    h('div', { class: 'row' },
+      asks.button ? h('button', { type: 'button', class: 'primary trust-tap', onclick: (e) => { e.currentTarget.blur(); tap(keep.checked); } }, 'Trust this folder') : null,
+      terminal ? h('button', { type: 'button', onclick: terminal }, 'Open terminal') : null));
+}
+export const TRUST_WARNING = 'Do not tick it for a folder copied from somewhere you do not trust: what is in it can then run on this machine as you.';
+// The tick in the New pane dialog and the New session sheet. `ask`: calls
+// the station (`foldertrust.choice`). `get`: what is chosen in the dialog
+// now. The row is hidden for a program that does not ask, and on a
+// station from before this.
+export function trustTick(ask, get) {
+  const box = h('input', { type: 'checkbox', style: { width: 'auto' }, 'aria-describedby': 'trust-note' });
+  const label = h('span', {});
+  const note = h('small', { class: 'muted trust-note', id: 'trust-note' });
+  const row = h('div', { class: 'trust-row', hidden: true }, h('label', { class: 'row' }, box, label), note);
+  let n = 0, shown = false, touched = false;
+  box.addEventListener('change', () => { touched = true; });
+  const refresh = async () => {
+    const mine = ++n, at = get();
+    let r = null;
+    if (at.agent && at.agent !== 'shell') {
+      try { r = await ask({ agent: at.agent, project: at.project || undefined, cwd: at.cwd || undefined }); } catch (e) { r = null; }
+    }
+    if (mine !== n) return;
+    shown = !!(r && r.asks);
+    row.hidden = !shown;
+    if (!shown) return;
+    if (!touched || box.dataset.for !== r.folder + '|' + r.agent) { box.checked = r.on === true; touched = false; }
+    box.dataset.for = r.folder + '|' + r.agent;
+    label.textContent = `Trust this folder for ${r.agent_name} if it asks`;
+    // replaceChildren would print a missing piece as the word "null".
+    note.replaceChildren(...[
+      h('span', { class: 'mono trust-folder' }, r.folder), h('br'),
+      r.why === 'folder' ? h('span', {}, 'On because you ticked it for this folder before. Untick it to stop. ') : null,
+      r.why === 'project' ? h('span', {}, `On because this project's agents may start without asking you. `) : null,
+      h('span', {}, r.allows + ' ' + r.reach + ' '),
+      h('span', { class: 'trust-warn' }, TRUST_WARNING),
+      r.pressed === false ? h('span', {}, ` ${r.agent_name}'s own choice on that screen is "No, exit", so spandeck presses nothing there: the pane will offer "Trust this folder", one tap.`) : null].filter(Boolean));
+  };
+  return { row, refresh, value: () => (shown ? box.checked : undefined) };
+}
 export const RELEASE_SAYS = 'Release: this agent takes mail again. Typing into the pane does the same. A paused pane stays paused.';
 export function stateRank(p) {
   return { needs_you: 0, error: 1, working: 2, done: 3, idle: 4, exited: 5 }[stateOf(p)] ?? 6;

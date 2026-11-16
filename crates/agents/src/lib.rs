@@ -17,6 +17,7 @@ pub mod claude;
 pub mod codex;
 pub mod detect;
 pub mod event;
+pub mod foldertrust;
 pub mod install;
 pub mod opencode;
 pub mod sessions;

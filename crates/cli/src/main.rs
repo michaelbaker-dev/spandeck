@@ -235,9 +235,24 @@ enum PaneCmd {
         /// new one starts when there is none.
         #[arg(long)]
         resume_last: bool,
+        /// If the agent's program asks whether to trust the folder, the
+        /// answer is yes, and that is remembered for this folder and this
+        /// program. It lets the program read, edit and run files there and
+        /// apply the folder's own settings: do not use it for a folder
+        /// copied from somewhere you do not trust.
+        #[arg(long)]
+        trust_folder: bool,
         /// Program and arguments instead of an agent.
         #[arg(last = true)]
         command: Vec<String>,
+    },
+    /// Answer "yes" to the folder-trust question a pane's program is
+    /// showing. With --remember: also for later panes of that program in
+    /// that folder.
+    TrustFolder {
+        pane: String,
+        #[arg(long)]
+        remember: bool,
     },
     List,
     /// Print a pane's screen.
@@ -604,6 +619,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 project,
                 cwd,
                 resume_last,
+                trust_folder,
                 command,
             } => {
                 let cwd = cwd.or_else(|| std::env::current_dir().ok());
@@ -611,12 +627,21 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     Some((p, rest)) => (Some(p.clone()), rest.to_vec()),
                     None => (None, vec![]),
                 };
-                let v = c.call("pane.spawn", json!({"agent": agent, "name": name, "project": project, "cwd": cwd, "program": program, "args": args, "resume_last": resume_last}))?;
+                // Not given, nothing is sent: the owner's standing choice
+                // for the folder stands as it is.
+                let trust = trust_folder.then_some(true);
+                let v = c.call("pane.spawn", json!({"agent": agent, "name": name, "project": project, "cwd": cwd, "program": program, "args": args, "resume_last": resume_last, "trust_folder": trust}))?;
                 // The id stays alone on standard output, for scripts.
                 if resume_last && v["resumed"] != json!(true) && v["agent"] != json!("shell") {
                     eprintln!("spandeck: no saved conversation to continue in this folder; a new one was started");
                 }
                 show(j, &v, |v| v["id"].as_str().unwrap_or("").to_string());
+            }
+            PaneCmd::TrustFolder { pane, remember } => {
+                c.call(
+                    "pane.trust_folder",
+                    json!({"pane": pane, "remember": remember}),
+                )?;
             }
             PaneCmd::List => {
                 let v = c.call("pane.list", json!({}))?;

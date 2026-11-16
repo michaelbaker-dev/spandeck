@@ -145,6 +145,29 @@ days, not hours.
   the agent shows its own prompt in its terminal. What was asked is part of your
   conversation, so it is not in the list of approvals, the notice or the ship's log,
   which only say that something is asked.
+- **Answering a program's "trust this folder?" for you.** An agent program started in a
+  folder it has not seen asks whether you trust it. You can tick "Trust this folder for
+  <agent> if it asks" when you start the pane, or switch it on for a project
+  (`DECISIONS.md`, "The folder-trust question"). This is the one place where spandeck
+  presses a consent key for you, on a choice you made earlier, and it is bounded. The
+  choice is yours alone: starting a pane with it, the list of folders and a project's
+  switch are refused to an agent, to a station acting for itself and to the read-only
+  caller, and a helper an agent asks for is answered only in a project you switched on.
+  It is kept by the station, never in a project's files, so a repository cannot switch
+  it on for itself. The key is Enter, pressed once, and only on the program's own first
+  screen, word for word, for that pane's folder, within 20 seconds of the program's
+  start, with the program's marker already on "Yes, I trust this folder". A screen that
+  says anything more (Claude Code lists what a folder's settings would pre-approve or
+  run), a permission prompt, a login, Codex's review of hooks, or the same words later
+  in a session are never answered. Every answer is in the ship's log and on the pane.
+  The programs' own trust files are not written. **What you are granting** is the
+  program's own trust, which is wider than it sounds: the program will read, edit and
+  run files there, and with Claude Code the folder's own settings then apply without
+  asking (permission rules, extra folders, helper commands), for the whole git
+  repository the folder is in. **Do not tick it, and do not switch a project on, for a
+  folder copied from somewhere you do not trust**: what is in it can then run on this
+  machine as you. Claude Code's own choice on its screen is "No, exit", so by default
+  spandeck presses nothing there and offers you one tap instead.
 - **API keys.** With AgentVault connected, agents use keys through the vault and never
   hold them. See `docs/vault.md`, including what that does not protect against.
 
