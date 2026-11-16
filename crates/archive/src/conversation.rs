@@ -25,6 +25,9 @@ use serde_json::{json, Map, Value};
 
 /// Bytes of text in one item; the rest is fetched as detail.
 pub const TEXT_CAP: usize = 16 * 1024;
+/// How the refusal of a plan the owner sent back from the Control Deck
+/// begins (core, questions.rs says the rest).
+pub const SENT_BACK: &str = "The owner read this plan in spandeck and did not approve it";
 /// Characters of a tool call's one-line summary.
 pub const SUMMARY_CAP: usize = 200;
 /// Bytes of text in one detail answer; `next` says where the rest starts.
@@ -430,7 +433,9 @@ fn summary_of(input: &Value) -> String {
     String::new()
 }
 
-fn questions_of(input: &Value) -> Vec<Question> {
+/// The questions of an AskUserQuestion call, as an item shows them: every
+/// string cleaned and cut. Also what a held question shows (core, questions.rs).
+pub fn questions_of(input: &Value) -> Vec<Question> {
     let short = |v: &Value, max: usize| one_line(v.as_str().unwrap_or(""), max);
     input
         .get("questions")
@@ -492,6 +497,12 @@ fn claude_result(v: &Value, block: &Value, ts: Option<u64>) -> Option<ToolResult
             "interrupted"
         } else if v.get("toolDenialKind").is_some_and(|k| !k.is_null())
             || said.starts_with("The user doesn't want to proceed")
+            // A plan the owner sent back from the Control Deck: the hook's
+            // refusal, in spandeck's own words (core, questions.rs). How
+            // Claude Code writes a call a hook refused has not been seen
+            // in a real session; its hook reference says the reason is
+            // shown to the agent.
+            || said.contains(SENT_BACK)
         {
             "denied"
         } else if block["is_error"] == json!(true) {

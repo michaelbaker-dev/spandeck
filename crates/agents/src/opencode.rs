@@ -33,6 +33,7 @@ impl Adapter for OpenCode {
             remote_approval: false,
             inject_context: false,
             resume: true,
+            answer_questions: false,
             verified: false,
             note: "No hooks: state is read from the screen, rules are guidance, and approvals are answered in the pane. spandeck's tools and skills are attached at launch.",
         }

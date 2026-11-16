@@ -2648,6 +2648,9 @@ impl Daemon {
         if self.flag_on("holds", true) {
             caps.push(crate::holds::CAP);
         }
+        // A question and a plan are held for the owner, and
+        // `question.answer` answers them.
+        caps.push(crate::questions::CAP);
         if self.flag_on(crate::stops::CAP, true) {
             caps.push(crate::stops::CAP);
         }

@@ -92,8 +92,35 @@ pub enum Kind {
     Tool,
     /// The agent asks permission: answered from the Control Deck.
     Permission,
+    /// The agent asks the owner a question, or to approve its plan: the
+    /// hook of the entry for those two tools, which may wait for the
+    /// owner's answer from the Control Deck (questions.rs). Like a
+    /// permission request it never refuses: with no answer, the agent's
+    /// own prompt takes over.
+    Answer,
     /// Everything else, and every hook of an agent that cannot be blocked.
     Other,
+}
+
+/// `answers`: this is the hook of the entry for the tools that ask the
+/// owner something, and `tool` is the call's tool. It is that kind of hook
+/// only when it was told its timeout: one that was not cannot be held.
+pub fn kind_for(
+    agent: AgentKind,
+    event: &str,
+    answers: bool,
+    tool: Option<&str>,
+    deadline: Option<u64>,
+) -> Kind {
+    let asks = tool.is_some_and(|t| crate::questions::kind_of_tool(t).is_some());
+    let can = adapter(agent).is_some_and(|a| a.capabilities().answer_questions);
+    match (answers, event) {
+        // The hook every tool call has does the rest for this call: this
+        // one only ever waits for the owner, and otherwise says nothing.
+        (true, "PreToolUse") if asks && can && deadline.is_some() => Kind::Answer,
+        (true, _) => Kind::Other,
+        _ => kind_of(agent, event),
+    }
 }
 
 pub fn kind_of(agent: AgentKind, event: &str) -> Kind {
@@ -130,7 +157,7 @@ pub fn plan(kind: Kind, deadline: Option<u64>, known: Known) -> Plan {
             reach: HOOK_WAIT,
             decide_by: None,
         },
-        Kind::Permission => {
+        Kind::Permission | Kind::Answer => {
             let by = by(PERMISSION_SECS);
             Plan {
                 reach: HOLD.min(by),
@@ -222,16 +249,26 @@ pub enum Outcome {
 /// print and exit with. `deadline`: the agent's timeout for this hook, in
 /// seconds, when the hook was told it. It never breaks the agent: a
 /// failure is a silent pass, except the one case this file is for.
-pub fn run(paths: &Paths, agent: &str, deadline: Option<u64>, input: &str) -> HookReply {
-    run_told(paths, agent, deadline, input).0
+pub fn run(
+    paths: &Paths,
+    agent: &str,
+    deadline: Option<u64>,
+    answers: bool,
+    input: &str,
+) -> HookReply {
+    run_told(paths, agent, deadline, answers, input).0
 }
 
 /// `run`, also saying whether the daemon answered (the stand-in agent of
 /// the tests shows it).
+///
+/// `answers`: the installed command line said this is the hook of the
+/// entry for a question or a plan (`SPANDECK_HOOK_ANSWERS`).
 pub fn run_told(
     paths: &Paths,
     agent: &str,
     deadline: Option<u64>,
+    answers: bool,
     input: &str,
 ) -> (HookReply, Outcome) {
     let silent = |why: &str| (nothing(agent), Outcome::Unanswered(why.to_string()));
@@ -254,7 +291,16 @@ pub fn run_told(
         .and_then(|e| e.as_str())
         .unwrap_or("")
         .to_string();
-    let kind = AgentKind::parse(agent).map_or(Kind::Other, |a| kind_of(a, &event));
+    let tool = payload.get("tool_name").and_then(|t| t.as_str());
+    let kind = AgentKind::parse(agent).map_or(Kind::Other, |a| {
+        kind_for(a, &event, answers, tool, deadline)
+    });
+    // The hook of the entry for a question or a plan, for anything that
+    // is not one it can hold: the other hook of the same call tells the
+    // daemon of it. Telling it twice would count the call twice.
+    if answers && kind != Kind::Answer {
+        return silent("not a question or a plan this hook can hold");
+    }
     let known = match kind {
         Kind::Tool => read(paths, &pane, SystemTime::now()),
         _ => Known::Unknown,
@@ -264,7 +310,11 @@ pub fn run_told(
     // Made once, and sent with every try: what this hook asks the owner
     // is found again by it (approvals.rs).
     let hook_id = crate::rids::new_rid();
-    let params = json!({"agent": agent, "payload": payload, "hook_id": hook_id});
+    let mut params = json!({"agent": agent, "payload": payload, "hook_id": hook_id});
+    if kind == Kind::Answer {
+        params["answers"] = json!(true);
+        params["deadline"] = json!(deadline);
+    }
     let answered = |reply: Value| {
         let exit_code = reply["exit_code"].as_i64().unwrap_or(0) as i32;
         let reply = match reply["stdout"].as_str().filter(|s| !s.is_empty()) {
@@ -608,6 +658,78 @@ mod tests {
             out["hookSpecificOutput"]["permissionDecisionReason"],
             "Blocked by spandeck: spandeck is not running on this station, so the rules enforced for this session cannot be checked. Do not retry this and do not try another way: stop and wait for the owner."
         );
+    }
+
+    /// Mobile plan, phase M3, with "While spandeck is away": the hook that
+    /// may hold a question or a plan for the owner is the one whose
+    /// command line says so, for those two tools, of an agent whose hook
+    /// can answer them, and only when it was told its timeout. It waits
+    /// for the daemon as a permission request does (a minute each time it
+    /// finds it away), answers two seconds before its hour, and with no
+    /// answer says nothing whatever the guard says: it never refuses and
+    /// never answers for the owner, so the agent's own prompt appears.
+    /// The hook every tool call has is unchanged for these two tools: a
+    /// rule is still checked, and still refused when spandeck is away.
+    #[test]
+    fn the_hook_for_a_question_waits_for_the_owner_and_never_refuses() {
+        for tool in ["AskUserQuestion", "ExitPlanMode"] {
+            for agent in [AgentKind::Claude, AgentKind::Fake] {
+                assert_eq!(
+                    kind_for(agent, "PreToolUse", true, Some(tool), Some(3600)),
+                    Kind::Answer
+                );
+                assert_eq!(
+                    kind_for(agent, "PreToolUse", false, Some(tool), Some(75)),
+                    Kind::Tool
+                );
+                // Not told its timeout: it cannot be held.
+                assert_eq!(
+                    kind_for(agent, "PreToolUse", true, Some(tool), None),
+                    Kind::Other
+                );
+                assert_eq!(
+                    kind_for(agent, "PostToolUse", true, Some(tool), Some(3600)),
+                    Kind::Other
+                );
+            }
+            // Codex, OpenCode and Antigravity cannot be answered this way.
+            for agent in [
+                AgentKind::Codex,
+                AgentKind::OpenCode,
+                AgentKind::Antigravity,
+            ] {
+                assert_eq!(
+                    kind_for(agent, "PreToolUse", true, Some(tool), Some(3600)),
+                    Kind::Other,
+                    "{agent:?}"
+                );
+            }
+        }
+        assert_eq!(
+            kind_for(
+                AgentKind::Claude,
+                "PreToolUse",
+                true,
+                Some("Bash"),
+                Some(3600)
+            ),
+            Kind::Other
+        );
+        for known in [
+            Known::Enforced,
+            Known::Unknown,
+            Known::NotEnforced { away: S(600) },
+            Known::Allow,
+        ] {
+            assert_eq!(
+                plan(Kind::Answer, Some(3600), known),
+                Plan {
+                    reach: S(60),
+                    decide_by: Some(S(3598))
+                }
+            );
+            assert_eq!(unanswered(Kind::Answer, known), Verdict::Silent);
+        }
     }
 
     /// The guard as a hook reads it: enforced, not enforced with its age,

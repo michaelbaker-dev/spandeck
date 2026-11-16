@@ -11,6 +11,14 @@
 //!   {"prompt": "text"}                   UserPromptSubmit
 //!   {"tool": {"name":"Bash","command":"x","ok":true,"file":"p","run":false}}
 //!   {"permission": {"name":"Write","file":"p"}}
+//!   {"ask": {"questions":[…], "id":"toolu_1"}}   AskUserQuestion, as Claude Code asks
+//!   {"plan": {"plan":"markdown", "id":"toolu_2"}} ExitPlanMode
+//!       Both go through PreToolUse twice, as with the entries spandeck
+//!       installs: the hook every tool call has, then the hook that may
+//!       wait for the owner. Answered by that hook, the input it was
+//!       given back is printed; not answered, the prompt is "in the
+//!       terminal" and the next line typed answers it. The call and its
+//!       result are written to the session file in Claude Code's shape.
 //!   {"work": ms}                         a long tool call; ESC interrupts it
 //!   {"subagent": {"type":"Explore","stop":false}}  the agent's own sub-agent starts (or stops)
 //!   {"turn_end": "last message"}         Stop (may be continued with mail)
@@ -23,7 +31,9 @@
 //! Beside the steps, `"hook_deadline"`: how long this agent gives a hook
 //! that can block, in seconds, and tells it (default: what spandeck
 //! installs now, 75 for a tool call); `"old"`: 10 seconds and the hook is
-//! told nothing, as in a session started before 16 Nov 2026.
+//! told nothing, as in a session started before 16 Nov 2026;
+//! `"question_deadline"`: what the hook that may wait for the owner is
+//! given, in seconds (default: what spandeck installs, an hour).
 //! After the steps it idles at a prompt; each input line runs `on_input`.
 
 use std::io::{Read, Write};
@@ -44,6 +54,8 @@ struct Agent {
     interrupted: bool,
     /// The script's `hook_deadline`.
     hook_deadline: Value,
+    /// The script's `question_deadline`.
+    question_deadline: Option<u64>,
 }
 
 fn out(s: &str) {
@@ -78,12 +90,143 @@ impl Agent {
             Value::Number(secs) if event == "PreToolUse" => secs.as_u64(),
             _ => install::timeout_secs(AgentKind::Fake, event).filter(|_| install::blocking(event)),
         };
-        let (reply, outcome) =
-            spandeck_core::guard::run_told(&self.paths, "fake", deadline, &extra.to_string());
+        let (reply, outcome) = spandeck_core::guard::run_told(
+            &self.paths,
+            "fake",
+            deadline,
+            false,
+            &extra.to_string(),
+        );
         if let spandeck_core::guard::Outcome::Unanswered(why) = outcome {
             out(&format!("[fake] hook error: {why}"));
         }
         serde_json::from_str(&reply.stdout).unwrap_or(Value::Null)
+    }
+
+    /// The second hook of a call that asks the owner something: the one
+    /// spandeck installs for those two tools by name, with its own long
+    /// timeout, and told that it is the one that may wait.
+    fn answering_hook(&self, mut extra: Value) -> Value {
+        let obj = extra.as_object_mut().expect("hook payload is an object");
+        obj.insert("hook_event_name".into(), json!("PreToolUse"));
+        obj.insert("session_id".into(), json!(self.session));
+        obj.insert("transcript_path".into(), json!(self.transcript));
+        obj.insert("cwd".into(), json!(self.cwd));
+        let deadline = self
+            .question_deadline
+            .unwrap_or(spandeck_agents::install::QUESTION_HOOK_SECS);
+        let (reply, _) = spandeck_core::guard::run_told(
+            &self.paths,
+            "fake",
+            Some(deadline),
+            true,
+            &extra.to_string(),
+        );
+        serde_json::from_str(&reply.stdout).unwrap_or(Value::Null)
+    }
+
+    /// AskUserQuestion or ExitPlanMode, the way Claude Code runs one.
+    fn asks(&mut self, name: &str, spec: &Value) {
+        let id = spec["id"]
+            .as_str()
+            .map(String::from)
+            .unwrap_or_else(|| spandeck_core::paths::new_id("toolu"));
+        let input = match name {
+            "AskUserQuestion" => json!({"questions": spec["questions"]}),
+            _ => json!({"plan": spec["plan"], "planFilePath": format!("{}/plan.md", self.cwd)}),
+        };
+        let what = if name == "AskUserQuestion" {
+            "question"
+        } else {
+            "plan"
+        };
+        self.append_transcript(
+            &json!({"type": "assistant", "message": {"role": "assistant",
+            "content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}}),
+        );
+        let payload = json!({"tool_name": name, "tool_input": input, "tool_use_id": id});
+        let denied = |reply: &Value| {
+            (reply.pointer("/hookSpecificOutput/permissionDecision") == Some(&json!("deny"))).then(
+                || {
+                    reply
+                        .pointer("/hookSpecificOutput/permissionDecisionReason")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                },
+            )
+        };
+        let result = |content: &str, error: bool, tur: Value| {
+            json!({"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": id, "content": content, "is_error": error}]},
+                "toolUseResult": tur})
+        };
+        // The hook every tool call has: a rule may refuse the call.
+        let first = self.hook("PreToolUse", payload.clone());
+        if let Some(reason) = denied(&first) {
+            out(&format!("[fake] BLOCKED {name}: {reason}"));
+            self.append_transcript(&result(&reason, true, json!({})));
+            return;
+        }
+        out(&format!("[fake] {what}?"));
+        let reply = self.answering_hook(payload.clone());
+        let given = reply.pointer("/hookSpecificOutput/updatedInput").cloned();
+        let allowed =
+            reply.pointer("/hookSpecificOutput/permissionDecision") == Some(&json!("allow"));
+        let line = if let Some(reason) = denied(&reply) {
+            out(&format!("[fake] {what} sent back: {reason}"));
+            result(&reason, true, json!({}))
+        } else if let (true, Some(given)) = (allowed, given) {
+            // What the hook gave the call as its input, whole.
+            out(&format!("[fake] {what} answered by the hook: {given}"));
+            match name {
+                "AskUserQuestion" => result(
+                    "User has answered your questions.",
+                    false,
+                    json!({"questions": given["questions"], "answers": given["answers"]}),
+                ),
+                _ => result(
+                    "User has approved your plan.",
+                    false,
+                    json!({"plan": given["plan"], "isAgent": false, "filePath": given["planFilePath"]}),
+                ),
+            }
+        } else {
+            // No decision: the prompt is the agent's own, in its terminal.
+            out(&format!(
+                "[fake] {what} is in the terminal: type your answer"
+            ));
+            let typed = self.read_line().unwrap_or_default();
+            out(&format!("[fake] {what} answered in the terminal: {typed}"));
+            match name {
+                "AskUserQuestion" => {
+                    let asked = input["questions"][0]["question"].as_str().unwrap_or("");
+                    result(
+                        "User has answered your questions.",
+                        false,
+                        json!({"questions": input["questions"], "answers": {asked: typed}}),
+                    )
+                }
+                _ if typed.starts_with('y') => result(
+                    "User has approved your plan.",
+                    false,
+                    json!({"plan": input["plan"], "isAgent": false}),
+                ),
+                _ => result(
+                    "The user doesn't want to proceed with this tool use.",
+                    true,
+                    json!({}),
+                ),
+            }
+        };
+        let refused = line["message"]["content"][0]["is_error"] == json!(true);
+        self.append_transcript(&line);
+        if !refused {
+            self.hook(
+                "PostToolUse",
+                json!({"tool_name": name, "tool_input": input, "tool_use_id": id, "tool_response": {}}),
+            );
+        }
     }
 
     fn show_context(reply: &Value) {
@@ -184,6 +327,10 @@ impl Agent {
                 .and_then(|b| b.as_str())
                 .unwrap_or("none");
             out(&format!("[fake] permission: {behavior}"));
+        } else if let Some(ask) = step.get("ask") {
+            self.asks("AskUserQuestion", ask);
+        } else if let Some(plan) = step.get("plan") {
+            self.asks("ExitPlanMode", plan);
         } else if let Some(sub) = step.get("subagent") {
             let stop = sub.get("stop").and_then(|s| s.as_bool()).unwrap_or(false);
             self.hook(
@@ -387,6 +534,7 @@ fn main() {
         round,
         interrupted: false,
         hook_deadline: script["hook_deadline"].clone(),
+        question_deadline: script["question_deadline"].as_u64(),
     };
 
     match &resume {

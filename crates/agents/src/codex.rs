@@ -34,6 +34,7 @@ impl Adapter for Codex {
             remote_approval: true,
             inject_context: true,
             resume: true,
+            answer_questions: false,
             verified: false,
             note: "From the Codex hooks reference, not yet run against a real Codex. Hooks need to be trusted in Codex first and do not cover hosted tools.",
         }
@@ -44,8 +45,10 @@ impl Adapter for Codex {
     }
 
     fn reply(&self, raw_event: &str, decision: &HookDecision) -> HookReply {
-        // Codex fails a PreToolUse hook that returns anything but deny/context,
-        // and the shared renderer only ever emits those.
+        // Codex fails a PreToolUse hook that returns anything but deny/context.
+        // The shared renderer emits one thing more, an answer to a question
+        // or a plan, and that decision is only ever made for an agent that
+        // says `answer_questions`: not this one.
         reply_claude_dialect(raw_event, decision)
     }
 

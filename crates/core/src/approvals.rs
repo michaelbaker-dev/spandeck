@@ -17,6 +17,12 @@
 //! `detail.hook` out, and what is stored is a hash. A row is only ever
 //! found again for the pane it belongs to.
 //!
+//! A question the agent asks the owner, and a plan it wants approved, are
+//! held the same way (questions.rs; kinds `question` and `plan`): the same
+//! rows, the same waiting, the same finding again after a restart. They
+//! are what was said in a conversation, so they are in no list that the
+//! approvals are in (`list`); the owner's own calls read them (`held`).
+//!
 //! This file is plain code over the database, so that it can be tested
 //! without a daemon.
 
@@ -40,6 +46,14 @@ pub const REATTACH_WAIT: Duration = Duration::from_secs(15);
 /// What the owner is told when an answer was recorded for a hook that is
 /// not connected at this moment.
 pub const RECORDED: &str = "recorded: the agent will get it when it reconnects";
+
+/// The kinds of row that hold an agent's question or plan for the owner.
+/// What they say is the owner's conversation: never in `list`.
+pub const HELD_KINDS: [&str; 2] = ["question", "plan"];
+
+fn held_kind(v: &Value) -> bool {
+    v["kind"].as_str().is_some_and(|k| HELD_KINDS.contains(&k))
+}
 
 pub struct ApprovalBook {
     db: Arc<Db>,
@@ -84,6 +98,7 @@ struct Row {
     id: String,
     ts: u64,
     pane: String,
+    kind: String,
     status: String,
     reason: Option<String>,
     hook: Option<String>,
@@ -94,6 +109,7 @@ fn row_of(v: &Value) -> Option<Row> {
         id: v["id"].as_str()?.to_string(),
         ts: v["ts"].as_u64().unwrap_or(0),
         pane: v["pane"].as_str()?.to_string(),
+        kind: v["kind"].as_str().unwrap_or("").to_string(),
         status: v["status"].as_str()?.to_string(),
         reason: v["reason"].as_str().map(String::from),
         hook: v["detail"]["hook"].as_str().map(String::from),
@@ -326,6 +342,40 @@ impl ApprovalBook {
         }
     }
 
+    /// "Answer in the terminal instead": the owner lets a held question or
+    /// plan go. The hook that waits falls through with no answer, so the
+    /// agent shows its own prompt; one that comes back later is told the
+    /// same. Nothing is answered. Returns its pane, or None when it was no
+    /// longer waiting.
+    pub fn release(&self, id: &str, by: &str, now: u64) -> Option<String> {
+        let mut waiters = self.waiters.lock().unwrap();
+        let row = self.row(id).filter(|r| r.status == "pending")?;
+        // Dropping the sender is what tells the hook.
+        waiters.remove(id);
+        // Written with the waiters locked, as an answer is.
+        self.db.put(Op::ApprovalStatus {
+            id: id.to_string(),
+            status: "released".into(),
+            at: now as i64,
+            by: Some(by.to_string()),
+            reason: None,
+            only_pending: true,
+        });
+        Some(row.pane)
+    }
+
+    /// What kind of request a row is, and how it stands.
+    pub fn kind_and_status(&self, id: &str) -> Option<(String, String)> {
+        self.row(id).map(|r| (r.kind, r.status))
+    }
+
+    /// Does this pane have a question or a plan held for the owner now?
+    pub fn holds(&self, pane: &str) -> bool {
+        self.raw(true)
+            .iter()
+            .any(|r| r["pane"] == pane && held_kind(r))
+    }
+
     /// Is the answer to this approval in the database?
     pub fn saved(&self, id: &str) -> bool {
         self.db
@@ -338,6 +388,37 @@ impl ApprovalBook {
         let ids: Vec<String> = self
             .raw(true)
             .iter()
+            .filter_map(row_of)
+            .filter(|r| r.pane == pane)
+            .map(|r| r.id)
+            .collect();
+        for id in &ids {
+            self.waiters.lock().unwrap().remove(id);
+            self.db.put(Op::ApprovalStatus {
+                id: id.clone(),
+                status: "cancelled".into(),
+                at: now as i64,
+                by: None,
+                reason: None,
+                only_pending: true,
+            });
+        }
+        ids
+    }
+
+    /// Is any hook waiting on anything now? From memory: for a caller
+    /// that would otherwise read the rows on every hook of every agent.
+    pub fn any_waiting(&self) -> bool {
+        !self.waiters.lock().unwrap().is_empty()
+    }
+
+    /// `cancel_pane`, for the pane's questions and plans only: the turn
+    /// they belonged to is over. A permission request is left alone.
+    pub fn cancel_held(&self, pane: &str, now: u64) -> Vec<String> {
+        let ids: Vec<String> = self
+            .raw(true)
+            .iter()
+            .filter(|r| held_kind(r))
             .filter_map(row_of)
             .filter(|r| r.pane == pane)
             .map(|r| r.id)
@@ -476,8 +557,23 @@ impl ApprovalBook {
     /// The approvals, as anyone is shown them: a hook's mark is left out,
     /// and one that waits says whether its hook is connected (`attached`:
     /// false while the agent is finding its way back after a restart).
+    ///
+    /// A held question or plan is not an approval and is not here: what it
+    /// says is the owner's conversation, and this list is read by callers
+    /// who may not read that (`held`).
     pub fn list(&self, pending_only: bool) -> Vec<Value> {
+        self.shown(pending_only, false)
+    }
+
+    /// The questions and plans held for the owner, shown the same way.
+    /// The owner's only.
+    pub fn held(&self, pending_only: bool) -> Vec<Value> {
+        self.shown(pending_only, true)
+    }
+
+    fn shown(&self, pending_only: bool, held: bool) -> Vec<Value> {
         let mut rows = self.raw(pending_only);
+        rows.retain(|r| held_kind(r) == held);
         let waiters = self.waiters.lock().unwrap();
         for r in rows.iter_mut() {
             if let Some(detail) = r["detail"].as_object_mut() {
@@ -722,5 +818,67 @@ mod tests {
         assert!(rx.try_recv().is_err());
         assert!(!b.finish(&asked, waiter));
         assert_eq!(status(&b, &asked), "cancelled");
+    }
+
+    /// Mobile plan, phase M3. A question the agent asked is held like an
+    /// approval and is what was said in a conversation, so it must not be
+    /// where approvals are listed: `approval.list` and the snapshot are
+    /// read by callers that may not read a conversation. And "Answer in
+    /// the terminal instead" answers nothing: the hook that waits falls
+    /// through, one that comes back is told it is gone, and no answer can
+    /// be given afterwards.
+    #[test]
+    fn a_held_question_is_in_no_list_of_approvals_and_can_be_let_go() {
+        let b = book();
+        let asked = b.ask(
+            "p1",
+            None,
+            "question",
+            "asks a question",
+            json!({"input": {"questions": [{"question": "Which herons count?"}]}}),
+            Some(HOOK),
+            1_000,
+            LIMIT,
+        );
+        let (id, waiter, mut rx, ..) = waiting(asked);
+        assert!(b.list(false).is_empty() && b.list(true).is_empty());
+        assert!(b.holds("p1") && !b.holds("p2"));
+        let held = b.held(true);
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0]["attached"], json!(true));
+        assert!(!json!(held).to_string().contains("\"hook\""));
+        assert_eq!(
+            b.kind_and_status(&id),
+            Some(("question".into(), "pending".into()))
+        );
+        // A permission request beside it is listed as it always was.
+        let (perm, ..) = waiting(ask(&b, "p1", None, 1_500));
+        assert_eq!(b.list(true).len(), 1);
+        assert_eq!(b.list(true)[0]["id"], json!(perm));
+        assert_eq!(b.held(true).len(), 1);
+
+        assert_eq!(b.release(&id, "you", 2_000), Some("p1".into()));
+        assert!(rx.try_recv().is_err(), "the hook is told nothing");
+        assert!(!b.finish(&id, waiter), "and expires nothing");
+        assert!(b.held(true).is_empty() && !b.holds("p1"));
+        assert_eq!(b.held(false)[0]["status"], "released");
+        assert_eq!(b.release(&id, "you", 2_500), None, "let go once");
+        assert_eq!(
+            b.answer(&id, true, Some("{}".into()), "you", 3_000, |_| true),
+            Answer::NotWaiting { expired: None }
+        );
+        assert!(matches!(
+            b.ask(
+                "p1",
+                None,
+                "question",
+                "asks a question",
+                json!({}),
+                Some(HOOK),
+                4_000,
+                LIMIT
+            ),
+            Asked::Gone
+        ));
     }
 }

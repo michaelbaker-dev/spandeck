@@ -129,6 +129,9 @@ impl Daemon {
         // Stopped and staying stopped, or waiting for the owner after a
         // restart (holds.rs); null when neither.
         v["held"] = self.held_view(&meta);
+        // A question or a plan its hook holds for the owner: which, and
+        // until when; null when none. Never what it says (questions.rs).
+        v["asks"] = self.asks_view(&meta.id);
         // A deck from before holds shows only this: said where the pane
         // has no reason of its own to show.
         if meta.needs_reason.is_none() && meta.exit.is_none() {

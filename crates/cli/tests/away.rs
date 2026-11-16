@@ -396,3 +396,123 @@ fn an_approval_survives_a_restart_and_is_answered_once() {
         "three were asked, in all"
     );
 }
+
+fn held_questions(s: &Station, pane: &str) -> Vec<Value> {
+    s.try_call("pane.conversation", json!({"pane": pane}))
+        .ok()
+        .and_then(|c| c["live"]["questions"].as_array().cloned())
+        .unwrap_or_default()
+}
+
+/// Mobile plan, phase M3, with the Enforcement Guarantee "an approval that
+/// is waiting when the station restarts is still the same approval
+/// afterwards: it can be answered, by the owner only, and the agent is
+/// given the answer once". A question held for the owner is held the same
+/// way, by the same hook id: through a restart in place, through the
+/// daemon being ended and started while its hook keeps trying, and
+/// answered while its hook is away. The hook that holds it never refuses
+/// and never answers for the owner while spandeck is away.
+#[test]
+#[ignore = "merge tier: restarts a station under a waiting question three times"]
+fn a_question_survives_a_restart_and_is_answered_once() {
+    let mut s = station();
+    let mut steps = vec![json!({"prompt": "count"}), json!({"say": "ready"})];
+    for n in 1..=3 {
+        steps.push(wait_go("asker", n));
+        steps.push(json!({"ask": {"id": format!("toolu_q{n}"), "questions": [
+            {"header": "Go on", "question": format!("Question {n}?"), "multiSelect": false,
+             "options": [{"label": "Yes"}, {"label": "No"}]}]}}));
+        steps.push(json!({"say": format!("settled {n}")}));
+    }
+    let asker = s.fake(json!({"steps": steps}), json!({"name": "asker"}));
+    s.wait_text(&asker, "ready");
+    let pid = s.pane(&asker)["pid"].as_i64().unwrap() as i32;
+    let one = |s: &Station, what: &str, attached: bool| {
+        wait_for(what, 20, || {
+            let held = held_questions(s, &asker);
+            assert!(held.len() <= 1, "never a second question: {held:?}");
+            held.into_iter().find(|q| q["attached"] == json!(attached))
+        })
+    };
+    let answered = |s: &Station, with: &str| {
+        let flat: String = s.text(&asker).split_whitespace().collect();
+        flat.matches(&format!("\"answers\":{{{with}}}")).count()
+    };
+
+    // 1. A restart in place under a held question.
+    go(&s, "asker", 1);
+    let first = one(&s, "the question", true);
+    let before = s.call("station.info", json!({}));
+    s.call("station.restart", json!({}));
+    wait_for("the new image", 15, || {
+        let i = s.try_call("station.info", json!({})).ok()?;
+        (i["started_ms"] != before["started_ms"]).then_some(())
+    });
+    let again = one(&s, "the hook to find its question again", true);
+    assert_eq!(again["id"], first["id"]);
+    assert_eq!(
+        again["until_ms"], first["until_ms"],
+        "the time already waited counts"
+    );
+    assert_eq!(s.log("question.reattached").len(), 1);
+    assert!(!s.text(&asker).contains("settled 1"), "still held");
+    let done = s.call(
+        "question.answer",
+        json!({"id": first["id"], "answers": [{"picked": [0]}]}),
+    );
+    assert_eq!(done["delivered"], json!(true), "{done}");
+    s.wait_text(&asker, "settled 1");
+    assert_eq!(answered(&s, "\"Question1?\":\"Yes\""), 1);
+    assert!(s
+        .try_call(
+            "question.answer",
+            json!({"id": first["id"], "answers": [{"picked": [1]}]})
+        )
+        .is_err());
+
+    // 2. The daemon is ended without warning and is away for a while: the
+    // hook keeps trying, refuses nothing and answers nothing, and finds
+    // its question again when the daemon is back.
+    go(&s, "asker", 2);
+    let second = one(&s, "the second question", true);
+    away_for(&mut s, Duration::from_millis(1500), |_| {});
+    let back = one(&s, "the hook to be back", true);
+    assert_eq!(back["id"], second["id"]);
+    assert!(!s.text(&asker).contains("settled 2"));
+    assert!(
+        !s.text(&asker).contains("in the terminal"),
+        "{}",
+        s.text(&asker)
+    );
+    s.call(
+        "question.answer",
+        json!({"id": second["id"], "answers": [{"other": "later"}]}),
+    );
+    s.wait_text(&asker, "settled 2");
+    assert_eq!(answered(&s, "\"Question2?\":\"later\""), 1);
+
+    // 3. Answered while its hook is away: kept, said to be kept, and
+    // collected by the hook when it is back, once.
+    go(&s, "asker", 3);
+    let third = one(&s, "the third question", true);
+    kill_pid(pid, SIGSTOP);
+    away_for(&mut s, Duration::from_millis(300), |_| {});
+    let waiting = one(&s, "the question with its hook away", false);
+    assert_eq!(waiting["id"], third["id"]);
+    let done = s.call(
+        "question.answer",
+        json!({"id": third["id"], "answers": [{"picked": [1]}]}),
+    );
+    assert_eq!(done["delivered"], json!(false), "{done}");
+    assert_eq!(
+        done["note"],
+        json!("recorded: the agent will get it when it reconnects")
+    );
+    assert!(held_questions(&s, &asker).is_empty());
+    kill_pid(pid, SIGCONT);
+    s.wait_text(&asker, "settled 3");
+    assert_eq!(answered(&s, "\"Question3?\":\"No\""), 1);
+    assert_eq!(s.log("question.collected").len(), 1);
+    assert_eq!(s.log("question.asked").len(), 3, "three were asked, in all");
+    assert_eq!(s.text(&asker).matches("answered by the hook").count(), 3);
+}

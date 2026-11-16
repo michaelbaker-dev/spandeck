@@ -215,6 +215,18 @@ pub(crate) fn reply_claude_dialect(raw_event: &str, d: &HookDecision) -> HookRep
                     "permissionDecision": "deny",
                     "permissionDecisionReason": reason,
                 }})
+            } else if let (true, Some(input)) = (d.allow, &d.updated_input) {
+                // The owner's answer to a question or a plan, given from
+                // the Control Deck. Claude Code's hook reference, "Tools
+                // that require user interaction" (read 16 Nov 2026):
+                // allow alone is not enough for these; the answer goes
+                // back as the call's whole input. Not run with the real
+                // agent.
+                json!({"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "updatedInput": input,
+                }})
             } else if let Some(ctx) = &d.context {
                 json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": ctx}})
             } else {
@@ -270,6 +282,7 @@ impl Adapter for ClaudeCode {
             remote_approval: true,
             inject_context: true,
             resume: true,
+            answer_questions: true,
             verified: true,
             note: "Verified live against Claude Code 2.1.323: a hook blocks any tool call, answers permission prompts and adds context.",
         }
@@ -327,6 +340,7 @@ impl Adapter for FakeAgent {
             remote_approval: true,
             inject_context: true,
             resume: true,
+            answer_questions: true,
             verified: true,
             note: "Test agent.",
         }

@@ -400,7 +400,7 @@ fn class(method: &str, params: &Value) -> Class {
         _ if repeatable(method, params) => Class::Repeat,
         "msg.send" | "msg.reply" => Class::Once(Mark::InTx),
         "stop.all" => Class::Stop,
-        "pane.stop" | "approval.answer" => Class::OwnRecord,
+        "pane.stop" | "approval.answer" | "question.answer" => Class::OwnRecord,
         _ if DONE_ONCE.contains(&method) => Class::Once(Mark::Before),
         _ => Class::Never,
     }
@@ -714,6 +714,7 @@ impl Daemon {
                     }))
                 })
             }
+            "question.answer" => self.question_done(opt(params, "id")?, params),
             "pane.stop" => {
                 let pane = self.pane(opt(params, "pane")?).ok()?;
                 let held = pane.meta.lock().unwrap().held_stopped.clone()?;
@@ -1108,6 +1109,22 @@ impl Daemon {
             "hook.ingest" => {
                 let id = self.target_pane(caller, &params)?;
                 self.own_pane_only(caller, &id)?;
+                // The hook of the entry for a question or a plan: it asks
+                // to have the call held for the owner, and says nothing
+                // else of it (questions.rs). The call itself is told by
+                // the hook every tool call has.
+                if flag(&params, "answers") {
+                    let reply = self
+                        .hook_answer(
+                            &id,
+                            s(&params, "agent")?,
+                            params.get("payload").cloned().unwrap_or(Value::Null),
+                            opt(&params, "hook_id"),
+                            params.get("deadline").and_then(|d| d.as_u64()),
+                        )
+                        .await?;
+                    return Ok(json!(reply));
+                }
                 let reply = self
                     .hook_ingest(
                         &id,
@@ -1140,6 +1157,18 @@ impl Daemon {
                     out["note"] = json!(crate::approvals::RECORDED);
                 }
                 out
+            }
+            // The owner's alone: on no agent's list, no station's and not
+            // the read-only one. It reaches another station only as the
+            // owner's forwarded request. What it can put into the agent's
+            // call is one of the call's own choices, or the owner's text.
+            "question.answer" => {
+                let d = self.clone();
+                let id = s(&params, "id")?.to_string();
+                let who = by.to_string();
+                tokio::task::spawn_blocking(move || d.answer_question(&id, &params, &who))
+                    .await
+                    .map_err(|e| invalid(e.to_string()))??
             }
             "integration.status" => json!([AgentKind::Claude, AgentKind::Codex]
                 .iter()
@@ -2381,6 +2410,16 @@ mod tests {
         assert_eq!(class("stop.all", &none), Class::Stop);
         assert_eq!(class("pane.stop", &none), Class::OwnRecord);
         assert_eq!(class("approval.answer", &none), Class::OwnRecord);
+        // An answer to a question or a plan is safe a second time by the
+        // question's own record, like an approval's. And rule 7: it is the
+        // owner's alone, and reaches another station only as the owner's
+        // forwarded request.
+        assert_eq!(class("question.answer", &none), Class::OwnRecord);
+        for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
+            assert!(!allowed(who, "question.answer"), "{who:?}");
+        }
+        assert!(allowed(Authority::Owner, "question.answer"));
+        assert!(!not_forwarded("question.answer") && !reads("question.answer"));
         for (m, params) in [
             ("pane.kill", none.clone()),
             ("pane.pause", json!({"pane": "p"})),

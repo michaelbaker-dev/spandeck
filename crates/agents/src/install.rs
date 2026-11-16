@@ -15,7 +15,9 @@ use crate::AgentKind;
 
 /// Bump when the set of hooked events or the command line changes.
 /// 2 (16 Nov 2026): a hook that can block is given 75 seconds and told so.
-pub const HOOKS_VERSION: u32 = 2;
+/// 3 (16 Nov 2026): Claude Code's question and plan have an entry of their
+/// own, with an hour, so that the owner can answer them from the deck.
+pub const HOOKS_VERSION: u32 = 3;
 /// How the hook command is told how long its agent gives it (seconds): in
 /// its environment, set by the installed command line itself. Not an
 /// argument: a `spandeck` from before this (after going back a version)
@@ -26,6 +28,27 @@ pub const DEADLINE_ENV: &str = "SPANDECK_HOOK_DEADLINE";
 /// 10 seconds, which a session started before the update keeps.
 pub const TOOL_HOOK_SECS: u64 = 75;
 pub const PERMISSION_HOOK_SECS: u64 = 330;
+/// The tools with which Claude Code asks the owner something. A hook that
+/// runs before one of them can answer it (Claude Code's hook reference,
+/// "Tools that require user interaction", read 16 Nov 2026): these two get
+/// a second entry, beside the one every tool call has.
+pub const ASKING_TOOLS: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
+/// What that entry's hook is given: an hour. It is the most a session will
+/// ever wait, since a session keeps the entries it was started with; how
+/// long the station really holds a question is its own setting, ten
+/// minutes unless the owner says otherwise (core/questions.rs). A person
+/// answers these, from a phone, so the 75 seconds of a rule check would
+/// put nearly every question back in the terminal. The reference gives a
+/// command hook 600 seconds when it names none, and names no upper limit;
+/// that an hour is honoured has not been run with the real agent. If it
+/// is not, the hook is cancelled early, and the reference says what
+/// follows: the call goes on through its normal flow, which for these two
+/// is the prompt in the terminal. Nothing answers for the owner.
+pub const QUESTION_HOOK_SECS: u64 = 3600;
+/// How the hook of that entry is told which one it is: the first entry's
+/// hook runs for these tools too (hooks that match run side by side), and
+/// only this one may wait for the owner.
+pub const ANSWERS_ENV: &str = "SPANDECK_HOOK_ANSWERS";
 const MARKER: &str = "# spandeck-managed v";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,13 +132,22 @@ pub fn timeout_secs(kind: AgentKind, event: &str) -> Option<u64> {
         .map(|(_, secs)| *secs)
 }
 
-fn hook_command(kind: AgentKind, bin: &str, windows: bool, deadline: Option<u64>) -> String {
+fn hook_command(
+    kind: AgentKind,
+    bin: &str,
+    windows: bool,
+    deadline: Option<u64>,
+    answers: bool,
+) -> String {
     if windows {
         // PowerShell: `&` runs a quoted path, a quote inside single quotes
         // is doubled, and `#` starts a comment as it does in sh.
-        let told = deadline
+        let mut told = deadline
             .map(|secs| format!("$env:{DEADLINE_ENV}='{secs}'; "))
             .unwrap_or_default();
+        if answers {
+            told.push_str(&format!("$env:{ANSWERS_ENV}='1'; "));
+        }
         return format!(
             "{told}& '{}' hook {} {}{}",
             bin.replace('\'', "''"),
@@ -124,9 +156,12 @@ fn hook_command(kind: AgentKind, bin: &str, windows: bool, deadline: Option<u64>
             HOOKS_VERSION
         );
     }
-    let told = deadline
+    let mut told = deadline
         .map(|secs| format!("{DEADLINE_ENV}={secs} "))
         .unwrap_or_default();
+    if answers {
+        told.push_str(&format!("{ANSWERS_ENV}=1 "));
+    }
     format!(
         "{told}'{}' hook {} {}{}",
         bin.replace('\'', "'\\''"),
@@ -142,9 +177,16 @@ fn hook_command(kind: AgentKind, bin: &str, windows: bool, deadline: Option<u64>
 /// in both, so the entry names PowerShell, which every Windows has. Codex
 /// documents no way to name the shell there: the same line is written and
 /// is unverified (DECISIONS.md, "Windows").
-fn hook_entry(kind: AgentKind, bin: &str, event: &str, timeout: u64, windows: bool) -> Value {
+fn hook_entry(
+    kind: AgentKind,
+    bin: &str,
+    event: &str,
+    timeout: u64,
+    windows: bool,
+    answers: bool,
+) -> Value {
     let deadline = blocking(event).then_some(timeout);
-    let mut entry = json!({"type": "command", "command": hook_command(kind, bin, windows, deadline), "timeout": timeout});
+    let mut entry = json!({"type": "command", "command": hook_command(kind, bin, windows, deadline, answers), "timeout": timeout});
     if windows && kind == AgentKind::Claude {
         entry["shell"] = json!("powershell");
     }
@@ -166,9 +208,20 @@ fn hooks_block_for(kind: AgentKind, bin: &str, windows: bool) -> Value {
         }
         group.insert(
             "hooks".into(),
-            json!([hook_entry(kind, bin, event, *timeout, windows)]),
+            json!([hook_entry(kind, bin, event, *timeout, windows, false)]),
         );
-        hooks.insert(event.to_string(), json!([Value::Object(group)]));
+        let mut groups = vec![Value::Object(group)];
+        // Claude Code's question and plan: a second entry for those two
+        // tools by name, with the long timeout. A matcher of letters and
+        // `|` is a list of exact names (its hook reference, "Matcher
+        // patterns"), and each handler has a timeout of its own.
+        if kind == AgentKind::Claude && *event == "PreToolUse" {
+            groups.push(json!({
+                "matcher": ASKING_TOOLS.join("|"),
+                "hooks": [hook_entry(kind, bin, event, QUESTION_HOOK_SECS, windows, true)],
+            }));
+        }
+        hooks.insert(event.to_string(), Value::Array(groups));
     }
     Value::Object(hooks)
 }
@@ -352,6 +405,15 @@ mod tests {
         );
         assert!(is_ours(entry));
         assert_eq!(marker_version(command), Some(HOOKS_VERSION));
+        // The entry that answers a question or a plan says so, and has
+        // its hour.
+        assert_eq!(
+            block["PreToolUse"][1]["hooks"][0]["command"],
+            format!(
+                r"$env:SPANDECK_HOOK_DEADLINE='3600'; $env:SPANDECK_HOOK_ANSWERS='1'; & 'C:\Users\Mary O''Neil\AppData\Local\Programs\spandeck\spandeck.exe' hook claude # spandeck-managed v{HOOKS_VERSION}"
+            )
+        );
+        assert_eq!(block["PreToolUse"][1]["hooks"][0]["shell"], "powershell");
         // Unix entries are as they were: no shell is named.
         let unix = hooks_block_for(AgentKind::Claude, "/usr/bin/spandeck", false);
         assert!(unix["PreToolUse"][0]["hooks"][0].get("shell").is_none());
@@ -434,7 +496,7 @@ mod tests {
             assert_eq!(
                 entry("PreToolUse")["command"],
                 format!(
-                    "SPANDECK_HOOK_DEADLINE=75 '/usr/local/bin/spandeck' hook {} # spandeck-managed v2",
+                    "SPANDECK_HOOK_DEADLINE=75 '/usr/local/bin/spandeck' hook {} # spandeck-managed v3",
                     kind.as_str()
                 )
             );
@@ -446,14 +508,14 @@ mod tests {
             assert_eq!(
                 entry("PostToolUse")["command"],
                 format!(
-                    "'/usr/local/bin/spandeck' hook {} # spandeck-managed v2",
+                    "'/usr/local/bin/spandeck' hook {} # spandeck-managed v3",
                     kind.as_str()
                 )
             );
             for event in ["PreToolUse", "PermissionRequest", "Stop"] {
                 let e = entry(event);
                 assert!(is_ours(&e));
-                assert_eq!(marker_version(e["command"].as_str().unwrap()), Some(2));
+                assert_eq!(marker_version(e["command"].as_str().unwrap()), Some(3));
                 assert_eq!(timeout_secs(kind, event), e["timeout"].as_u64());
             }
         }
@@ -466,8 +528,45 @@ mod tests {
         let st = install(AgentKind::Claude, home.path(), "/usr/local/bin/spandeck").unwrap();
         assert!(st.installed && !st.outdated);
         let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(after["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(after["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
         assert_eq!(after["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"], 75);
+    }
+
+    /// Mobile plan, phase M3: a question or a plan waits for a person, far
+    /// longer than a rule check. Claude Code's two asking tools get an entry
+    /// of their own, by name, with an hour, and its hook is told that it is
+    /// the one that may wait for the owner; the entry every tool call has is
+    /// unchanged, so a rule is still checked within its 75 seconds. Codex,
+    /// whose hooks cannot answer a question, gets no such entry. Uninstall
+    /// takes both away.
+    #[test]
+    fn a_question_and_a_plan_have_an_entry_of_their_own() {
+        let block = hooks_block_for(AgentKind::Claude, "/usr/local/bin/spandeck", false);
+        let groups = block["PreToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0]["matcher"], "*");
+        assert_eq!(groups[0]["hooks"][0]["timeout"], 75);
+        assert_eq!(groups[1]["matcher"], "AskUserQuestion|ExitPlanMode");
+        assert_eq!(groups[1]["hooks"][0]["timeout"], 3600);
+        assert_eq!(
+            groups[1]["hooks"][0]["command"],
+            "SPANDECK_HOOK_DEADLINE=3600 SPANDECK_HOOK_ANSWERS=1 '/usr/local/bin/spandeck' hook claude # spandeck-managed v3"
+        );
+        assert!(is_ours(&groups[1]["hooks"][0]));
+        let codex = hooks_block_for(AgentKind::Codex, "/usr/local/bin/spandeck", false);
+        assert_eq!(codex["PreToolUse"].as_array().unwrap().len(), 1);
+        for event in ["PermissionRequest", "PostToolUse", "Stop"] {
+            assert_eq!(block[event].as_array().unwrap().len(), 1, "{event}");
+        }
+        let home = tempfile::tempdir().unwrap();
+        install(AgentKind::Claude, home.path(), "/usr/local/bin/spandeck").unwrap();
+        let st = uninstall(AgentKind::Claude, home.path()).unwrap();
+        assert!(!st.installed);
+        let left: Value = serde_json::from_str(
+            &fs::read_to_string(home.path().join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(left, json!({}));
     }
 
     #[test]

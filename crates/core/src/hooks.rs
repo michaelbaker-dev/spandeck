@@ -232,6 +232,20 @@ impl Daemon {
             }
             (m.clone(), session_changed)
         };
+        // A question or a plan held for the owner belongs to its turn.
+        // When that turn is over, or another begins, it is not something
+        // the owner can still answer (questions.rs).
+        if matches!(
+            ev.kind,
+            EventKind::PromptSubmit
+                | EventKind::TurnEnd
+                | EventKind::TurnFailed
+                | EventKind::Interrupted
+                | EventKind::SessionStart
+                | EventKind::SessionEnd
+        ) {
+            self.questions_moot(p);
+        }
 
         if session_changed {
             self.save_pane(p);
@@ -399,6 +413,19 @@ impl Daemon {
                 None,
                 json!({"reason": reason}),
             );
+        } else if ev.kind == EventKind::ToolStart
+            && ev
+                .tool
+                .as_ref()
+                .is_some_and(|t| crate::questions::kind_of_tool(&t.name).is_some())
+            && self.approvals.any_waiting()
+            && self.approvals.holds(&p.id)
+        {
+            // The call that asks the owner a question, seen by the hook
+            // every tool call has, while the other hook of the same call
+            // holds it for the owner: the pane needs the owner, and this
+            // hook does not say "working" over that (the two run side by
+            // side, in either order).
         } else if let Some(state) = ev.state {
             // A turn that is being continued with mail is still working.
             let state = if decision.continue_with.is_some() {
@@ -532,6 +559,17 @@ impl Daemon {
         by: &str,
     ) -> Result<Answered> {
         let status = if allow { "allowed" } else { "denied" };
+        // A question or a plan is not allowed or denied: its answer is
+        // made of its own choices (questions.rs).
+        if self
+            .approvals
+            .kind_and_status(id)
+            .is_some_and(|(kind, _)| crate::questions::is_held(&kind))
+        {
+            return Err(invalid(
+                "that is a question or a plan, not an approval: answer it with question.answer",
+            ));
+        }
         let alive = |pane: &str| {
             self.pane(pane)
                 .is_ok_and(|p| p.meta.lock().unwrap().exit.is_none())

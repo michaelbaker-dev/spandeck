@@ -66,6 +66,7 @@ pub mod perf;
 pub mod prefs;
 pub mod prices;
 pub mod project;
+pub mod questions;
 pub mod recipes;
 pub mod relay;
 pub mod remove;

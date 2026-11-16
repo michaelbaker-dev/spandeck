@@ -1229,7 +1229,9 @@ fn hook_main(paths: &Paths, agent: &str) -> i32 {
     let deadline = std::env::var(spandeck_agents::install::DEADLINE_ENV)
         .ok()
         .and_then(|secs| secs.trim().parse::<u64>().ok());
-    let reply = spandeck_core::guard::run(paths, agent, deadline, &input);
+    // The entry for a question or a plan says which one it is.
+    let answers = std::env::var(spandeck_agents::install::ANSWERS_ENV).is_ok_and(|v| v == "1");
+    let reply = spandeck_core::guard::run(paths, agent, deadline, answers, &input);
     if !reply.stdout.is_empty() {
         println!("{}", reply.stdout);
     }

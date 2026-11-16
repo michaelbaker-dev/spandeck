@@ -91,6 +91,12 @@ pub struct HookDecision {
     pub context: Option<String>,
     /// At turn end: keep the agent going with this instruction.
     pub continue_with: Option<String>,
+    /// Before a tool call that asks the owner something (a question, a
+    /// plan): the call's whole input with the owner's answer in it. Given
+    /// with `allow`, the call runs with this input and the agent shows no
+    /// prompt of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_input: Option<serde_json::Value>,
 }
 
 impl HookDecision {
@@ -106,6 +112,15 @@ impl HookDecision {
     pub fn allow() -> Self {
         HookDecision {
             allow: true,
+            ..Self::default()
+        }
+    }
+    /// Let a call that asks the owner something run, with the owner's
+    /// answer in its input.
+    pub fn answer(input: serde_json::Value) -> Self {
+        HookDecision {
+            allow: true,
+            updated_input: Some(input),
             ..Self::default()
         }
     }
@@ -141,6 +156,10 @@ pub struct Capabilities {
     pub inject_context: bool,
     /// The conversation can be resumed by session id.
     pub resume: bool,
+    /// A hook can answer the agent's own question to the owner, or its
+    /// plan, by giving the call its input back with the answer in it.
+    #[serde(default)]
+    pub answer_questions: bool,
     /// Checked against the real agent on this build (not only against docs).
     pub verified: bool,
     /// Plain-words note shown beside the table.

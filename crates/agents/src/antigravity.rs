@@ -58,6 +58,7 @@ impl Adapter for Antigravity {
             remote_approval: false,
             inject_context: true,
             resume: true,
+            answer_questions: false,
             verified: false,
             note: "From the hooks guide shipped with the CLI, not yet seen from a live session. Tool calls are not hooked, so rules are guidance and approvals are answered in the pane.",
         }

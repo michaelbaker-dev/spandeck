@@ -188,10 +188,39 @@ impl Daemon {
         // one; else to the newest running call of that tool with the same
         // command or file; else, for a tool that has neither, to the only
         // running call of that tool.
+        // A question or a plan the hook holds (questions.rs). Read before
+        // the pane's state, like the approvals.
+        let mut questions = self.questions_held(&p.id);
         let waiting = match session {
-            Some(s) if !pending.is_empty() => self.archive.conversation_waiting(s),
+            Some(s) if !pending.is_empty() || !questions.is_empty() => {
+                self.archive.conversation_waiting(s)
+            }
             _ => vec![],
         };
+        // Tied to its item by the call's own id; else to the only call of
+        // that tool that waits; else to none, and the card is drawn all
+        // the same from what the hook was given.
+        for q in questions.iter_mut() {
+            let name = match q["kind"].as_str() {
+                Some("plan") => "ExitPlanMode",
+                _ => "AskUserQuestion",
+            };
+            let item = waiting
+                .iter()
+                .find(|w| q["tool_use_id"].as_str() == Some(w.tool_id.as_str()))
+                .or_else(|| {
+                    let mut same = waiting.iter().filter(|w| w.name == name);
+                    match (same.next(), same.next()) {
+                        (Some(only), None) => Some(only),
+                        _ => None,
+                    }
+                })
+                .map(|w| w.item.clone());
+            q["item"] = json!(item);
+            if let Some(o) = q.as_object_mut() {
+                o.remove("tool_use_id");
+            }
+        }
         let approvals: Vec<Value> = pending
             .iter()
             .map(|a| {
@@ -236,6 +265,7 @@ impl Daemon {
             "exited": meta.exit.is_some(), "resumed": meta.resumed,
             "hooks_seen": meta.hooks_seen,
             "approvals": approvals,
+            "questions": questions,
             "unread": self.conversation_unread(meta),
             "read_line": session.map(|s| self.read_line(&p.id, s)),
             "now_ms": now_ms(),
