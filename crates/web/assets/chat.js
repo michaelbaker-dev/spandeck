@@ -331,10 +331,18 @@ class Conv {
 
   // ----------------------------------------------------------------- reading
 
-  scrolled() {
-    if (!this.log.isConnected || !this.log.clientHeight) return;
+  // Where the log is now. The browser tells of a scroll only with its next
+  // frame, and a page that is drawn again before then (or a window that
+  // draws no frames) would put the log back where it was told of last.
+  note() {
+    if (!this.log.isConnected || !this.log.clientHeight) return false;
     this.stuck = this.log.scrollHeight - this.log.scrollTop - this.log.clientHeight < 48;
     this.top = this.log.scrollTop;
+    return true;
+  }
+
+  scrolled() {
+    if (!this.note()) return;
     if (this.top < 160) this.older();
     this.maybeRead();
   }
@@ -1116,7 +1124,14 @@ export function conversation(st, p, where) {
   return c;
 }
 
-export function chatBeforeRender() { for (const c of convs.values()) c.used = false; }
+// (Only a log that moved since it was last told of: one that grew under an
+// owner reading its end stays at its end.)
+export function chatBeforeRender() {
+  for (const c of convs.values()) {
+    if (c.log.isConnected && c.log.scrollTop !== c.top) c.note();
+    c.used = false;
+  }
+}
 // After the page was drawn: a conversation that left the page is let go of,
 // and each one still on it is where it was scrolled to.
 export function chatAfterRender() {
