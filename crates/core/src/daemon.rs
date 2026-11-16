@@ -1265,6 +1265,17 @@ impl Daemon {
             None,
             json!({"name": m.name, "agent": m.agent, "resumed": resume.is_some(), "resume_last": opts.resume_last}),
         );
+        if m.agent == AgentKind::Antigravity {
+            if let Some(words) = self.antigravity_without_tools() {
+                self.notify(
+                    "agent",
+                    Some(&id),
+                    m.project.as_deref(),
+                    &format!("{} has no spandeck tools", m.name),
+                    &format!("It was {words}. {}.", self.not_owning_words()),
+                );
+            }
+        }
         Ok(entry)
     }
 
@@ -1352,10 +1363,16 @@ impl Daemon {
             }
             AgentKind::Antigravity => {
                 // Antigravity has no per-launch setting for MCP servers or
-                // hooks. It loads plugins from its config folder, so spandeck
-                // keeps one there, in a folder of its own.
-                for problem in self.antigravity_plugin(&setup) {
-                    tracing::warn!(%problem, "antigravity plugin");
+                // hooks. It loads plugins from its config folder (the
+                // user's, or a project's own `.agents/`), so spandeck keeps
+                // one in the user's, in a folder of its own. Only the
+                // station of the account writes there: another station
+                // starts Antigravity with whatever plugin that one keeps,
+                // or with none, and says so (`antigravity_without_tools`).
+                if self.owns_agent_home() {
+                    for problem in self.antigravity_plugin(&setup) {
+                        tracing::warn!(%problem, "antigravity plugin");
+                    }
                 }
                 // Report state to the terminal (OSC 7501) without asking it
                 // first whether it understands.

@@ -35,6 +35,13 @@ pub struct Station {
 /// again, be given the same one: that made tests fail on small CI machines.
 /// So each test binary hands out its own run of ports, below the range the
 /// system uses for outgoing connections, and never hands one out twice.
+/// Config for a test station that is to write the agents' settings under
+/// its home folder (a throwaway one: `Station::command` sets HOME). Without
+/// it a test station writes nothing there, like any station that is not
+/// the one of its account.
+#[allow(dead_code)]
+pub const AGENT_HOME: &str = "agent_home = true\n";
+
 pub fn free_port() -> u16 {
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -119,6 +126,13 @@ impl Station {
     /// A linked pair, with extra config for the first station.
     pub fn pair_with(extra_a: &str) -> (Station, Station) {
         Station::two(Some("5a".repeat(32)), extra_a)
+    }
+
+    /// A linked pair whose stations were both told, in their config, to
+    /// write the agents' settings under their (throwaway) home folders, as
+    /// the station of an account does.
+    pub fn pair_told() -> (Station, Station) {
+        Station::two_with(Some("5a".repeat(32)), AGENT_HOME, AGENT_HOME)
     }
 
     /// Three stations in one fleet: alpha, bravo and charlie.
@@ -228,6 +242,10 @@ impl Station {
     }
 
     fn two(shared_key: Option<String>, extra_a: &str) -> (Station, Station) {
+        Station::two_with(shared_key, extra_a, "")
+    }
+
+    fn two_with(shared_key: Option<String>, extra_a: &str, extra_b: &str) -> (Station, Station) {
         let (pa, pb) = (free_port(), free_port());
         let key = shared_key.as_deref();
         let a = Station::start_keyed(
@@ -236,7 +254,12 @@ impl Station {
             &format!("peers = [\"127.0.0.1:{pb}\"]\n{extra_a}"),
             key,
         );
-        let b = Station::start_keyed("bravo", pb, &format!("peers = [\"127.0.0.1:{pa}\"]\n"), key);
+        let b = Station::start_keyed(
+            "bravo",
+            pb,
+            &format!("peers = [\"127.0.0.1:{pa}\"]\n{extra_b}"),
+            key,
+        );
         let want = if key.is_some() {
             "online"
         } else {
@@ -256,6 +279,13 @@ impl Station {
             });
         }
         (a, b)
+    }
+
+    /// A station that is ready to be started (`launch`) and has not been:
+    /// for a test that puts something in its home folder first.
+    #[allow(dead_code)]
+    pub fn not_started(name: &str, extra: &str) -> Station {
+        Station::prepare(name, free_port(), extra, &[])
     }
 
     pub fn start_on(name: &str, port: u16, extra: &str, env: &[(&str, &str)]) -> Station {

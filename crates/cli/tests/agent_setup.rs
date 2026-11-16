@@ -35,7 +35,7 @@ fn arg_printer(s: &Station) -> String {
 #[test]
 #[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
 fn one_setup_reaches_every_station_and_every_new_agent() {
-    let (a, b) = Station::pair();
+    let (a, b) = Station::pair_told();
     let out = a.call("setup.set", json!({"setup": setup()}));
     let stations: Vec<&str> = out["stations"]
         .as_array()
@@ -133,7 +133,7 @@ fn one_setup_reaches_every_station_and_every_new_agent() {
 
 #[test]
 fn a_station_that_was_away_catches_up_when_it_is_seen_again() {
-    let (a, mut b) = Station::pair();
+    let (a, mut b) = Station::pair_told();
     b.kill9();
     wait_for("bravo to be seen as unreachable", 20, || {
         let v = a.call("fleet.refresh", json!({}));
@@ -486,7 +486,7 @@ fn a_missing_agent_is_installed_in_its_pane_and_then_started_with_spandecks_tool
     let s = Station::start_with(
         "alpha",
         &format!(
-            "[agents.opencode]\nprogram = \"{}\"\ninstall_cmd = [\"cp\", \"{source}\", \"{}\"]\n[agents.antigravity]\nprogram = \"{}\"\ninstall_cmd = [\"sh\", \"-c\", \"echo started-$((1+1)); sleep 30\"]\n",
+            "agent_home = true\n[agents.opencode]\nprogram = \"{}\"\ninstall_cmd = [\"cp\", \"{source}\", \"{}\"]\n[agents.antigravity]\nprogram = \"{}\"\ninstall_cmd = [\"sh\", \"-c\", \"echo started-$((1+1)); sleep 30\"]\n",
             opencode.display(),
             opencode.display(),
             agy.display()
@@ -565,6 +565,150 @@ fn a_missing_agent_is_installed_in_its_pane_and_then_started_with_spandecks_tool
         "{}",
         err.message
     );
+}
+
+/// Every file under `dir`, with what it holds.
+fn tree(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut found = std::collections::BTreeMap::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                found.insert(format!("{}/", path.display()), vec![]);
+                todo.push(path);
+            } else {
+                found.insert(
+                    path.display().to_string(),
+                    std::fs::read(&path).unwrap_or_default(),
+                );
+            }
+        }
+    }
+    found
+}
+
+/// What happened on the owner's machine on 16 Nov 2026: a throwaway
+/// station, started for a test under its own state and config directories
+/// but with the owner's real HOME, rewrote `~/.gemini/config/plugins/
+/// spandeck/mcp_config.json` and `hooks.json` to point at its own binary,
+/// and a setup applied there removes the skills it does not list. The
+/// rule: only the station of the account (the usual state directory, with
+/// the login service), or one whose config says `agent_home = true`,
+/// writes anything into the agents' settings under the home folder. This
+/// station is neither. Its home has what the owner's real station keeps
+/// there; after a pane of every agent kind, a setup with a skill, and a
+/// try at `integration install`, not one file of it has changed. Its
+/// panes still get spandeck's tools, on their own command line.
+#[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
+fn a_station_that_is_not_the_one_of_its_account_writes_nothing_into_the_agents_settings() {
+    let tools = tempfile::tempdir().unwrap();
+    let t = tools.path();
+    let program = script(
+        t,
+        "agent",
+        "[ \"$1\" = --version ] && { echo 1.2.3; exit 0; }\nfor a in \"$@\"; do echo \"ARG<$a>\"; done\necho \"CONFIG<$OPENCODE_CONFIG_CONTENT>\"\necho AGENT-STARTED\nsleep 60",
+    );
+    let agents: String = ["claude", "codex", "opencode", "antigravity"]
+        .iter()
+        .map(|a| format!("[agents.{a}]\nprogram = \"{program}\"\n"))
+        .collect();
+    let mut s = Station::not_started("trial", &agents);
+    let home = s.root.join("home");
+    // What the station of this account keeps in the home folder.
+    let theirs = "/home/owner/.local/bin/spandeck";
+    let plugin = home.join(".gemini/config/plugins/spandeck");
+    for (file, content) in [
+        (".gemini/config/plugins/spandeck/plugin.json", "{\"name\": \"spandeck\"}\n".to_string()),
+        (".gemini/config/plugins/spandeck/mcp_config.json", format!("{{\"mcpServers\": {{\"spandeck\": {{\"command\": \"{theirs}\", \"args\": [\"mcp\"]}}}}}}\n")),
+        (".gemini/config/plugins/spandeck/hooks.json", format!("{{\"spandeck\": {{\"Stop\": [{{\"type\": \"command\", \"command\": \"'{theirs}' hook antigravity\"}}]}}}}\n")),
+        (".gemini/config/plugins/spandeck/.spandeck-managed", "Made by spandeck.\n".to_string()),
+        (".gemini/config/plugins/spandeck/skills/old-notes/SKILL.md", "---\nname: old-notes\n---\n".to_string()),
+        (".gemini/config/plugins/spandeck/skills/old-notes/.spandeck-managed", "x\n".to_string()),
+        (".claude/skills/old-notes/SKILL.md", "---\nname: old-notes\n---\n".to_string()),
+        (".claude/skills/old-notes/.spandeck-managed", "x\n".to_string()),
+        (".codex/skills/old-notes/SKILL.md", "---\nname: old-notes\n---\n".to_string()),
+        (".codex/skills/old-notes/.spandeck-managed", "x\n".to_string()),
+        (".claude/settings.json", "{\"model\": \"opus\"}\n".to_string()),
+        (".codex/hooks.json", "{\"hooks\": {}}\n".to_string()),
+    ] {
+        let path = home.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+    let before = tree(&home);
+    s.launch();
+
+    // A setup with a skill for every agent: saved, with the reason the
+    // home folder's agents did not get it.
+    let mut setup = setup();
+    setup["skills"] = json!({"release-notes": {"description": "How we write release notes", "content": "Keep them short."}});
+    let saved = s.call("setup.set", json!({"setup": setup, "fleet": false}));
+    let problems = saved["stations"][0]["problems"].to_string();
+    assert!(
+        problems.contains("skills were not written for Claude Code, Codex or Antigravity")
+            && problems.contains("agent_home = true"),
+        "{problems}"
+    );
+    // A pane of each kind, each wired on its own command line or environment.
+    let spawn = |agent: &str| {
+        let pane = s.call("pane.spawn", json!({"agent": agent, "cwd": home}))["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        (s.wait_text(&pane, "AGENT-STARTED").replace('\n', ""), pane)
+    };
+    let (claude, _) = spawn("claude");
+    assert!(
+        claude.contains("ARG<--settings>") && claude.contains("ARG<--mcp-config>"),
+        "{claude}"
+    );
+    let (codex, _) = spawn("codex");
+    assert!(codex.contains("mcp_servers.spandeck.command="), "{codex}");
+    let (opencode, _) = spawn("opencode");
+    assert!(opencode.contains("CONFIG<{\"mcp\":{"), "{opencode}");
+    // Antigravity: the plugin the station of the account put there is
+    // used as it is, and nothing is said against it.
+    let (_, agy) = spawn("antigravity");
+    assert_eq!(s.pane(&agy)["needs_reason"], json!(null));
+    // The owner's settings are not this station's to change either way.
+    for (method, agent) in [
+        ("integration.install", "claude"),
+        ("integration.install", "codex"),
+        ("integration.uninstall", "claude"),
+    ] {
+        let err = s.try_call(method, json!({"agent": agent})).unwrap_err();
+        assert!(
+            err.code == "denied" && err.message.contains("nothing was changed"),
+            "{method} {agent}: {} {}",
+            err.code,
+            err.message
+        );
+    }
+    let doctor = s.call("station.doctor", json!({})).to_string();
+    assert!(
+        doctor.contains("does not write into the agent settings in your home folder"),
+        "{doctor}"
+    );
+    assert_eq!(
+        tree(&home),
+        before,
+        "nothing under the home folder was written, changed or removed"
+    );
+
+    // With no plugin there, an Antigravity pane has no spandeck tools:
+    // the pane and a notice say so, and no plugin is made.
+    std::fs::remove_dir_all(&plugin).unwrap();
+    let (_, bare) = spawn("antigravity");
+    let reason = s.pane(&bare)["needs_reason"].as_str().unwrap().to_string();
+    assert!(
+        reason.starts_with("started without spandeck's tools"),
+        "{reason}"
+    );
+    let notices = s.call("notify.list", json!({})).to_string();
+    assert!(notices.contains("has no spandeck tools"), "{notices}");
+    assert!(!plugin.exists());
 }
 
 /// What happened on the owner's Mac: `/opt/homebrew/bin/codex` was an old npm

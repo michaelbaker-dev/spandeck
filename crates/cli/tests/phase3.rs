@@ -275,7 +275,7 @@ fn an_agent_cannot_use_methods_that_administer_the_station() {
 
 #[test]
 fn integration_install_is_reversible_through_the_api() {
-    let s = Station::start("alpha");
+    let s = Station::start_with("alpha", AGENT_HOME, &[]);
     let st = s.call("integration.install", json!({"agent": "claude"}));
     assert_eq!(st["installed"], json!(true));
     let settings = s.root.join("home/.claude/settings.json");

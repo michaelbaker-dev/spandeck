@@ -55,7 +55,6 @@ impl Paths {
         if !running.starts_with(&self.state_dir) {
             return running.to_path_buf();
         }
-        let usual = sys::default_dirs(home).0 == self.state_dir;
         let installed = if sys::WINDOWS {
             self.state_dir
                 .parent()
@@ -64,9 +63,19 @@ impl Paths {
             Some(home.join(".local/bin/spandeck"))
         };
         match installed {
-            Some(p) if usual && p.is_file() && crate::doctor::service_installed(home) => p,
+            Some(p) if p.is_file() && self.is_the_station(home) => p,
             _ => running.to_path_buf(),
         }
+    }
+
+    /// Is this THE station of this user account: the one kept in the usual
+    /// state directory, with the login service? A trial, a test or a second
+    /// station kept under another directory is not, whatever its HOME is.
+    /// Only the station of the account writes anything into the agents'
+    /// own settings under the user's home folder (DECISIONS.md, "Only the
+    /// station of the account writes the agents' settings in your home").
+    pub fn is_the_station(&self, home: &Path) -> bool {
+        sys::default_dirs(home).0 == self.state_dir && crate::doctor::service_installed(home)
     }
 
     pub fn socket(&self) -> PathBuf {
@@ -219,6 +228,14 @@ pub struct Config {
     pub stuck_idle_turns: u32,
     /// Seconds between nudges typed into an idle agent with unread mail.
     pub nudge_secs: u64,
+    /// May this station write into the agents' own settings under the
+    /// user's home folder (Antigravity's plugin, skills for Claude Code
+    /// and Codex, `spandeck integration install`)? Not set: only the
+    /// station of this account does, the one in the usual state directory
+    /// with the login service. `true` tells another station to (the owner
+    /// said so, in this file); `false` stops the usual one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_home: Option<bool>,
     /// AgentVault: normally empty, because spandeck finds the vault by itself.
     pub vault: crate::vault::VaultConfig,
     /// Let this station start another station's daemon over SSH. Off by
@@ -285,6 +302,7 @@ impl Default for Config {
             stuck_same_failure: 3,
             stuck_idle_turns: 3,
             nudge_secs: 60,
+            agent_home: None,
             vault: Default::default(),
             remote_start: false,
             remote_start_cmd: None,
@@ -395,6 +413,9 @@ mod tests {
         std::fs::create_dir_all(service.parent().unwrap()).unwrap();
         std::fs::write(&service, "").unwrap();
         assert_eq!(paths.started_from_in(home, &release), installed);
+        // And that station, alone, is the station of this account: the
+        // one that may write the agents' settings in the home folder.
+        assert!(paths.is_the_station(home));
         // A program outside the state directory is what it says it is.
         let built = home.join("code/target/release/spandeck");
         assert_eq!(paths.started_from_in(home, &built), built);
@@ -405,5 +426,6 @@ mod tests {
         };
         let image = other.state_dir.join("releases/v9/spandeck");
         assert_eq!(other.started_from_in(home, &image), image);
+        assert!(!other.is_the_station(home));
     }
 }
