@@ -515,6 +515,24 @@ impl MessageStore {
             .unwrap_or_default()
     }
 
+    /// Every unread message for these names: its id, its sender, and when
+    /// its agent was last told of it (0: never), oldest first.
+    pub fn unread_told(&self, names: &[String]) -> Vec<(String, String, u64)> {
+        let list = json!(names.iter().map(|n| self.qualify(n)).collect::<Vec<_>>()).to_string();
+        self.db
+            .read(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT id, sender, announced FROM messages WHERE recipient IN (SELECT value FROM json_each(?1))
+                     AND received IS NOT NULL AND read IS NULL ORDER BY received",
+                )?;
+                let rows = stmt.query_map(params![list], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)?.max(0) as u64))
+                })?;
+                rows.collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Remember when the recipient was told about these messages.
     pub fn mark_announced(&self, ids: &[String], now: u64) {
         let list = json!(ids).to_string();

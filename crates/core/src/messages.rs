@@ -473,11 +473,19 @@ impl Daemon {
             self.record("msg.nudge_enter", Some(&p.id), None, None, None, json!({}));
         }
         let mut typed_now = false;
-        let told = announce(
+        let look = crate::wake::Look {
+            now,
+            nudge_ms: self.cfg.nudge_secs * 1000,
+            state_since_ms: since,
+            owner_acted: p
+                .wake
+                .owner_acted
+                .swap(false, std::sync::atomic::Ordering::Relaxed),
+        };
+        let (told, what) = announce(
             &self.mail(),
             &self.pane_names(&p.id),
-            now,
-            now.saturating_sub(self.cfg.nudge_secs * 1000),
+            look,
             &mut turn,
             |count, senders| {
                 if unsent {
@@ -527,8 +535,38 @@ impl Daemon {
                 None,
                 None,
                 None,
-                json!({"count": told, "typed": typed_now}),
+                json!({"count": told, "typed": typed_now, "tries": turn.tries}),
             );
+        }
+        if what == crate::wake::Due::GiveUp {
+            // Said once: `due` gives this answer one time, until something
+            // changes. The mail stays unread and waiting.
+            let (name, project) = {
+                let m = p.meta.lock().unwrap();
+                (m.name.clone(), m.project.clone())
+            };
+            self.record(
+                "msg.nudge_gave_up",
+                Some(&p.id),
+                project.as_deref(),
+                None,
+                None,
+                json!({"tries": turn.tries}),
+            );
+            self.notify(
+                "message",
+                Some(&p.id),
+                project.as_deref(),
+                &format!("{name} has mail it has not taken"),
+                &format!(
+                    "It was nudged {} times and did not read its mail, which stays unread. It is not nudged again until its state changes, new mail arrives for it or you type into it. Look at its terminal: it may be waiting at a screen it cannot leave by itself.",
+                    turn.tries
+                ),
+            );
+        }
+        if told > 0 || what == crate::wake::Due::GiveUp {
+            // Its state says so (`pane_view`): the decks ask again.
+            self.emit("pane.updated", Some(&p.id), None, json!({}));
         }
         Wake::Now
     }

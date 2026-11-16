@@ -907,7 +907,10 @@ fn mail_that_is_not_read_is_nudged_again_and_mail_sent_at_startup_is_not_lost() 
     s.call_as_pane(&ignorer, "msg.inbox", json!({})).unwrap();
     let count = s.text(&ignorer).matches("new spandeck message").count();
     std::thread::sleep(Duration::from_millis(4500));
-    assert_eq!(s.text(&ignorer).matches("new spandeck message").count(), count);
+    assert_eq!(
+        s.text(&ignorer).matches("new spandeck message").count(),
+        count
+    );
 }
 
 /// Layouts, step 2 (agreed 14 Nov 2026): a pane shows the agents working
