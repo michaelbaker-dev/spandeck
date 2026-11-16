@@ -214,6 +214,21 @@ impl Daemon {
                     ),
                 },
             );
+            // Antigravity has no hooks to install: what `integration
+            // install` adds for it is allow rules for spandeck's mail
+            // tools. Said, never counted as a fault: it is the owner's
+            // choice whether Antigravity asks.
+            if kind == AgentKind::Antigravity {
+                if let Ok(st) = install::status(kind, &self.home) {
+                    add(
+                        "Antigravity mail tools",
+                        true,
+                        false,
+                        st.note.unwrap_or_default(),
+                    );
+                }
+                continue;
+            }
             if let Ok(st) = install::status(kind, &self.home) {
                 let detail = match (st.installed, st.outdated, kind) {
                     (true, true, _) => format!("hooks installed but out of date (v{}): a rule check is cut off after 10 seconds. Run `spandeck integration install {}`{}", st.version.unwrap_or(0), kind.as_str(), if kind == AgentKind::Codex { ", then trust the hooks again in Codex with /hooks" } else { "" }),
