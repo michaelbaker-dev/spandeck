@@ -63,6 +63,11 @@
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
+/* A phone's browser makes the text of a block wider than the screen larger,
+   line by line ("text autosizing"): a row that ran off its card came out in
+   two or three sizes. The page is laid out for the screen it is on, and its
+   sizes are the owner's (--ui-scale), so the browser leaves them alone. */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body { background: var(--bg); color: var(--text); font: calc(13px * var(--ui-scale))/1.45 var(--ui-font); overflow: hidden; }
 body.dragging { user-select: none; cursor: grabbing; }
 #app { display: flex; flex-direction: column; height: 100dvh; }
@@ -291,8 +296,47 @@ button.toggle { padding: 2px 10px; } button.toggle.on { background: var(--toggle
 .slots { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; } .slot { display: grid; grid-template-columns: 1.2fr 1fr 1.2fr auto; gap: 6px; }
 .list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .list-row { justify-content: flex-start; text-align: left; background: var(--panel2); } .list-row.first { border-color: var(--blue); }
+/* A row of a list is never wider than its dialog: a long name is cut with an
+   ellipsis, and in a card a long address wraps (the same report as the
+   Inbox's, below). */
+.list-row { min-width: 0; max-width: 100%; overflow: hidden; } .list-row > b, .list-row > .muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.note > .row { flex-wrap: wrap; } .note > .row > b, .note > .row > .muted { min-width: 0; overflow-wrap: anywhere; }
 .note { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; } .note.unread { border-color: var(--blue); }
 .approval { background: var(--panel2); border: 1px solid var(--amber); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+/* The Inbox (DECISIONS.md, "The Inbox is one size of text, and nothing in it
+   runs off its card"). One scale for every entry, a message or a notice: a
+   title, what it says one step smaller, and a quiet line of where and when.
+   An entry is a card of those three, each on its own lines; what it says is
+   cut to a few lines until it is opened. On a computer a notice is one line
+   until it is opened. Nothing in a card can be wider than the card, and the
+   dialog's body is what scrolls. */
+.dialog:has(.inbox) { display: flex; flex-direction: column; max-height: calc(92dvh - 12px); margin-bottom: 0; }
+.dialog:has(.inbox) > .dialog-body { flex: 1 1 auto; min-height: 0; overflow: hidden auto; overscroll-behavior: contain; }
+.inbox { --inbox-title: calc(14px * var(--ui-scale)); --inbox-text: calc(13px * var(--ui-scale)); --inbox-meta: calc(12px * var(--ui-scale)); min-width: 0; }
+.inbox-top { flex-wrap: wrap; margin-top: 0; }
+.inbox-item { display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px; padding: 0 8px 0 0; min-width: 0; overflow: hidden; }
+.inbox-item:not(:has(.inbox-acts)) { padding-right: 0; }
+.inbox-main { flex: 1 1 200px; min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 2px 8px; padding: 8px 10px; background: none; border: none; border-radius: 0; text-align: left; white-space: normal; color: inherit; }
+.inbox-main > .dot { grid-area: 1 / 1; margin-top: calc(var(--inbox-title) * .675 - 4.5px); }
+.inbox-main > :not(.dot) { grid-column: 2; min-width: 0; overflow-wrap: anywhere; }
+.inbox-item.no-dot > .inbox-main { grid-template-columns: minmax(0, 1fr); } .inbox-item.no-dot > .inbox-main > * { grid-column: 1; }
+.inbox-title { font-size: var(--inbox-title); font-weight: 600; line-height: 1.35; }
+.inbox-body { font-size: var(--inbox-text); font-weight: 400; line-height: 1.45; white-space: pre-wrap; } .inbox-body:empty { display: none; }
+.inbox-meta { font-size: var(--inbox-meta); font-weight: 400; line-height: 1.4; color: var(--muted); }
+.inbox-title, .inbox-body { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+.inbox-title { -webkit-line-clamp: 2; line-clamp: 2; } .inbox-body { -webkit-line-clamp: 3; line-clamp: 3; } .inbox-msg .inbox-body { -webkit-line-clamp: 6; line-clamp: 6; }
+.inbox-item.open .inbox-title, .inbox-item.open .inbox-body { display: block; -webkit-line-clamp: none; line-clamp: none; }
+.inbox-acts { flex: 0 1 auto; min-width: 0; margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; padding: 6px 0; } .inbox-acts button { white-space: normal; text-align: left; }
+@media (min-width: 761px) {
+  .inbox-note:not(.open) > .inbox-main { display: flex; align-items: baseline; }
+  .inbox-note:not(.open) > .inbox-main > .dot { margin-top: 0; align-self: center; }
+  .inbox-note:not(.open) > .inbox-main > :not(.dot) { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
+  .inbox-note:not(.open) .inbox-title { flex: 0 1 auto; max-width: 50%; } .inbox-note:not(.open) .inbox-body { flex: 1 1 0; }
+  .inbox-note:not(.open) .inbox-body:empty { display: block; } .inbox-note:not(.open) .inbox-meta { flex: 0 1 auto; max-width: 34%; }
+}
+@media (max-width: 760px) {
+  .inbox button { min-height: 44px; } .inbox button.mini { padding: 4px 12px; }
+}
 .table { width: 100%; border-collapse: collapse; } .table th, .table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .table th { color: var(--muted); font-weight: 500; font-size: calc(12px * var(--ui-scale)); }
 .diff, .stat { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow: auto; max-height: 60vh; font: calc(12px * var(--ui-scale))/1.45 var(--mono-font); margin: 0 0 10px; }

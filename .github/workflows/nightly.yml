@@ -80,6 +80,12 @@ jobs:
       # hand: docs/measurements.md.)
       - name: A terminal's history on a phone (watched, whole width, a flood, earlier output)
         run: cargo test -p spandeck --test phonescroll the_rest -- --ignored
+      # The Inbox in a real browser at an iPhone's width and a computer's:
+      # one size for every title, body and line of where and when, nothing
+      # wider than its card, a long body cut and opened by a tap. About five
+      # seconds.
+      - name: The Inbox is one size of text, and nothing runs off its card (phone and computer)
+        run: cargo test -p spandeck --test inbox -- --ignored
   build:
     strategy:
       fail-fast: false
