@@ -3781,10 +3781,13 @@ addEventListener('keydown', (e) => {
 if (window.visualViewport) {
   const fit = () => {
     const vv = window.visualViewport, app = document.getElementById('app');
-    const top = Math.max(0, Math.round(vv.offsetTop || 0));
-    app.style.height = vv.height + 'px';
+    // (Zoomed in with two fingers, what is in sight is a part of the page
+    // and no keyboard: the page stays as it is, to be looked over.)
+    const zoomed = (vv.scale || 1) > 1.01;
+    const top = zoomed ? 0 : Math.max(0, Math.round(vv.offsetTop || 0));
+    app.style.height = zoomed ? '' : vv.height + 'px';
     app.style.top = top ? top + 'px' : '';
-    const keyboard = vv.height < window.innerHeight * 0.78;
+    const keyboard = !zoomed && vv.height < window.innerHeight * 0.78;
     app.classList.toggle('kbd', keyboard);
     app.classList.toggle('kbd-term', keyboard && !!document.activeElement?.closest?.('.xterm'));
     if (window.scrollY || document.documentElement.scrollTop) window.scrollTo(0, 0);
