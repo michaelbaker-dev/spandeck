@@ -398,6 +398,14 @@ class Conv {
     const tall = this.log.clientHeight, was = this.tall;
     this.tall = tall;
     if (!tall || !was || tall === was) return;
+    // (Scrolled since it was last told of: where it was in its old room.
+    // A log that only grew taller near its end was moved by the browser,
+    // which keeps it within its end, and not by the owner.)
+    const end = this.log.scrollHeight - tall, held = this.top > end && Math.abs(this.log.scrollTop - end) <= 1;
+    if (this.log.scrollTop !== this.top && !held) {
+      this.stuck = this.log.scrollHeight - this.log.scrollTop - was < 48;
+      this.top = this.log.scrollTop;
+    }
     this.log.scrollTop = this.stuck ? this.log.scrollHeight : Math.max(0, this.top + (was - tall));
     this.top = this.log.scrollTop;
   }

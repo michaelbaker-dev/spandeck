@@ -725,7 +725,7 @@ mod in_a_browser {
             format!("[...document.querySelectorAll('.phone-layout > .chat-bar .chat-switch button')].find(b => b.innerText === '{to}')")
         };
         let src = "document.querySelector('.phone-layout .chat-src')?.innerText";
-        let blocks = "[...document.querySelectorAll('.phone-layout .chat-screen-text')].map(x => x.innerText).join('\\n')";
+        let blocks = "[...document.querySelectorAll('.phone-layout .chat-screen')].map(x => x.innerText).join('\\n')";
         let bubbles = "[...document.querySelectorAll('.phone-layout .chat-user .chat-bubble')].map(x => x.innerText)";
 
         // The Codex pane, before it has a session: Chat, made from its
@@ -739,9 +739,10 @@ mod in_a_browser {
             seen[1].as_str().unwrap().starts_with("From the screen: Codex has not said which session it is in yet (nothing has come from its hooks), and no session file of Codex's"),
             "{seen}"
         );
+        // (The keys are in the message box, out of the way until asked for.)
         assert_eq!(
             (&seen[2], &seen[3]),
-            (&json!(false), &json!(true)),
+            (&json!(false), &json!(false)),
             "{seen}"
         );
         shoot(&page, "phone-layout-codex-before-a-session");
@@ -761,7 +762,7 @@ mod in_a_browser {
         );
         let seen = page.wait(
             "Codex's own conversation",
-            &format!("[...document.querySelectorAll('.phone-layout .chat-text')].some(t => t.innerText.includes('counted what you asked')) && !document.querySelector('.phone-layout .chat-src') && [{bubbles}, document.querySelector('.phone-layout .chat-box').value, {switch}, document.querySelectorAll('.phone-layout .chat-screen-text').length]"),
+            &format!("[...document.querySelectorAll('.phone-layout .chat-text')].some(t => t.innerText.includes('counted what you asked')) && !document.querySelector('.phone-layout .chat-src') && [{bubbles}, document.querySelector('.phone-layout .chat-box').value, {switch}, document.querySelectorAll('.phone-layout .chat-screen').length]"),
         );
         assert_eq!(
             seen,
@@ -813,7 +814,7 @@ mod in_a_browser {
         );
         assert_eq!(
             seen,
-            json!([["echo reed-$((40+2)) '<b id=evil>bold</b>'"], false, true])
+            json!([["echo reed-$((40+2)) '<b id=evil>bold</b>'"], false, false])
         );
         shoot(&page, "phone-layout-shell-chat");
         // A key of the row reaches the pane: Ctrl-C ends a command.
@@ -822,7 +823,11 @@ mod in_a_browser {
             &say(".phone-layout", "sleep 300; echo slept"),
         );
         s.wait_text(&sh, "sleep 300");
-        page.js("[...document.querySelectorAll('.phone-layout .chat-keys .key')].find(b => b.innerText === '^C').click()");
+        page.js("document.querySelector('.phone-layout .chat-keys-btn').click()");
+        page.wait(
+            "the keys, asked for",
+            "!!document.querySelector('.phone-layout .chat-keys:not([hidden])') && ([...document.querySelectorAll('.phone-layout .chat-keys .key')].find(b => b.innerText === '^C').click(), true)",
+        );
         page.wait(
             "another command",
             &say(".phone-layout", "echo back-$((20+3))"),
@@ -845,7 +850,7 @@ mod in_a_browser {
         page.js("[...document.querySelectorAll('.chat-switch button')].find(b => b.innerText === 'Chat').click()");
         page.wait(
             "the shell's conversation by itself",
-            "[...document.querySelectorAll('.phone-chat .chat-screen-text')].some(x => x.innerText.includes('back-23'))",
+            "[...document.querySelectorAll('.phone-chat .chat-screen')].some(x => x.innerText.includes('back-23'))",
         );
         shoot(&page, "phone-shell-chat");
         page.goto(&format!("#/s/alpha/p/{codex}"));
@@ -902,7 +907,7 @@ mod in_a_browser {
         s.wait_text(&codex, "[fake] got: How many otters?");
         let seen = page.wait(
             "what each printed, in its own cell",
-            &format!("[...document.querySelectorAll('{t} .chat-screen-text')].some(x => x.innerText.includes('reed-42')) && [...document.querySelectorAll('{c} .chat-text')].some(x => x.innerText.includes('counted what you asked')) && [[...document.querySelectorAll('{t} .chat-bubble')].map(x => x.innerText), [...document.querySelectorAll('{c} .chat-bubble')].map(x => x.innerText), !!document.querySelector('{c} .chat-src')]"),
+            &format!("[...document.querySelectorAll('{t} .chat-screen')].some(x => x.innerText.includes('reed-42')) && [...document.querySelectorAll('{c} .chat-text:not(.chat-screen)')].some(x => x.innerText.includes('counted what you asked')) && [[...document.querySelectorAll('{t} .chat-bubble')].map(x => x.innerText), [...document.querySelectorAll('{c} .chat-bubble')].map(x => x.innerText), !!document.querySelector('{c} .chat-src')]"),
         );
         assert_eq!(
             seen,
@@ -920,7 +925,7 @@ mod in_a_browser {
         page.goto(&format!("#/s/alpha/p/{sh}"));
         page.wait(
             "the shell's conversation at full size",
-            "[...document.querySelectorAll('.zoomed .chat-screen-text')].some(x => x.innerText.includes('reed-42'))",
+            "[...document.querySelectorAll('.zoomed .chat-screen')].some(x => x.innerText.includes('reed-42'))",
         );
         shoot(&page, "desktop-shell-chat");
         page.goto(&format!("#/s/alpha/p/{codex}"));
@@ -1123,6 +1128,361 @@ mod in_a_browser {
                 .is_some_and(|i| i.iter().any(|x| x["kind"] == json!("user")))
                 .then_some(())
         });
+    }
+
+    /// What makes a conversation the component it is: the classes and the
+    /// drawn type of the owner's bubble, an agent's prose, the marks under
+    /// it and the message box. Read from the page for the pane on screen.
+    const LOOK: &str = r#"(() => {
+        const root = document.querySelector('.phone-chat, .phone-layout, .zoomed .chat-pane');
+        const q = (s) => root.querySelector(s);
+        const css = (e, ...props) => { const c = getComputedStyle(e); return props.map(p => c[p]); };
+        const bubble = q('.chat-user:not(.other) .chat-bubble'), text = [...root.querySelectorAll('.chat-text')].find(t => t.querySelector('.md h5')), prose = text.querySelector('.md p');
+        const acts = text.querySelector('.chat-acts'), row = q('.chat-row');
+        return {
+            bubble: [bubble.className, bubble.parentNode.className, ...css(bubble, 'fontFamily', 'fontSize', 'borderTopLeftRadius', 'backgroundColor', 'color')],
+            prose: [text.classList.contains('chat-text'), prose.parentNode.className, ...css(prose, 'fontFamily', 'fontSize', 'lineHeight', 'color')],
+            heading: [text.querySelector('.md h5').className, ...css(text.querySelector('.md h5'), 'fontSize', 'fontWeight')],
+            lists: [text.querySelector('.md ol').className, text.querySelectorAll('.md ol > li').length, text.querySelectorAll('.md ul > li').length, !!text.querySelector('.md .md-code-in')],
+            acts: [acts.className, ...[...acts.children].map(b => b.className + ': ' + b.innerText), ...css(acts.firstChild, 'width', 'height')],
+            composer: [q('.chat-composer').tagName, row.className, ...css(row, 'borderTopLeftRadius', 'backgroundColor'), q('.chat-box').className, q('.chat-box').placeholder,
+                [...q('.chat-tools').children].map(b => b.className.replace(/ ?(on|danger|primary)\b/g, '').trim() + ': ' + b.innerText)],
+            keys: !!q('.chat-keys:not([hidden])'),
+            bar: [...root.querySelectorAll(':scope > .chat-bar > *, .chat-pane > .chat-bar > *')].map(e => e.className.replace(/ ?(working|idle|done|needs_you|error)\b/g, '')).filter(c => c !== 'chat-next'),
+        };
+    })()"#;
+
+    /// Where things are, and what can scroll, for the conversation on screen.
+    const PLACE: &str = r#"(() => {
+        const root = document.querySelector('.phone-chat, .phone-layout'), log = root.querySelector('.chat-log'), vv = window.visualViewport;
+        const box = (e) => { const r = e.getBoundingClientRect(); return { top: Math.round(r.top), bottom: Math.round(r.bottom) }; };
+        const last = [...log.children].filter(e => e.getBoundingClientRect().height > 0).pop();
+        // Everything that could be scrolled up or down: the log, and nothing else.
+        const scrollers = [document.scrollingElement, document.body, document.getElementById('app'), root, ...root.querySelectorAll('*')]
+            .filter(e => e.scrollHeight > e.clientHeight + 1 && (e === document.scrollingElement || ['auto', 'scroll'].includes(getComputedStyle(e).overflowY)))
+            .map(e => e.className || e.tagName);
+        const wide = [...root.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > window.innerWidth + 0.5 && !e.closest('pre, .md-table')).map(e => e.className || e.tagName);
+        window.scrollTo(0, 300);
+        return {
+            page: [document.scrollingElement.scrollTop, window.scrollY, document.documentElement.scrollWidth <= document.documentElement.clientWidth],
+            log: [log.scrollHeight > log.clientHeight, log.scrollWidth <= log.clientWidth, Math.round(log.scrollHeight - log.scrollTop - log.clientHeight)],
+            edge: Math.round(log.scrollTop + log.clientHeight),
+            scrollers, wide,
+            vv: [Math.round(vv.offsetTop), Math.round(vv.offsetTop + vv.height)],
+            app: box(document.getElementById('app')), bar: box(root.querySelector(':scope > .chat-bar')), dock: box(root.querySelector('.chat-dock')), row: box(root.querySelector('.chat-row')),
+            last: box(last), logBox: box(log), top: !!document.querySelector('#app > .topbar') && document.querySelector('#app > .topbar').getBoundingClientRect().height,
+            kbd: document.getElementById('app').classList.contains('kbd'),
+        };
+    })()"#;
+
+    /// The phone's keyboard, as the page is told of one: what is in sight
+    /// becomes `tall` high and begins `top` down the page (iOS slides the
+    /// page under what is in sight to show the box being typed in).
+    fn keyboard(page: &Page, tall: u32, top: u32) {
+        page.js(&format!(
+            "(() => {{ const real = window.__vv || (window.__vv = window.visualViewport); \
+               const now = {{ height: {tall}, width: window.innerWidth, offsetTop: {top}, offsetLeft: 0, pageTop: {top}, pageLeft: 0, scale: 1 }}; \
+               Object.defineProperty(window, 'visualViewport', {{ configurable: true, get: () => now }}); \
+               real.dispatchEvent(new Event('resize')); return true; }})()"
+        ));
+    }
+
+    /// The owner's report of 16 Nov 2026, from an iPhone, with five
+    /// pictures: "Antigravity chat just scrolls the entire pane and not
+    /// the text inside the pane. Also they look different in chat and
+    /// should be the same. Shouldn't chat be the same code base for every
+    /// chat?" and, with the keyboard up, a message box in the middle of the
+    /// screen over an empty gap, then at the very top with everything
+    /// under it blank.
+    ///
+    /// At a phone's size: a pane with a session file of Claude Code's
+    /// kind, a Codex pane, an Antigravity pane and an agent whose Chat is
+    /// made from its screen (a program that draws 120 columns itself) are
+    /// one component: the same bubble, prose, marks under it, turn marker
+    /// and message box, drawn in the same type. The log is the only thing
+    /// that scrolls, and nothing is wider than the phone. With the
+    /// keyboard up, the message box is directly above it and the pane's
+    /// bar at the top of what is in sight, wherever the browser slid the
+    /// page; the page itself has not moved; and the log keeps its place.
+    /// The same holds in a phone's layout view, and a cell of a layout on
+    /// a computer is the same component.
+    #[test]
+    #[ignore = "merge tier: a browser"]
+    fn every_pane_is_one_chat() {
+        let c = chats();
+        // A turn of the agent whose Chat is its screen: the station sees it end.
+        let say = |state: &str| {
+            c.s.call_as_pane(&c.tui, "pane.report_agent", json!({"state": state}))
+                .unwrap()
+        };
+        say("working");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        say("idle");
+
+        let page = Page::open(&c.s, 390, 844);
+        let open = |id: &str| {
+            page.goto(&format!("#/s/alpha/p/{id}"));
+            page.wait(
+                "the pane's conversation",
+                &format!("location.hash.endsWith('{id}') && !!document.querySelector('.phone-chat .chat-user .chat-bubble') && [...document.querySelectorAll('.phone-chat .chat-text')].some(t => t.querySelector('.md h5') && t.querySelector('.chat-acts')) && [...document.querySelectorAll('.phone-chat .chat-quiet')].some(e => e.innerText.startsWith('Turn ended'))"),
+            );
+        };
+        let mut looks = vec![];
+        for (name, id) in [
+            ("claude", &c.claude),
+            ("codex", &c.codex),
+            ("antigravity", &c.agy),
+            ("screen", &c.tui),
+        ] {
+            open(id);
+            let look = page.js(LOOK);
+            assert!(
+                look.is_object(),
+                "{name}: the page did not say how it looks"
+            );
+            let place = page.js(PLACE);
+            // The page cannot be scrolled, and has not been; the log can.
+            assert_eq!(place["page"], json!([0, 0, true]), "{name}: {place}");
+            // (The log scrolls where there is more than a screen of it.)
+            let scrollers = if place["log"][0] == json!(true) {
+                json!(["chat-log"])
+            } else {
+                json!([])
+            };
+            assert_eq!(place["scrollers"], scrollers, "{name}: {place}");
+            assert_eq!(place["wide"], json!([]), "{name}: {place}");
+            assert_eq!(place["log"][1], json!(true), "{name}: {place}");
+            // On a phone the conversation has the screen: its bar is at the top.
+            assert_eq!(
+                (&place["top"], &place["bar"]["top"]),
+                (&json!(0), &json!(0)),
+                "{name}: {place}"
+            );
+            assert_eq!(place["dock"]["bottom"], json!(844), "{name}: {place}");
+            shoot(&page, &format!("one-chat-{name}"));
+            looks.push((name, look, place));
+        }
+        // Three conversations read from three stores, and one made from a
+        // screen: one component.
+        for (name, look, _) in &looks[1..] {
+            assert_eq!(look, &looks[0].1, "{name} is not drawn as claude is");
+        }
+        assert_eq!(looks[0].1["keys"], json!(false));
+        assert_eq!(
+            looks[0].1["acts"],
+            json!([
+                "chat-acts",
+                "chat-act act-copy: Copy",
+                "chat-act act-speak: Read aloud",
+                "40px",
+                "36px"
+            ])
+        );
+        // The three with enough said have a log that scrolls.
+        for (name, _, place) in &looks[..3] {
+            assert_eq!(place["log"][0], json!(true), "{name}: {place}");
+        }
+        // What the screen's conversation is made of: prose and one block
+        // of rows that are a layout, which scrolls sideways inside itself;
+        // none of the program's frame, message box or status row.
+        let screen = page.js("(t => [t.innerText, [...t.querySelectorAll('.chat-mono pre')].map(p => [p.innerText, getComputedStyle(p).whiteSpace, getComputedStyle(p).overflowX]), [...document.querySelectorAll('.phone-chat .chat-quiet')].map(e => e.innerText).filter(x => x.startsWith('Turn ended'))])([...document.querySelectorAll('.phone-chat .chat-screen')].find(t => t.querySelector('.md h5')))");
+        let said = screen[0].as_str().unwrap();
+        assert!(
+            said.contains("The survey counts nine nests this year, three more than last spring. Most are high in the alders on the east bank, where the water is slow and the fishing is easy."),
+            "{screen}"
+        );
+        for chrome in ["╭", "│", "tern-2-low", "> "] {
+            assert!(!said.contains(chrome), "{chrome:?} in {screen}");
+        }
+        assert_eq!(
+            screen[1],
+            json!([["bank          nests     seen at dusk\neast          6         yes\nisland        3         no", "pre", "auto"]])
+        );
+        assert!(
+            screen[2][0]
+                .as_str()
+                .unwrap()
+                .starts_with("Turn ended · 1 s"),
+            "{screen}"
+        );
+
+        // A shell: the same bubble and message box, and its rows as they
+        // were, in the block a reply's code has, wider than the phone
+        // inside itself only.
+        page.goto(&format!("#/s/alpha/p/{}", c.sh));
+        page.wait("the shell", &format!("location.hash.endsWith('{}') && document.querySelectorAll('.chat-switch button').length === 2", c.sh));
+        page.js("[...document.querySelectorAll('.chat-switch button')].find(b => b.innerText === 'Chat').click()");
+        let sh = page.wait(
+            "the shell's conversation",
+            "(p => p && p.innerText.includes('survey.md     2 KB') && [p.parentNode.className, p.scrollWidth > p.clientWidth, getComputedStyle(p).whiteSpace, document.querySelector('.phone-chat .chat-row').className, document.querySelector('.phone-chat .chat-bubble').className])(document.querySelector('.phone-chat .chat-screen .chat-mono pre'))",
+        );
+        assert_eq!(
+            sh,
+            json!(["md-code chat-mono", true, "pre", "chat-row", "chat-bubble"])
+        );
+        let place = page.js(PLACE);
+        assert_eq!(
+            (&place["page"], &place["scrollers"], &place["wide"]),
+            (&json!([0, 0, true]), &json!(["chat-log"]), &json!([])),
+            "{place}"
+        );
+        shoot(&page, "one-chat-shell");
+
+        // The keyboard. First at the end of the conversation: the page is
+        // slid 150 px up, 480 px are in sight.
+        open(&c.claude);
+        let before = page.js(PLACE);
+        assert_eq!(before["log"][2], json!(0), "{before}");
+        keyboard(&page, 480, 150);
+        let up = page.js(PLACE);
+        assert_eq!(up["vv"], json!([150, 630]), "{up}");
+        assert_eq!(
+            (
+                &up["bar"]["top"],
+                &up["dock"]["bottom"],
+                &up["page"],
+                &up["kbd"]
+            ),
+            (&json!(150), &json!(630), &json!([0, 0, true]), &json!(true)),
+            "{up}"
+        );
+        // Nothing between the message box and the keyboard but its own edge.
+        assert!(
+            up["dock"]["bottom"].as_i64().unwrap() - up["row"]["bottom"].as_i64().unwrap() <= 8,
+            "{up}"
+        );
+        // The last thing said is still in sight above it.
+        assert_eq!(up["log"][2], json!(0), "{up}");
+        assert!(
+            up["last"]["bottom"].as_i64() <= up["logBox"]["bottom"].as_i64()
+                && up["last"]["top"].as_i64() >= up["logBox"]["top"].as_i64(),
+            "{up}"
+        );
+        shoot(&page, "one-chat-keyboard-up");
+        keyboard(&page, 844, 0);
+        let down = page.js(PLACE);
+        assert_eq!(
+            (
+                &down["bar"]["top"],
+                &down["dock"]["bottom"],
+                &down["log"][2],
+                &down["kbd"],
+                &down["page"]
+            ),
+            (
+                &json!(0),
+                &json!(844),
+                &json!(0),
+                &json!(false),
+                &json!([0, 0, true])
+            ),
+            "{down}"
+        );
+        // Further up: the line at the bottom edge stays at the bottom edge.
+        page.js("(l => { l.scrollTop = Math.round(l.scrollHeight / 2); return true; })(document.querySelector('.phone-chat .chat-log'))");
+        let reading = page.js(PLACE);
+        keyboard(&page, 480, 0);
+        let up = page.js(PLACE);
+        assert_eq!(
+            (&up["edge"], &up["dock"]["bottom"], &up["bar"]["top"]),
+            (&reading["edge"], &json!(480), &json!(0)),
+            "{up}"
+        );
+        keyboard(&page, 844, 0);
+        assert_eq!(page.js(PLACE)["edge"], reading["edge"]);
+
+        // The window itself made short, as a browser that makes the page
+        // smaller for its keyboard does: the same.
+        page.js("(Object.defineProperty(window, 'visualViewport', { configurable: true, get: () => window.__vv }), true)");
+        page.protocol(
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width": 390, "height": 500, "deviceScaleFactor": 1, "mobile": false}),
+        );
+        page.wait(
+            "the short window",
+            "window.innerHeight === 500 && document.getElementById('app').getBoundingClientRect().height === 500",
+        );
+        let small = page.js(PLACE);
+        assert_eq!(
+            (&small["dock"]["bottom"], &small["bar"]["top"], &small["page"], &small["scrollers"]),
+            (&json!(500), &json!(0), &json!([0, 0, true]), &json!(["chat-log"])),
+            "{small} {}",
+            page.js("[window.innerHeight, window.visualViewport.height, document.getElementById('app').style.height]")
+        );
+        page.protocol("Emulation.clearDeviceMetricsOverride", json!({}));
+        page.wait("the window as it was", "window.innerHeight > 800");
+
+        // A phone's layout view: the same pane, the same component, the
+        // same place for everything, and the same with the keyboard up.
+        page.goto("#/l/pair");
+        page.wait(
+            "the layout's first pane",
+            "!!document.querySelector('.phone-layout .chat-user .chat-bubble') && [...document.querySelectorAll('.phone-layout .chat-text')].some(t => t.querySelector('.md h5') && t.querySelector('.chat-acts'))",
+        );
+        assert_eq!(
+            page.js(LOOK),
+            looks[0].1,
+            "in a layout it is not drawn as by itself"
+        );
+        let place = page.js(PLACE);
+        assert_eq!(
+            (
+                &place["page"],
+                &place["scrollers"],
+                &place["wide"],
+                &place["top"]
+            ),
+            (
+                &json!([0, 0, true]),
+                &json!(["chat-log"]),
+                &json!([]),
+                &json!(0)
+            ),
+            "{place}"
+        );
+        // (It was left halfway up, above: back to its end.)
+        page.js("(l => { l.scrollTop = l.scrollHeight; return true; })(document.querySelector('.phone-layout .chat-log'))");
+        keyboard(&page, 480, 150);
+        let up = page.js(PLACE);
+        assert_eq!(
+            (
+                &up["bar"]["top"],
+                &up["dock"]["bottom"],
+                &up["page"],
+                &up["log"][2]
+            ),
+            (&json!(150), &json!(630), &json!([0, 0, true]), &json!(0)),
+            "{up}"
+        );
+        shoot(&page, "one-chat-layout-keyboard-up");
+
+        // A computer: a cell of a layout is the same component.
+        let wide = Page::open(&c.s, 1400, 900);
+        wide.goto(&format!("#/s/alpha/p/{}", c.tui));
+        wide.wait(
+            "the pane at full size",
+            "[...document.querySelectorAll('.zoomed .chat-text')].some(t => t.querySelector('.md h5') && t.querySelector('.chat-acts'))",
+        );
+        let big = wide.js(LOOK);
+        for part in ["bubble", "prose", "heading", "lists", "composer"] {
+            let mut theirs = looks[0].1[part].clone();
+            let mut ours = big[part].clone();
+            // (A computer's own sizes: the marks and the buttons are smaller.)
+            if part == "composer" {
+                theirs[6] = json!(null);
+                ours[6] = json!(null);
+            }
+            assert_eq!(ours, theirs, "{part} on a computer");
+        }
+        assert_eq!(big["acts"][1], json!("chat-act act-copy: Copy"));
+        // Where the deck's top bar is, on a computer: it stays.
+        assert_eq!(wide.js("!!document.querySelector('#app > .topbar') && document.querySelector('#app > .topbar').getBoundingClientRect().height > 20"), json!(true));
+        wide.goto("#/l/pair");
+        wide.wait(
+            "the layout",
+            "document.querySelectorAll('.split .chat-pane').length === 2",
+        );
+        shoot(&wide, "one-chat-desktop-layout");
     }
 
     /// Pictures of each kind of pane's Chat, for a human to lay side by

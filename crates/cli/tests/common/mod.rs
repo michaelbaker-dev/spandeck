@@ -1058,6 +1058,13 @@ pub mod browser {
             }
         }
 
+        /// One call of the DevTools protocol, for what `js` cannot do (the
+        /// size of the window as a device has it).
+        pub fn protocol(&self, method: &str, params: Value) -> Value {
+            self.call(method, params)
+                .unwrap_or_else(|e| panic!("{method} failed: {e}"))
+        }
+
         fn call(&self, method: &str, params: Value) -> Result<Value, String> {
             let mut wire = self.wire.lock().unwrap();
             wire.get_or_insert_with(|| Wire::open(&self._browser, &self.tab))

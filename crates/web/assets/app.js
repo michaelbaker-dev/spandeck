@@ -3793,6 +3793,7 @@ if (window.visualViewport) {
   };
   window.visualViewport.addEventListener('resize', fit);
   window.visualViewport.addEventListener('scroll', fit);
+  window.addEventListener('resize', fit);
   window.addEventListener('scroll', fit, { passive: true });
   document.addEventListener('focusin', () => setTimeout(fit, 50));
   document.addEventListener('focusout', () => setTimeout(fit, 50));
