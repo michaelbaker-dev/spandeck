@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 /// A phone: its width, and touches.
 fn phone_of(s: &Station) -> Page {
     let page = Page::open(s, 390, 844);
+    page.phone_screen();
     page.touches();
     page
 }

@@ -1164,7 +1164,7 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     page.touch_drag(&format!("{term}.body"), 0.0, 250.0, 12);
     page.wait(
         "earlier output after dragging down",
-        &format!("(t => !t.following && t.body.scrollTop < t._metrics().liveTop - 150)({term})"),
+        &format!("(t => !t.following && t.body.scrollTop < t._metrics().liveTop - 60)({term})"),
     );
 
     // Found from a real phone's drag reports: Claude Code runs full-screen and
@@ -2022,11 +2022,12 @@ fn a_terminals_history_on_a_phone_is_scrolled_by_the_phone() {
         .unwrap()
         .to_string();
     let phone = Page::open(&s, 390, 844);
+    phone.phone_screen();
     phone.touches();
     phone.goto(&format!("#/s/alpha/p/{pane}"));
     phone.wait(
         "the terminal fitted to the phone",
-        &format!("(t => !!t && t.control && t.chan !== null && t.term.cols < 60)({T})"),
+        &format!("(t => !!t && t.control && t.chan !== null && t.term.cols < 60 && t.body.clientHeight > 350)({T})"),
     );
     // Colours, a line longer than the phone is wide, something that would be
     // markup if it were put in as markup, and four hundred lines.

@@ -1099,6 +1099,23 @@ pub mod browser {
             }
         }
 
+        /// From now on this page is as large as a phone's screen, whatever
+        /// the browser's window. (A full Chrome, as the CI runners have, is
+        /// never narrower than 500 px and gives the page less than the
+        /// height asked for: "390 × 844" was 500 × 644 there, and a
+        /// terminal fitted to it had 63 columns where a test expected
+        /// fewer than 60.)
+        pub fn phone_screen(&self) {
+            self.protocol(
+                "Emulation.setDeviceMetricsOverride",
+                json!({"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": false}),
+            );
+            self.wait(
+                "a phone's screen",
+                "innerWidth === 390 && innerHeight === 844",
+            );
+        }
+
         /// From now on this page has a touch screen.
         pub fn touches(&self) {
             self.protocol(
@@ -1112,11 +1129,24 @@ pub mod browser {
         /// in `steps` moves and lifted; with no way to go, a tap. These are
         /// the browser's own touches (`touches` first): it scrolls with
         /// them, or hands them to the page, as it would a finger's. An
-        /// event the page makes up itself scrolls nothing.
+        /// event the page makes up itself scrolls nothing. The finger
+        /// stays on the element: a way longer than the element is cut to
+        /// what fits (a finger put down beside a terminal is not a drag
+        /// over it, which is what happened on a screen shorter than the
+        /// one the test was written on).
         pub fn touch_drag(&self, el: &str, dx: f64, dy: f64, steps: u32) {
             let at = self.js(&format!(
-                "(r => [r.left + r.width / 2, r.top + r.height / 2])({el}.getBoundingClientRect())"
+                "(r => [r.left + r.width / 2, r.top + r.height / 2, r.width, r.height])({el}.getBoundingClientRect())"
             ));
+            let fits = |way: f64, room: f64| {
+                if way.abs() > room - 16.0 {
+                    (room - 16.0).max(0.0) / way.abs()
+                } else {
+                    1.0
+                }
+            };
+            let part = fits(dx, at[2].as_f64().unwrap()).min(fits(dy, at[3].as_f64().unwrap()));
+            let (dx, dy) = (dx * part, dy * part);
             let (x, y) = (
                 at[0].as_f64().unwrap() - dx / 2.0,
                 at[1].as_f64().unwrap() - dy / 2.0,
