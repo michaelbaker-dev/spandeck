@@ -21,7 +21,7 @@ import { phoneLook } from './phonelook.js';
 import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook, refreshAsked, refreshCorrected } from './perf.js';
 import { qrSvg } from './qr.js';
 import { sendAct } from './typed.js';
-import { initChat, conversation, faceOf, chatToggle, termBox, chatBeforeRender, chatAfterRender, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
+import { initChat, conversation, faceOf, chatToggle, termBox, chatBeforeRender, chatAfterRender, chatPark, sync as syncKids, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
 
 // The page opens in the look this browser last had, before anything is asked.
 applyRemembered();
@@ -3124,7 +3124,57 @@ const mapSpan = (n) => {
   return n.dir === 'row' ? [aw + bw, Math.max(ah, bh)] : [Math.max(aw, bw), ah + bh];
 };
 
+// The Terminal face of a pane on a phone, the same for a pane opened by
+// itself and for the pane a layout is showing: Fit to screen, the usage and
+// Stop this turn in `v.head`, the terminal in `v.slot`, the keys a phone
+// lacks and the message box in `v.foot`. Watching shows the pane at the size
+// someone else set, shrunk to fit; fitting resizes the pane to this screen,
+// as a computer's deck would. The page is redrawn every few seconds: the
+// terminal and the message box stay where they are, so the keyboard does not
+// close while you type, and the bar is rebuilt only when what it shows
+// changes (rebuilding it on every redraw made the phone put a focus ring on a
+// button at each touch). `guest`: in a layout, where the pane is from.
+function phoneTerm(v, st, p, guest) {
+  const fitKey = `${st}/${p.id}`;
+  // In a layout a pane that has ended is only looked at.
+  const fitted = phoneFit.has(fitKey) && (guest === undefined || !p.exited);
+  const t = fitted ? getTerm(st, p, 'phone-fit', 'control') : getTerm(st, p, 'phone', 'watch');
+  if (guest !== undefined) t.setGuest(guest);
+  const canStop = !p.exited && (p.state === 'working' || p.state === 'needs_you');
+  const pu = p.usage;
+  const brief = pu && pu.model ? [pu.model.replace(/^.*\//, ''), contextText(pu) ? 'context ' + contextText(pu) : '', fmtTokens(pu.total_tokens) + ' tokens', pu.cost_estimate !== null && pu.cost_estimate !== undefined ? 'est. ' + fmtCost(pu.cost_estimate) : ''].filter(Boolean).join(' · ') : '';
+  const sig = `${fitKey}|${fitted}|${p.exited}|${canStop}|${brief}`;
+  if (v.sig !== sig) {
+    v.sig = sig;
+    // replaceChildren would print a missing piece as the word "null".
+    v.head.replaceChildren(...[
+      p.exited ? null : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: (e) => { e.currentTarget.blur(); fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
+      brief ? h('button', { class: 'phone-usage', title: usageTitle(p.usage), 'aria-label': `Usage: ${brief}`, onclick: (e) => { e.currentTarget.blur(); usageDialog(st, p); } }, brief, h('span', { class: 'muted' }, ' ›')) : null,
+      h('span', { class: 'grow' }),
+      h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(st, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn')].filter(Boolean));
+  }
+  if (v.slot.firstChild !== t.el) v.slot.replaceChildren(t.el);
+  const foot = p.exited ? (v.ended ||= h('p', { class: 'muted small' }, 'This pane has ended.')) : composer(st, p);
+  if (v.foot.firstChild !== foot) v.foot.replaceChildren(foot);
+}
+
+// Whether a touch began on something that scrolls sideways itself (a block
+// of code, a table, a diff): a drag there is that thing's, not a step.
+function scrollsSideways(el, within) {
+  for (let n = el; n && n !== within; n = n.parentElement) {
+    if (n.classList.contains('xterm')) return false;
+    if (n.scrollWidth > n.clientWidth + 1 && /auto|scroll/.test(getComputedStyle(n).overflowX)) return true;
+  }
+  return false;
+}
+
 // Any layout: a project's or a global one, with panes from any station.
+// The pane being shown is the pane as it is when opened by itself (the
+// owner, 16 Nov 2026: "The panes in the layout should work like the single
+// panes"): the conversation's own bar with Chat | Terminal, and under it the
+// conversation, or the terminal with its keys and message box. The layout
+// adds one line between the two: previous and next, which pane of how many,
+// and the map of the layout, which opens from that line and closes again.
 function phoneLayoutView(lay) {
   const lays = allLayouts();
   const ctx = ctxFor(lay);
@@ -3146,30 +3196,53 @@ function phoneLayoutView(lay) {
     : d > 0 ? order.find(c => cells.indexOf(c) > i) : order.filter(c => cells.indexOf(c) < i).pop()) || null;
   const p = cur?.p || null, st = cur?.st;
 
-  // As in the pane view: the page is redrawn every few seconds, and what is
-  // on it stays where it is. The terminal and the message box are never put
-  // back, so the keyboard does not close while you type; the map and the bars
-  // are rebuilt only when what they show changes, so a touch leaves no focus
-  // ring behind and an approval keeps the reason being typed into it.
+  // The page is redrawn every few seconds, and what is on it stays where it
+  // is: the line and the map are rebuilt only when what they show changes, so
+  // a touch leaves no focus ring behind and an approval keeps the reason
+  // being typed into it.
   const vkey = 'layout:' + lay.key;
   let v = phonePanes.get(vkey);
   if (!v) {
     v = { head: h('div', { class: 'row' }), title: h('div', { class: 'lay-title' }), map: h('div', { class: 'lay-map', role: 'group' }),
-      showing: h('span', { class: 'lay-showing', role: 'status' }), dots: h('span', { class: 'lay-dots', 'aria-hidden': 'true' }),
-      prev: h('button', { type: 'button', onclick: (e) => { e.currentTarget.blur(); v.step(-1); } }, '‹'), next: h('button', { type: 'button', onclick: (e) => { e.currentTarget.blur(); v.step(1); } }, '›'),
-      appr: h('div', { class: 'lay-approvals' }), rows: new Map(), slot: h('div', { class: 'keep' }), foot: h('div', { class: 'keep' }) };
+      showing: h('span', { class: 'lay-showing' }), dots: h('span', { class: 'lay-dots', 'aria-hidden': 'true' }),
+      prev: h('button', { type: 'button', class: 'lay-step', onclick: (e) => { e.currentTarget.blur(); v.step(-1); } }, '‹'), next: h('button', { type: 'button', class: 'lay-step', onclick: (e) => { e.currentTarget.blur(); v.step(1); } }, '›'),
+      appr: h('div', { class: 'lay-approvals' }), rows: new Map(), slot: h('div', { class: 'keep' }), foot: h('div', { class: 'keep' }), open: false };
     // Hide the pane being looked at, or show it in the layout again.
     v.hide = h('button', { type: 'button', class: 'lay-hide', onclick: (e) => { e.currentTarget.blur(); v.toggle(); } });
-    v.nav = h('div', { class: 'lay-nav' }, v.prev, h('div', { class: 'lay-where' }, v.showing, v.dots), v.hide, v.next);
-    v.main = h('main', { class: 'phone phone-pane phone-layout' }, v.head, v.title, v.map, v.nav, v.appr, v.slot, v.foot);
-    // A swipe left or right anywhere but the message box steps to the next or
-    // the previous pane. Heard before the terminal, which scrolls on a drag
-    // up or down and never sees a sideways one end.
+    // The one line: which pane of how many. A tap opens the layout's name,
+    // where it is from, its map and Hide, over the pane and not above it, so
+    // the pane keeps its room (and a fitted terminal its size).
+    v.chev = h('span', { class: 'chev', 'aria-hidden': 'true' }, '▾');
+    v.where = h('button', { type: 'button', class: 'lay-where', 'aria-expanded': 'false', onclick: (e) => { e.currentTarget.blur(); v.fold(!v.open); } }, v.showing, v.dots, v.chev);
+    v.nav = h('div', { class: 'lay-nav' }, v.prev, v.where, v.next);
+    v.panel = h('div', { class: 'lay-panel', hidden: true }, v.title, v.map, h('div', { class: 'row lay-panel-row' }, h('span', { class: 'muted small grow' }, 'Tap a pane to show it here. A dashed one is hidden in the layout.'), v.hide));
+    v.strip = h('div', { class: 'lay-strip' }, v.nav, v.panel);
+    v.fold = (open) => {
+      v.open = open;
+      v.panel.hidden = !open;
+      v.where.setAttribute('aria-expanded', String(open));
+      v.where.setAttribute('aria-label', `${v.says || 'Panes'}. ${open ? 'Close' : 'Open'} the map of the layout`);
+      v.chev.textContent = open ? '▴' : '▾';
+    };
+    // With no pane to show there is no bar of a pane: only the way back.
+    v.back = h('div', { class: 'row lay-back' }, h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'));
+    v.term = h('div', { class: 'lay-term' }, v.head, v.slot, v.foot);
+    v.main = h('main', { class: 'phone phone-layout' });
+    // A touch outside the open map closes it, and does nothing else: it is
+    // not also a press of the Allow or the Send it happened to land on.
+    v.main.addEventListener('click', (e) => { if (v.open && !v.strip.contains(e.target)) { e.preventDefault(); e.stopPropagation(); v.fold(false); } }, true);
+    // A swipe left or right steps to the next or the previous pane. Heard
+    // before the terminal, which scrolls on a drag up or down and never sees
+    // a sideways one end. It is a step only when it is plainly sideways (far
+    // more across than up or down, so reading a conversation is never one),
+    // quick, and not begun on something that is the touch's own: a message
+    // box, a card, the open map, or a block that scrolls sideways itself.
+    // Selecting text is never a step.
     let sw = null;
     const one = (e) => (e.touches && e.touches.length === 1 ? e.touches[0] : null);
     v.main.addEventListener('touchstart', (e) => {
       const t = one(e), el = e.target;
-      const busy = !t || !el.closest || el.closest('.composer, .approval, input, textarea, select') || (el.closest('.lay-map') && v.map.scrollWidth > v.map.clientWidth + 1);
+      const busy = !t || !el.closest || el.closest('.composer, .chat-dock, .approval, .lay-panel, input, textarea, select') || scrollsSideways(el, v.main);
       sw = busy ? null : { x: t.clientX, y: t.clientY, dx: 0, dy: 0, at: Date.now() };
     }, { capture: true, passive: true });
     v.main.addEventListener('touchmove', (e) => { const t = one(e); if (sw && t) { sw.dx = t.clientX - sw.x; sw.dy = t.clientY - sw.y; } else sw = null; }, { capture: true, passive: true });
@@ -3177,6 +3250,8 @@ function phoneLayoutView(lay) {
       const g = sw;
       sw = null;
       if (!g || Math.abs(g.dx) < 60 || Math.abs(g.dx) < 2 * Math.abs(g.dy) || Date.now() - g.at > 900) return;
+      const sel = window.getSelection && window.getSelection();
+      if (sel && !sel.isCollapsed && sel.anchorNode && v.main.contains(sel.anchorNode)) return;
       if (e.cancelable) e.preventDefault();
       v.step(g.dx < 0 ? 1 : -1);
     }, { capture: true, passive: false });
@@ -3184,22 +3259,10 @@ function phoneLayoutView(lay) {
     phonePanes.clear();
     phonePanes.set(vkey, v);
   }
-  const show = (ref) => { if (phoneAt.get(lay.key) !== ref) { phoneAt.set(lay.key, ref); render(); } };
+  const show = (ref) => { v.fold(false); if (phoneAt.get(lay.key) !== ref) { phoneAt.set(lay.key, ref); render(); } };
   v.step = (d) => { const to = stepTo(d); if (to) show(to.ref); };
   v.toggle = () => { if (cur) { setHidden(cur.node, !cur.hidden); saveLayout(lay); render(); } };
 
-  const live = !!p && !p.exited;
-  const fitKey = p ? `${st}/${p.id}` : '';
-  const fitted = live && phoneFit.has(fitKey);
-  const canStop = live && (p.state === 'working' || p.state === 'needs_you');
-  const headSig = `${st}/${p?.id}|${live}|${fitted}|${canStop}`;
-  if (v.headSig !== headSig) {
-    v.headSig = headSig;
-    v.head.replaceChildren(...[h('a', { class: 'btn', href: '#/fleet' }, '‹ Back'),
-      live ? h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: (e) => { e.currentTarget.blur(); fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen') : null,
-      h('span', { class: 'grow' }),
-      h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(st, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn')].filter(Boolean));
-  }
   const titleSig = lays.map(x => x.key).join('|') + '>' + lay.key;
   if (v.titleSig !== titleSig) {
     v.titleSig = titleSig;
@@ -3207,7 +3270,10 @@ function phoneLayoutView(lay) {
       ? h('select', { 'aria-label': 'Layout', onchange: (e) => { const x = lays.find(y => y.key === e.target.value); if (x) go(layUrl(x)); } }, lays.map(x => h('option', { value: x.key, selected: x.key === lay.key }, `${x.project ? x.project + (onlineStations().length > 1 ? ' on ' + x.station : '') : 'Global'} · ${x.name}`)))
       : h('span', {}, h('b', {}, lay.name), h('span', { class: 'muted' }, lay.project ? ` · layout in ${lay.project} on ${lay.station}` : ' · global layout')));
   }
-  const mapSig = JSON.stringify([lay.cache.tree, i, cells.map(c => c.label)]);
+  // Another pane of the layout that needs the owner is said on the line too,
+  // since the map is closed most of the time.
+  const calls = cells.filter(c => c !== cur && (c.state === 'needs_you' || c.state === 'error'));
+  const mapSig = JSON.stringify([lay.cache.tree, i, cells.map(c => c.label), lay.name]);
   if (v.mapSig !== mapSig) {
     v.mapSig = mapSig;
     const [w, hh] = mapSpan(lay.cache.tree);
@@ -3215,33 +3281,42 @@ function phoneLayoutView(lay) {
     v.map.replaceChildren(...(cells.length ? [layoutMap(lay.cache.tree, cells, show)] : []));
     if (v.map.firstChild) Object.assign(v.map.firstChild.style, { minWidth: w * 48 - 4 + 'px', height: Math.max(hh * 48 - 4, 56) + 'px' });
     v.map.hidden = !cells.length;
-    v.nav.hidden = !cells.length;
-    v.showing.textContent = cur ? `Showing ${cur.name}${cur.guest ? ' (' + cur.guest + ')' : ''} · ${cur.hidden ? 'hidden' : `${order.indexOf(cur) + 1} of ${order.length}`}` : '';
+    v.strip.hidden = !cells.length;
+    const count = cur ? (cur.hidden ? 'hidden' : `${order.indexOf(cur) + 1} of ${order.length}`) : '';
+    const shown = cur ? `${cur.name}${cur.guest ? ' (' + cur.guest + ')' : ''}` : '';
+    v.showing.replaceChildren(...(cur ? [h('span', { class: 'muted lay-in' }, lay.name + ' › '), h('b', {}, shown), h('span', { class: 'lay-count' }, ' · ' + count)] : []));
+    v.says = cur ? `Layout ${lay.name}: showing ${shown}, ${count}${calls.length ? `. ${calls.map(c => c.name).join(', ')} ${calls.length === 1 ? 'needs' : 'need'} you` : ''}` : '';
+    v.where.classList.toggle('attn', calls.length > 0);
     // The last pane showing cannot be hidden, as on a computer.
     v.hide.hidden = !cur;
     v.hide.disabled = !cur || (!cur.hidden && order.length < 2);
-    v.hide.textContent = cur?.hidden ? 'Show' : 'Hide';
+    v.hide.textContent = !cur ? 'Hide' : cur.hidden ? `Show ${cur.name}` : `Hide ${cur.name}`;
     v.hide.setAttribute('aria-label', !cur ? 'Hide' : cur.hidden ? `Show ${cur.name} in this layout again` : `Hide ${cur.name} in this layout. It keeps running.`);
-    v.dots.replaceChildren(...order.map((c) => h('i', { class: c === cur ? 'on' : '' })));
+    v.dots.replaceChildren(...order.map((c) => h('i', { class: (c === cur ? 'on ' : '') + c.state })));
     for (const [b, d, word] of [[v.prev, -1, 'Previous'], [v.next, 1, 'Next']]) {
       const to = stepTo(d);
       b.disabled = !to;
       b.setAttribute('aria-label', to ? `${word} pane: ${to.name}` : `${word} pane`);
     }
+    v.fold(v.open);
   }
+
+  // The pane itself, by the same code as a pane opened by itself.
+  const conv = p ? conversation(st, p, 'phone') : null;
+  const chat = !!p && faceOf(st, p) === 'chat';
+  if (p && !chat) phoneTerm(v, st, p, cur.guest || '');
+  // The panes stepped away from: their conversations are kept, not watched.
+  for (const c of cells) if (c.p && c !== cur) chatPark(c.st, c.p);
+
   // What is waiting for an answer from a pane in this layout stays on top,
-  // whichever pane is showing.
-  const waiting = S.approvals.filter(a => cells.some(c => c.p && c.st === a.station && findPane(a.station, a.pane)?.id === c.p.id));
+  // whichever pane is showing. An approval of the pane on screen is a card
+  // of its conversation, and is not said twice.
+  const waiting = S.approvals.filter(a => cells.some(c => c.p && c.st === a.station && findPane(a.station, a.pane)?.id === c.p.id && !(chat && c === cur)));
   for (const [id, el] of v.rows) if (!waiting.some(a => a.id === id)) { el.remove(); v.rows.delete(id); }
   for (const a of waiting) if (!v.rows.has(a.id)) { const el = approvalRow(a); v.rows.set(a.id, el); v.appr.append(el); }
 
-  let body, foot = null;
-  if (p) {
-    const t = fitted ? getTerm(st, p, 'phone-fit', 'control') : getTerm(st, p, 'phone', 'watch');
-    t.setGuest(cur.guest);
-    body = t.el;
-    foot = live ? composer(st, p) : null;
-  } else {
+  let body;
+  if (!p) {
     const what = cur ? cur.ref : '';
     if (v.gone?.what !== what) {
       const project = cur && cur.node.pane !== undefined ? (cur.node.project || lay.project) : null;
@@ -3251,9 +3326,10 @@ function phoneLayoutView(lay) {
         : h('p', {}, 'This layout is empty. Put panes in it with Arrange, on a computer.')) };
     }
     body = v.gone.el;
-  }
-  if (v.slot.firstChild !== body) v.slot.replaceChildren(body);
-  if (v.foot.firstChild !== foot) v.foot.replaceChildren(...(foot ? [foot] : []));
+  } else body = chat ? conv.body : v.term;
+  v.main.classList.toggle('phone-chat', chat);
+  v.main.classList.toggle('phone-pane', !!p && !chat);
+  syncKids(v.main, [conv ? conv.bar : v.back, v.strip, v.appr, body]);
   return v.main;
 }
 
@@ -3266,13 +3342,7 @@ function phonePaneView(st, id) {
   // agent with no conversation, is its terminal, and the bar says why.
   const conv = conversation(st, p, 'phone');
   if (faceOf(st, p) === 'chat') return conv.phoneMain();
-  // Watching shows the pane at the size someone else set, shrunk to fit.
-  // Fitting resizes the pane to this screen, as a computer's deck would.
   const fitKey = `${st}/${p.id}`;
-  const fitted = phoneFit.has(fitKey);
-  const t = fitted ? getTerm(st, p, 'phone-fit', 'control') : getTerm(st, p, 'phone', 'watch');
-  // The page is redrawn every few seconds. The terminal and the message
-  // box stay where they are, so the keyboard does not close while you type.
   let v = phonePanes.get(fitKey);
   if (!v) {
     v = { head: h('div', { class: 'row' }), slot: h('div', { class: 'keep' }), foot: h('div', { class: 'keep' }) };
@@ -3280,27 +3350,10 @@ function phonePaneView(st, id) {
     phonePanes.clear();
     phonePanes.set(fitKey, v);
   }
-  // The bar is rebuilt only when what it shows changes. Rebuilding it on
-  // every redraw made the phone put a focus ring on a button at each touch.
-  const canStop = !p.exited && (p.state === 'working' || p.state === 'needs_you');
-  const pu = p.usage;
-  const brief = pu && pu.model ? [pu.model.replace(/^.*\//, ''), contextText(pu) ? 'context ' + contextText(pu) : '', fmtTokens(pu.total_tokens) + ' tokens', pu.cost_estimate !== null && pu.cost_estimate !== undefined ? 'est. ' + fmtCost(pu.cost_estimate) : ''].filter(Boolean).join(' · ') : '';
-  const sig = `${fitted}|${p.exited}|${canStop}|${brief}`;
-  if (v.sig !== sig) {
-    v.sig = sig;
-    // replaceChildren would print a missing piece as the word "null".
-    v.head.replaceChildren(...[
-      p.exited ? null : h('button', { 'aria-pressed': String(fitted), title: fitted ? 'Stop resizing this pane to the phone' : 'Resize this pane to fit this screen', onclick: (e) => { e.currentTarget.blur(); fitted ? phoneFit.delete(fitKey) : phoneFit.add(fitKey); update(); } }, fitted ? 'Fitted' : 'Fit to screen'),
-      brief ? h('button', { class: 'phone-usage', title: usageTitle(p.usage), 'aria-label': `Usage: ${brief}`, onclick: (e) => { e.currentTarget.blur(); usageDialog(st, p); } }, brief, h('span', { class: 'muted' }, ' ›')) : null,
-      h('span', { class: 'grow' }),
-      h('button', { class: 'danger big', disabled: !canStop, onclick: (e) => { e.currentTarget.blur(); rpc(st, 'pane.stop', { pane: p.id }).then(() => toast('Stop sent')); } }, 'Stop this turn')].filter(Boolean));
-  }
+  phoneTerm(v, st, p);
   // The bar is the conversation's, and a pane left and opened again has a
   // new conversation: its bar takes the old one's place.
   if (v.main.firstChild !== conv.bar) { if (v.bar) v.bar.remove(); v.bar = conv.bar; v.main.prepend(conv.bar); }
-  if (v.slot.firstChild !== t.el) v.slot.replaceChildren(t.el);
-  const foot = p.exited ? (v.ended ||= h('p', { class: 'muted small' }, 'This pane has ended.')) : composer(st, p);
-  if (v.foot.firstChild !== foot) v.foot.replaceChildren(foot);
   return v.main;
 }
 

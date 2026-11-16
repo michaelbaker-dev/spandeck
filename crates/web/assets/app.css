@@ -352,12 +352,21 @@ button.agent-row:hover { border-color: var(--blue); }
 .watch-card.guest .tile { border-color: var(--violet-line); }
 .watch-from { position: absolute; top: -9px; right: 10px; z-index: 1; background: var(--panel2); }
 
-/* Phone: a layout, one pane at a time */
-.phone-layout { gap: 8px; }
+/* Phone: a layout, one pane at a time. The pane is the pane as it is when
+   opened by itself (its bar, then its conversation or its terminal); the
+   layout adds one line under the bar, and its map opens over the pane. */
+.phone.phone-layout { padding: 0; gap: 0; overflow: hidden; }
+.phone.phone-layout > .chat-bar { margin: 0; }
 .phone-layout .pane { min-height: 20dvh; }
-.lay-title { display: block; flex: none; font-size: calc(12px * var(--ui-scale)); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lay-strip { position: relative; flex: none; background: var(--panel); border-bottom: 1px solid var(--line); }
+.lay-strip[hidden], .lay-panel[hidden], .lay-map[hidden] { display: none; }
+.lay-panel { position: absolute; top: 100%; left: 0; right: 0; z-index: 6; display: flex; flex-direction: column; gap: 8px; max-height: 60dvh; overflow: auto; padding: 8px 12px 10px; background: var(--panel); border-bottom: 1px solid var(--line); box-shadow: 0 12px 24px rgba(0, 0, 0, .35); }
+.lay-panel-row { gap: 10px; } .lay-panel-row .lay-hide { flex: none; min-height: 44px; padding: 0 12px; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lay-term { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; overflow: auto; padding: 8px 12px; }
+.lay-term > .row { flex-wrap: wrap; flex: none; }
+.lay-back { flex: none; padding: 8px 12px; }
+.lay-title { display: block; flex: none; font-size: calc(13px * var(--ui-scale)); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lay-map { flex: none; overflow-x: auto; padding: 4px; background: var(--well2); border: 1px solid var(--line); border-radius: 10px; }
-.lay-map[hidden], .lay-nav[hidden] { display: none; }
 .map-split { display: flex; gap: 4px; min-width: 0; min-height: 0; }
 /* "row" is also a helper class that centres its children (see .split.row). */
 .map-split.row { align-items: stretch; gap: 4px; } .map-split.col { flex-direction: column; }
@@ -372,21 +381,27 @@ button.agent-row:hover { border-color: var(--blue); }
 /* A hidden pane: still in the map where it belongs, but not in the swipe order. */
 .map-box.hid { border-style: dashed; } .map-box.hid:not(.needs_you):not(.error) { opacity: .55; }
 .map-box.current { outline: 2px solid var(--blue); outline-offset: -2px; color: var(--strong); font-weight: 600; }
-.lay-nav { display: flex; align-items: center; gap: 8px; flex: none; }
-.lay-nav button { min-width: 44px; min-height: 44px; justify-content: center; font-size: calc(18px * var(--ui-scale)); }
-.lay-nav .lay-hide { font-size: calc(13px * var(--ui-scale)); padding: 0 10px; } .lay-hide[hidden] { display: none; }
-.lay-where { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 5px; }
-.lay-showing { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lay-dots { display: flex; gap: 6px; } .lay-dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); } .lay-dots i.on { background: var(--blue); }
-.lay-approvals { display: flex; flex-direction: column; flex: none; } .lay-approvals:empty { display: none; }
-.lay-gone { flex: 1; border: 1px dashed var(--line); border-radius: 8px; margin: 0; }
+.lay-nav { display: flex; align-items: center; gap: 4px; flex: none; padding: 0 6px; }
+.lay-nav button { min-width: 44px; min-height: 44px; justify-content: center; border: none; background: none; }
+.lay-nav .lay-step { flex: none; font-size: calc(20px * var(--ui-scale)); }
+.lay-hide[hidden] { display: none; }
+.lay-where { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 0 6px; font-size: calc(13px * var(--ui-scale)); color: var(--text); }
+.lay-where .chev { flex: none; color: var(--muted); }
+.lay-showing { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lay-showing b { color: var(--strong); }.lay-dots { display: flex; flex: none; gap: 6px; } .lay-dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); }
+/* A pane that needs the owner shows in the dots, as it does in the map. */
+.lay-dots i.needs_you { background: var(--amber); } .lay-dots i.error { background: var(--red); } .lay-dots i.on { background: var(--blue); }
+.lay-where.attn .lay-count { color: var(--amber); }
+.lay-approvals { display: flex; flex-direction: column; flex: none; padding: 6px 12px 0; } .lay-approvals:empty { display: none; }
+.lay-gone { flex: 1; border: 1px dashed var(--line); border-radius: 8px; margin: 12px; }
 .phone-project { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
 .phone-project-head { color: var(--muted); padding: 0 2px; } .phone-project-head b { color: var(--text); }
 .phone-row .ico-wrap .ico { width: 20px; height: 20px; }
 .phone-watch .watch { flex-direction: column; padding: 0; flex: none; }
 .phone-watch .watch-map { flex: none; gap: 60px; padding: 14px 10px 64px; }
 .phone-watch .watch-feed { max-width: none; overflow: visible; }
-#app.kbd .phone-layout > .lay-title, #app.kbd .phone-layout > .lay-map, #app.kbd .phone-layout > .lay-nav { display: none; }
+#app.kbd .phone-layout > .lay-strip, #app.kbd .lay-term > .row { display: none; }
+#app.kbd .lay-term { padding-top: 4px; gap: 6px; overflow: hidden; }
 .lay-title select { font-size: calc(14px * var(--ui-scale)); min-height: 44px; }
 
 /* Usage: the model and a context gauge in the strip, and the two dialogs. */

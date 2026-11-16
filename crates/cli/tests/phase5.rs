@@ -1833,16 +1833,23 @@ fn a_phone_steps_through_a_layout_from_its_map() {
     );
     assert_eq!(
         page.js("[[...document.querySelectorAll('.lay-map button')].map(b => b.getAttribute('aria-label')), document.querySelector('.lay-showing').innerText]"),
-        json!([["lead from proj, idle", "scratch, idle"], "Showing lead (from proj) · 1 of 2"])
+        json!([["lead from proj, idle", "scratch, idle"], "all › lead (from proj) · 1 of 2"])
     );
     page.goto("#/fleet");
     page.wait(
         "the layout's row under its station",
         "(r => r ? (r.click(), true) : false)(document.querySelector('main.phone .phone-station .lay-row'))",
     );
+    // The layout's own controls are one line under the pane's bar; the map
+    // opens from it, over the pane.
+    page.wait(
+        "the line, with the map closed",
+        "document.querySelectorAll('.lay-map button').length === 3 && !!document.querySelector('.phone-layout .composer-box') && document.querySelector('.lay-panel').hidden",
+    );
+    page.js("(document.querySelector('.lay-where').click(), true)");
     page.wait(
         "the map",
-        "document.querySelectorAll('.lay-map button').length === 3 && !!document.querySelector('.phone-layout .composer-box')",
+        "document.querySelector('.lay-where').getAttribute('aria-expanded') === 'true' && document.querySelector('.lay-map button').getBoundingClientRect().height > 0",
     );
     let boxes = page.js("[...document.querySelectorAll('.lay-map button')].map(b => { const r = b.getBoundingClientRect(); return { label: b.getAttribute('aria-label'), now: b.getAttribute('aria-current'), x: Math.round(r.left), y: Math.round(r.top), w: r.width, h: r.height }; })");
     let labels: Vec<&str> = boxes
@@ -1870,14 +1877,15 @@ fn a_phone_steps_through_a_layout_from_its_map() {
         "every box is big enough for a finger: {boxes}"
     );
     let showing = "document.querySelector('.lay-showing').innerText";
-    assert_eq!(page.js(showing), json!("Showing dev · 1 of 3"));
+    assert_eq!(page.js(showing), json!("build › dev · 1 of 3"));
 
-    // Tap the second box: that pane is shown, and the message box is its.
+    // Tap the second box: that pane is shown, the map closes, and the
+    // message box is its.
     page.js("document.querySelectorAll('.lay-map button')[1].click()");
     page.wait(
         "the second pane",
         &format!(
-            "{showing} === 'Showing dev2 · 2 of 3' && document.querySelector('.phone-layout .pane')?.dataset.pane === {} && !!document.querySelector('.phone-layout .xterm-rows')",
+            "{showing} === 'build › dev2 · 2 of 3' && document.querySelector('.lay-panel').hidden && document.querySelector('.phone-layout .pane')?.dataset.pane === {} && !!document.querySelector('.phone-layout .xterm-rows')",
             s.pane("dev2")["id"]
         ),
     );
@@ -1910,11 +1918,106 @@ fn a_phone_steps_through_a_layout_from_its_map() {
     );
     page.wait(
         "the third pane after a swipe",
-        &format!("{showing} === 'Showing lead · 3 of 3'"),
+        &format!("{showing} === 'build › lead · 3 of 3'"),
     );
 
     // The same station and the same phone, for the conversation view.
     the_conversation_view(&s, &page);
+    the_pane_of_a_layout_is_the_pane_itself(&s, &page, loose["id"].as_str().unwrap());
+}
+
+/// The owner's report (16 Nov 2026), from a phone: "the window on mobile in a
+/// layout is the old style vs a pane not in a layout. The panes in the layout
+/// should work like the single panes." In a layout of an agent and a shell,
+/// at a phone's width: the agent's pane is its conversation, under the same
+/// bar, with its card and its message box; Chat and Terminal are one tap
+/// apart and the draft goes along; the shell is its terminal, and the bar
+/// says why; stepping away stops watching the conversation and lets go of
+/// the terminal, and stepping back finds the conversation where it was
+/// scrolled to, with what was being written. Chat sets no size.
+fn the_pane_of_a_layout_is_the_pane_itself(s: &Station, page: &common::browser::Page, shell: &str) {
+    let line = |v: Value| json!({"transcript": v});
+    let said = |blocks: Value| {
+        line(json!({"type": "assistant", "message": {"role": "assistant", "content": blocks}}))
+    };
+    let tallier = s.fake(
+        json!({"steps": [
+            {"prompt": "tally the wrens"},
+            said(json!([{"type": "text", "text": "A line of the tally.\n\n".repeat(40) + "**Forty** lines."}])),
+            said(json!([{"type": "tool_use", "id": "toolu_w", "name": "Bash", "input": {"command": "rm wrens.csv"}}])),
+            {"permission": {"name": "Bash", "command": "rm wrens.csv"}},
+            {"turn_end": "the wrens are tallied"}
+        ]}),
+        json!({"name": "tallier"}),
+    );
+    s.wait_state(&tallier, "needs_you");
+    s.call(
+        "deck.layout.save",
+        json!({"layout": {"name": "pair", "tree": {"dir": "row", "ratio": 500,
+            "a": {"id": tallier, "station": "alpha"}, "b": {"id": shell, "station": "alpha"}}}}),
+    );
+    // (A look at the page costs a tenth of a second here, so each one below
+    // waits for what the step before led to, and takes the next step.)
+    let face = |to: &str| {
+        format!("[...document.querySelectorAll('.phone-layout > .chat-bar .chat-switch button')].find(b => b.innerText === '{to}')")
+    };
+    let showing = "document.querySelector('.lay-showing')?.innerText";
+    let log = "document.querySelector('.phone-layout .chat-log')";
+    // What the page asks the station to watch and to attach, and to let go
+    // of, counted from here: the list, where nothing is watched.
+    let watched = "((c, n) => n(c['pane.conversation.watch']) - n(c['pane.conversation.unwatch']) + ' watched, ' + (n(c['pane.attach']) - n(c['pane.detach'])) + ' attached')(window.__sent, x => x || 0)";
+    page.goto("#/fleet");
+    page.js("(window.__sent = {}, WebSocket.prototype.send = (send => function (m) { try { const k = JSON.parse(m).method; window.__sent[k] = (window.__sent[k] || 0) + 1; } catch (e) { /* not text */ } return send.call(this, m); })(WebSocket.prototype.send), location.hash = '#/l/pair', true)");
+
+    // The agent's pane: its conversation under its own bar, and the request
+    // its hook holds as a card, said once. Allowed there.
+    let seen = page.wait(
+        "the conversation in the layout",
+        &format!("{showing} === 'pair › tallier · 1 of 2' && !!document.querySelector('.phone-layout .chat-text strong') && !!document.querySelector('.phone-layout .chat-box') && (allow => allow ? [document.querySelectorAll('.phone-layout .xterm, .phone-layout .composer-box').length, document.querySelectorAll('.lay-approvals .approval').length, document.querySelector('.phone-layout > .chat-bar .chat-title b').innerText, !!document.querySelector('.phone-layout > .chat-bar .chat-more'), allow.click()] : null)([...document.querySelectorAll('.phone-layout .chat-cards .approval button')].find(b => b.innerText === 'Allow'))"),
+    );
+    assert_eq!(seen, json!([0, 0, "tallier", true, null]));
+    s.wait_text(&tallier, "[fake] permission: allow");
+
+    // Terminal and back: the same switch, and the draft goes along.
+    page.wait(
+        "the reply, then Terminal with something half written",
+        &format!("[...document.querySelectorAll('.phone-layout .chat-text')].some(t => t.innerText.includes('the wrens are tallied')) && !document.querySelector('.chat-cards .approval') && (b => (b.value = 'wrens, then', b.dispatchEvent(new Event('input')), {}.click(), true))(document.querySelector('.chat-box'))", face("Terminal")),
+    );
+    page.wait(
+        "the terminal with the draft, then Chat",
+        &format!("!!document.querySelector('.phone-layout .xterm-rows') && document.querySelector('.phone-layout .composer-box')?.value === 'wrens, then' && !document.querySelector('.phone-layout .chat-log') && ({}.click(), true)", face("Chat")),
+    );
+    page.wait(
+        "the conversation with the draft, then Send",
+        "document.querySelector('.phone-layout .chat-box')?.value === 'wrens, then' && !document.querySelector('.phone-layout .xterm') && (document.querySelector('.chat-send').click(), true)",
+    );
+    s.wait_text(&tallier, "[fake] got: wrens, then");
+
+    // Scrolled up, and something half written: then on to the shell. It is
+    // its terminal, the bar says why, and nothing of the agent's pane is
+    // watched or attached any more.
+    page.wait(
+        "the message as a bubble, then the next pane",
+        &format!("document.querySelectorAll('.phone-layout .chat-user').length === 2 && document.querySelector('.chat-box').value === '' && (async () => {{ {log}.scrollTop = 40; await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); const b = document.querySelector('.chat-box'); b.value = 'kept'; b.dispatchEvent(new Event('input')); document.querySelector('.lay-nav .lay-step:last-child').click(); return true; }})()"),
+    );
+    let shell_seen = page.wait(
+        "the shell's terminal, then the pane before",
+        &format!("{showing} === 'pair › scratch · 2 of 2' && !!document.querySelector('.phone-layout .xterm-rows') && !document.querySelector('.phone-layout .chat-log') && {watched} === '0 watched, 1 attached' && [document.querySelector('.phone-layout > .chat-bar .chat-why').innerText, !!document.querySelector('.phone-layout .composer .keys'), document.querySelector('.lay-nav .lay-step').click()]"),
+    );
+    assert_eq!(
+        shell_seen,
+        json!(["Terminal only: it runs a shell, not an agent", true, null])
+    );
+    page.wait(
+        "the conversation where it was",
+        &format!("{showing} === 'pair › tallier · 1 of 2' && Math.abs({log}?.scrollTop - 40) <= 2 && document.querySelector('.chat-box').value === 'kept' && {watched} === '1 watched, 0 attached'"),
+    );
+    let pane = s.pane(&tallier);
+    assert_eq!(
+        (pane["cols"].as_u64(), pane["controller"].is_null()),
+        (Some(120), true),
+        "the layout's conversation did not resize the pane"
+    );
 }
 
 /// Kills a daemon the harness did not start (the one "installed" by an add).
@@ -5018,5 +5121,139 @@ fn pictures_of_answering_in_place() {
         for id in [&one, &two, &planner, &moved] {
             s.call("pane.close", json!({"pane": id}));
         }
+    }
+}
+
+/// Not a test of behaviour: pictures of a layout on a phone, one pane at a
+/// time, where the pane shown is the pane as it is when opened by itself (the
+/// owner's report, 16 Nov 2026), in a dark and a light theme. It also prints
+/// how much of the screen the pane's conversation gets.
+/// `SPANDECK_SHOTS=<folder> cargo test -p spandeck --test phase5 pictures_of_the_phones_layout -- --ignored --nocapture`
+#[test]
+#[ignore = "takes pictures for a person to look at; needs Chrome"]
+fn pictures_of_the_phones_layout_view() {
+    use common::browser::Page;
+    use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png;
+    let out = std::path::PathBuf::from(std::env::var("SPANDECK_SHOTS").expect("SPANDECK_SHOTS"));
+    std::fs::create_dir_all(&out).unwrap();
+    let s = Station::start("spark2");
+    let line = |v: Value| json!({"transcript": v});
+    let said = |text: &str| {
+        line(
+            json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}),
+        )
+    };
+    let shell = |n: &str| json!({"name": n, "agent": "shell"});
+    s.call(
+        "project.new",
+        json!({"path": "~/testProject1", "panes": [shell("dev2"), shell("logs")], "open": true}),
+    );
+    let shot = |page: &Page, name: &str| {
+        std::thread::sleep(Duration::from_millis(700));
+        let png = page.tab.capture_screenshot(Png, None, None, true).unwrap();
+        std::fs::write(out.join(format!("{name}.png")), png).unwrap();
+    };
+    let click = |page: &Page, what: &str, el: &str| {
+        page.wait(what, &format!("(e => e ? (e.click(), true) : false)({el})"));
+    };
+    let face = |to: &str| {
+        format!("[...document.querySelectorAll('.phone-layout .chat-switch button')].find(b => b.innerText === '{to}')")
+    };
+    let reply = "The inbox notification is fixed. What changed:\n\n- **The count** is the fleet's, not one station's\n- A notice raised at `spark2` reaches a deck served by any other station at once\n- \"Mark all read\" goes to every station that answers\n\nThe tests pass. One file is left over from the old count, and I would like to remove it.";
+    for theme in ["dark", "light"] {
+        s.call(
+            "look.set",
+            json!({"level": "deck", "choice": {"theme": format!("spandeck-{theme}")}}),
+        );
+        let name = format!("claude-{theme}");
+        let agent = s.fake(
+            json!({"steps": [
+                line(json!({"type": "ai-title", "aiTitle": "Spandeck inbox notification"})),
+                {"prompt": "Make the inbox count the fleet's."},
+                said(reply),
+                line(json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "rm crates/core/src/old_count.rs"}}]}})),
+                {"permission": {"name": "Bash", "command": "rm crates/core/src/old_count.rs"}},
+                {"turn_end": "Removed. The inbox is the fleet's now."}
+            ]}),
+            json!({"name": name, "project": "testProject1", "cwd": s.root.join("home/testProject1")}),
+        );
+        s.wait_state(&agent, "needs_you");
+        s.call(
+            "project.layout.save",
+            json!({"project": "testProject1", "layout": {"name": "build", "tree": {"dir": "col", "ratio": 600,
+                "a": {"dir": "row", "ratio": 500, "a": {"pane": name}, "b": {"pane": "dev2"}}, "b": {"pane": "logs"}},
+                "hidden": [{"pane": "logs"}]}}),
+        );
+        let phone = Page::open(&s, 390, 844);
+        click(
+            &phone,
+            "the list by station",
+            "[...document.querySelectorAll('.home-switch button')].find(b => b.innerText === 'By station')",
+        );
+        click(
+            &phone,
+            "the layout's row",
+            "document.querySelector('main.phone .phone-station .lay-row')",
+        );
+        phone.wait(
+            "the layout",
+            "!!document.querySelector('.phone-layout .chat-log .chat-text, .phone-layout .xterm-rows')",
+        );
+        // How much of the screen the pane itself gets, under the layout's own
+        // controls: the conversation's log, or the terminal where there is none.
+        let room = phone.js(
+            "(e => { const r = e.getBoundingClientRect(); return { what: e.className, top: Math.round(r.top), height: Math.round(r.height), screen: innerHeight }; })(document.querySelector('.phone-layout .chat-log') || document.querySelector('.phone-layout .pane'))",
+        );
+        println!("{theme}: the pane's room at 390x844, with a card waiting: {room}");
+        phone.wait(
+            "the card",
+            "!!document.querySelector('.phone-layout .chat-cards .approval')",
+        );
+        shot(&phone, &format!("{theme}-1-agent-chat-card"));
+        click(
+            &phone,
+            "Allow",
+            "[...document.querySelectorAll('.chat-cards .approval button')].find(b => b.innerText === 'Allow')",
+        );
+        phone.wait(
+            "the reply",
+            "[...document.querySelectorAll('.chat-text')].some(t => t.innerText.includes('Removed.')) && !document.querySelector('.chat-cards .approval')",
+        );
+        let room = phone.js(
+            "['.chat-bar', '.lay-strip', '.chat-log', '.chat-dock'].map(q => { const e = document.querySelector('.phone-layout ' + q), r = e.getBoundingClientRect(); return [q, Math.round(r.top), Math.round(r.height)]; })",
+        );
+        println!("{theme}: top and height of each part, nothing waiting: {room}");
+        shot(&phone, &format!("{theme}-2-agent-chat-map-collapsed"));
+        click(&phone, "the line", "document.querySelector('.lay-where')");
+        phone.wait("the map", "!document.querySelector('.lay-panel').hidden");
+        shot(&phone, &format!("{theme}-3-map-expanded"));
+        click(
+            &phone,
+            "the line again",
+            "document.querySelector('.lay-where')",
+        );
+        click(&phone, "Terminal", &face("Terminal"));
+        phone.wait(
+            "the terminal",
+            "!!document.querySelector('.phone-layout .xterm-rows') && !!document.querySelector('.phone-layout .composer-box')",
+        );
+        shot(&phone, &format!("{theme}-4-agent-terminal"));
+        click(&phone, "Chat", &face("Chat"));
+        phone.wait(
+            "the conversation",
+            "!!document.querySelector('.phone-layout .chat-log .chat-text')",
+        );
+        click(
+            &phone,
+            "the next pane",
+            "document.querySelector('.lay-nav .lay-step:last-child')",
+        );
+        phone.wait(
+            "the shell",
+            "!!document.querySelector('.phone-layout .xterm-rows') && !!document.querySelector('.phone-layout .chat-why')",
+        );
+        shot(&phone, &format!("{theme}-5-shell"));
+        drop(phone);
+        s.call("pane.close", json!({"pane": agent}));
     }
 }
