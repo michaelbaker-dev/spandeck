@@ -73,7 +73,7 @@ pub fn choose(
         .collect();
     if mine.is_empty() {
         return Err(format!(
-            "no session file of {program}'s for this folder has appeared since the pane started"
+            "no session file of {program}'s for this folder has appeared since the pane started ({program} begins one with its first message)"
         ));
     }
     // A file begun after another such pane had started could be that

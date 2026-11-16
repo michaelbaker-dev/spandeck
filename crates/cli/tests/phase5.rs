@@ -4577,7 +4577,9 @@ fn pictures_of_the_conversation_view() {
         click(&wide, "the fold", "document.querySelector('.chat-fold')");
         shot(&wide, &format!("desktop-{theme}-1-pane-as-conversation"));
         wide.goto("#/l/survey");
-        wide.wait("the layout", "!!document.querySelector('.workspace .chat-pane') && !!document.querySelector('.workspace .xterm-rows')");
+        // (Every agent's cell opens as its conversation: Terminal is
+        // picked in the last, for a picture of one of each.)
+        wide.wait("the layout", "(t => (!document.querySelector('.workspace .xterm-rows') && t.length > 1 && t[t.length - 1].click(), !!document.querySelector('.workspace .chat-pane') && !!document.querySelector('.workspace .xterm-rows')))([...document.querySelectorAll('.workspace .chat-pane .chat-switch button')].filter(b => b.innerText === 'Terminal'))");
         shot(&wide, &format!("desktop-{theme}-2-layout-one-of-each"));
         wide.goto(&pane(&asker));
         wide.terminal_face();

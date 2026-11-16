@@ -130,7 +130,7 @@ fn a_codex_pane_with_no_hooks_gets_its_conversation_from_its_session_file() {
     assert_eq!(old["available"], json!(false), "{old}");
     let why = old["reason"].as_str().unwrap();
     assert!(
-        why.starts_with("no conversation for this pane: Codex has not said which session it is in yet (nothing has come from its hooks), and no session file of Codex's for this folder has appeared since the pane started"),
+        why.starts_with("no conversation for this pane: Codex has not said which session it is in yet (nothing has come from its hooks), and no session file of Codex's for this folder has appeared since the pane started (Codex begins one with its first message)"),
         "{why}"
     );
     let new = conversation(&s, &first, true);

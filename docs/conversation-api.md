@@ -144,7 +144,7 @@ answers from its screen, with the same `reason` ("From the screen", below). The 
 | A shell, or a program spandeck does not know | `it runs a shell, not an agent` |
 | OpenCode, Antigravity | `<Agent> keeps its conversation where spandeck cannot read it yet` |
 | Claude Code before its first hook | `Claude Code has not said which session it is in yet (nothing has come from its hooks)` |
-| Codex with no hook yet and no session file since the pane started (every Codex pane before its first message) | `Codex has not said which session it is in yet (nothing has come from its hooks), and no session file of Codex's for this folder has appeared since the pane started` |
+| Codex with no hook yet and no session file since the pane started (every Codex pane before its first message) | `Codex has not said which session it is in yet (nothing has come from its hooks), and no session file of Codex's for this folder has appeared since the pane started (Codex begins one with its first message)` |
 | Codex with no hook, and another hookless Codex pane in the same folder | `…, and another pane runs Codex in this folder and reports nothing either, so a session file begun since both started could be either pane's: spandeck does not guess` |
 | Codex with no hook, and several session files in its folder written to at the same time | `…, and 2 of Codex's session files for this folder were written to at the same time since the pane started, so more than one Codex is at work here: spandeck does not guess which is this pane's` |
 | A pane started into a saved session whose file is not found | `<Agent> has not said where its session file is` |
