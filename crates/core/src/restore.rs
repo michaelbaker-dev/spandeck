@@ -665,6 +665,7 @@ impl Daemon {
             term,
             tx,
             meta: Mutex::new(meta),
+            wake: Default::default(),
         });
         self.panes
             .write()

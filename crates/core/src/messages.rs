@@ -3,12 +3,14 @@
 //! typed into another agent's session.
 
 use serde_json::{json, Value};
-use spandeck_agents::AgentState;
 
-use crate::daemon::{invalid, Authority, Caller, Daemon, Error, Result};
+use std::sync::Arc;
+
+use crate::daemon::{invalid, Authority, Caller, Daemon, Error, PaneEntry, Result};
 use crate::hooks::truncate;
 use crate::paths::now_ms;
 use crate::relay::{split_address, MessageStore, NewMessage, SendMark, TaskAuth, TASK_AUTH_MS};
+use crate::wake::Wake;
 
 const ROUTE_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 
@@ -93,6 +95,7 @@ impl Daemon {
         let sender = self.sender_name(caller);
         let agent = caller.authority == Authority::Agent;
         let mut auth = None;
+        let mut local_pane = None;
         if remote {
             let dest = station.unwrap_or_default();
             if self.fleet.peer(dest).is_none() {
@@ -141,6 +144,7 @@ impl Daemon {
                     return Err(not_linked(own, theirs));
                 }
             }
+            local_pane = Some(target.id.clone());
         }
         let env = self
             .mail()
@@ -165,6 +169,10 @@ impl Daemon {
         if remote {
             self.relay
                 .push(&Timed(self.clone()), station.unwrap_or_default());
+        }
+        // For a pane here: its agent is told now if it is idle (wake.rs).
+        if let Some(pane) = &local_pane {
+            self.wake_mail(pane);
         }
         // The ship's log keeps who talked to whom, not what was said.
         self.record(
@@ -311,10 +319,13 @@ impl Daemon {
     /// marked as announced. A notice that is ignored is repeated after
     /// `nudge_secs`.
     pub(crate) fn mail_notice(&self, pane_id: &str) -> Option<String> {
+        let p = self.pane(pane_id).ok()?;
+        // One road at a time tells a pane of its mail (wake.rs).
+        let _turn = p.wake.turn.lock().unwrap();
         // Read the marks now, not from an earlier copy: a pause or a stop
         // that lands while a hook is being handled must still hold the mail
         // back.
-        if self.no_mail(&self.pane(pane_id).ok()?.meta.lock().unwrap()) {
+        if self.no_mail(&p.meta.lock().unwrap()) {
             return None;
         }
         let names = self.pane_names(pane_id);
@@ -348,70 +359,128 @@ impl Daemon {
     }
 
     /// Wake idle agents that have unread mail with a typed one-line nudge.
-    /// The nudge is the only typed text; the payload never is.
+    /// The nudge is the only typed text; the payload never is. This is the
+    /// look once a second: it repeats a nudge that was ignored, and tells
+    /// an agent whose wake on arrival was missed or is switched off.
     pub(crate) fn pump_mail(&self) {
-        let mail = self.mail();
-        let now = now_ms();
         let in_force = self.holds_in_force();
         for p in self.list_panes() {
-            // An idle agent that nothing holds: not paused, not stopped,
-            // not waiting for the owner after a restart.
-            let wakeable = |m: &crate::daemon::PaneMeta| {
-                m.exit.is_none()
-                    && !in_force.no_mail(m)
-                    && m.agent.is_agent()
-                    && matches!(m.state, AgentState::Idle | AgentState::Done)
-                    && now.saturating_sub(m.state_since_ms) > 1200
-            };
-            let (idle, id) = {
-                let m = p.meta.lock().unwrap();
-                (wakeable(&m), m.id.clone())
-            };
-            if !idle {
-                continue;
-            }
-            let waiting = mail.unannounced(
-                &self.pane_names(&id),
-                now.saturating_sub(self.cfg.nudge_secs * 1000),
-            );
-            let Some((_, sender, _)) = waiting.first().cloned() else {
-                continue;
-            };
-            let nudge = format!("You have mail from {sender}. Check your spandeck inbox.");
-            // The marks are looked at once more with the pane's input
-            // locked, and whatever sets one takes back a nudge not yet
-            // typed: this look and the typing cannot pass a Pause or a Stop
-            // (terminal/input.rs). A nudge that is not sent announces
-            // nothing: the mail stays as it was.
-            let sent = p.term.send_if(
-                spandeck_terminal::Item {
-                    kind: spandeck_terminal::InputKind::Nudge,
-                    bytes: nudge.into_bytes(),
-                    enter_after: Some(std::time::Duration::from_millis(30)),
-                    from: None,
-                },
-                || wakeable(&p.meta.lock().unwrap()),
-            );
-            if !matches!(sent, Ok(Some(_))) {
-                continue;
-            }
-            self.note_woken(
-                &waiting.iter().map(|w| w.0.clone()).collect::<Vec<_>>(),
-                now,
-            );
-            mail.mark_announced(
-                &waiting.iter().map(|w| w.0.clone()).collect::<Vec<_>>(),
-                now,
-            );
+            self.nudge_pane(&p, in_force);
+        }
+    }
+
+    /// One look at one pane, by whichever road: type the nudge if the pane
+    /// is an idle agent that nothing holds and has mail it was not told of.
+    /// Says what the pane's state allowed, whether or not there was mail.
+    fn nudge_pane(&self, p: &Arc<PaneEntry>, in_force: crate::holds::InForce) -> Wake {
+        use crate::wake::{announce, decide, Seen};
+        // An idle agent that nothing holds: not paused, not stopped, not
+        // waiting for the owner after a restart. Looked at before the
+        // pane's turn is asked for, so that a look at a pane with nothing
+        // to wake waits for nothing.
+        let first = decide(&Seen::of(&p.meta.lock().unwrap(), in_force), None, now_ms());
+        if first == Wake::No {
+            return first;
+        }
+        let mut turn = p.wake.turn.lock().unwrap();
+        let now = now_ms();
+        let nudged = turn.last_nudge_ms;
+        let wakeable = || decide(&Seen::of(&p.meta.lock().unwrap(), in_force), nudged, now);
+        match wakeable() {
+            Wake::Now => {}
+            other => return other,
+        }
+        let told = announce(
+            &self.mail(),
+            &self.pane_names(&p.id),
+            now,
+            now.saturating_sub(self.cfg.nudge_secs * 1000),
+            &mut turn,
+            |sender| {
+                let nudge = format!("You have mail from {sender}. Check your spandeck inbox.");
+                // The marks are looked at once more with the pane's input
+                // locked, and whatever sets one takes back a nudge not yet
+                // typed: this look and the typing cannot pass a Pause or a
+                // Stop (terminal/input.rs). A nudge that is not sent
+                // announces nothing: the mail stays as it was.
+                let sent = p.term.send_if(
+                    spandeck_terminal::Item {
+                        kind: spandeck_terminal::InputKind::Nudge,
+                        bytes: nudge.into_bytes(),
+                        enter_after: Some(std::time::Duration::from_millis(30)),
+                        from: None,
+                    },
+                    || wakeable() == Wake::Now,
+                );
+                matches!(sent, Ok(Some(_)))
+            },
+            |ids| self.note_woken(ids, now),
+        );
+        if told > 0 {
             self.record(
                 "msg.nudged",
-                Some(&id),
+                Some(&p.id),
                 None,
                 None,
                 None,
-                json!({"count": waiting.len()}),
+                json!({"count": told}),
             );
         }
+        Wake::Now
+    }
+
+    /// Mail for this pane was stored a moment ago: look at the pane now,
+    /// off the caller's thread, instead of at the next look once a second.
+    /// Whoever stored the message waits for none of it, and nothing
+    /// depends on it: a wake that is lost is made up by `pump_mail`.
+    pub(crate) fn wake_mail(&self, pane: &str) {
+        if !self.flag_on(crate::wake::SWITCH, true) {
+            return;
+        }
+        let (Ok(p), Ok(rt)) = (self.pane(pane), tokio::runtime::Handle::try_current()) else {
+            return;
+        };
+        let d = self.clone();
+        rt.spawn_blocking(move || {
+            if let Wake::At(at) = d.nudge_pane(&p, d.holds_in_force()) {
+                // Idle, but not for long enough yet: at the moment it
+                // will have been.
+                d.wake_mail_at(&p.id, at);
+            }
+        });
+    }
+
+    /// Look at this pane's mail at `at` (the station's clock). One later
+    /// look is set per pane: an earlier one replaces it, a later one is
+    /// not needed, since each look sets the next if it is still too soon.
+    pub(crate) fn wake_mail_at(&self, pane: &str, at: u64) {
+        if !self.flag_on(crate::wake::SWITCH, true) {
+            return;
+        }
+        let (Ok(p), Ok(rt)) = (self.pane(pane), tokio::runtime::Handle::try_current()) else {
+            return;
+        };
+        {
+            let mut set = p.wake.timer_at.lock().unwrap();
+            if set.is_some_and(|t| t <= at) {
+                return;
+            }
+            *set = Some(at);
+        }
+        let d = self.clone();
+        rt.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                at.saturating_sub(now_ms()),
+            ))
+            .await;
+            {
+                let mut set = p.wake.timer_at.lock().unwrap();
+                if *set == Some(at) {
+                    *set = None;
+                }
+            }
+            d.wake_mail(&p.id);
+        });
     }
 
     /// The safety net of the message relay, every half second: every
@@ -495,6 +564,10 @@ impl Daemon {
                     &format!("Message from {}", env.sender),
                     &truncate(&env.body, 200),
                 );
+            } else {
+                // Stored here for a pane here: its agent is told now if it
+                // is idle (wake.rs).
+                self.wake_mail(name);
             }
         }
         ack
@@ -550,6 +623,10 @@ impl crate::relay::Link for Timed {
             &format!("Not delivered to {}", env.recipient),
             &truncate(&note.body, 400),
         );
+        // The note is mail for the sender's pane like any other.
+        if let Some(pane) = &pane {
+            d.wake_mail(pane);
+        }
     }
 }
 

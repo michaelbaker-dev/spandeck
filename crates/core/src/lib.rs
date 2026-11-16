@@ -80,6 +80,7 @@ pub mod tasks;
 pub mod trust;
 pub mod usage;
 pub mod vault;
+pub mod wake;
 
 pub use daemon::{Authority, BusEvent, Caller, Daemon, Error, StartOpts, PROTOCOL, VERSION};
 pub use paths::{Config, Paths};

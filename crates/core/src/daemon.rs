@@ -237,6 +237,8 @@ pub struct PaneEntry {
     pub term: Pane,
     pub tx: broadcast::Sender<PaneEvent>,
     pub meta: Mutex<PaneMeta>,
+    /// Whose turn it is to look at this pane's mail (wake.rs).
+    pub wake: crate::wake::PaneWake,
 }
 
 impl PaneEntry {
@@ -1220,6 +1222,7 @@ impl Daemon {
             term,
             tx,
             meta: Mutex::new(meta),
+            wake: Default::default(),
         });
         panes.insert(id.clone(), entry.clone());
         drop(panes);
@@ -1437,6 +1440,11 @@ impl Daemon {
             json!({"state": state, "from": old, "reason": reason, "name": meta.name}),
         );
         if old != state {
+            // An agent that has just gone idle is looked at again the
+            // moment it has been idle long enough to be told of its mail.
+            if matches!(state, AgentState::Idle | AgentState::Done) && meta.agent.is_agent() {
+                self.wake_mail_at(&p.id, meta.state_since_ms + crate::wake::IDLE_MS + 1);
+            }
             self.notify_state(&meta, old, state);
             // A task follows its agent: stuck on the user is blocked, and
             // working again is running. Waiting on an approval is set where
@@ -2202,6 +2210,7 @@ impl Daemon {
                         term,
                         tx,
                         meta: Mutex::new(meta.clone()),
+                        wake: Default::default(),
                     });
                     self.panes.write().unwrap().insert(h.id.clone(), entry);
                     self.record(
@@ -2533,6 +2542,7 @@ impl Daemon {
                         term,
                         tx,
                         meta: Mutex::new(hp.meta),
+                        wake: Default::default(),
                     });
                     self.panes.write().unwrap().insert(id, entry.clone());
                     self.save_pane(&entry);
@@ -2598,6 +2608,7 @@ impl Daemon {
                     term,
                     tx,
                     meta: Mutex::new(hp.meta),
+                    wake: Default::default(),
                 });
                 self.panes.write().unwrap().insert(id, entry);
             }
