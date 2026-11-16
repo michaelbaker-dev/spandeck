@@ -1123,11 +1123,12 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     // The drag is repeated until it takes: on a slow machine the first one
     // landed while the last lines were still being drawn, and the view went
     // back to the end (seen twice on the Mac CI runner).
-    // Still fails now and then on the Mac CI runner only (never on a real
-    // Mac): when it does, say what the page showed, so the cause can be found.
+    // Earlier output is whatever is above the end: the failures on the CI
+    // runners (16 Nov 2026) showed the view at the very first lines, above
+    // the numbers this once looked for, and so waited for ever.
     let dragged = format!(
             "(() => {{ // The finger lands on the terminal's own element, as on a real phone.
-           if (!{rows}.includes('1300')) return /1[0-2][0-9][0-9]/.test({rows});
+           if (!{rows}.includes('1300')) return /\\S/.test({rows});
            const el = document.querySelector('.phone-pane .xterm-screen');
            const touch = (type, y) => {{ const ev = new Event(type, {{bubbles: true, cancelable: true}}); Object.defineProperty(ev, 'touches', {{value: y === null ? [] : [{{clientX: 100, clientY: y}}]}}); return ev; }};
            el.dispatchEvent(touch('touchstart', 200));
