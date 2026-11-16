@@ -1274,6 +1274,40 @@ fn a_link_between_stations_is_known_on_both_and_carries_messages_and_findings() 
     for s in [&a, &b] {
         assert_eq!(s.call("approval.list", json!({"all": true})), json!([]));
     }
+    // Found 16 Nov 2026: the sender's copy stayed "delivered" while the
+    // recipient's said "answered". Alpha's copy says what alpha knows
+    // (stored at bravo; read is bravo's to say), and is answered when
+    // the reply to it arrives.
+    let asked = |s: &Station| {
+        s.call("msg.recent", json!({}))
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["body"].as_str().unwrap().contains("gannet contract"))
+            .cloned()
+            .unwrap()
+    };
+    let mine = wait_for("alpha to know it was stored", 10, || {
+        Some(asked(&a)).filter(|m| m["status"] == json!("delivered"))
+    });
+    assert_eq!(asked(&b)["status"], json!("read"));
+    assert!(
+        mine["status_words"]
+            .as_str()
+            .unwrap()
+            .starts_with("stored at bravo, as alpha knows it"),
+        "{mine}"
+    );
+    b.call_as_pane(
+        &keeper,
+        "msg.reply",
+        json!({"id": mine["id"], "body": "name and scope, as I said"}),
+    )
+    .unwrap();
+    wait_for("alpha's copy to be answered", 10, || {
+        (asked(&a)["status"] == json!("answered")).then_some(())
+    });
+    assert_eq!(asked(&b)["status"], json!("answered"));
 
     // The link opens vault and nothing else on bravo. A pane of another
     // project there, addressed by its bare name, passes alpha's route

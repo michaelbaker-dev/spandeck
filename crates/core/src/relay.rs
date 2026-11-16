@@ -364,7 +364,7 @@ impl MessageStore {
     }
 
     /// The other station has it.
-    fn settle_delivered(&self, msg: &str, now: u64) -> bool {
+    pub(crate) fn settle_delivered(&self, msg: &str, now: u64) -> bool {
         self.db
             .with_tx(|tx| {
                 tx.execute("UPDATE outbox SET state='done' WHERE msg=?1", [msg])?;
@@ -640,6 +640,64 @@ impl MessageStore {
         })
     }
 
+    /// A message has arrived that says which messages it answers (`refs`:
+    /// `reply` puts the id of the message replied to there). Those that
+    /// this station sent to its sender are answered, and now this station
+    /// knows it: before, the sender's copy stayed "delivered" for ever
+    /// while the recipient's said "answered" (found 16 Nov 2026).
+    ///
+    /// Only the pane a message was sent to can mark it: the row's
+    /// recipient must be the reply's sender, and its sender the reply's
+    /// recipient. Nothing else about the row is taken from the reply.
+    /// Returns how many were marked.
+    pub fn answered_by(&self, reply: &Envelope, now: u64) -> usize {
+        let ids: Vec<&str> = reply
+            .refs
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.as_str())
+            .take(20)
+            .collect();
+        if ids.is_empty() {
+            return 0;
+        }
+        self.db
+            .with(|c| {
+                c.execute(
+                    "UPDATE messages SET status='answered', acted=COALESCE(acted, ?2), read=COALESCE(read, ?2)
+                     WHERE id IN (SELECT value FROM json_each(?1)) AND recipient=?3 AND sender=?4
+                       AND status='delivered'",
+                    params![json!(ids).to_string(), now as i64, reply.sender, reply.recipient],
+                )
+            })
+            .unwrap_or(0)
+    }
+
+    /// What a row's status is worth, said in the row: `at` is the station
+    /// whose copy this is, and for a message that went to another station
+    /// and is not known to be answered, `status_words` says what
+    /// "delivered" means here. The sender's station is told that a
+    /// message was answered by the reply itself; it is never told that
+    /// one was only read, and does not pretend to know.
+    fn say(&self, mut rows: Vec<Value>) -> Vec<Value> {
+        for row in &mut rows {
+            let dest = row["to"]
+                .as_str()
+                .and_then(|to| split_address(to).1)
+                .filter(|s| *s != self.station)
+                .map(String::from);
+            row["at"] = json!(self.station);
+            if let (Some(dest), Some("delivered")) = (dest, row["status"].as_str()) {
+                row["status_words"] = json!(format!(
+                    "stored at {dest}, as {} knows it: whether it was read is recorded at {dest} only, and {} learns that it was answered when the reply arrives",
+                    self.station, self.station
+                ));
+            }
+        }
+        rows
+    }
+
     /// Remember when the recipient was told about these messages.
     pub fn mark_announced(&self, ids: &[String], now: u64) {
         let list = json!(ids).to_string();
@@ -673,6 +731,7 @@ impl MessageStore {
                 let rows = stmt.query_map([thread], row_view)?;
                 rows.collect()
             })
+            .map(|rows| self.say(rows))
             .unwrap_or_default()
     }
 
@@ -686,6 +745,7 @@ impl MessageStore {
                 let rows = stmt.query_map(params![project, limit], row_view)?;
                 rows.collect()
             })
+            .map(|rows| self.say(rows))
             .unwrap_or_default()
     }
 }
