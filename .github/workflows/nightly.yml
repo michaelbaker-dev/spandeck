@@ -62,6 +62,11 @@ jobs:
       # the 816 calls a minute of before.
       - name: The deck asks each station one question (a frozen station, one from before, an idle count)
         run: cargo test -p spandeck --test refresh -- --ignored --nocapture
+      # Chat for every pane, in a real browser at a phone's width and a
+      # computer's: a layout of a Codex whose hooks never ran and a shell,
+      # each with Chat and Terminal. About ten seconds.
+      - name: Chat for every pane (a hookless Codex and a shell in a layout, phone and computer)
+        run: cargo test -p spandeck --test chat -- --ignored
   build:
     strategy:
       fail-fast: false

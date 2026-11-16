@@ -102,13 +102,14 @@ try { faces = JSON.parse(localStorage.getItem(FACES) || '{}') || {}; } catch (e)
 
 // 'chat' or 'terminal'. Every pane has both; one whose station cannot give
 // a conversation at all (a station from before this) is its terminal. Until
-// the owner chooses: on a phone an agent opens as its conversation; a shell,
-// and any pane on a computer, as its terminal.
+// the owner chooses for a pane: an agent opens as its conversation and a
+// shell as its terminal, on a phone and on a computer ("Chat default for
+// agents terminal for terminals", the owner, 16 Nov 2026).
 export function faceOf(st, p) {
   if (!p) return 'terminal';
   const key = keyOf(st, p), c = convs.get(key);
   if (c && c.available === false) return 'terminal';
-  return faces[key] === 'chat' || faces[key] === 'terminal' ? faces[key] : env.isPhone() && p.agent !== 'shell' ? 'chat' : 'terminal';
+  return faces[key] === 'chat' || faces[key] === 'terminal' ? faces[key] : p.agent !== 'shell' ? 'chat' : 'terminal';
 }
 
 export function setFace(st, p, face) {

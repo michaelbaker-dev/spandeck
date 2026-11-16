@@ -4539,7 +4539,7 @@ fn pictures_of_the_conversation_view() {
         phone.wait("banner", "!!document.querySelector('.chat-card.wait') && document.querySelector('.chat-peek')?.innerText.length > 5");
         shot(&phone, &format!("phone-{theme}-7-waiting-in-terminal"));
         phone.goto(&pane(&sh));
-        phone.wait("shell", "!!document.querySelector('.phone-pane .xterm-rows') && !!document.querySelector('.chat-why')");
+        phone.wait("shell", "!!document.querySelector('.phone-pane .xterm-rows') && document.querySelectorAll('.phone-pane .chat-switch button').length === 2");
         shot(&phone, &format!("phone-{theme}-8-shell"));
         if theme == "dark" {
             phone.goto(&pane(&heron));
@@ -4571,6 +4571,7 @@ fn pictures_of_the_conversation_view() {
 
         let wide = Page::open(&s, 1400, 900);
         wide.goto(&pane(&heron));
+        wide.terminal_face();
         click(&wide, "Chat", "document.querySelector('.strip .face-btn')");
         wide.wait("heron", "!!document.querySelector('.chat-pane .chat-acts')");
         click(&wide, "the fold", "document.querySelector('.chat-fold')");
@@ -4579,6 +4580,7 @@ fn pictures_of_the_conversation_view() {
         wide.wait("the layout", "!!document.querySelector('.workspace .chat-pane') && !!document.querySelector('.workspace .xterm-rows')");
         shot(&wide, &format!("desktop-{theme}-2-layout-one-of-each"));
         wide.goto(&pane(&asker));
+        wide.terminal_face();
         wide.wait("terminal", "!!document.querySelector('.strip .face-btn')");
         click(&wide, "Chat", "document.querySelector('.strip .face-btn')");
         wide.wait(
@@ -4791,7 +4793,7 @@ fn the_rest_of_the_conversation_view() {
     );
     click(&phone, "Shell", "[...document.querySelectorAll('.dialog.sheet .tile-pick')].find(b => b.innerText.trim() === 'Shell')");
     click(&phone, "Start", &button("Start"));
-    phone.wait("the new pane", "/#\\/s\\/alpha\\/p\\//.test(location.hash) && !!document.querySelector('.phone-pane .xterm-rows') && document.querySelector('.chat-why')?.innerText.includes('it runs a shell')");
+    phone.wait("the new pane", "/#\\/s\\/alpha\\/p\\//.test(location.hash) && !!document.querySelector('.phone-pane .xterm-rows') && document.querySelector('.phone-pane .chat-switch button.on')?.innerText === 'Terminal'");
     drop(phone);
 
     // On a computer: Chat on a terminal's title bar, in a pane at full size
@@ -4804,9 +4806,11 @@ fn the_rest_of_the_conversation_view() {
     );
     let wide = Page::open(&s, 1400, 900);
     wide.goto("#/l/two");
+    // (An agent's cell opens as its conversation since 16 Nov 2026:
+    // Terminal is picked in each, and it goes on from two terminals.)
     wide.wait(
         "two terminals",
-        "document.querySelectorAll('.workspace .pane .xterm-rows').length === 2",
+        "([...document.querySelectorAll('.workspace .chat-pane .chat-switch button')].filter(b => b.innerText === 'Terminal').forEach(b => b.click()), document.querySelectorAll('.workspace .pane .xterm-rows').length === 2)",
     );
     let fitted = wait_for("the layout to fit its panes", 10, || {
         let p = s.pane(&long);
@@ -5115,6 +5119,7 @@ fn pictures_of_answering_in_place() {
 
         let wide = Page::open(&s, 1400, 900);
         wide.goto(&pane(&two));
+        wide.terminal_face();
         wide.wait(
             "the terminal",
             "!!document.querySelector('.strip .face-btn')",
@@ -5130,6 +5135,7 @@ fn pictures_of_answering_in_place() {
         );
         shot(&wide, &format!("desktop-{theme}-2-question"));
         wide.goto(&pane(&planner));
+        wide.terminal_face();
         wide.wait(
             "the terminal",
             "!!document.querySelector('.strip .face-btn')",
@@ -5284,7 +5290,7 @@ fn pictures_of_the_phones_layout_view() {
         );
         phone.wait(
             "the shell",
-            "!!document.querySelector('.phone-layout .xterm-rows') && !!document.querySelector('.phone-layout .chat-why')",
+            "!!document.querySelector('.phone-layout .xterm-rows') && document.querySelectorAll('.phone-layout .chat-switch button').length === 2",
         );
         shot(&phone, &format!("{theme}-5-shell"));
         drop(phone);

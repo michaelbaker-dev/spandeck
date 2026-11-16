@@ -640,4 +640,69 @@ mod tests {
         }
         assert_eq!(codex_last(&sessions, &folder, &none), None);
     }
+
+    /// The owner's report of 16 Nov 2026: a Codex pane whose hooks had not
+    /// run had no conversation. Its session is looked for among Codex's
+    /// files: only its own conversations written to since the pane began
+    /// are candidates, and a pane started into a saved one finds its file
+    /// by the id.
+    #[test]
+    fn codex_files_since_a_moment_and_the_file_of_a_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        let meta = |id: &str, cwd: &str, source: &str| {
+            format!("{{\"timestamp\":\"2026-11-16T09:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"timestamp\":\"2026-11-16T09:00:00.250Z\",\"cwd\":\"{cwd}\",\"source\":{source}}}}}\n")
+        };
+        let day = sessions.join("2026/11/16");
+        write(
+            &day.join("rollout-2026-11-16T09-00-00-aaa.jsonl"),
+            &meta("aaa", "/w/weir", "\"cli\""),
+            10,
+        );
+        // Written to long ago; one Codex began itself; a first line still
+        // being written; and a file that is not a session.
+        write(
+            &sessions.join("2026/11/15/rollout-2026-11-15T09-00-00-old.jsonl"),
+            &meta("old", "/w/weir", "\"cli\""),
+            5000,
+        );
+        write(
+            &day.join("rollout-2026-11-16T09-00-01-sub.jsonl"),
+            &meta("sub", "/w/weir", "{\"subagent\":\"review\"}"),
+            10,
+        );
+        write(
+            &day.join("rollout-2026-11-16T09-00-02-half.jsonl"),
+            meta("half", "/w/weir", "\"cli\"").trim_end(),
+            10,
+        );
+        write(&day.join("notes.txt"), "x\n", 10);
+        let found = codex_since(&sessions, now_ms() - 60_000);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(
+            (
+                found[0].id.as_str(),
+                found[0].cwd.as_str(),
+                found[0].started.as_str()
+            ),
+            ("aaa", "/w/weir", "2026-11-16T09:00:00.250Z")
+        );
+        assert_eq!(codex_since(&sessions, 0).len(), 2);
+
+        assert_eq!(
+            codex_file_of(&sessions, "old"),
+            Some(sessions.join("2026/11/15/rollout-2026-11-15T09-00-00-old.jsonl"))
+        );
+        // A name that ends like the id is not enough: the first line says.
+        write(
+            &day.join("rollout-2026-11-16T09-00-03-x-old.jsonl"),
+            &meta("x-old", "/w/weir", "\"cli\""),
+            10,
+        );
+        assert_eq!(
+            codex_file_of(&sessions, "old"),
+            Some(sessions.join("2026/11/15/rollout-2026-11-15T09-00-00-old.jsonl"))
+        );
+        assert_eq!(codex_file_of(&sessions, "nobody"), None);
+    }
 }

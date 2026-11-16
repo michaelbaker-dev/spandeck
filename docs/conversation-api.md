@@ -6,7 +6,12 @@ phase M2). The code is
 `crates/archive/src/conversation.rs` (session file to items), `crates/core/src/conversation.rs`
 (the calls) and `watch_local` / `watch_remote` in `crates/web/src/lib.rs` (the live stream).
 Answering a question or a plan (phase M3, 16 Nov 2026) is `crates/core/src/questions.rs`:
-`live.questions` and `question.answer`, below.
+`live.questions` and `question.answer`, below. Since 16 Nov 2026 every pane has a conversation
+for a caller that asks for it (`DECISIONS.md`, "Chat for every pane"): the agent's own where
+the station can read it (`source: "transcript"`), else one made from the pane's screen
+(`source: "screen"`; `crates/core/src/screentalk.rs`); and a Codex pane's session is found
+among Codex's own files when no hook has named it (`crates/core/src/discover.rs`). See
+"From the screen" and "How a pane's session is found", below.
 
 ## Rules that hold for every call
 
@@ -30,12 +35,13 @@ Answering a question or a plan (phase M3, 16 Nov 2026) is `crates/core/src/quest
 ## `pane.conversation`
 
 ```
-{pane, after?, before?, limit?, session?}
+{pane, after?, before?, limit?, session?, screen?}
 ```
 
 | Parameter | Meaning |
 |---|---|
 | `pane` | The pane's id (or `id@station`, or a unique name, as everywhere). |
+| `screen: true` | The caller can show a conversation made from the screen. A pane with no transcript then answers with one (`available: true`, `source: "screen"`) where it would have answered `available: false`. Without it, every answer is what it was before 16 Nov 2026. Send it with every call for the pane, the watch included. A station from before ignores it. |
 | neither `after` nor `before` | The newest `limit` items. What a view opens with. |
 | `after: N` | Items on session lines after `N`, oldest first, at most `limit`. `N` is a `cursor` from an earlier answer. |
 | `before: N` | The `limit` items just before line `N`. `N` is a `first` from an earlier answer. The page above. |
@@ -51,6 +57,7 @@ answer is as fresh as the file whoever asks.
 {
   "pane": "p_01jx", "station": "spark2", "agent": "claude",
   "available": true,
+  "source": "transcript", "session_from": "hooks",
   "session": "5b1e7c0a-0000-4000-8000-00000000c0de",
   "reset": false,
   "title": "Heron counts for the marsh survey",
@@ -102,6 +109,8 @@ answer is as fresh as the file whoever asks.
 
 | Field | Meaning |
 |---|---|
+| `source` | `transcript`: the items are the agent's own conversation, read from its session file. `screen`: they are made from the pane's terminal (below). A station from before 16 Nov 2026 sends no `source`: it is `transcript`. |
+| `session_from` | How the session is known. `hooks`: the agent's hooks named it. `resume`: the pane was started into it. `files`: found among the program's own session files, because no hook has named one (below). Absent with `source: "screen"`. |
 | `items` | The items asked for, oldest first. |
 | `updated` | Only with `after`: items you were sent before (their line is at or before the `after` you gave) that a line since has changed, which is a call that got its result, or a call the turn left behind. Replace the one you hold by `id`. An item in `items` is already complete as far as the file goes; the same item may come again later in `updated`, and replacing is always right. |
 | `cursor` | The session line this answer reaches. Ask `after` it for what comes next. Keep it with `session`. In an answer to `before` it is the line of the last item of that older page: do not take it as your place in the stream. |
@@ -126,14 +135,98 @@ answer is as fresh as the file whoever asks.
 ```
 
 `reason` always begins `no conversation for this pane: `. Show the terminal, and the reason
-where the Chat switch would be. The reasons:
+where the Chat switch would be. This is the answer only to a caller that did not send
+`screen: true`, or from a station from before 16 Nov 2026; with `screen: true` the same pane
+answers from its screen, with the same `reason` ("From the screen", below). The reasons:
 
 | Pane | Reason ends |
 |---|---|
 | A shell, or a program spandeck does not know | `it runs a shell, not an agent` |
 | OpenCode, Antigravity | `<Agent> keeps its conversation where spandeck cannot read it yet` |
-| Claude Code or Codex before its first hook | `<Agent> has not said which session it is in yet (nothing has come from its hooks)` |
-| The same, with a session but no file path | `<Agent> has not said where its session file is` |
+| Claude Code before its first hook | `Claude Code has not said which session it is in yet (nothing has come from its hooks)` |
+| Codex with no hook yet and no session file since the pane started (every Codex pane before its first message) | `Codex has not said which session it is in yet (nothing has come from its hooks), and no session file of Codex's for this folder has appeared since the pane started` |
+| Codex with no hook, and another hookless Codex pane in the same folder | `…, and another pane runs Codex in this folder and reports nothing either, so a session file begun since both started could be either pane's: spandeck does not guess` |
+| Codex with no hook, and several session files in its folder written to at the same time | `…, and 2 of Codex's session files for this folder were written to at the same time since the pane started, so more than one Codex is at work here: spandeck does not guess which is this pane's` |
+| A pane started into a saved session whose file is not found | `<Agent> has not said where its session file is` |
+| A session that is known and not in the archive | `its session is not in the archive` |
+
+### From the screen (`source: "screen"`)
+
+The answer to a caller that sent `screen: true`, for a pane with no transcript:
+
+```json
+{
+  "pane": "p_01jy", "station": "spark2", "agent": "shell",
+  "available": true, "source": "screen",
+  "reason": "no conversation for this pane: it runs a shell, not an agent",
+  "session": "screen:1794736800000", "reset": false, "title": null,
+  "items": [
+    {"id": "0.0", "line": 0, "kind": "screen", "ts_ms": 1794736800100, "lines": 1, "text": "Last login: Mon Nov 16"},
+    {"id": "1.0", "line": 1, "kind": "user", "ts_ms": 1794736811000, "origin": "you", "text": "ls reeds"},
+    {"id": "2.0", "line": 2, "kind": "screen", "ts_ms": 1794736811200, "lines": 3, "open": true,
+     "text": "$ ls reeds\navon.csv  exe.csv\n$"}
+  ],
+  "updated": [],
+  "cursor": 5, "first": 0, "more_before": false, "more_after": false,
+  "not_understood": 0, "not_understood_kinds": [], "older_dropped": false,
+  "live": {"state": "idle", "...": "..."}
+}
+```
+
+- It has the shape of any answer and is applied the same way: `items` are new, `updated`
+  replace the ones held by `id`, `reset` means throw away what is held. `reason` is why there
+  is no transcript, in the words of the table above: say it ("From the screen: it runs a shell,
+  not an agent"), where "Terminal only" was said.
+- **Items.** `user`: something sent to the pane through `pane.paste` or `pane.send_text`
+  (`origin`: `you`, or `agent` with `from`, the sending pane's name), and the first message a
+  pane was started with. `screen`: what the pane printed after it, as plain text in the
+  terminal's own layout (show it in a fixed-width font; lines are not wrapped).
+
+| `screen` field | Meaning |
+|---|---|
+| `text` | The last 16 KB of the block, from a line's beginning. Control characters are dropped. An empty `text` in `updated` means the block came to nothing: stop showing it. |
+| `lines` | How many lines the block has. |
+| `more` | `text` is not all of it: `pane.conversation.detail` has the rest (a frozen block: its last 256 KB; the one being printed: its last 4,000 lines, read from the terminal then). |
+| `open` | This is the block being printed now: it comes again in `updated` as it grows. When the next message is sent it is frozen: it comes once more without `open`, and never changes again. |
+| `whole` | The block is the whole screen as it was at that moment, not what was printed since the message: the program draws its screen itself (a full-screen program, or one that redrew over the place the message was sent at), or the place has left the terminal's history. |
+
+- **`cursor` is a count of changes, not a line.** Send it back as `after`, with `session`, and
+  do nothing else with it. `first` and `before` are an item's `line`, as always. `line` and
+  `id` (`<line>.0`) only ever grow, and a block keeps its from its first line to frozen.
+- **`session`** begins `screen:` and changes when the pane's program is started again. When
+  the pane gets a transcript (its first message begins its session file, or its first hook
+  arrives), the next answer has the transcript's `session`, `source: "transcript"` and
+  `reset: true`; the other way round too.
+- **`pane.conversation.detail {pane, item, session, offset?}`** with a `screen:` session gives
+  `{pane, session, item, text: {text, offset, total, next}}`, paged like any text.
+- `title` is `null`, `live.unread` is false and `pane.read` is refused (`invalid`): there is
+  nothing to mark. `live` is the same, so approvals, the folder-trust question and the reasons
+  a pane needs the owner are shown as in any conversation.
+- Kept in memory at the pane's station: 400 items and 2 MB a pane (`older_dropped` when the
+  oldest have gone), and it begins again when the station does.
+- The owner's only, like every answer here. No method was added.
+
+### How a pane's session is found
+
+In order: **the session its hooks named** (always, and it takes the place of anything below);
+**the session the pane was started into** (`resume`; for Codex its file is found by the id in
+the file's name, checked against the file's first line); and, for Codex only, **a session file
+found for the pane** (`session_from: "files"`):
+
+- the file is under `<CODEX_HOME or ~/.codex>/sessions/YYYY/MM/DD/`, named `rollout-*.jsonl`;
+  its first line is `session_meta` with an `id`, a `cwd` that is the pane's working folder,
+  a `timestamp` at or after the moment the pane's program was started, and a `source` that is
+  not an object (an object marks a conversation Codex began itself, for a sub-agent);
+- no other pane on the station is in that session;
+- no other pane that runs Codex in that folder and has had no hook either was already
+  started at the file's `timestamp`;
+- of those left, the newest, provided every older one was last written to before it began.
+  Otherwise none.
+
+It is looked for when the pane's conversation is asked for: at most twice a second while none
+is found, every two seconds after, so a new session begun with `/new` is followed. It is only
+read: nothing is ever answered or sent to a session, only to a pane. Claude Code is given its
+hooks at launch and is never looked for; OpenCode and Antigravity have no reader.
 
 A pane that has no conversation now can have one a moment later (the agent starts and its first
 hook arrives). Ask again, or watch: the stream says when.
@@ -141,6 +234,11 @@ hook arrives). Ask again, or watch: the stream says when.
 A station on a version from before this answers `not found: method pane.conversation`
 (error code `not_found`). Treat it as no conversation, with the reason that the station needs
 an update.
+
+**Mixed versions (16 Nov 2026).** A caller from before sends no `screen` and is answered as
+before. A station from before (0.4.7 to 0.4.9) ignores `screen` and answers a pane with no
+transcript `available: false` with its reason: show the terminal, and the reason where the
+switch would be. There is no `caps` entry: the answer itself says which it is.
 
 ### Items
 
@@ -446,7 +544,7 @@ an item of another session), `unreachable` (the pane's station, through the gate
 
 | | Claude Code | Codex | OpenCode, Antigravity | Shell |
 |---|---|---|---|---|
-| Conversation | Yes | Yes, read from 0.169.0 files; no live Codex pane has been watched yet | No: the reason, and the terminal | No |
+| Conversation | Yes | Yes, read from 0.169.0 files; named by its hooks, else found among its files. Before its first message it has no session: the screen | From the screen (`screen: true`); else the reason, and the terminal | From the screen (`screen: true`); else the reason |
 | Title | Yes | No | | |
 | Tool status | `ok` / `error` / `denied` / `interrupted` | `done` (the file does not say) | | |
 | Tool duration | Yes | Yes, from the times of the two records | | |

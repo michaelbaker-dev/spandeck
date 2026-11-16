@@ -555,9 +555,9 @@ mod in_a_browser {
         shoot(&page, "phone-codex-found-session");
     }
 
-    /// The same on a computer: each cell of a layout has "Chat" on its
-    /// terminal's title bar, whatever runs in it, and the conversation's
-    /// bar leads back.
+    /// The same on a computer: each cell of a layout has both faces,
+    /// whatever runs in it: "Chat" on a terminal's title bar, and the
+    /// conversation's bar leads back.
     #[test]
     #[ignore = "merge tier: a browser"]
     fn on_a_computer_every_cell_of_a_layout_has_chat_and_terminal() {
@@ -565,16 +565,15 @@ mod in_a_browser {
         let page = Page::open(&s, 1400, 900);
         page.goto("#/l/pair");
         let cell = |id: &str| format!(".chat-pane[data-pane=\"{id}\"]");
+        // As they open: the agent as its conversation, the shell as its
+        // terminal with "Chat" on its title bar ("Chat default for agents
+        // terminal for terminals").
         page.wait(
-            "both terminals, each with Chat on its bar",
-            "document.querySelectorAll('.split .face-btn').length === 2 && [...document.querySelectorAll('.split .face-btn')].every(b => b.innerText === 'Chat')",
+            "the agent's cell as Chat and the shell's as its terminal",
+            "document.querySelectorAll('.split .chat-pane').length === 1 && document.querySelectorAll('.split .face-btn').length === 1 && document.querySelector('.split .face-btn').innerText === 'Chat' && !!document.querySelector('.split .xterm-rows')",
         );
-        shoot(&page, "desktop-layout-terminals");
+        shoot(&page, "desktop-layout-as-it-opens");
         page.js("document.querySelector('.split .face-btn').click()");
-        page.wait(
-            "one cell as its conversation, then the other",
-            "document.querySelectorAll('.split .chat-pane').length === 1 && document.querySelectorAll('.split .face-btn').length === 1 && (document.querySelector('.split .face-btn').click(), true)",
-        );
         let (c, t) = (cell(&codex), cell(&sh));
         let seen = page.wait(
             "both cells as conversations made from the screen",
