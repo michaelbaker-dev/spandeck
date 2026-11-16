@@ -176,7 +176,7 @@ export class PaneTerm {
   }
 
   // The page has a new connection: the channel of the one before names
-  // nothing on it.
+  // nothing on it (it was let go of when that connection ended, `onClosed`).
   reattach() { this.chan = null; return this.attach(); }
 
   async attach() {
@@ -189,6 +189,12 @@ export class PaneTerm {
     if (!this.api.connected) return;
     try {
       const handlers = {
+        // This terminal was closed while the pane was being attached.
+        gone: () => this.disposed,
+        // The connection this attachment was on has ended: from now until
+        // this terminal's own next attach is answered it has no channel,
+        // and nothing typed into it is sent.
+        onClosed: () => { this.chan = null; },
         onData: (b) => { paneWrote(this); this.term.write(b); },
         onResync: (b) => { this.term.reset(); this.term.write(b); },
         onExit: (info) => this._note(`This pane's process ended (${describeExit(info)}).`),
@@ -216,7 +222,7 @@ export class PaneTerm {
         },
       };
       const res = await this.api.attach(this.station, this.pane.id, this.mode, handlers);
-      if (this.disposed) { this.api.detach(res.chan); return; }
+      if (!res) return;
       this.chan = res.chan;
       this.silentSince = null;
       this.tries = 0;

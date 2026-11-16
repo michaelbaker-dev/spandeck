@@ -69,6 +69,21 @@ days, not hours.
   Deck types names its pane by a channel number of its connection. Each connection
   starts counting at a random place, and a number it did not give is refused, so a key
   sent with a number from before a reconnect does not reach another pane.
+- **Attachment names are chosen by the page and never reused** (16 Nov 2026). A page
+  names each pane it attaches with a number it uses once in its life, across every
+  reconnect, and the station takes what is typed only for a name attached on that
+  connection: a key that carries a name from an earlier connection reaches no pane. A
+  station refuses a name that is already attached on the connection, and refuses a pane
+  without a name from a page that says it names them.
+- **A page that reconnects replaces only its own earlier connection** (16 Nov 2026). A
+  page sends at sign-in a value it made when it loaded (64 random bits, kept in memory
+  only, never stored). A new connection closes an older one only when it was let in as
+  the same caller and gives the same client id and the same value; through another
+  station, also only for the same pane. The client id alone is not enough (a duplicated
+  tab has it), an agent's token is never fenced and cannot close the owner's connection,
+  and another station can close only connections it made itself. A connection that
+  sends no such value is never closed by this rule. What the closed connection had
+  waiting to be typed is thrown away, never written later.
 - **Agents are not the owner.** Each pane has its own token. Agents can message, delegate
   and search history; they never get a call that administers a station. Text from agents,
   other stations and session history is shown as text and labelled as quoted, never run

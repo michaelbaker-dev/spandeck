@@ -409,6 +409,9 @@ pub struct Perf {
     pub silent_decks: Count,
     pub silent_gateways: Count,
     pub silent_panes: Count,
+    /// Connections closed because the page they belonged to came back on
+    /// a newer one (a Control Deck's, or a gateway's for one pane).
+    pub fenced: Count,
     /// A message for another station: sent here, to stored there.
     pub msg_received: Hist,
     /// A message stored here, to its agent being told of it.
@@ -664,7 +667,7 @@ impl Perf {
             "periodic": {"late": late, "work": self.tick_work.summary_at(now, FIVE_MIN).json(), "loops": loops},
             "look": self.look.summary_at(now, FIVE_MIN).json(),
             "terminal": {"resyncs": self.resyncs.json()},
-            "connections": {"closed_silent": {"decks": self.silent_decks.json(), "gateways": self.silent_gateways.json(), "panes_elsewhere": self.silent_panes.json()}},
+            "connections": {"closed_silent": {"decks": self.silent_decks.json(), "gateways": self.silent_gateways.json(), "panes_elsewhere": self.silent_panes.json()}, "replaced": self.fenced.json()},
             "messages": {
                 "received": self.msg_received.summary_at(now, FIVE_MIN).json(),
                 "woken": self.msg_woken.summary_at(now, FIVE_MIN).json(),

@@ -42,8 +42,10 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite;
 
+mod fence;
 mod lanes;
 use lanes::{Lane, Lines, Scope};
+use spandeck_core::typed;
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
@@ -54,6 +56,42 @@ pub struct Web {
     daemon: Daemon,
     /// Host header values this server answers to.
     hosts: Arc<RwLock<Vec<String>>>,
+    /// The connections that asked to be fenced (fence.rs): a page that
+    /// comes back closes its own earlier connection.
+    fences: Arc<Mutex<fence::Table<Arc<Fenced>>>>,
+}
+
+/// How a connection is told that the page it belonged to has come back on
+/// a newer one: it ends, and what it still had waiting to be typed is
+/// thrown away.
+#[derive(Default)]
+struct Fenced {
+    off: std::sync::atomic::AtomicBool,
+    told: tokio::sync::Notify,
+}
+
+impl Fenced {
+    fn close(&self) {
+        self.off.store(true, Ordering::SeqCst);
+        self.told.notify_one();
+    }
+
+    fn is_off(&self) -> bool {
+        self.off.load(Ordering::SeqCst)
+    }
+}
+
+/// A connection's place in the fence table, given up when it ends.
+struct Entered {
+    fences: Arc<Mutex<fence::Table<Arc<Fenced>>>>,
+    key: fence::Key,
+    ticket: u64,
+}
+
+impl Drop for Entered {
+    fn drop(&mut self) {
+        self.fences.lock().unwrap().leave(&self.key, self.ticket);
+    }
 }
 
 const FRAME_OUTPUT: u8 = 1;
@@ -235,6 +273,7 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
     let web = Web {
         daemon: daemon.clone(),
         hosts: Arc::new(RwLock::new(vec![])),
+        fences: Default::default(),
     };
     let app = Router::new()
         .route("/api/rpc", post(http_rpc))
@@ -817,6 +856,8 @@ impl Chan {
 /// connection did not give is refused.
 struct Channels<T> {
     live: HashMap<u32, T>,
+    /// Names a page gave to attachments that are still being made.
+    claimed: std::collections::HashSet<u32>,
     next: u32,
 }
 
@@ -830,6 +871,7 @@ impl<T> Channels<T> {
     fn starting_from(seed: u32) -> Self {
         Channels {
             live: HashMap::new(),
+            claimed: Default::default(),
             next: 1 + seed % (CHAN_FIRST_BELOW - 1),
         }
     }
@@ -841,10 +883,22 @@ impl<T> Channels<T> {
         loop {
             let chan = self.next;
             self.next = if chan >= u32::MAX - 1 { 1 } else { chan + 1 };
-            if !self.live.contains_key(&chan) {
+            if !self.live.contains_key(&chan) && !self.claimed.contains(&chan) {
                 return chan;
             }
         }
+    }
+
+    /// Take the name a page chose for a new attachment. Refused when it
+    /// is 0 (which an answer without a number reads as) or names a channel
+    /// this connection has open or is opening: a name is one attachment's.
+    fn claim(&mut self, chan: u32) -> bool {
+        chan != 0 && !self.live.contains_key(&chan) && self.claimed.insert(chan)
+    }
+
+    /// The attachment a name was taken for was not made.
+    fn unclaim(&mut self, chan: u32) {
+        self.claimed.remove(&chan);
     }
 
     /// The number a request names, if it is one: a whole number that fits
@@ -858,6 +912,7 @@ impl<T> Channels<T> {
     }
 
     fn open(&mut self, chan: u32, what: T) {
+        self.claimed.remove(&chan);
         self.live.insert(chan, what);
     }
 
@@ -899,6 +954,16 @@ struct Conn {
     who: Arc<Caller>,
     out: mpsc::Sender<Message>,
     open: Arc<Mutex<Open>>,
+    /// Attachments are named by the page (the switch `deck_names`).
+    names: bool,
+    /// The page said it names every pane it attaches (`auth.caps`): one
+    /// it does not name is refused, so that no pane of this connection
+    /// has a number the page did not choose.
+    page_names: bool,
+    /// The page's instance (fence.rs), passed on to a gateway's fence.
+    instance: Option<String>,
+    /// Set when the page has come back on a newer connection.
+    fenced: Arc<Fenced>,
 }
 
 /// One request as it was read.
@@ -940,6 +1005,12 @@ enum Typed {
     },
 }
 
+/// What was typed on a connection whose page has since come back on a
+/// newer one, and had not been handed to its pane: it is thrown away.
+fn replaced() -> Value {
+    json!({"code": "replaced", "message": "this page has made a newer connection: what was still waiting on this one was not sent"})
+}
+
 fn denied(message: &str) -> Value {
     json!({"code": "denied", "message": message})
 }
@@ -952,7 +1023,7 @@ impl Conn {
     /// `pane.attach` and `pane.conversation.watch`: the channel is in the
     /// connection's list before the answer that names it is given.
     async fn attach(&self, method: &str, params: &Value) -> Result<Value, Value> {
-        let (daemon, who) = (self.daemon(), &self.who);
+        let who = &self.who;
         let watch = method == "pane.conversation.watch";
         if !who.is_owner() {
             return Err(denied(if watch {
@@ -961,7 +1032,44 @@ impl Conn {
                 "attaching is for the user's clients"
             }));
         }
-        let chan = self.open.lock().unwrap().chans.fresh();
+        let chan = self.name_for(watch, params)?;
+        let made = self.attach_as(chan, watch, params).await;
+        if made.is_err() {
+            self.open.lock().unwrap().chans.unclaim(chan);
+        }
+        made
+    }
+
+    /// The number a new channel goes by: the one the page chose, when it
+    /// chose one that is free on this connection; else the next of this
+    /// connection's own.
+    fn name_for(&self, watch: bool, params: &Value) -> Result<u32, Value> {
+        let invalid = |message: String| json!({"code": "invalid", "message": message});
+        let mut open = self.open.lock().unwrap();
+        let asked = params.get("chan").filter(|c| !c.is_null());
+        match asked {
+            Some(asked) if self.names => {
+                let chan = Channels::<Chan>::named(params)
+                    .ok_or_else(|| invalid(format!("{asked} is not a channel number")))?;
+                if !open.chans.claim(chan) {
+                    return Err(invalid(format!(
+                        "channel {chan} is already attached on this connection"
+                    )));
+                }
+                Ok(chan)
+            }
+            // A pane's channel takes what is typed, so on a connection
+            // whose page names them none is given a number the page did
+            // not choose. (A watched conversation takes no typing.)
+            None if self.names && self.page_names && !watch => Err(invalid(
+                "this page names its attachments: pane.attach needs chan".into(),
+            )),
+            _ => Ok(open.chans.fresh()),
+        }
+    }
+
+    async fn attach_as(&self, chan: u32, watch: bool, params: &Value) -> Result<Value, Value> {
+        let (daemon, who) = (self.daemon(), &self.who);
         let station = params
             .get("station")
             .and_then(|s| s.as_str())
@@ -1022,7 +1130,10 @@ impl Conn {
                     &station,
                     &pane,
                     control,
-                    &who.client,
+                    Tab {
+                        client: &who.client,
+                        instance: self.instance.as_deref().filter(|_| self.names),
+                    },
                     chan,
                     self.out.clone(),
                 )
@@ -1447,6 +1558,7 @@ impl Running {
                     began = std::time::Instant::now();
                     match lane {
                         Lane::Attach => conn.attach(&req.method, &req.params).await,
+                        Lane::Input if conn.fenced.is_off() => Err(replaced()),
                         _ => {
                             conn.dispatch(&req.method, req.params.clone(), req.retry.clone(), at)
                                 .await
@@ -1464,6 +1576,9 @@ impl Running {
                     });
                     match (held, silent) {
                         (Err(_), _) => Err(lanes::not_sent(to, knows)),
+                        (Ok(_), _) if lane == Lane::Input && conn.fenced.is_off() => {
+                            Err(replaced())
+                        }
                         (Ok(_), Some(since)) => {
                             let for_ms = spandeck_core::paths::now_ms().saturating_sub(since);
                             Err(lanes::not_answering(to, for_ms, knows))
@@ -1531,14 +1646,17 @@ impl Running {
                     let _counted = counted;
                     place.turn().await;
                     let began = std::time::Instant::now();
-                    let reply = conn
-                        .dispatch(
+                    let reply = if conn.fenced.is_off() {
+                        Err(replaced())
+                    } else {
+                        conn.dispatch(
                             &req.method,
                             req.params.clone(),
                             req.retry.clone(),
                             AtRead::default(),
                         )
-                        .await;
+                        .await
+                    };
                     drop(place);
                     conn.finish(&req, Lane::Input, began, reply).await;
                 });
@@ -1593,6 +1711,7 @@ impl Running {
                     let turn = tokio::time::timeout(lanes::STATION_WAIT, place.turn()).await;
                     let began = std::time::Instant::now();
                     let reply = match turn {
+                        Ok(()) if conn.fenced.is_off() => Err(replaced()),
                         Ok(()) => hand(&conn, &req),
                         Err(_) => {
                             conn.input_refused(&req.params, &station);
@@ -1697,6 +1816,37 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     };
     // Read once, here: a connection keeps the way it began.
     let in_lanes = web.daemon.flag_on(lanes::FLAG, true);
+    let names = web.daemon.flag_on(typed::NAMES_FLAG, true);
+    let page_names = auth["caps"]
+        .as_array()
+        .is_some_and(|caps| caps.iter().any(|c| c == typed::NAMES_CAP));
+    // The same page come back (or the same page's same pane, through a
+    // gateway) closes the connection it had before, here, before this one
+    // is told it is signed in: nothing the older one still holds is done
+    // after anything this one sends. The owner's connections only, and
+    // only one that asks (fence.rs).
+    let from_station = who.who.starts_with("you (via ");
+    let fenced = Arc::new(Fenced::default());
+    let _entered = (names && who.is_owner())
+        .then(|| fence::Key::from_auth(&who.who, &who.client, from_station, &auth))
+        .flatten()
+        .map(|key| {
+            let (ticket, older) = web
+                .fences
+                .lock()
+                .unwrap()
+                .enter(key.clone(), fenced.clone());
+            if let Some(older) = older {
+                web.daemon.perf.fenced.add();
+                older.close();
+            }
+            Entered {
+                fences: web.fences.clone(),
+                key,
+                ticket,
+            }
+        });
+    let instance = fence::instance_of(auth.get("instance")).map(String::from);
     let hello = json!({"auth": {"ok": true, "station": web.daemon.station, "version": spandeck_core::VERSION, "build": assets_build(), "client": who.client, "full": who.is_owner(), "device": device, "lanes": in_lanes, "caps": web.daemon.caps()}});
     if sink
         .send(Message::Text(hello.to_string().into()))
@@ -1738,6 +1888,10 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
             chans: Channels::starting_from(chan_seed()),
             ended: false,
         })),
+        names,
+        page_names,
+        instance,
+        fenced: fenced.clone(),
     };
     let who = conn.who.clone();
     let mut running = Running::new(conn.clone(), page_knows_busy);
@@ -1778,7 +1932,6 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     // Another station's connection for one pane is judged in seconds (the
     // owner is looking at that pane); a deck's in half a minute, which is
     // only ever a page that is gone.
-    let from_station = who.who.starts_with("you (via ");
     let mut pulse = Beat::new(
         if from_station {
             beat::STATION
@@ -1791,6 +1944,9 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     loop {
         let msg = tokio::select! {
             m = in_rx.recv() => m,
+            // The page has come back on a newer connection: this one is
+            // over, with whatever it had not yet read.
+            _ = fenced.told.notified() => break,
             _ = rekeyed.changed(), if rests_on_key => {
                 key_replaced = true;
                 break;
@@ -1817,6 +1973,9 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
             Some(_) = running.lasting.join_next(), if !running.lasting.is_empty() => continue,
         };
         let Some((arrived, msg)) = msg else { break };
+        if fenced.is_off() {
+            break;
+        }
         let text = match msg {
             Message::Text(t) => t,
             Message::Close(_) => break,
@@ -2079,6 +2238,7 @@ async fn peer_socket(
     daemon: &Daemon,
     station: &str,
     client: &str,
+    fence: Option<Value>,
 ) -> Result<
     (
         futures_util::stream::SplitSink<PeerSocket, tungstenite::Message>,
@@ -2133,11 +2293,16 @@ async fn peer_socket(
         }
     };
     let (mut peer_sink, peer_stream) = ws.split();
+    // `fence`: this is one tab's connection for one pane, and replaces
+    // that tab's earlier one for that pane (fence.rs). A station from
+    // before passes over it.
+    let mut auth = json!({"client": gateway_client(&daemon.station, client)});
+    if let Some(fence) = fence {
+        auth["fence"] = fence;
+    }
     peer_sink
         .send(tungstenite::Message::Text(
-            json!({"auth": {"client": gateway_client(&daemon.station, client)}})
-                .to_string()
-                .into(),
+            json!({"auth": auth}).to_string().into(),
         ))
         .await
         .map_err(|e| e.to_string())?;
@@ -2262,6 +2427,14 @@ impl Pulse {
     }
 }
 
+/// The browser tab a gateway attaches for: its client id here, and its
+/// page's instance when the page gave one (and the switch `deck_names` is
+/// on here).
+struct Tab<'a> {
+    client: &'a str,
+    instance: Option<&'a str>,
+}
+
 /// Gateway: attach to a pane on another station and relay its stream, so the
 /// browser keeps a single connection to the station it opened. `client` is
 /// the browser tab the attach is for.
@@ -2270,11 +2443,14 @@ async fn attach_remote(
     station: &str,
     pane: &str,
     control: bool,
-    client: &str,
+    tab: Tab<'_>,
     chan: u32,
     out: mpsc::Sender<Message>,
 ) -> Result<RemoteAttach, String> {
-    let (mut peer_sink, mut peer_stream) = peer_socket(daemon, station, client).await?;
+    // The tab's page and the pane: the same page attaching this pane
+    // again closes this connection at the pane's station.
+    let fence = tab.instance.map(|i| json!({"pane": pane, "instance": i}));
+    let (mut peer_sink, mut peer_stream) = peer_socket(daemon, station, tab.client, fence).await?;
     let send = |v: Value| tungstenite::Message::Text(v.to_string().into());
     // The station's events come down this connection too, for one thing:
     // who resized the pane and to what.
@@ -2483,7 +2659,7 @@ async fn watch_remote(
     out: mpsc::Sender<Message>,
 ) -> Result<Watched, Value> {
     let unreachable = |message: String| json!({"code": "unreachable", "message": message});
-    let (mut peer_sink, mut peer_stream) = peer_socket(daemon, station, client)
+    let (mut peer_sink, mut peer_stream) = peer_socket(daemon, station, client, None)
         .await
         .map_err(unreachable)?;
     let mut ask = params.clone();
@@ -2610,6 +2786,41 @@ mod tests {
             let first = Channels::<()>::starting_from(seed).fresh();
             assert!((1..CHAN_FIRST_BELOW).contains(&first), "{seed}: {first}");
         }
+    }
+
+    /// Unit 03b closes what 02a left ("unlikely, not impossible"): the page
+    /// names each attachment with a number it never uses again, so a
+    /// number left over from before a reconnect is one the new connection
+    /// was never given. The station's part: a name is one attachment's.
+    #[test]
+    fn a_name_the_page_chose_is_one_attachments() {
+        let mut chans = Channels::starting_from(7);
+        // Taken as given; a second attachment under the same name is
+        // refused while the first is being made, and while it is open.
+        assert!(chans.claim(900));
+        assert!(!chans.claim(900));
+        chans.open(900, "pane B");
+        assert!(!chans.claim(900));
+        assert_eq!(chans.get(&json!({"chan": 900})), Some(&"pane B"));
+        // 0 is what an answer without a number reads as.
+        assert!(!chans.claim(0));
+        // An attachment that was not made gives its name back; one that
+        // was closed leaves it free (the page does not use it again; a
+        // station need not remember every name it ever saw).
+        assert!(chans.claim(901));
+        chans.unclaim(901);
+        assert!(chans.claim(901));
+        // The connection's own numbers pass over a name the page holds.
+        let mut chans = Channels::starting_from(0);
+        assert!(chans.claim(1));
+        chans.open(2, "open");
+        assert_eq!(chans.fresh(), 3);
+        // A pane on a new connection, under a new name: the old name
+        // names nothing there.
+        let mut after = Channels::starting_from(7);
+        assert!(after.claim(902));
+        after.open(902, "pane C");
+        assert_eq!(after.get(&json!({"chan": 900})), None);
     }
 
     /// The frame's channel field is four bytes and 0 is read as "no

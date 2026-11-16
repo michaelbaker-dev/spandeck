@@ -2659,6 +2659,11 @@ impl Daemon {
         if self.flag_on(crate::beat::FLAG, true) {
             caps.push(crate::beat::CAP);
         }
+        // An attachment is named by the page, and a page that comes back
+        // replaces its own earlier connection.
+        if self.flag_on(crate::typed::NAMES_FLAG, true) {
+            caps.push(crate::typed::NAMES_CAP);
+        }
         caps
     }
 

@@ -971,6 +971,271 @@ pub mod browser {
     }
 }
 
+/// A link that can be stalled or slowed, and a Control Deck's socket as a
+/// browser tab holds one: what the scenario tests of the deck's connection
+/// share (heartbeat.rs, typed.rs).
+pub mod wire {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    /// A link that can go half-open, as the audit's proxy did: while it is
+    /// stalled nothing passes in either direction and nothing is closed (what
+    /// was on its way waits, and is delivered when the link returns; a new
+    /// connection is taken and then hears nothing). It can also be slow: every
+    /// piece is held `delay` ms, each way, without holding up the one behind it
+    /// for longer than that. A request is passed on under the station's own
+    /// address (a station serves only the hosts that are its own).
+    pub struct Link {
+        pub port: u16,
+        delay: Arc<AtomicU64>,
+        stalled: Arc<AtomicBool>,
+    }
+
+    impl Link {
+        pub fn to(station: u16) -> Link {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (delay, stalled) = (
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicBool::new(false)),
+            );
+            let (d, s) = (delay.clone(), stalled.clone());
+            std::thread::spawn(move || {
+                for from in listener.incoming().flatten() {
+                    let Ok(onward) = TcpStream::connect(("127.0.0.1", station)) else {
+                        continue;
+                    };
+                    let _ = (from.set_nodelay(true), onward.set_nodelay(true));
+                    let (here, there) = (
+                        format!("127.0.0.1:{port}").into_bytes(),
+                        format!("127.0.0.1:{station}").into_bytes(),
+                    );
+                    let pairs = [
+                        (from.try_clone().unwrap(), onward.try_clone().unwrap(), true),
+                        (onward, from, false),
+                    ];
+                    for (mut src, mut dst, outward) in pairs {
+                        let (here, there) = (here.clone(), there.clone());
+                        let (delay, stalled) = (d.clone(), s.clone());
+                        let (tx, rx) = mpsc::channel::<(Instant, Vec<u8>)>();
+                        std::thread::spawn(move || {
+                            let mut buf = [0u8; 32 * 1024];
+                            while let Ok(n) = src.read(&mut buf) {
+                                if n == 0 {
+                                    break;
+                                }
+                                let due = Instant::now()
+                                    + Duration::from_millis(delay.load(Ordering::SeqCst));
+                                let mut bytes = buf[..n].to_vec();
+                                // Only a request's head holds the address as
+                                // text: what a WebSocket client sends is masked.
+                                while let Some(at) = bytes
+                                    .windows(here.len())
+                                    .position(|w| outward && w == here.as_slice())
+                                {
+                                    bytes.splice(at..at + here.len(), there.iter().copied());
+                                }
+                                if tx.send((due, bytes)).is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                        std::thread::spawn(move || {
+                            for (due, bytes) in rx {
+                                std::thread::sleep(due.saturating_duration_since(Instant::now()));
+                                while stalled.load(Ordering::SeqCst) {
+                                    std::thread::sleep(Duration::from_millis(5));
+                                }
+                                if dst.write_all(&bytes).is_err() {
+                                    break;
+                                }
+                            }
+                            let _ = dst.shutdown(std::net::Shutdown::Both);
+                        });
+                    }
+                }
+            });
+            Link {
+                port,
+                delay,
+                stalled,
+            }
+        }
+
+        pub fn stall(&self, on: bool) {
+            self.stalled.store(on, Ordering::SeqCst);
+        }
+
+        pub fn slow(&self, ms: u64) {
+            self.delay.store(ms, Ordering::SeqCst);
+        }
+    }
+
+    type Socket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// What a page has been sent so far.
+    #[derive(Default)]
+    pub struct Seen {
+        pub answers: Vec<(u64, Result<Value, Value>)>,
+        pub output: Vec<(u64, Vec<u8>)>,
+        /// Messages on a channel that are not output.
+        pub said: Vec<Value>,
+        pub pongs: Vec<Value>,
+        pub closed: bool,
+    }
+
+    /// A signed-in Control Deck, as a browser tab is one.
+    pub struct Deck {
+        sink: tokio::sync::Mutex<futures_util::stream::SplitSink<Socket, Message>>,
+        pub seen: Arc<Mutex<Seen>>,
+        pub hello: Value,
+        id: AtomicU64,
+    }
+
+    impl Deck {
+        pub async fn open(s: &Station, port: u16, client: &str) -> Deck {
+            Deck::open_as(s, port, json!({"client": client, "caps": ["busy"]})).await
+        }
+
+        /// Signed in with what `auth` says besides the token: the client id,
+        /// and what a page of today adds (`instance`, `caps`).
+        pub async fn open_as(s: &Station, port: u16, mut auth: Value) -> Deck {
+            let url = format!("ws://127.0.0.1:{port}/api/ws");
+            let (ws, _) = tokio_tungstenite::connect_async_with_config(url, None, true)
+                .await
+                .unwrap();
+            let (mut sink, mut stream) = ws.split();
+            auth["token"] = json!(s.token());
+            let auth = json!({"auth": auth});
+            sink.send(Message::Text(auth.to_string().into()))
+                .await
+                .unwrap();
+            let hello = match stream.next().await {
+                Some(Ok(Message::Text(t))) => serde_json::from_str::<Value>(&t).unwrap(),
+                other => panic!("no hello: {other:?}"),
+            };
+            assert_eq!(hello["auth"]["ok"], json!(true), "{hello}");
+            let seen: Arc<Mutex<Seen>> = Arc::default();
+            let into = seen.clone();
+            tokio::spawn(async move {
+                while let Some(Ok(m)) = stream.next().await {
+                    let mut seen = into.lock().unwrap();
+                    match m {
+                        Message::Binary(b) if b.len() >= 5 => {
+                            let chan = u32::from_le_bytes([b[1], b[2], b[3], b[4]]) as u64;
+                            seen.output.push((chan, b[5..].to_vec()));
+                        }
+                        Message::Text(t) => {
+                            let v: Value = serde_json::from_str(&t).unwrap();
+                            match v["id"].as_u64() {
+                                Some(id) => {
+                                    let answer = match v.get("error") {
+                                        Some(e) => Err(e.clone()),
+                                        None => Ok(v["result"].clone()),
+                                    };
+                                    seen.answers.push((id, answer));
+                                }
+                                None if v.get("pong").is_some() => seen.pongs.push(v),
+                                None if v.get("chan").is_some() => seen.said.push(v),
+                                None => {}
+                            }
+                        }
+                        Message::Close(_) => break,
+                        _ => {}
+                    }
+                }
+                into.lock().unwrap().closed = true;
+            });
+            Deck {
+                sink: tokio::sync::Mutex::new(sink),
+                seen,
+                hello,
+                id: AtomicU64::new(0),
+            }
+        }
+
+        pub async fn raw(&self, text: Value) {
+            let mut sink = self.sink.lock().await;
+            let _ = sink.send(Message::Text(text.to_string().into())).await;
+        }
+
+        pub async fn ask(&self, method: &str, params: Value) -> u64 {
+            let id = 1 + self.id.fetch_add(1, Ordering::SeqCst);
+            self.raw(json!({"id": id, "method": method, "params": params}))
+                .await;
+            id
+        }
+
+        pub async fn until<T>(&self, what: &str, secs: u64, f: impl Fn(&Seen) -> Option<T>) -> T {
+            let began = Instant::now();
+            loop {
+                if let Some(v) = f(&self.seen.lock().unwrap()) {
+                    return v;
+                }
+                assert!(began.elapsed() < Duration::from_secs(secs), "no {what}");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        pub async fn answer(&self, id: u64) -> Result<Value, Value> {
+            self.until(&format!("answer to request {id}"), 30, |seen| {
+                seen.answers
+                    .iter()
+                    .find(|(i, _)| *i == id)
+                    .map(|(_, a)| a.clone())
+            })
+            .await
+        }
+
+        pub async fn attach(&self, params: Value) -> Result<u64, Value> {
+            let id = self.ask("pane.attach", params).await;
+            self.answer(id).await.map(|v| v["chan"].as_u64().unwrap())
+        }
+
+        pub async fn key(&self, chan: u64, data: &str) {
+            self.raw(
+                json!({"id": null, "method": "pane.input", "params": {"chan": chan, "data": data}}),
+            )
+            .await;
+        }
+
+        /// Wait until the pane's output on this channel has shown `needle`.
+        pub async fn shows(&self, chan: u64, needle: &str) {
+            self.until(&format!("{needle} on channel {chan}"), 20, |seen| {
+                let all: Vec<u8> = seen
+                    .output
+                    .iter()
+                    .filter(|(c, _)| *c == chan)
+                    .flat_map(|(_, b)| b.clone())
+                    .collect();
+                String::from_utf8_lossy(&all).contains(needle).then_some(())
+            })
+            .await
+        }
+
+        /// What was said on a channel that it is unreachable, if anything.
+        pub fn unreachable(&self, chan: u64) -> Option<Value> {
+            unreachable_in(&self.seen.lock().unwrap(), chan)
+        }
+    }
+
+    pub fn unreachable_in(seen: &Seen, chan: u64) -> Option<Value> {
+        seen.said
+            .iter()
+            .find(|v| v["chan"] == json!(chan) && v["unreachable"] == json!(true))
+            .cloned()
+    }
+}
+
 /// A stand-in for AgentVault that follows the contract in
 /// docs/specs/spandeck-agentvault.md, for scenario tests.
 pub mod fake_vault {

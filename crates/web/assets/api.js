@@ -8,20 +8,34 @@ const FRAME_OUTPUT = 1, FRAME_RESYNC = 2;
 // different in every tab or window. Two windows of the same browser showing the
 // same pane used to look like one client, so neither gave way and they resized
 // the pane back and forth without end (the screen flashed).
-function clientId() {
+const hex = (bytes) => Array.from(crypto.getRandomValues(new Uint8Array(bytes)), b => b.toString(16).padStart(2, '0')).join('');
+// `renew`: this tab's part is made again (another page turned out to hold it).
+function clientId(renew = false) {
   let id = localStorage.getItem('spandeck.client');
   if (!id) {
-    id = 'web-' + Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, '0')).join('');
+    id = 'web-' + hex(8);
     localStorage.setItem('spandeck.client', id);
   }
   let tab = null;
   try { tab = sessionStorage.getItem('spandeck.tab'); } catch (e) { /* no session storage: one tab's worth */ }
-  if (!tab) {
-    tab = Array.from(crypto.getRandomValues(new Uint8Array(3)), b => b.toString(16).padStart(2, '0')).join('');
+  const had = !!tab;
+  if (!tab || renew) {
+    tab = hex(3);
     try { sessionStorage.setItem('spandeck.tab', tab); } catch (e) { /* as above */ }
   }
-  return `${id}-${tab}`;
+  return { id: `${id}-${tab}`, had };
 }
+// This page, for as long as it is loaded: made here, kept in memory only,
+// so a reload or a duplicated tab is another page. The station closes a
+// connection only for a newer one with the same client id AND instance:
+// the same page come back.
+const INSTANCE = hex(8);
+// Where a page starts counting the names of its attachments: a place of its
+// own below 2^30. A name is used once in the page's life, across every
+// reconnect, so a number left over from an earlier connection is one the new
+// connection was never given. (The audit: a key carrying pane B's old number
+// was written to pane C.)
+const firstName = () => 1 + crypto.getRandomValues(new Uint32Array(1))[0] % ((1 << 30) - 1);
 
 // The localhost token arrives once in the URL fragment and is kept locally.
 // Only the station's own, from `spandeck cc` on that machine: a browser's
@@ -112,7 +126,14 @@ export class Api {
     this.statusListeners = new Set();
     this.station = null;
     this.version = null;
-    this.client = clientId();
+    const me = clientId();
+    this.client = me.id;
+    this.instance = INSTANCE;
+    this.chanNext = firstName();
+    this.attaching = new Map();
+    // A duplicated tab is a client of its own (see `_twins`).
+    this.renamed = 0;
+    this._twins(me.had);
     this.connected = false;
     this.authError = null;
     // Refused for now, for a reason that is not this browser's (the station
@@ -152,6 +173,37 @@ export class Api {
     addEventListener('pageshow', wake);
     addEventListener('online', wake);
   }
+
+  // A duplicated tab copies `sessionStorage`, and with it the tab's part of
+  // the client id: two pages would then be one client to every station, and
+  // each would take the other's resize for its own (the sizing rule: each
+  // tab is a client). Pages of one browser say who they are to each other;
+  // of two with the same id, the one loaded later makes itself a new one and
+  // connects again under it. (They never close each other's connection
+  // meanwhile: that goes by the instance.) A page that finds its tab id
+  // already there, and was not reloaded, waits a moment for another page to
+  // say so before it first connects.
+  _twins(had) {
+    if (typeof BroadcastChannel !== 'function') return;
+    const born = Date.now(), bc = new BroadcastChannel('spandeck.tab');
+    const say = () => bc.postMessage({ tab: this.client, instance: this.instance, born });
+    bc.onmessage = (ev) => {
+      const m = ev.data;
+      if (!m || m.tab !== this.client || m.instance === this.instance) return;
+      if (born < m.born || (born === m.born && this.instance < m.instance)) return say();
+      this.client = clientId(true).id;
+      this.renamed += 1;
+      const ws = this.ws;
+      if (ws) { this._closed(ws); try { ws.close(); } catch (e) { /* gone already */ } }
+    };
+    say();
+    let reloaded = false;
+    try { reloaded = performance.getEntriesByType('navigation')[0]?.type === 'reload'; } catch (e) { /* not known: wait */ }
+    if (had && !reloaded) this.settling = new Promise(r => setTimeout(r, 80));
+  }
+
+  // A name for a new attachment: never used before by this page.
+  _name() { return this.chanNext++; }
 
   onEvent(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
   onStatus(fn) { this.statusListeners.add(fn); return () => this.statusListeners.delete(fn); }
@@ -272,6 +324,9 @@ export class Api {
     if (was) this.gapFrom ??= this._now();
     for (const p of this.pending.values()) { clearTimeout(p.limit); p.reject(Object.assign(new Error('connection lost'), { code: 'connection_lost' })); }
     this.pending.clear();
+    // Every attachment was this connection's: its name names nothing now,
+    // and whoever held it is told so before anything else can be typed.
+    for (const c of this.chans.values()) c.onClosed && c.onClosed();
     this.chans.clear();
     for (const fn of this.settle || []) fn(false);
     this.settle = null;
@@ -283,6 +338,11 @@ export class Api {
   }
 
   connect() {
+    if (!this.settling) return this._open();
+    return this.settling.then(() => { this.settling = null; return this._open(); });
+  }
+
+  _open() {
     return new Promise((resolve) => {
       if (this.ws) return resolve(this.connected);
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -305,7 +365,9 @@ export class Api {
       ws.onopen = () => {
         clearTimeout(limit);
         limit = setTimeout(late, signInWithin(performance.now() - began));
-        ws.send(JSON.stringify({ auth: { token: takeToken(), client: this.client, caps: ['busy'] } }));
+        // `instance`: this page (see INSTANCE). `names`: every pane this
+        // page attaches is named by it.
+        ws.send(JSON.stringify({ auth: { token: takeToken(), client: this.client, instance: this.instance, caps: ['busy', 'names'] } }));
       };
       ws.onmessage = (ev) => {
         if (ws !== this.ws) return;
@@ -446,14 +508,32 @@ export class Api {
     return this.call('peer.call', { station, method, params }, opts.within ? { within: opts.within + 2000, of: station } : opts);
   }
 
+  // Attach to a pane under a name of this page's choosing (a station from
+  // before gives a number of its own, and whichever the answer names is the
+  // channel). `handlers.gone()`: whoever asked no longer wants it; it is let
+  // go of here, and nothing is returned. One pane is attached by one request
+  // at a time, each after the one before has been answered and, if unwanted,
+  // let go of: so that at the pane's station this page's newer attachment
+  // always follows its older one.
   async attach(station, pane, mode, handlers) {
-    const res = await this.call('pane.attach', { pane, mode, station: station === this.station ? undefined : station });
-    this.chans.set(res.chan, handlers);
-    const snapshot = Uint8Array.from(atob(res.snapshot_b64), c => c.charCodeAt(0));
-    // `client`: who this tab is at the pane's station. Through a gateway that
-    // is a name the gateway made for this tab; here it is this tab's own.
-    const client = typeof res.client === 'string' && res.client ? res.client : this.client;
-    return { chan: res.chan, info: res.info, exited: res.exited, snapshot, client };
+    const key = `${station}/${pane}`, before = this.attaching.get(key);
+    let done;
+    const mine = new Promise(r => { done = r; });
+    this.attaching.set(key, mine);
+    try {
+      if (before) await before;
+      const res = await this.call('pane.attach', { pane, mode, station: station === this.station ? undefined : station, chan: this._name() });
+      if (handlers.gone && handlers.gone()) { this.send('pane.detach', { chan: res.chan }); return null; }
+      this.chans.set(res.chan, handlers);
+      const snapshot = Uint8Array.from(atob(res.snapshot_b64), c => c.charCodeAt(0));
+      // `client`: who this tab is at the pane's station. Through a gateway that
+      // is a name the gateway made for this tab; here it is this tab's own.
+      const client = typeof res.client === 'string' && res.client ? res.client : this.client;
+      return { chan: res.chan, info: res.info, exited: res.exited, snapshot, client };
+    } finally {
+      if (this.attaching.get(key) === mine) this.attaching.delete(key);
+      done();
+    }
   }
 
   detach(chan) {
