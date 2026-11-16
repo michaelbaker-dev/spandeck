@@ -206,6 +206,13 @@ button.toggle { padding: 2px 10px; } button.toggle.on { background: var(--toggle
 .term-body.letterbox .xterm { transform-origin: center; flex: none; }
 .term-note { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; display: flex; gap: 10px; align-items: center; }
 .term-note[hidden] { display: none; }
+/* The page's own link is down (api.js, the heartbeat): said on every pane, at
+   the top, clear of the pane's other note. The screen is what it was. */
+.term-note.link-note { bottom: auto; top: 40px; z-index: 3; max-width: calc(100% - 24px); color: var(--amber); border-color: var(--amber-line); box-shadow: 0 6px 18px rgba(0,0,0,.4); }
+.pane.link-down .term-body { opacity: .55; }
+.link-chip[hidden], .link-as-of[hidden], .link-bar[hidden] { display: none; }
+.link-bar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 14px; background: var(--panel2); border-bottom: 1px solid var(--line); border-left: 4px solid var(--amber); }
+.link-bar .grow { flex: 1 1 260px; min-width: 0; } .link-bar .muted { overflow-wrap: anywhere; }
 
 #overlays { position: fixed; inset: 0; pointer-events: none; z-index: 50; } #overlays > * { pointer-events: auto; }
 .menu { position: fixed; min-width: 220px; max-width: 360px; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 4px; box-shadow: 0 10px 30px rgba(0,0,0,.5); display: flex; flex-direction: column; }

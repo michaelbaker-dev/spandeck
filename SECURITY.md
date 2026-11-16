@@ -53,6 +53,18 @@ days, not hours.
   the work and nobody else's. A station's signed call makes this station ask it again
   at once, at most every two seconds, and only at the address it is already listed at;
   an unsigned call changes nothing about when or where this station looks.
+- **A connection that goes silent is let go of, and nobody is trusted on a guess**
+  (16 Nov 2026). Every connection a station holds is pinged: a Control Deck's is closed
+  after 30 seconds with nothing heard on it, another station's connection for one pane
+  after 6, and what it held (attached panes, watched conversations) is freed, so a client
+  that connects and then says nothing cannot hold a station's resources for good. A
+  page's own ping is answered only on a connection that has signed in; it is a frame,
+  not a request, names no method, and its answer carries a number of milliseconds since
+  the station started and nothing else. When the local Tailscale client does not answer
+  the question "who is at this address", the station lets nobody in from another machine
+  ("Tailscale is not answering here") and asks again at the next connection: it neither
+  takes the caller for the owner nor remembers them as a stranger. What one station
+  shows of a failed call to another no longer includes the address it called.
 - **Channel numbers are not reused from one connection to the next.** What a Control
   Deck types names its pane by a channel number of its connection. Each connection
   starts counting at a random place, and a number it did not give is refused, so a key

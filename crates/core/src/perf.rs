@@ -403,6 +403,12 @@ pub struct Perf {
     pub look: Hist,
     /// A client that fell behind a pane's output and was repainted.
     pub resyncs: Count,
+    /// Connections given up because nothing was heard on them (beat.rs):
+    /// a Control Deck's, another station's for one pane (it came to this
+    /// station), and this station's own to another station for one pane.
+    pub silent_decks: Count,
+    pub silent_gateways: Count,
+    pub silent_panes: Count,
     /// A message for another station: sent here, to stored there.
     pub msg_received: Hist,
     /// A message stored here, to its agent being told of it.
@@ -658,6 +664,7 @@ impl Perf {
             "periodic": {"late": late, "work": self.tick_work.summary_at(now, FIVE_MIN).json(), "loops": loops},
             "look": self.look.summary_at(now, FIVE_MIN).json(),
             "terminal": {"resyncs": self.resyncs.json()},
+            "connections": {"closed_silent": {"decks": self.silent_decks.json(), "gateways": self.silent_gateways.json(), "panes_elsewhere": self.silent_panes.json()}},
             "messages": {
                 "received": self.msg_received.summary_at(now, FIVE_MIN).json(),
                 "woken": self.msg_woken.summary_at(now, FIVE_MIN).json(),

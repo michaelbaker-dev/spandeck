@@ -2655,6 +2655,10 @@ impl Daemon {
         if self.flag_on(crate::rids::FLAG, true) {
             caps.push(crate::rids::CAP);
         }
+        // A page's `{"ping": n}` is answered, and connections are pinged.
+        if self.flag_on(crate::beat::FLAG, true) {
+            caps.push(crate::beat::CAP);
+        }
         caps
     }
 

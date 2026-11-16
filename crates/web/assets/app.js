@@ -27,6 +27,8 @@ applyRemembered();
 
 const api = new Api();
 const root = document.getElementById('app');
+// The element leads back to the connection (tests read it; the deck does not).
+root.api = api;
 const isPhone = () => matchMedia('(max-width: 760px)').matches;
 
 const S = {
@@ -111,7 +113,10 @@ const canSnapshot = (st) => !slot(st).old && (S.fleet.stations.find(s => s.stati
 // (`data-asked` and `data-corrections` are read by nothing in the deck: a
 // test counts with them.)
 let askedTotal = 0, correctedTotal = 0;
-const ask = (st, method, params) => { refreshAsked(); root.dataset.asked = String(++askedTotal); return api.on(st, method, params); };
+// Each has ten seconds: a question with no answer by then is over, and its
+// station is asked again at the next round (the audit: no request in the page
+// had a time limit, so one that was never answered held its place for ever).
+const ask = (st, method, params) => { refreshAsked(); root.dataset.asked = String(++askedTotal); return api.on(st, method, params, { within: 10000 }); };
 const corrected = (st, name) => { refreshCorrected(st, name); root.dataset.corrections = String(++correctedTotal); };
 // What a section says, for comparing two copies of it: without the two
 // fields that change with the clock alone (the station leaves them out of
@@ -499,7 +504,11 @@ api.onEvent((ev) => {
   if (ev.kind === 'fleet.add.output') { if (addDlg) addDlg.line(ev.data); return; }
   // Raised here, or at another station of the fleet, which told this one.
   if (ev.kind === 'notify.new') { announced.add(`${ev.data.station}/${ev.data.id}`); notifyBrowser(ev.data); }
-  if (ev.kind === 'connection.restored') { for (const t of S.terms.values()) t.attach(); }
+  if (ev.kind === 'connection.restored') { for (const t of S.terms.values()) t.reattach(); }
+  // The page is looked at again (it was in the background, or the machine
+  // slept): what it shows is brought up to date now, not at the next round.
+  if (ev.kind === 'page.woke') { if (api.connected) refresh(); return; }
+  if (ev.kind === 'link.back') { linkBack(ev.data.ms); return; }
   // The strip: from the event itself.
   if (ev.kind === 'agent.tool_start' && ev.pane) return panePatched(ev.pane, { tool: ev.data?.tool ?? null, tool_since_ms: ev.ts });
   if (ev.kind === 'agent.tool' && ev.pane) return panePatched(ev.pane, { tool: null });
@@ -1516,7 +1525,7 @@ function topbar() {
     h('a', { class: 'brand', href: '#/fleet', title: 'spandeck ' + (api.version || '') }, 'spandeck'),
     h('nav', { class: 'crumbs', 'aria-label': 'Where you are' }, crumbs),
     h('span', { class: 'grow' }),
-    !api.connected ? h('span', { class: 'chip bad' }, api.authError || 'reconnecting…') : null,
+    linkChip, linkAsOf,
     own ? h('button', { class: 'chip key-chip own-key ' + own.info.level, onclick: () => keyDialog(own.name, own.info, own.more), title: 'This is the device you are using. When its key expires it can no longer open the Control Deck.' }, `This device's Tailscale key ${own.info.text}`) : null,
     needs ? h('span', { class: 'chip needs', title: 'Agents waiting for you' }, `${needs} need${needs === 1 ? 's' : ''} you`) : null,
     h('button', { class: S.approvals.length ? 'attn' : '', onclick: approvalsPanel }, 'Approvals', S.approvals.length ? h('span', { class: 'count' }, S.approvals.length) : null),
@@ -1790,7 +1799,8 @@ function stationTile(s) {
     up ? h('div', { class: 'tile-stats' },
       h('span', {}, h('b', {}, s.working ?? 0), ' working'), h('span', { class: s.needs_you ? 'needs' : '' }, h('b', {}, s.needs_you ?? 0), ' need you'),
       s.load != null ? h('span', { class: 'muted' }, 'load ' + Number(s.load).toFixed(1)) : null, s.keep_awake ? h('span', { class: 'chip' }, 'kept awake') : null,
-      S.busy.has(s.station) ? h('span', { class: 'chip warn', title: `${s.station} has not answered what this page last asked of it. What is shown of it here is as of ${ago(S.busy.get(s.station))} ago. It is asked again by itself, one question at a time; everything else on this page is unaffected.` }, `not answering: as of ${ago(S.busy.get(s.station))} ago`) : null,
+      linkOld() ? h('span', { class: 'chip warn as-of', title: `This page has not heard from ${api.station}, which it asks everything through, since ${clockOf(api.link().asOf)}. What is shown of ${s.station} is as it was then.` }, `as of ${clockOf(api.link().asOf)}`)
+      : S.busy.has(s.station) ? h('span', { class: 'chip warn', title: `${s.station} has not answered what this page last asked of it. What is shown of it here is as of ${ago(S.busy.get(s.station))} ago. It is asked again by itself, one question at a time; everything else on this page is unaffected.` }, `not answering: as of ${ago(S.busy.get(s.station))} ago`) : null,
       s.codex_sandbox_blocked ? h('span', { class: 'chip warn', title: 'Codex cannot run commands on this station: the system blocks its sandbox. On the station, run "spandeck doctor --fix" once. It asks for your password.' }, 'Codex blocked') : null,
       s.service === false ? h('span', { class: 'chip warn', title: 'spandeck does not start at login on this station. After a reboot it stays down until someone starts it. Run "spandeck service --install" there.' }, 'not started at login') : null, vaultChip(s), keyChip(s.station))
       : h('div', { class: 'tile-stats warn-text' }, s.state === 'update_needed' ? 'Needs an update before it can be controlled' : awayWhy(s) ? [awayWhy(s), ' ', s.why === 'clock' ? null : keyChip(s.station)] : s.state === 'unreachable' ? [`Unreachable · last seen ${ago(s.last_seen_ms)} ago. Right-click to wake or start it. `, keyChip(s.station)] : s.state === 'not_linked' ? ['Not in this fleet. ', h('button', { class: 'mini add-station', onclick: (e) => { e.preventDefault(); e.stopPropagation(); addMachineDialog({ station: s.station, kind: 'join' }); } }, `Add ${s.station} to this fleet…`)] : `Unreachable · last seen ${ago(s.last_seen_ms)} ago`),
@@ -2158,6 +2168,7 @@ function getTerm(st, p, where, mode) {
     t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', face: where === 'leaf' || where === 'zoom' ? (term) => chatToggle(st, term.pane) : null, agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where, term), onUsage: (term) => usageDialog(st, term.pane), onFocus: (term) => { S.focused = `${st}/${term.pane.id}`; } });
     S.terms.set(key, t);
     t._fresh = true;
+    t.setLink(linkPaneWords(api.link()));
   } else t.update(p);
   t._used = true;
   return t;
@@ -3359,6 +3370,94 @@ async function signIn() {
   }
 }
 
+// ------------------------------------------------- the link to this station
+//
+// What the screen says when the station serving this page stops answering
+// (api.js: the heartbeat, and `linkLevel`). The audit found nothing at all
+// on screen at 1 s, 5 s, 30 s and 5 minutes of a half-open link; the owner's
+// rule: "This has to be well designed and seamless to the user. 100% uptime
+// from every client, control deck, session etc". So:
+//   under 0.3 s   nothing (an upgrade's reconnect is not worth a flash)
+//   to 3 s        "reconnecting…"
+//   3 to 10 s     amber, with the time; panes say typing is off; what is
+//                 shown is marked "as of 12:01:05"
+//   from 10 s     a bar: "alpha has not answered for 12 s. Your agents keep
+//                 running there.", and a button for each other station's deck
+//   from 60 s     "alpha last answered 1 min 12 s ago (12:01:05)"
+// An open connection that does not answer ("no answer for 4 s") and one that
+// is being made again ("reconnecting… 12 s") are told apart; both are counted
+// from the last thing heard.
+// The three pieces stay on the page and are filled in here, four times a
+// second while anything is wrong, so that they are right while a menu or a
+// dialog is open and the rest of the page is not being drawn again.
+const spanWords = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s} s` : s < 3600 ? `${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ''}` : `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`; };
+const clockOf = (at) => new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+const linkChip = h('span', { class: 'chip link-chip', role: 'status', hidden: true });
+const linkAsOf = h('span', { class: 'chip warn as-of link-as-of', hidden: true });
+const linkBar = h('div', { class: 'link-bar', role: 'alert', hidden: true });
+let linkShown = 0, linkDrawn = 0, linkBarKey = '';
+// What is on the page is from before a gap, and is marked so.
+const linkOld = () => api.link().level >= 2;
+function linkWords(l) {
+  // An open connection that does not answer is not being made again: it
+  // is said as what it is, from the moment it is known.
+  if (l.level <= 1 && l.state !== 'silent') return 'reconnecting…';
+  // Short: a phone's bar has room for this and the "as of" beside it.
+  return l.state === 'silent' ? `no answer for ${spanWords(l.wall)}` : `reconnecting… ${spanWords(l.wall)}`;
+}
+function linkTick() {
+  const l = api.link(), me = api.station || 'the station';
+  // Refused for now, for a reason that is not this browser's.
+  const waiting = !api.connected && !api.authError && api.waitWhy;
+  const starting = !api.connected && !api.authError && !api.everConnected && !waiting;
+  linkChip.hidden = !(l.level || waiting || starting);
+  linkChip.className = 'chip link-chip ' + (l.level >= 2 || waiting ? 'warn' : 'bad');
+  const chip = waiting ? 'waiting for Tailscale on the station' : starting ? 'connecting…' : linkWords(l);
+  if (linkChip.textContent !== chip) linkChip.textContent = chip;
+  linkChip.title = waiting ? api.waitWhy : l.level ? `This page has heard nothing from ${me} since ${clockOf(l.asOf)}. It keeps trying by itself.` : '';
+  linkAsOf.hidden = l.level < 2;
+  if (l.level >= 2) {
+    const text = `as of ${clockOf(l.asOf)}`;
+    if (linkAsOf.textContent !== text) linkAsOf.textContent = text;
+    linkAsOf.title = `Everything on this page (who needs you, approvals, the inbox, every station's agents) is as it was at ${clockOf(l.asOf)}, when ${me} last answered.`;
+  }
+  linkBar.hidden = l.level < 3;
+  if (l.level >= 3) {
+    const said = l.level >= 4 ? `${me} last answered ${spanWords(l.wall)} ago (${clockOf(l.asOf)}).` : `${me} has not answered for ${spanWords(l.wall)}.`;
+    // The other stations' own decks, by the hand-over (`hopOpen`): the
+    // buttons are made again only when the list changes, so that one being
+    // clicked is not replaced under the finger.
+    const others = S.fleet.stations.filter(s => hopOrigin(s));
+    const key = others.map(s => s.station).join(' ');
+    if (key !== linkBarKey || !linkBar.firstChild) {
+      linkBarKey = key;
+      linkBar.replaceChildren(h('div', { class: 'grow' }, h('b', { class: 'link-said' }), ' Your agents keep running there. ',
+        h('span', { class: 'muted' }, 'This page keeps trying by itself. What it shows is from before.')),
+        ...others.map(s => h('button', { onclick: () => hopOpen(s) }, `Open ${s.station}'s deck`)));
+    }
+    const b = linkBar.querySelector('.link-said');
+    if (b.textContent !== said) b.textContent = said;
+  }
+  // The panes: typing is off, and they say so.
+  if (l.level !== linkShown) {
+    linkShown = l.level;
+    for (const t of S.terms.values()) t.setLink(linkPaneWords(l));
+  }
+  // The marks on the tiles are part of the page's drawing: drawn again when
+  // the level changes, as soon as nothing forbids it.
+  if (l.level !== linkDrawn && !document.querySelector('.menu') && !document.body.classList.contains('dragging')) { linkDrawn = l.level; update(); }
+}
+const linkPaneWords = (l) => (l.level >= 2 ? `Not connected to ${api.station}: typing is off. What is shown is as of ${clockOf(l.asOf)}.` : null);
+setInterval(linkTick, 250);
+// The link is back after a gap the owner was told of.
+function linkBack(ms) {
+  // A pane that said "typing is off" at a key says so no longer.
+  for (const t of S.terms.values()) t.setLink(null);
+  linkTick();
+  if (ms >= 10000) toast(`${api.station} is back after ${spanWords(ms)}.`);
+  refreshSoon(0);
+}
+
 // ------------------------------------------------------------------- render
 
 let drawnAt = null;
@@ -3405,7 +3504,7 @@ function render() {
   if (!layCtx) arranging = null;
   // A view that is already on the page stays attached: replacing it would
   // take the keyboard away from whatever is being typed into.
-  const kids = [signInBar(), versionBar(), vaultPromptBox, main].filter(Boolean);
+  const kids = [linkBar, signInBar(), versionBar(), vaultPromptBox, main].filter(Boolean);
   if (root.children.length === kids.length + 1 && kids.every((k, i) => root.children[i + 1] === k)) root.replaceChild(topbar(), root.children[0]);
   else root.replaceChildren(topbar(), ...kids);
   const side = document.querySelector('.sidebar');
@@ -3508,7 +3607,7 @@ initChat({
   agentMark: (kind) => h('span', { class: 'ico-wrap' }, paneIcon(kind)),
 });
 
-api.onStatus(() => render());
+api.onStatus(() => { linkTick(); render(); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 api.connect().then((ok) => {
   if (!ok) return render();

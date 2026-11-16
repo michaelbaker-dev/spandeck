@@ -20,6 +20,7 @@
 
 import { h, showMenu, toast, dialog, copyText, dot, stateOf, STATE_LABEL, fmtTokens, heldWords, RELEASE_SAYS } from './ui.js';
 import { renderMarkdown } from './md.js';
+import { retryIn } from './api.js';
 
 let env = null;
 const convs = new Map();   // "station/pane id" -> Conv
@@ -196,6 +197,7 @@ class Conv {
         onUnreachable: () => { this.unwatch(); this.again(`${this.st} stopped answering. Trying again…`); },
       });
       this.state = 'watching';
+      this.tries = 0;
       this.problem = '';
       this.apply(r);
     } catch (e) {
@@ -222,7 +224,8 @@ class Conv {
     this.problem = text;
     this.draw();
     clearTimeout(this.retry);
-    this.retry = setTimeout(() => { this.retry = null; if (!this.disposed) this.watch(); }, 3000);
+    // By the schedule every reconnect uses (api.js): soon, then up to 5 s.
+    this.retry = setTimeout(() => { this.retry = null; if (!this.disposed) this.watch(); }, Math.max(retryIn(this.tries = (this.tries || 0) + 1), 50));
   }
 
   unwatch() {

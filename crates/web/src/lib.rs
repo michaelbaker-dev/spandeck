@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use axum::body::Body;
@@ -27,6 +28,7 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use rust_embed::RustEmbed;
 use serde_json::{json, Value};
+use spandeck_core::beat::{self, Beat, Verdict};
 use spandeck_core::daemon::{Authority, Caller, Daemon};
 use spandeck_core::fleet::Remote;
 use spandeck_core::perf::Kind;
@@ -389,8 +391,15 @@ async fn caller(
             StatusCode::FORBIDDEN,
             "this device is not under your Tailscale login",
         )),
+        Remote::NoTailscale => Err((StatusCode::SERVICE_UNAVAILABLE, NO_TAILSCALE)),
     }
 }
+
+/// Said to whoever connects from another address while the local Tailscale
+/// client does not say who they are. It is not "you are a stranger": the
+/// page keeps trying, and is let in when Tailscale answers.
+const NO_TAILSCALE: &str =
+    "Tailscale is not answering here, so this station cannot tell who is connecting. It is asked again by itself.";
 
 /// A station in this fleet relaying its own user's attach: it signs its name.
 fn gateway_station(web: &Web, headers: &HeaderMap) -> Option<String> {
@@ -488,7 +497,11 @@ async fn device_call(
     if let Err(e) = origin_ok(web, headers) {
         return refuse(e);
     }
-    if matches!(identify(web, addr.ip()).await, Remote::Stranger(_)) {
+    let remote = identify(web, addr.ip()).await;
+    if remote == Remote::NoTailscale {
+        return refuse((StatusCode::SERVICE_UNAVAILABLE, NO_TAILSCALE));
+    }
+    if matches!(remote, Remote::Stranger(_)) {
         return refuse((
             StatusCode::FORBIDDEN,
             "this device is not under your Tailscale login",
@@ -523,7 +536,11 @@ async fn peer_rpc(
         .and_then(|f| f.as_str())
         .unwrap_or("?")
         .to_string();
-    if matches!(identify(&web, addr.ip()).await, Remote::Stranger(_)) {
+    let remote = identify(&web, addr.ip()).await;
+    if remote == Remote::NoTailscale {
+        return refuse((StatusCode::SERVICE_UNAVAILABLE, NO_TAILSCALE));
+    }
+    if matches!(remote, Remote::Stranger(_)) {
         return refuse((StatusCode::FORBIDDEN, "not a station under this login"));
     }
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -1297,6 +1314,18 @@ impl Running {
             .flatten()
             .filter(|s| *s != conn.daemon().station)
             .map(String::from);
+        // Not asked of a station that is not answering (it would wait out
+        // four seconds to connect), but for the one that finds out.
+        if let Some(to) = attach_to.as_deref() {
+            let fleet = &conn.daemon().fleet;
+            let silent = fleet.not_answering(to);
+            if let Some(since) = lanes::held_back(lane, silent, || fleet.probe(to)) {
+                conn.daemon().perf.busy.add();
+                let for_ms = spandeck_core::paths::now_ms().saturating_sub(since);
+                let no = lanes::not_answering(to, for_ms, self.page_knows_busy);
+                return conn.say(answer(&req.id, Err(no)));
+            }
+        }
         let counted = match self
             .counts
             .admit(station.as_deref().or(attach_to.as_deref()), lane)
@@ -1633,7 +1662,9 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
         Err((_, msg)) => {
             let _ = sink
                 .send(Message::Text(
-                    json!({"auth": {"ok": false, "message": msg}})
+                    // `again`: nothing is wrong with this browser; the
+                    // page keeps trying by itself.
+                    json!({"auth": {"ok": false, "message": msg, "again": msg == NO_TAILSCALE}})
                         .to_string()
                         .into(),
                 ))
@@ -1717,13 +1748,45 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     // not read, as before. Reading one never waits for the one before it
     // (lanes.rs), unless the switch `ws_lanes` is off.
     let (in_tx, mut in_rx) = mpsc::channel::<(std::time::Instant, Message)>(64);
+    // The heartbeat (beat.rs). When anything at all was last read from the
+    // other end is kept by the task that reads, so that it is right while
+    // requests wait to be taken. A page's ping is answered there too, by
+    // nothing that can wait: its answer says the link and this station
+    // are alive, whatever the requests before it are waiting for.
+    let beats = web.daemon.flag_on(beat::FLAG, true);
+    let conn_began = std::time::Instant::now();
+    let heard_ms = Arc::new(AtomicU64::new(0));
+    let (heard, pong_tx) = (heard_ms.clone(), out_tx.clone());
     let reader = tokio::spawn(async move {
         while let Some(Ok(msg)) = stream.next().await {
-            if in_tx.send((std::time::Instant::now(), msg)).await.is_err() {
+            let now = std::time::Instant::now();
+            heard.store(
+                now.duration_since(conn_began).as_millis() as u64,
+                Ordering::Relaxed,
+            );
+            if beats {
+                if let Some(pong) = pong_for(&msg) {
+                    let _ = pong_tx.try_send(pong);
+                    continue;
+                }
+            }
+            if in_tx.send((now, msg)).await.is_err() {
                 break;
             }
         }
     });
+    // Another station's connection for one pane is judged in seconds (the
+    // owner is looking at that pane); a deck's in half a minute, which is
+    // only ever a page that is gone.
+    let from_station = who.who.starts_with("you (via ");
+    let mut pulse = Beat::new(
+        if from_station {
+            beat::STATION
+        } else {
+            beat::DECK
+        },
+        conn_began,
+    );
 
     loop {
         let msg = tokio::select! {
@@ -1731,6 +1794,23 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
             _ = rekeyed.changed(), if rests_on_key => {
                 key_replaced = true;
                 break;
+            }
+            _ = tokio::time::sleep_until(pulse.due().into()), if beats => {
+                pulse.heard(conn_began + std::time::Duration::from_millis(heard_ms.load(Ordering::Relaxed)));
+                match pulse.tick(std::time::Instant::now()) {
+                    // Never waited for: with the way out full, the frames
+                    // already in it are what the other end hears.
+                    Verdict::Ping => {
+                        let _ = out_tx.try_send(Message::Ping(Default::default()));
+                        continue;
+                    }
+                    Verdict::Wait => continue,
+                    Verdict::Dead => {
+                        let perf = &web.daemon.perf;
+                        if from_station { perf.silent_gateways.add() } else { perf.silent_decks.add() }
+                        break;
+                    }
+                }
             }
             // Tasks that are done are let go of as they finish.
             Some(_) = running.ending.join_next(), if !running.ending.is_empty() => continue,
@@ -1831,6 +1911,25 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     }
     running.lasting.detach_all();
     writer.abort();
+}
+
+/// A page's ping (`{"ping": n, "t": …}`) and its answer: the number and
+/// the page's own time back, and this station's forward-only clock (`s`).
+/// It is a frame, not a request: it names no method, is on no method list,
+/// and is answered whoever is signed in on the connection.
+fn pong_for(msg: &Message) -> Option<Message> {
+    let Message::Text(text) = msg else {
+        return None;
+    };
+    if text.len() > 256 || !text.as_str().starts_with("{\"ping\"") {
+        return None;
+    }
+    let ping: Value = serde_json::from_str(text.as_str()).ok()?;
+    let mut pong = json!({"pong": ping.get("ping")?.as_u64()?, "s": beat::mono_ms()});
+    if let Some(t) = ping.get("t").and_then(|t| t.as_f64()) {
+        pong["t"] = json!(t);
+    }
+    Some(Message::Text(pong.to_string().into()))
 }
 
 type AttachResult = (Value, tokio::task::JoinHandle<()>);
@@ -2004,15 +2103,35 @@ async fn peer_socket(
         HeaderValue::from_str(&daemon.trust.sign("ws", daemon.station.as_bytes()))
             .map_err(|e| e.to_string())?,
     );
-    let (ws, _) = tokio::time::timeout(
+    let made = tokio::time::timeout(
         std::time::Duration::from_secs(4),
         // The same towards the other station: a key typed through this
         // one is a small piece too.
         tokio_tungstenite::connect_async_with_config(req, None, daemon.flag_on(NODELAY, true)),
     )
-    .await
-    .map_err(|_| format!("{station} did not answer"))?
-    .map_err(|e| format!("{station} unreachable: {e}"))?;
+    .await;
+    // Never the transport's own words: they name the address.
+    let (ws, _) = match made {
+        Ok(Ok(made)) => made,
+        // It answered, and would not have this station.
+        Ok(Err(tungstenite::Error::Http(_))) => return Err(refused_by(daemon, station)),
+        Ok(Err(e)) => {
+            daemon.fleet.connection_tried(station, false);
+            let io = match &e {
+                tungstenite::Error::Io(io) => Some(io.kind()),
+                _ => None,
+            };
+            use spandeck_core::fleet::NoAnswer;
+            return Err(match NoAnswer::from(true, false, io) {
+                NoAnswer::NoConnection => format!("{station} could not be reached"),
+                why => format!("{station} {}", why.words()),
+            });
+        }
+        Err(_) => {
+            daemon.fleet.connection_tried(station, false);
+            return Err(format!("{station} could not be reached within 4 s"));
+        }
+    };
     let (mut peer_sink, peer_stream) = ws.split();
     peer_sink
         .send(tungstenite::Message::Text(
@@ -2034,6 +2153,112 @@ fn refused_by(daemon: &Daemon, station: &str) -> String {
             spandeck_core::perf::clock_words(c.diff_ms)
         ),
         None => format!("{station} refused this station"),
+    }
+}
+
+type PeerSink = futures_util::stream::SplitSink<PeerSocket, tungstenite::Message>;
+
+/// What became of something sent to the other station.
+enum Sending {
+    Sent,
+    /// The connection is closed.
+    Closed,
+    /// It could not even be written for a ping's interval: the other end
+    /// has taken nothing for that long. Silent for this many ms.
+    Stuck(u64),
+}
+
+/// The heartbeat of a connection this station holds to another for one
+/// pane (beat.rs: a ping every 2 s, given up after 6 s with nothing heard),
+/// and what it tells the rest of the station: the same "not answering"
+/// state that the calls to that station feed (`FleetState::not_answering`).
+struct Pulse {
+    daemon: Daemon,
+    station: String,
+    on: bool,
+    beat: Beat,
+}
+
+impl Pulse {
+    fn new(daemon: &Daemon, station: &str) -> Pulse {
+        let beat = Beat::new(beat::STATION, std::time::Instant::now());
+        Pulse {
+            daemon: daemon.clone(),
+            station: station.to_string(),
+            // Read once: a connection keeps the way it began.
+            on: daemon.flag_on(beat::FLAG, true),
+            beat,
+        }
+    }
+
+    /// Something came from the other station (or its connection ended).
+    fn heard<E>(&mut self, from_peer: &Option<Result<tungstenite::Message, E>>) {
+        let Some(Ok(msg)) = from_peer else {
+            return;
+        };
+        self.beat.heard(std::time::Instant::now());
+        // A station taken to be silent has answered a ping: it is back,
+        // and what is asked of it is sent again from now, not at the next
+        // call that is let through to find out.
+        if matches!(msg, tungstenite::Message::Pong(_))
+            && self.daemon.fleet.not_answering(&self.station).is_some()
+        {
+            self.daemon.fleet.heartbeat(&self.station, None);
+        }
+    }
+
+    /// Send, without ever waiting longer than a ping's interval: a write
+    /// that waits is the other end taking nothing, and must not stop this
+    /// connection's own clock.
+    async fn send(&mut self, sink: &mut PeerSink, msg: tungstenite::Message) -> Sending {
+        match tokio::time::timeout(beat::STATION.0, sink.send(msg)).await {
+            Ok(Ok(())) => Sending::Sent,
+            Ok(Err(_)) => Sending::Closed,
+            Err(_) => Sending::Stuck(self.lost()),
+        }
+    }
+
+    /// The next beat: a ping goes out. `Some(ms)` when the other station
+    /// has said nothing for six seconds: for how long.
+    async fn tick(&mut self, sink: &mut PeerSink) -> Option<u64> {
+        if !self.on {
+            return std::future::pending().await;
+        }
+        tokio::time::sleep_until(self.beat.due().into()).await;
+        match self.beat.tick(std::time::Instant::now()) {
+            Verdict::Dead => Some(self.lost()),
+            Verdict::Wait => None,
+            Verdict::Ping => match self
+                .send(sink, tungstenite::Message::Ping(Default::default()))
+                .await
+            {
+                Sending::Stuck(quiet_ms) => Some(quiet_ms),
+                // A closed connection is found by the read.
+                _ => None,
+            },
+        }
+    }
+
+    /// Given up for silence: counted, and the station is not answering
+    /// from when it was last heard.
+    fn lost(&self) -> u64 {
+        let quiet_ms = self.beat.quiet(std::time::Instant::now()).as_millis() as u64;
+        let last_heard = spandeck_core::paths::now_ms().saturating_sub(quiet_ms);
+        self.daemon.fleet.heartbeat(&self.station, Some(last_heard));
+        self.daemon.perf.silent_panes.add();
+        quiet_ms
+    }
+
+    /// What the page is told on the pane's channel. `unreachable` is the
+    /// message a page from before knows; `station` and `quiet_ms` (when it
+    /// was silence, not a closed connection) are for one that says more.
+    fn gone(&self, chan: u32, quiet_ms: Option<u64>) -> Message {
+        let station: String = self.station.chars().take(64).collect();
+        let mut said = json!({"chan": chan, "unreachable": true, "station": station});
+        if let Some(ms) = quiet_ms {
+            said["quiet_ms"] = json!(ms);
+        }
+        Message::Text(said.to_string().into())
     }
 }
 
@@ -2084,9 +2309,14 @@ async fn attach_remote(
                 }
             }
             Ok(Some(Ok(_))) => {}
-            _ => return Err(format!("{station} closed the connection")),
+            Ok(_) => return Err(format!("{station} closed the connection")),
+            Err(_) => {
+                daemon.fleet.connection_tried(station, false);
+                return Err(format!("{station} did not answer within 5 s"));
+            }
         }
     };
+    daemon.fleet.connection_tried(station, true);
     let peer_chan = result["chan"].as_u64().unwrap_or(0);
     result["chan"] = json!(chan);
     result["station"] = json!(station);
@@ -2095,35 +2325,44 @@ async fn attach_remote(
     let pane_id = result["pane"].as_str().unwrap_or(pane).to_string();
 
     let (tx, mut rx) = mpsc::channel::<String>(256);
+    let mut pulse = Pulse::new(daemon, station);
     let task = tokio::spawn(async move {
-        loop {
+        // Why the loop ended, when it is the other station's doing: for
+        // how long it had said nothing, or that the connection closed.
+        let ended: Option<Option<u64>> = loop {
             tokio::select! {
+                dead = pulse.tick(&mut peer_sink) => if let Some(quiet_ms) = dead { break Some(Some(quiet_ms)) },
                 to_peer = rx.recv() => match to_peer {
-                    Some(text) => {
-                        if peer_sink.send(tungstenite::Message::Text(text.into())).await.is_err() { break; }
-                    }
-                    None => break,
+                    Some(text) => match pulse.send(&mut peer_sink, tungstenite::Message::Text(text.into())).await {
+                        Sending::Sent => {}
+                        Sending::Closed => break Some(None),
+                        Sending::Stuck(quiet_ms) => break Some(Some(quiet_ms)),
+                    },
+                    None => break None,
                 },
-                from_peer = peer_stream.next() => match from_peer {
-                    Some(Ok(tungstenite::Message::Binary(b))) if b.len() >= 5 => {
-                        if out.send(frame(b[0], chan, &b[5..])).await.is_err() { break; }
-                    }
-                    Some(Ok(tungstenite::Message::Text(t))) => {
-                        let Ok(mut v) = serde_json::from_str::<Value>(&t) else { continue };
-                        if v.get("chan").is_some() {
-                            v["chan"] = json!(chan);
-                            if out.send(Message::Text(v.to_string().into())).await.is_err() { break; }
-                        } else if let Some(msg) = v.get("event").and_then(|ev| resized_for(ev, &pane_id, chan)) {
-                            if out.send(Message::Text(msg.to_string().into())).await.is_err() { break; }
+                from_peer = peer_stream.next() => {
+                    pulse.heard(&from_peer);
+                    match from_peer {
+                        Some(Ok(tungstenite::Message::Binary(b))) if b.len() >= 5 => {
+                            if out.send(frame(b[0], chan, &b[5..])).await.is_err() { break None; }
                         }
-                    }
-                    Some(Ok(_)) => {}
-                    _ => {
-                        let _ = out.send(Message::Text(json!({"chan": chan, "unreachable": true}).to_string().into())).await;
-                        break;
+                        Some(Ok(tungstenite::Message::Text(t))) => {
+                            let Ok(mut v) = serde_json::from_str::<Value>(&t) else { continue };
+                            if v.get("chan").is_some() {
+                                v["chan"] = json!(chan);
+                                if out.send(Message::Text(v.to_string().into())).await.is_err() { break None; }
+                            } else if let Some(msg) = v.get("event").and_then(|ev| resized_for(ev, &pane_id, chan)) {
+                                if out.send(Message::Text(msg.to_string().into())).await.is_err() { break None; }
+                            }
+                        }
+                        Some(Ok(_)) => {}
+                        _ => break Some(None),
                     }
                 },
             }
+        };
+        if let Some(quiet_ms) = ended {
+            let _ = out.send(pulse.gone(chan, quiet_ms)).await;
         }
     });
     Ok((result, tx, peer_chan, task))
@@ -2281,38 +2520,43 @@ async fn watch_remote(
                 }
             }
             Ok(Some(Ok(_))) => {}
-            _ => return Err(unreachable(format!("{station} did not answer"))),
+            Ok(_) => return Err(unreachable(format!("{station} closed the connection"))),
+            Err(_) => {
+                daemon.fleet.connection_tried(station, false);
+                return Err(unreachable(format!("{station} did not answer within 10 s")));
+            }
         }
     };
+    daemon.fleet.connection_tried(station, true);
     result["chan"] = json!(chan);
+    let mut pulse = Pulse::new(daemon, station);
     let task = tokio::spawn(async move {
-        // Held so the connection stays open for as long as it is watched.
-        let _peer_sink = peer_sink;
-        loop {
-            match peer_stream.next().await {
-                Some(Ok(tungstenite::Message::Text(t))) => {
-                    let Ok(mut v) = serde_json::from_str::<Value>(&t) else {
-                        continue;
-                    };
-                    if v.get("chan").is_some() {
-                        v["chan"] = json!(chan);
-                        if out.send(Message::Text(v.to_string().into())).await.is_err() {
-                            break;
+        // The connection stays open for as long as it is watched.
+        let ended: Option<Option<u64>> = loop {
+            tokio::select! {
+                dead = pulse.tick(&mut peer_sink) => if let Some(quiet_ms) = dead { break Some(Some(quiet_ms)) },
+                from_peer = peer_stream.next() => {
+                    pulse.heard(&from_peer);
+                    match from_peer {
+                        Some(Ok(tungstenite::Message::Text(t))) => {
+                            let Ok(mut v) = serde_json::from_str::<Value>(&t) else {
+                                continue;
+                            };
+                            if v.get("chan").is_some() {
+                                v["chan"] = json!(chan);
+                                if out.send(Message::Text(v.to_string().into())).await.is_err() {
+                                    break None;
+                                }
+                            }
                         }
+                        Some(Ok(_)) => {}
+                        _ => break Some(None),
                     }
                 }
-                Some(Ok(_)) => {}
-                _ => {
-                    let _ = out
-                        .send(Message::Text(
-                            json!({"chan": chan, "unreachable": true})
-                                .to_string()
-                                .into(),
-                        ))
-                        .await;
-                    break;
-                }
             }
+        };
+        if let Some(quiet_ms) = ended {
+            let _ = out.send(pulse.gone(chan, quiet_ms)).await;
         }
     });
     Ok((result, task))
