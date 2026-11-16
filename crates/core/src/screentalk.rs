@@ -15,6 +15,13 @@
 //!   one that redrew over the tagged row), there is no log to cut: the
 //!   block is the screen as it is, and says so (`whole`).
 //!
+//! - What an *agent* program printed is also given as parts to read
+//!   (`parts`: reflow.rs): prose, drawn like any reply, and rows whose
+//!   layout is their meaning. A shell's block is its rows, as they were.
+//! - When the station sees an agent's turn end (its state goes from
+//!   working to idle or done), the block is frozen there and a "turn
+//!   ended" notice follows it, as in a conversation read from a file.
+//!
 //! Kept in memory, for each pane: it begins again when the station does.
 //! Served only through `pane.conversation`, so to the owner alone.
 
@@ -25,6 +32,7 @@ use spandeck_archive::conversation::{cap, clean, paged, PAGE_DEFAULT, PAGE_MAX, 
 
 use crate::daemon::{invalid, Daemon, PaneEntry, PaneMeta, Result};
 use crate::paths::now_ms;
+use crate::reflow::{reflow, Part};
 
 /// Items kept for a pane; past this the oldest go.
 const ITEMS_MAX: usize = 400;
@@ -45,6 +53,8 @@ enum What {
     },
     /// What the pane printed. `lines`: how many there were.
     Printed { whole: bool, lines: usize },
+    /// The agent's turn ended here, after so long.
+    Ended { duration_ms: u64 },
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +66,29 @@ struct Kept {
     ts_ms: u64,
     what: What,
     text: String,
+    /// What an agent program printed, as parts to read. `None` for a
+    /// shell, whose rows are shown as they were.
+    parts: Option<Vec<Part>>,
+}
+
+impl Kept {
+    /// A block that came to nothing: not shown.
+    fn blank(&self) -> bool {
+        self.text.is_empty() && !matches!(self.what, What::Ended { .. })
+    }
+}
+
+/// What an agent program printed, as parts to read (reflow.rs).
+fn shape(printed: &spandeck_terminal::Printed, agent: bool) -> Option<Vec<Part>> {
+    agent.then(|| {
+        reflow(&printed.lines, &printed.joined, printed.cursor)
+            .into_iter()
+            .map(|p| Part {
+                prose: p.prose,
+                text: clean(&p.text),
+            })
+            .collect()
+    })
 }
 
 /// One pane's sent messages and printed blocks.
@@ -107,25 +140,29 @@ impl Talk {
         }
     }
 
-    /// Something was sent to the pane: what it had printed until then is
-    /// frozen as a block, and the message follows it.
-    fn sent(
-        &mut self,
-        printed: spandeck_terminal::Printed,
-        text: &str,
-        origin: &'static str,
-        from: Option<String>,
-    ) {
+    /// The screen drawn whole that was frozen last is what `block` (and,
+    /// for an agent, `parts`: so that a status row that ticks is no new
+    /// screen) says again.
+    fn said_last(&self, block: &str, parts: &Option<Vec<Part>>) -> bool {
+        self.items
+            .iter()
+            .rev()
+            .find(|k| matches!(k.what, What::Printed { whole: true, .. }))
+            .is_some_and(|k| match parts {
+                Some(_) => k.parts == *parts,
+                None => k.text == block,
+            })
+    }
+
+    /// What the pane had printed until now is frozen as a block.
+    fn freeze(&mut self, printed: spandeck_terminal::Printed, agent: bool) {
         let now = now_ms();
+        let parts = shape(&printed, agent);
         let block = clean(&printed.lines.join("\n"));
         let (block, _) = tail(&block, BLOCK_MAX);
         // A screen that was drawn whole and has not changed since it was
         // last frozen is not said twice.
-        let same = printed.whole
-            && self.items.iter().rev().find_map(|k| match &k.what {
-                What::Printed { whole: true, .. } => Some(k.text.as_str()),
-                _ => None,
-            }) == Some(block);
+        let same = printed.whole && self.said_last(block, &parts);
         let open = self.open.take();
         self.open_at = None;
         if !block.is_empty() && !same {
@@ -140,6 +177,7 @@ impl Talk {
                     lines: printed.total,
                 },
                 text: block.to_string(),
+                parts,
             });
         } else if let Some(open) = open {
             // It was served while it was being printed, and nothing of it
@@ -156,30 +194,71 @@ impl Talk {
                     lines: 0,
                 },
                 text: String::new(),
+                parts: None,
             });
         } else {
             self.next += 1;
         }
+    }
+
+    /// Something was sent to the pane: what it had printed until then is
+    /// frozen as a block, and the message follows it.
+    fn sent(
+        &mut self,
+        printed: spandeck_terminal::Printed,
+        agent: bool,
+        text: &str,
+        origin: &'static str,
+        from: Option<String>,
+    ) {
+        self.freeze(printed, agent);
         let rev = self.bump();
         let (text, _) = cap(&clean(text), BLOCK_MAX);
         self.push(Kept {
             line: 0,
             made: rev,
             changed: rev,
-            ts_ms: now,
+            ts_ms: now_ms(),
             what: What::Sent { origin, from },
             text,
+            parts: None,
+        });
+    }
+
+    /// The agent's turn ended: what it printed in it is frozen as a block,
+    /// and a notice follows it.
+    fn ended(&mut self, printed: spandeck_terminal::Printed, duration_ms: u64) {
+        self.freeze(printed, true);
+        let rev = self.bump();
+        self.push(Kept {
+            line: 0,
+            made: rev,
+            changed: rev,
+            ts_ms: now_ms(),
+            what: What::Ended { duration_ms },
+            text: String::new(),
+            parts: None,
         });
     }
 
     /// The block being printed now, as the terminal has it.
-    fn look(&mut self, bytes_out: u64, read: impl FnOnce() -> spandeck_terminal::Printed) {
+    fn look(
+        &mut self,
+        bytes_out: u64,
+        agent: bool,
+        read: impl FnOnce() -> spandeck_terminal::Printed,
+    ) {
         if self.open_at == Some(bytes_out) {
             return;
         }
         self.open_at = Some(bytes_out);
         let printed = read();
+        let parts = shape(&printed, agent);
         let text = clean(&printed.lines.join("\n"));
+        // The screen that was frozen last, still as it was: not said again.
+        if self.open.is_none() && printed.whole && self.said_last(&text, &parts) {
+            return;
+        }
         let what = What::Printed {
             whole: printed.whole,
             lines: printed.total,
@@ -192,6 +271,7 @@ impl Talk {
                 let rev = self.bump();
                 let o = self.open.as_mut().unwrap();
                 o.text = text;
+                o.parts = parts;
                 o.what = what;
                 o.changed = rev;
             }
@@ -204,6 +284,7 @@ impl Talk {
                     ts_ms: now_ms(),
                     what,
                     text,
+                    parts,
                 });
             }
         }
@@ -217,7 +298,7 @@ impl Talk {
 
     /// What a page shows: not a block that came to nothing.
     fn shown(&self) -> impl DoubleEndedIterator<Item = &Kept> {
-        self.all().filter(|k| !k.text.is_empty())
+        self.all().filter(|k| !k.blank())
     }
 }
 
@@ -251,6 +332,26 @@ fn served(k: &Kept, open: bool) -> Value {
             if cut || *lines > k.text.lines().count() {
                 item["more"] = json!(true);
             }
+            // The same end of it, as parts to read.
+            if let Some(parts) = &k.parts {
+                let mut left = TEXT_CAP;
+                let mut out: Vec<Value> = vec![];
+                for p in parts.iter().rev() {
+                    if left == 0 {
+                        break;
+                    }
+                    let (text, _) = tail(&p.text, left);
+                    left -= text.len();
+                    out.push(json!({"prose": p.prose, "text": text}));
+                }
+                out.reverse();
+                item["parts"] = json!(out);
+            }
+        }
+        What::Ended { duration_ms } => {
+            item["kind"] = json!("notice");
+            item["what"] = json!("turn_ended");
+            item["duration_ms"] = json!(duration_ms);
         }
     }
     item
@@ -266,6 +367,7 @@ impl Daemon {
             return;
         }
         let printed = p.term.printed_and_mark(FROZEN_LINES);
+        let agent = p.meta.lock().unwrap().agent.is_agent();
         let (origin, from) = if by_owner {
             ("you", None)
         } else {
@@ -276,7 +378,18 @@ impl Daemon {
                 .unwrap_or_else(|_| who.to_string());
             ("agent", Some(name))
         };
-        p.talk.lock().unwrap().sent(printed, text, origin, from);
+        p.talk
+            .lock()
+            .unwrap()
+            .sent(printed, agent, text, origin, from);
+    }
+
+    /// The station saw an agent's turn end (its state went from working to
+    /// idle or done) after `duration_ms`: said in the screen's
+    /// conversation, where no transcript says it.
+    pub(crate) fn screen_turn_ended(&self, p: &PaneEntry, duration_ms: u64) {
+        let printed = p.term.printed_and_mark(FROZEN_LINES);
+        p.talk.lock().unwrap().ended(printed, duration_ms);
     }
 
     /// The first message a pane's program was started with.
@@ -298,6 +411,7 @@ impl Daemon {
                 from: None,
             },
             text,
+            parts: None,
         });
     }
 
@@ -333,7 +447,9 @@ impl Daemon {
         let mut talk = p.talk.lock().unwrap();
         // The pane's own lock is taken inside the talk's, and nowhere the
         // other way round (`screen_sent` reads the screen first).
-        talk.look(bytes_out, || p.term.printed(OPEN_LINES));
+        talk.look(bytes_out, meta.agent.is_agent(), || {
+            p.term.printed(OPEN_LINES)
+        });
         let open_line = talk.open.as_ref().map(|o| o.line);
         let serve = |k: &Kept| served(k, Some(k.line) == open_line);
         let (mut items, mut updated): (Vec<Value>, Vec<Value>) = (vec![], vec![]);
@@ -344,7 +460,7 @@ impl Daemon {
         ) {
             (Some(rev), _) => {
                 for k in talk.all() {
-                    if k.made > rev && k.text.is_empty() {
+                    if k.made > rev && k.blank() {
                         continue;
                     }
                     if k.made > rev {
@@ -462,6 +578,7 @@ mod tests {
             lines: lines.iter().map(|l| l.to_string()).collect(),
             total: lines.len(),
             whole,
+            ..Default::default()
         }
     }
 
@@ -482,18 +599,19 @@ mod tests {
                 .collect();
             (made, changed)
         };
-        t.look(10, || printed(&["$"], false));
+        t.look(10, false, || printed(&["$"], false));
         assert_eq!(ids(&t, 0), (vec![0], vec![]));
         let seen = t.rev;
         // Nothing more printed: not read again, and nothing to tell.
-        t.look(10, || panic!("read again with nothing printed"));
+        t.look(10, false, || panic!("read again with nothing printed"));
         assert_eq!(ids(&t, seen), (vec![], vec![]));
-        t.look(20, || printed(&["$ ls", "a.txt"], false));
+        t.look(20, false, || printed(&["$ ls", "a.txt"], false));
         assert_eq!(ids(&t, seen), (vec![], vec![0]));
         let seen = t.rev;
         // A message: the block is frozen under its line, the message follows.
         t.sent(
             printed(&["$ ls", "a.txt", "b.txt"], false),
+            false,
             "pwd",
             "you",
             None,
@@ -502,11 +620,11 @@ mod tests {
         let lines: Vec<(u64, &str)> = t.all().map(|k| (k.line, k.text.as_str())).collect();
         assert_eq!(lines, vec![(0, "$ ls\na.txt\nb.txt"), (1, "pwd")]);
         let seen = t.rev;
-        t.look(30, || printed(&["$ pwd", "/home/ada"], false));
+        t.look(30, false, || printed(&["$ pwd", "/home/ada"], false));
         assert_eq!(ids(&t, seen), (vec![2], vec![]));
         // A screen drawn whole that has not changed is not frozen twice.
-        t.sent(printed(&["menu"], true), "one", "you", None);
-        t.sent(printed(&["menu"], true), "two", "you", None);
+        t.sent(printed(&["menu"], true), false, "one", "you", None);
+        t.sent(printed(&["menu"], true), false, "two", "you", None);
         let texts: Vec<&str> = t.all().map(|k| k.text.as_str()).collect();
         assert_eq!(
             texts,
@@ -515,5 +633,48 @@ mod tests {
         // The end of a long block is what is served, from a line's start.
         let (end, cut) = tail("first line\nsecond line\nthird", 12);
         assert_eq!((end, cut), ("third", true));
+    }
+
+    /// The owner's report of 16 Nov 2026: Chat made from an agent's screen
+    /// was a box of terminal text with no end to a turn. For an agent the
+    /// block has parts to read, a turn's end is a notice after the block
+    /// that was printed in it, and a screen whose status row alone has
+    /// changed is not a new screen.
+    #[test]
+    fn an_agents_turn_ends_with_a_notice_and_its_screen_is_said_once() {
+        let mut t = Talk::default();
+        let screen = |status: &str| Printed {
+            cursor: Some(2),
+            ..printed(&["  Nine herons nest here.", "", "> ", status], true)
+        };
+        t.look(10, true, || screen("tern-2 · 12 s"));
+        t.ended(screen("tern-2 · 14 s"), 14_000);
+        let kinds: Vec<Value> = t.shown().map(|k| served(k, false)).collect();
+        assert_eq!(kinds.len(), 2, "{kinds:?}");
+        assert_eq!(
+            kinds[0]["parts"],
+            json!([{"prose": true, "text": "Nine herons nest here."}])
+        );
+        assert!(kinds[0]["text"].as_str().unwrap().contains("tern-2 · 14 s"));
+        assert_eq!(
+            (
+                &kinds[1]["kind"],
+                &kinds[1]["what"],
+                &kinds[1]["duration_ms"]
+            ),
+            (&json!("notice"), &json!("turn_ended"), &json!(14_000))
+        );
+        // The clock in its status row moves on: nothing new to show.
+        let seen = t.rev;
+        t.look(20, true, || screen("tern-2 · idle 3 s"));
+        assert_eq!(t.rev, seen);
+        t.look(30, true, || Printed {
+            cursor: Some(3),
+            ..printed(
+                &["  Nine herons nest here.", "  And two grebes.", "", "> "],
+                true,
+            )
+        });
+        assert_eq!(t.shown().count(), 3);
     }
 }

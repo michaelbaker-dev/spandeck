@@ -277,6 +277,12 @@ pub struct Printed {
     /// scrolled out of the history), or a full-screen program is open:
     /// these lines are the whole screen as it is, not a log since the mark.
     pub whole: bool,
+    /// For each line: it goes on from the line before, which the terminal
+    /// wrapped at its right edge (the program printed one long line). Such
+    /// a line before it keeps the blanks it ends with.
+    pub joined: Vec<bool>,
+    /// When the lines are the whole screen: which of them the cursor is on.
+    pub cursor: Option<usize>,
 }
 
 pub const DEFAULT_HISTORY: usize = 5000;
@@ -465,22 +471,57 @@ impl Screen {
         } else {
             self.rows as i32
         };
-        let mut lines: Vec<String> = (from.unwrap_or(0)..end)
-            .map(|i| self.line_text(Line(i)))
+        let first = from.unwrap_or(0);
+        let wraps = |i: i32| {
+            self.cols > 0
+                && grid[Line(i)][Column(self.cols as usize - 1)]
+                    .flags
+                    .contains(Flags::WRAPLINE)
+        };
+        let mut lines: Vec<String> = (first..end)
+            .map(|i| {
+                let text = self.line_text(Line(i));
+                // A row that goes on in the next keeps its width: the
+                // blanks it ends with are between two words.
+                if i + 1 < end && wraps(i) {
+                    let have = text.chars().count();
+                    let pad = (self.cols as usize).saturating_sub(have);
+                    text + &" ".repeat(pad)
+                } else {
+                    text
+                }
+            })
             .collect();
-        while lines.last().is_some_and(|l| l.is_empty()) {
+        let mut joined: Vec<bool> = (first..end).map(|i| i > first && wraps(i - 1)).collect();
+        let mut cursor = whole
+            .then(|| grid.cursor.point.line.0 - first)
+            .filter(|at| *at >= 0)
+            .map(|at| at as usize);
+        while lines.last().is_some_and(|l| l.trim().is_empty()) {
             lines.pop();
         }
-        let blank = lines.iter().take_while(|l| l.is_empty()).count();
+        joined.truncate(lines.len());
+        let blank = lines.iter().take_while(|l| l.trim().is_empty()).count();
         lines.drain(..blank);
+        joined.drain(..blank);
         let total = lines.len();
+        let cut = blank + total.saturating_sub(max);
         if total > max {
             lines.drain(..total - max);
+            joined.drain(..total - max);
+        }
+        cursor = cursor
+            .and_then(|at| at.checked_sub(cut))
+            .filter(|at| *at < lines.len());
+        if let Some(first) = joined.first_mut() {
+            *first = false;
         }
         Printed {
             lines,
             total,
             whole,
+            joined,
+            cursor,
         }
     }
 
@@ -922,6 +963,7 @@ mod tests {
         s.mark();
         s.feed(b"\x1b[?1049h\x1b[2J\x1b[Hmenu\r\n> first");
         let p = s.printed(true, 100);
+        assert_eq!(p.cursor, Some(1));
         assert_eq!(
             (p.lines, p.whole),
             (vec!["menu".to_string(), "> first".to_string()], true)
@@ -942,5 +984,13 @@ mod tests {
                 true
             )
         );
+        // One long line that the terminal wrapped at its right edge is said
+        // to go on (the owner's report of 16 Nov 2026: wrapped fragments,
+        // read as if they were lines).
+        let mut s = Screen::new(10, 4);
+        s.feed(b"the heron stood still\r\nnext");
+        let p = s.printed(false, 100);
+        assert_eq!(p.lines, vec!["the heron ", "stood stil", "l", "next"]);
+        assert_eq!(p.joined, vec![false, true, true, false]);
     }
 }
