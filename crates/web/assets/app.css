@@ -216,6 +216,40 @@ button.toggle { padding: 2px 10px; } button.toggle.on { background: var(--toggle
 /* A pane watched on a phone: at this device's text size, and scrolled both
    ways (term.js moves it under a finger), never shrunk to fit. */
 .term-body.natural { overflow: auto; padding: 0; scrollbar-width: thin; } .term-body.natural .xterm { flex: none; }
+/* On a phone the terminal is one element the phone scrolls itself, as it does
+   a conversation: the history as rows that stay as they were drawn (hist.js),
+   and under them the live screen, which is all the terminal draws. No move
+   of a finger is refused here, so the movement, its momentum and its bounce
+   are the phone's. The terminal's own scrolling element is never scrolled. */
+.term-body.flow { contain: strict; display: block; overflow: auto; padding: 0 0 0 6px; touch-action: pan-x pan-y pinch-zoom; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; overflow-anchor: none; scrollbar-width: thin; scrollbar-gutter: stable; }
+/* (Nothing around it refuses a finger either: a phone may ask every element
+   from the one touched up to the page.) */
+.phone-pane .pane.flows, .pane.flows .pane-main { touch-action: pan-x pan-y pinch-zoom; }
+.term-body.flow.natural, .term-body.flow.letterbox { padding: 0; } .term-body.flow.letterbox { display: block; place-items: normal; overflow-x: hidden; }
+.term-body.flow .xterm { min-height: 100%; }
+.term-body.flow.letterbox .xterm { min-height: 0; }
+.term-body.flow.letterbox .xterm, .term-body.flow.letterbox .term-hist { transform-origin: 0 0; }
+.term-body.flow .xterm-viewport { overflow: hidden !important; }
+/* A finger never lands on a piece of the terminal's text. The terminal makes
+   those pieces again whenever it draws a row, and a finger whose piece is
+   gone is heard of no more: a drag the page follows (a full-screen program,
+   or a touch screen that is not a phone's) stopped after its first line
+   wherever it began on coloured text. */
+.term-body.flow .xterm-rows { pointer-events: none; }
+@media (pointer: coarse) { .term-body .xterm-rows { pointer-events: none; } }
+/* A full-screen program keeps its own history: there is none of ours to
+   show, and a drag is passed on to it (term.js, `_drive`). */
+.term-body.flow.alt { touch-action: none; }
+.term-body.flow.alt .term-hist { display: none; }
+.term-hist { overflow: hidden; white-space: pre; color: var(--tf); background: var(--tb); font-kerning: none; font-variant-ligatures: var(--lig, normal); -webkit-user-select: text; user-select: text; }
+.hist-chunk { height: calc(var(--th, 16px) * var(--n, 0)); overflow: hidden; contain: strict; }
+.hist-row { height: var(--th, 16px); line-height: var(--th, 16px); }
+.hist-chunk.gone { white-space: normal; font: calc(12px * var(--ui-scale)) / 1.4 var(--ui-font, system-ui, sans-serif); color: var(--muted); padding: 4px 8px; box-sizing: border-box; }
+.hist-top { height: calc(var(--th, 16px) * 3); box-sizing: border-box; overflow: hidden; white-space: normal; padding: 4px 8px; font: calc(12px * var(--ui-scale)) / 1.35 var(--ui-font, system-ui, sans-serif); color: var(--muted); position: sticky; left: 0; max-width: 100vw; }
+.hist-top[hidden] { display: none; }
+/* Earlier output is being read, and the pane has printed since. */
+.term-new { position: absolute; right: 10px; bottom: 10px; z-index: 2; min-height: 36px; padding: 6px 12px; border-radius: 18px; background: var(--panel2); border: 1px solid var(--blue); box-shadow: 0 6px 18px rgba(0,0,0,.4); }
+.term-new[hidden] { display: none; }
 .fit-note { flex: 1 0 100%; color: var(--amber); font-size: calc(12px * var(--ui-scale)); }
 .term-note { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; display: flex; gap: 10px; align-items: center; }
 .term-note[hidden] { display: none; }

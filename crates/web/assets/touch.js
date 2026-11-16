@@ -1,19 +1,17 @@
-// A finger on a terminal: the arithmetic of a drag and of what follows it.
+// A finger on a terminal that the page has to follow: the arithmetic of a
+// drag and of what comes after it.
 //
-// A conversation's log is an element the phone scrolls itself, with the
-// phone's own momentum. A terminal's history is not: its rows are drawn for
-// one position, a line at a time, and a full-screen program keeps its own
-// history and has to be told to scroll. So a drag there is followed here
-// (the owner, 16 Nov 2026: "the Claude chat screen scrolls really nice but
-// the antigravity terminal doesn't, is not that responsive"): the finger is
+// On a phone a terminal's history is scrolled by the phone itself, as a
+// conversation's log is (hist.js; the owner, 16 Nov 2026: "have to fix
+// terminal to be like chat"). What is left for the page to follow is a
+// full-screen program, which keeps its own history and has to be told to
+// scroll, and a terminal on a touch screen that is not a phone's, whose
+// history the terminal still draws a line at a time. There the finger is
 // tracked to the pixel, the view keeps moving after the finger lifts and
-// slows as the phone's own scrolling does, and a touch stops it.
+// slows as a phone's own scrolling does, and a touch stops it.
 //
 // Nothing here touches the page: term.js gives it the events and is told
-// how far to move. (The browser could scroll the terminal's own viewport
-// element by itself only if touches reached it, through the layer the text
-// is drawn on; that layer is what a tap focuses, and a full-screen program
-// has nothing there to scroll. So the drag is followed, for every program.)
+// how far to move.
 
 // A drag is one way, the way it first went further: up and down, or sideways.
 export const SLOP = 6;
@@ -56,14 +54,25 @@ export function linesOf(px, line) {
 }
 
 // One thing to do in the next frame, however many times it is asked for.
-// A page that is not being drawn gets no frames, so a timer stands behind.
+// A page that is not being drawn gets no frames, so a timer stands behind;
+// whichever of the two comes first takes the other away. (Before 16 Nov 2026
+// it did not: what was asked for again from inside `fn`, as a glide does
+// every frame, left the other one armed, and that one ran `fn` again at
+// once, which armed two more. Three drags kept the page's thread busy for
+// 2.5 of 4.9 seconds: docs/measurements.md.)
 export function framer(fn) {
-  let asked = false;
-  const run = () => { if (!asked) return; asked = false; fn(performance.now()); };
+  let asked = false, frame = 0, timer = 0;
+  const run = () => {
+    if (!asked) return;
+    asked = false;
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame);
+    clearTimeout(timer);
+    fn(performance.now());
+  };
   return () => {
     if (asked) return;
     asked = true;
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
-    setTimeout(run, 40);
+    if (typeof requestAnimationFrame === 'function') frame = requestAnimationFrame(run);
+    timer = setTimeout(run, 40);
   };
 }

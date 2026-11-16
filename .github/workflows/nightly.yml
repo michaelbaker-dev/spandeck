@@ -71,6 +71,15 @@ jobs:
       # twenty seconds.
       - name: Chat for every pane, and one chat for all of them (phone and computer, the keyboard)
         run: cargo test -p spandeck --test chat -- --ignored
+      # A terminal's history on a phone is the browser's to scroll: the rest
+      # of it, with the browser's own touches. A pane another window holds
+      # (sideways and up), the whole width, a program that prints more than
+      # the terminal keeps while earlier output is read, a full-screen
+      # program that listens for the mouse, and the lines the page was not
+      # sent. About ten seconds. (The measure in the same file is run by
+      # hand: docs/measurements.md.)
+      - name: A terminal's history on a phone (watched, whole width, a flood, earlier output)
+        run: cargo test -p spandeck --test phonescroll the_rest -- --ignored
   build:
     strategy:
       fail-fast: false

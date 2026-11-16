@@ -1148,90 +1148,35 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
         (p["cols"].as_u64().is_some_and(|c| c < 80) && !p["controller"].is_null()).then_some(())
     });
 
-    // (Touches are built from plain events: a desktop browser with no touch
-    // screen, as on the macOS CI machine, has no Touch constructor.)
     // A bug that happened on a real phone: a finger could not scroll the
-    // terminal's history. Dragging down shows earlier output.
+    // terminal's history. Dragging down shows earlier output. (The history
+    // is the phone's own to scroll since 16 Nov 2026, phonescroll.rs: so
+    // the finger is a real touch, which the browser scrolls with.)
     set("seq 1000 1300");
     page.js("document.querySelector('.composer-row button[type=submit]').click()");
     s.wait_text(&sh, "1300");
-    // The lines on the screen. A line that is "1300" is the end of the
-    // output; the command that was typed holds "1300" too, and is not.
-    let rows = "document.querySelector('.phone-pane .xterm-rows').innerText.split('\\n').map(x => x.trim())";
-    page.wait("the end of the output", &format!("{rows}.includes('1300')"));
-    // The drag is repeated until it takes: on a slow machine the first one
-    // landed while the last lines were still being drawn, and the view went
-    // back to the end (seen twice on the Mac CI runner).
-    // The failures that remained on the Mac CI runner, and every run once
-    // this test asked the page faster: "1300" was looked for anywhere on the
-    // screen and found in the command just typed, so the drag came before
-    // the output; the view then stayed at the top of the history, where
-    // that command is, and looked like the end for good. When it fails
-    // again, it says what the page showed.
-    // Earlier output is whatever is above the end: other failures on the CI
-    // runners (16 Nov 2026) showed the view at the very first lines, above
-    // the numbers this once looked for, and so waited for ever.
-    let dragged = format!(
-            "(() => {{ // The finger lands on the terminal's own element, as on a real phone.
-           if (!{rows}.includes('1300')) return {rows}.some(x => x !== '');
-           const el = document.querySelector('.phone-pane .xterm-screen');
-           const touch = (type, y) => {{ const ev = new Event(type, {{bubbles: true, cancelable: true}}); Object.defineProperty(ev, 'touches', {{value: y === null ? [] : [{{clientX: 100, clientY: y}}]}}); return ev; }};
-           el.dispatchEvent(touch('touchstart', 200));
-           for (let y = 220; y <= 700; y += 20) el.dispatchEvent(touch('touchmove', y));
-           el.dispatchEvent(touch('touchend', null));
-           return false; }})()"
-        );
-    // The last failure showed the view at the earliest lines straight after a
-    // drag, and back at the end a quarter of a second later. Note everything
-    // that could move it, so the next failure names what did.
-    page.js(
-        "(() => { const t = document.querySelector('.phone-pane .pane').paneTerm; const log = window.__moved = []; const at = performance.now();
-           const note = (what) => { if (log.length < 60) log.push(Math.round(performance.now() - at) + ' ' + what); };
-           for (const name of ['write', 'reset', 'clear', 'resize', 'scrollToBottom', 'scrollToLine', 'refresh']) {
-             const real = t.term[name].bind(t.term);
-             t.term[name] = (...a) => { note(name + (name === 'write' ? ' ' + (a[0] ? a[0].length : 0) : ' ' + JSON.stringify(a.slice(0, 2))) + (name === 'write' ? '' : ' <- ' + (new Error().stack || '').split('\\n').slice(2, 5).map(x => x.trim().replace(/^at /, '').replace(/https?:[^ )]*\\//, '')).join(' < '))); return real(...a); };
-           }
-           let last = -1; t.term.onScroll((y) => { if (y > last && last >= 0) note('moved towards the end: ' + last + ' -> ' + y); last = y; });
-           window.__paneEl = document.querySelector('.phone-pane .pane');
-           return true; })()",
+    let term = "document.querySelector('.phone-pane .pane').paneTerm";
+    page.wait(
+        "the end of the output, and its history",
+        &format!("(t => t.following && t.hist.lines > 250 && !t.hist.pending() && t.body.querySelector('.xterm-rows').innerText.split('\\n').some(x => x.trim() === '1300'))({term})"),
     );
-    let start = std::time::Instant::now();
-    loop {
-        let v = page.js(&dragged);
-        if v == json!(true) {
-            break;
-        }
-        if start.elapsed() > Duration::from_secs(20) {
-            let moved = page.js("JSON.stringify({samePane: window.__paneEl === document.querySelector('.phone-pane .pane'), moved: window.__moved})");
-            eprintln!("what moved the view: {moved}");
-            let seen = page.js(
-                "(() => { const v = document.querySelector('.phone-pane .xterm-viewport'); const r = document.querySelector('.phone-pane .xterm-rows'); const s = document.querySelector('.phone-pane .xterm-screen'); return JSON.stringify({scrollTop: v && v.scrollTop, scrollHeight: v && v.scrollHeight, clientHeight: v && v.clientHeight, rowCount: r && r.children.length, rowHeight: r && r.firstElementChild && r.firstElementChild.getBoundingClientRect().height, screen: s && [s.clientWidth, s.clientHeight], hidden: document.hidden, lastRows: r && r.innerText.split('\\n').filter(x => x.trim()).slice(-3)}); })()",
-            );
-            panic!(
-                "timed out waiting for earlier output after dragging down; the page showed {seen}"
-            );
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-
-    if std::env::var_os("SPANDECK_TEST_SHOW_MOVES").is_some() {
-        eprintln!("moves: {}", page.js("JSON.stringify(window.__moved)"));
-    }
+    page.touches();
+    page.touch_drag(&format!("{term}.body"), 0.0, 250.0, 12);
+    page.wait(
+        "earlier output after dragging down",
+        &format!("(t => !t.following && t.body.scrollTop < t._metrics().liveTop - 150)({term})"),
+    );
 
     // Found from a real phone's drag reports: Claude Code runs full-screen and
     // listens for the mouse, so it has to be told to scroll. A drag over such a
     // program sends it wheel turns.
     set("printf '\\033[?1049h\\033[?1003h\\033[?1006h'; cat -v");
     page.js("document.querySelector('.composer-row button[type=submit]').click()");
-    std::thread::sleep(Duration::from_millis(900));
-    page.js(
-        "(() => { const el = document.querySelector('.phone-pane .xterm-screen');
-           const touch = (type, y) => { const ev = new Event(type, {bubbles: true, cancelable: true}); Object.defineProperty(ev, 'touches', {value: y === null ? [] : [{clientX: 100, clientY: y}]}); return ev; };
-           el.dispatchEvent(touch('touchstart', 200));
-           for (let y = 220; y <= 420; y += 20) el.dispatchEvent(touch('touchmove', y));
-           el.dispatchEvent(touch('touchend', null));
-           return true; })()",
+    page.wait(
+        "the full-screen program",
+        &format!("(t => t._alt && t._driven && t.term.modes.mouseTrackingMode !== 'none')({term})"),
     );
+    page.touch_drag(&format!("{term}.body"), 0.0, 200.0, 10);
     s.wait_text(&sh, "^[[<64;");
 
     // And start something new from the phone.
@@ -1989,7 +1934,9 @@ fn a_pane_on_a_phone_is_read_at_the_phones_text_size() {
         (holders(&wide) == 1 && !p["controller"].is_null() && cols(&wide) < 60).then_some(())
     });
 
-    // A drag over the terminal. The arithmetic first (touch.js).
+    // A drag over a full-screen program is followed by the page and passed
+    // on to it: the arithmetic of that (touch.js). The history of any other
+    // program is scrolled by the phone itself (phonescroll.rs).
     let sums = phone.js(
         "import('./touch.js').then(t => [t.axisOf(3, 4, true), t.axisOf(30, 4, true), t.axisOf(30, 4, false), t.axisOf(4, 30, true),
            t.linesOf(40, 17), t.linesOf(-9, 17),
@@ -2001,52 +1948,15 @@ fn a_pane_on_a_phone_is_read_at_the_phones_text_size() {
         json!([null, "x", "y", "y", {"whole": 2, "rest": 6}, {"whole": 0, "rest": -9}, 1, 0, 0, 325, 325]),
         "the arithmetic of a drag"
     );
-    s.call(
-        "pane.paste",
-        json!({"pane": wide, "text": "seq 1000 1400", "enter": true}),
-    );
-    s.wait_text(&wide, "1400");
-    phone.wait("the end of the output", "document.querySelector('.phone-pane .xterm-rows').innerText.split('\\n').some(x => x.trim() === '1400')");
-    // Less than a line: the rows follow the finger, and no line is moved.
-    let part = phone.js(&format!(
-        "(async () => {{ const t = {term}, el = t.body.querySelector('.xterm-screen'), rows = t.body.querySelector('.xterm-rows');
-           const touch = (type, y) => {{ const ev = new Event(type, {{bubbles: true, cancelable: true}}); Object.defineProperty(ev, 'touches', {{value: y === null ? [] : [{{clientX: 100, clientY: y}}]}}); return ev; }};
-           const y0 = t.term.buffer.active.viewportY;
-           el.dispatchEvent(touch('touchstart', 300)); el.dispatchEvent(touch('touchmove', 309));
-           for (let i = 0; i < 100 && !rows.style.transform; i += 1) await new Promise(r => setTimeout(r, 20));
-           const during = [rows.style.transform, t.term.buffer.active.viewportY - y0];
-           el.dispatchEvent(touch('touchend', null));
-           return [during, rows.style.transform, t.term.buffer.active.viewportY - y0]; }})()"
-    ));
-    assert!(
-        part[0] == json!(["translateY(9px)", 0])
-            && part[1] == json!("")
-            && [0, -1].contains(&part[2].as_i64().unwrap()),
-        "a drag of 9 px: {part}"
-    );
-    // A quick drag: the view goes on after the finger lifts, and comes to
-    // rest on a whole line.
-    let flick = phone.js(&format!(
-        "(async () => {{ const t = {term}, el = t.body.querySelector('.xterm-screen'), rows = t.body.querySelector('.xterm-rows');
-           const touch = (type, y) => {{ const ev = new Event(type, {{bubbles: true, cancelable: true}}); Object.defineProperty(ev, 'touches', {{value: y === null ? [] : [{{clientX: 100, clientY: y}}]}}); return ev; }};
-           t.term.scrollToBottom();
-           const y0 = t.term.buffer.active.viewportY;
-           el.dispatchEvent(touch('touchstart', 300));
-           for (let y = 315; y <= 420; y += 15) {{ el.dispatchEvent(touch('touchmove', y)); await new Promise(r => setTimeout(r, 16)); }}
-           el.dispatchEvent(touch('touchend', null));
-           const lifted = t.term.buffer.active.viewportY;
-           for (let i = 0; i < 200 && (t.term.buffer.active.viewportY >= lifted || rows.style.transform); i += 1) await new Promise(r => setTimeout(r, 25));
-           return [y0 - lifted, lifted - t.term.buffer.active.viewportY, rows.style.transform]; }})()"
-    ));
-    // (How far it goes on depends on how fast this page's own clock said
-    // the finger moved: on a slow CI runner the moves were far apart and it
-    // did not go on at all. The glide's arithmetic is checked above, by
-    // numbers; here, that the rows come to rest on a whole line.)
-    assert!(
-        flick[0].as_i64().unwrap() >= 3 && flick[1].as_i64().unwrap() >= 0 && flick[2] == json!(""),
-        "lines moved under the finger, lines moved after it lifted, and where the rows rest: {flick}"
-    );
 
+    // (What is to be given back is written down when the page is next
+    // redrawn, within a few seconds of the terminal taking its size: a
+    // reload before that gives nothing back. Found when this test stopped
+    // spending those seconds on a drag.)
+    phone.wait(
+        "the size to give back, kept for a reload",
+        &format!("(t => Object.values(JSON.parse(sessionStorage.getItem('spandeck.phonefit.before') || '{{}}')).some(k => k.mc === t.size.cols && k.mr === t.size.rows))({term})"),
+    );
     // After a reload: the size and the font, and the pane fitted again.
     phone.reload();
     phone.wait(
@@ -2080,6 +1990,259 @@ fn a_pane_on_a_phone_is_read_at_the_phones_text_size() {
     wait_for("its size given back", 10, || {
         (cols(&other) >= 80).then_some(())
     });
+}
+
+/// A terminal's history on a phone is scrolled by the phone (DECISIONS.md,
+/// "On a phone a terminal's history is scrolled by the phone"; the owner on
+/// an iPhone, 16 Nov 2026: "all terminals are choppy still, not like the
+/// chat window which is smooth.. have to fix terminal to be like chat"). No
+/// iPhone can be driven from here. What is shown is the structure that makes
+/// the chat smooth: rows that stay as drawn, in an element the browser
+/// scrolls itself, with a real touch; no move of the finger refused; and the
+/// terminal drawing nothing meanwhile. The rest is in phonescroll.rs.
+#[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
+fn a_terminals_history_on_a_phone_is_scrolled_by_the_phone() {
+    use common::browser::{Page, T, TOP_ROW, WATCH};
+    let paste = |s: &Station, pane: &str, text: &str| {
+        s.call(
+            "pane.paste",
+            json!({"pane": pane, "text": text, "enter": true}),
+        );
+    };
+    let drag = |page: &Page, dx: f64, dy: f64, steps: u32| {
+        page.touch_drag(&format!("{T}.body"), dx, dy, steps);
+    };
+    let s = Station::start("alpha");
+    let pane = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "hist", "cwd": s.root.join("home")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let phone = Page::open(&s, 390, 844);
+    phone.touches();
+    phone.goto(&format!("#/s/alpha/p/{pane}"));
+    phone.wait(
+        "the terminal fitted to the phone",
+        &format!("(t => !!t && t.control && t.chan !== null && t.term.cols < 60)({T})"),
+    );
+    // Colours, a line longer than the phone is wide, something that would be
+    // markup if it were put in as markup, and four hundred lines.
+    paste(
+        &s,
+        &pane,
+        "printf '\\033[31mredword\\033[0m plain \\033[1mboldword\\033[0m \\033[38;5;208morange256\\033[0m \\033[48;2;1;2;3mrgbbg\\033[0m\\n'; echo '<img src=x onerror=alert(1)>'; printf 'w%.0s' $(seq 1 300); echo; seq 1000 1400",
+    );
+    s.wait_text(&pane, "1400");
+    phone.wait(
+        "the history as rows, and the live screen in sight",
+        &format!("(t => t.following && t.hist.lines > 350 && !t.hist.pending() && Math.abs(t.body.scrollTop - t._metrics().liveTop) < 1)({T})"),
+    );
+
+    // The element that holds them is one the browser scrolls, and the
+    // terminal's own scrolling element is not.
+    // (Contained: without that the page laid out every row of the history
+    // again each second, when the pane's strip was redrawn; measured, see
+    // docs/measurements.md.)
+    let is = phone.js(&format!(
+        "(t => (b => [getComputedStyle(b).overflowY, getComputedStyle(b).touchAction, b.scrollHeight > b.clientHeight + 1000, b.scrollTop === b.scrollHeight - b.clientHeight,
+            getComputedStyle(b.querySelector('.xterm-viewport')).overflowY, b.scrollWidth <= b.clientWidth, t.hist.el.nextElementSibling === t.term.element, getComputedStyle(b).contain])(t.body))({T})"
+    ));
+    assert_eq!(
+        is,
+        json!([
+            "auto",
+            "manipulation",
+            true,
+            true,
+            "hidden",
+            true,
+            true,
+            "strict"
+        ]),
+        "the element that scrolls"
+    );
+    // Nothing from the text under a finger up to the page refuses a pan.
+    let refusing = phone.js(&format!(
+        "(t => {{ const out = []; for (let e = t.hist.el.querySelector('.hist-row'); e; e = e.parentElement) if (!/^(auto|manipulation)$/.test(getComputedStyle(e).touchAction)) out.push(e.className + ': ' + getComputedStyle(e).touchAction); return out; }})({T})"
+    ));
+    assert_eq!(refusing, json!([]), "elements that refuse a pan");
+    // A row of history is set as a row of the terminal is.
+    let set = "(r => (c => [c.fontFamily, c.fontSize, c.height, c.lineHeight, c.whiteSpace])(getComputedStyle(r)))";
+    let rows = phone.js(&format!(
+        "(t => [{set}(t.hist.el.querySelector('.hist-row')), {set}(t.body.querySelector('.xterm-rows > div'))])({T})"
+    ));
+    assert_eq!(
+        rows[0], rows[1],
+        "a row of history, and a row of the terminal"
+    );
+    assert!(rows[0][1] == json!("12px"), "{rows}");
+    // Its colours and its bold are the terminal's; what was printed is text.
+    let look = phone.js(&format!(
+        "(t => {{ const probe = document.createElement('span'); t.body.append(probe);
+            const as = (prop, value) => {{ probe.style[prop] = value; return getComputedStyle(probe)[prop]; }};
+            const span = (text) => [...t.hist.el.querySelectorAll('.hist-row span')].find(x => x.textContent === text);
+            const row = [...t.hist.el.querySelectorAll('.hist-row')].find(r => r.textContent.startsWith('redword'));
+            const out = [row.textContent, getComputedStyle(span('redword')).color === as('color', t.term.options.theme.red), getComputedStyle(span('boldword')).fontWeight === as('fontWeight', t.term.options.fontWeightBold),
+              getComputedStyle(row).fontWeight === as('fontWeight', t.term.options.fontWeight), getComputedStyle(span('orange256')).color, getComputedStyle(span('rgbbg')).backgroundColor,
+              [...t.hist.el.querySelectorAll('.hist-row')].some(r => r.textContent === '<img src=x onerror=alert(1)>'), t.hist.el.querySelector('img')];
+            probe.remove(); return out; }})({T})"
+    ));
+    assert_eq!(
+        look,
+        json!([
+            "redword plain boldword orange256 rgbbg",
+            true,
+            true,
+            true,
+            "rgb(255, 135, 0)",
+            "rgb(1, 2, 3)",
+            true,
+            null
+        ]),
+        "colours, bold, and text as text"
+    );
+
+    // A finger moves it: the browser scrolls, no move is refused, and the
+    // terminal draws nothing and is not scrolled itself.
+    let before = phone.js(&format!("{T}.body.scrollTop")).as_f64().unwrap();
+    phone.js(&format!("{WATCH}({T})"));
+    drag(&phone, 0.0, 300.0, 20);
+    phone.wait(
+        "the view at rest, on earlier output",
+        &format!("(t => !t.following && !!t._read)({T})"),
+    );
+    let after = phone.js(&format!(
+        "(t => [t.body.scrollTop, seen.moves.length, seen.moves.some(e => e.defaultPrevented), seen.changed, seen.drawn, t.term.buffer.active.viewportY === t.term.buffer.active.baseY, t.pill.hidden])({T})"
+    ));
+    assert!(
+        after[0].as_f64().unwrap() < before - 200.0,
+        "a drag of 300 px moved it from {before} to {after}"
+    );
+    assert!(after[1].as_u64().unwrap() >= 10, "{after}");
+    assert_eq!(
+        json!(after.as_array().unwrap()[2..]),
+        json!([false, 0, 0, true, true]),
+        "moves refused, changes to the terminal's rows, times it drew, its own lines at their end, no button: {after}"
+    );
+
+    // The pane prints while earlier output is being read: nothing moves, and
+    // a button says so.
+    let reading = phone.js(&format!("(t => [t.body.scrollTop, {TOP_ROW}(t)])({T})"));
+    paste(&s, &pane, "seq 2000 2100");
+    s.wait_text(&pane, "2100");
+    phone.wait(
+        "the button for new output",
+        &format!("(t => !t.pill.hidden && t.pill.offsetHeight > 0 && t.hist.lines > 450 && t.body.querySelector('.xterm-rows').innerText.includes('2100'))({T})"),
+    );
+    assert_eq!(
+        phone.js(&format!("(t => [t.body.scrollTop, {TOP_ROW}(t)])({T})")),
+        reading,
+        "new output moved what was being read"
+    );
+
+    // The phone is turned narrower: the lines are wrapped again, and the line
+    // that was being read is still at the top.
+    let wrapped = "(t => [t.term.cols, [...t.hist.el.querySelectorAll('.hist-row')].filter(r => /^w+$/.test(r.textContent)).length, t.hist.made])";
+    let wide = phone.js(&format!("{wrapped}({T})"));
+    phone.protocol(
+        "Emulation.setDeviceMetricsOverride",
+        json!({"width": 320, "height": 844, "deviceScaleFactor": 1, "mobile": false}),
+    );
+    let made = wide[2].as_u64().unwrap();
+    let narrow = phone.wait(
+        "the lines wrapped again, and the reading line in place",
+        &format!("(t => t.term.cols < {} && t.hist.made > {made} && !t.hist.pending() && {TOP_ROW}(t) === {} && !t.following && {wrapped}(t))({T})", wide[0], reading[1]),
+    );
+    let rows_of = |v: &Value| {
+        (
+            v[1].as_u64().unwrap(),
+            300_u64.div_ceil(v[0].as_u64().unwrap()),
+        )
+    };
+    assert_eq!(rows_of(&wide).0, rows_of(&wide).1, "{wide}");
+    assert_eq!(rows_of(&narrow).0, rows_of(&narrow).1, "{narrow}");
+    assert!(rows_of(&narrow).0 > rows_of(&wide).0, "{wide} {narrow}");
+
+    // The button leads back to the live screen, and there new output keeps
+    // it in sight.
+    phone.js(&format!("{T}.pill.click()"));
+    paste(&s, &pane, "seq 3000 3100");
+    s.wait_text(&pane, "3100");
+    phone.wait(
+        "the live screen in sight after new output",
+        &format!("(t => t.following && t.pill.hidden && t.hist.lines > 550 && Math.abs(t.body.scrollTop - t._metrics().liveTop) < 1 && t.body.querySelector('.xterm-rows').innerText.includes('3100'))({T})"),
+    );
+
+    // A full-screen program keeps its own history: there is none of ours in
+    // the element, and a drag is passed on to the program (arrow keys, for
+    // one that does not listen for the mouse).
+    // Its screen is full of coloured text, and the finger is on it: the
+    // terminal makes those pieces of text again when it draws, and a drag
+    // that began on one used to stop after its first line. The finger is on
+    // the screen itself, which stays.
+    paste(
+        &s,
+        &pane,
+        "printf '\\033[?1049h\\033[H'; i=0; while [ $i -lt 40 ]; do printf '\\033[32mgreen green green green green green green green\\033[0m\\n'; i=$((i+1)); done; cat -v",
+    );
+    let under = phone.wait(
+        "the full-screen program alone",
+        &format!("(t => t._alt && t._driven && getComputedStyle(t.hist.el).display === 'none' && getComputedStyle(t.body).touchAction === 'none' && t.body.scrollHeight <= t.body.clientHeight + 1 && t.body.querySelector('.xterm-rows').innerText.includes('green green') &&
+            (r => (e => [!!e.closest('.xterm'), !!e.closest('.xterm-rows')])(document.elementFromPoint(r.left + 60, r.top + 40)))(t.body.getBoundingClientRect()))({T})"),
+    );
+    assert_eq!(
+        under,
+        json!([true, false]),
+        "what a finger on the text touches"
+    );
+    drag(&phone, 0.0, -150.0, 10);
+    // Ten lines of drag: five keys, not the one of the first move.
+    s.wait_text(&pane, "^[[B^[[B^[[B^[[B");
+    // It ends: the history is back, with the live screen in sight, and the
+    // browser scrolls it again.
+    s.call("pane.input", json!({"pane": pane, "data": "\u{3}"}));
+    paste(&s, &pane, "printf '\\033[?1049l'");
+    phone.wait(
+        "the history again",
+        &format!("(t => !t._alt && !t._driven && t.following && getComputedStyle(t.body).touchAction === 'manipulation' && t.hist.lines > 550 && Math.abs(t.body.scrollTop - t._metrics().liveTop) < 1)({T})"),
+    );
+    let before = phone.js(&format!("{T}.body.scrollTop")).as_f64().unwrap();
+    drag(&phone, 0.0, 200.0, 12);
+    phone.wait(
+        "the history scrolled by the browser again",
+        &format!("(t => !t.following && t.body.scrollTop < {before} - 100)({T})"),
+    );
+    // A tap on earlier output is not a tap on the terminal: it takes the
+    // keyboard for nothing.
+    drag(&phone, 0.0, 300.0, 12);
+    phone.wait(
+        "nothing but earlier output in sight",
+        &format!("(t => !t.following && !!t._read && t.body.scrollTop < t._metrics().liveTop - t.body.clientHeight)({T})"),
+    );
+    let focused = "document.activeElement?.classList.contains('xterm-helper-textarea') || false";
+    drag(&phone, 0.0, 0.0, 1);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(phone.js(focused), json!(false), "a tap on earlier output");
+    // A tap on the live screen takes it, as it always did; and what is
+    // typed is typed at the end, wherever the view was.
+    phone.js(&format!("{T}.toEnd()"));
+    drag(&phone, 0.0, 0.0, 1);
+    phone.wait("the keyboard for the terminal", focused);
+    drag(&phone, 0.0, 250.0, 12);
+    phone.wait(
+        "earlier output, with the keyboard still the terminal's",
+        &format!("(t => !t.following && {focused})({T})"),
+    );
+    phone.press_key("x");
+    phone.wait(
+        "the live screen after a key",
+        &format!(
+            "(t => t.following && Math.abs(t.body.scrollTop - t._metrics().liveTop) < 1)({T})"
+        ),
+    );
 }
 
 /// The phone's layout map (agreed prototype, screen 4): a project layout is

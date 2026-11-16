@@ -2280,7 +2280,7 @@ function getTerm(st, p, where, mode) {
   let t = S.terms.get(key);
   if (!t) {
     const lost = where !== 'phone-fit' ? null : () => { const k = `${st}/${p.id}`; phoneFit.delete(k); phoneAuto.delete(k); phoneBefore.delete(k); phoneMine.delete(k); phoneTaken.add(k); update(); };
-    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', natural: where === 'phone', onLost: lost, face: where === 'leaf' || where === 'zoom' ? (term) => chatToggle(st, term.pane) : null, agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where, term), onUsage: (term) => usageDialog(st, term.pane), onFocus: (term) => { S.focused = `${st}/${term.pane.id}`; }, onAttached: (term) => keyboardBack(st, term) });
+    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', natural: where === 'phone', flow: where === 'phone' || where === 'phone-fit', onLost: lost, face: where === 'leaf' || where === 'zoom' ? (term) => chatToggle(st, term.pane) : null, agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where, term), onUsage: (term) => usageDialog(st, term.pane), onFocus: (term) => { S.focused = `${st}/${term.pane.id}`; }, onAttached: (term) => keyboardBack(st, term) });
     S.terms.set(key, t);
     t._fresh = true;
     t.setLink(linkPaneWords(api.link()));

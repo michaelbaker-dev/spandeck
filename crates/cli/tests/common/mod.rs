@@ -867,6 +867,21 @@ pub mod browser {
         })
     }
 
+    /// A terminal's history on a phone (phonescroll.rs, and the scenario in
+    /// phase5.rs): the terminal on the phone's screen.
+    pub const T: &str = "document.querySelector('.phone-pane .pane')?.paneTerm";
+
+    /// The text of the row of history at the top of what is in sight.
+    pub const TOP_ROW: &str = "(t => { const m = t._metrics(), rows = t.hist.el.querySelectorAll('.hist-row'); return rows[Math.round((t.body.scrollTop - m.histTop) / (t.hist.th * t._hs))]?.textContent; })";
+
+    /// Counts what the terminal draws and what happens to a finger's moves,
+    /// from now on: `window.seen`.
+    pub const WATCH: &str = "(t => { const seen = window.seen = { drawn: 0, changed: 0, moves: [] };
+        new MutationObserver(l => { seen.changed += l.length; }).observe(t.body.querySelector('.xterm-rows'), { subtree: true, childList: true, characterData: true, attributes: true });
+        t.term.onRender(() => { seen.drawn += 1; });
+        addEventListener('touchmove', e => seen.moves.push(e), true);
+        return true; })";
+
     pub struct Page {
         _browser: headless_chrome::Browser,
         pub tab: std::sync::Arc<headless_chrome::Tab>,
@@ -1082,6 +1097,49 @@ pub mod browser {
                 )
                 .unwrap_or_else(|e| panic!("the key {key:?}: {e}"));
             }
+        }
+
+        /// From now on this page has a touch screen.
+        pub fn touches(&self) {
+            self.protocol(
+                "Emulation.setTouchEmulationEnabled",
+                json!({"enabled": true, "maxTouchPoints": 1}),
+            );
+        }
+
+        /// A finger put down so that its way has the middle of `el` (an
+        /// expression for an element) at its own middle, moved by (dx, dy)
+        /// in `steps` moves and lifted; with no way to go, a tap. These are
+        /// the browser's own touches (`touches` first): it scrolls with
+        /// them, or hands them to the page, as it would a finger's. An
+        /// event the page makes up itself scrolls nothing.
+        pub fn touch_drag(&self, el: &str, dx: f64, dy: f64, steps: u32) {
+            let at = self.js(&format!(
+                "(r => [r.left + r.width / 2, r.top + r.height / 2])({el}.getBoundingClientRect())"
+            ));
+            let (x, y) = (
+                at[0].as_f64().unwrap() - dx / 2.0,
+                at[1].as_f64().unwrap() - dy / 2.0,
+            );
+            let point = |i: u32| {
+                let part = f64::from(i) / f64::from(steps);
+                json!([{"x": x + dx * part, "y": y + dy * part}])
+            };
+            self.protocol(
+                "Input.dispatchTouchEvent",
+                json!({"type": "touchStart", "touchPoints": point(0)}),
+            );
+            for i in 1..=steps {
+                self.protocol(
+                    "Input.dispatchTouchEvent",
+                    json!({"type": "touchMove", "touchPoints": point(i)}),
+                );
+                std::thread::sleep(Duration::from_millis(12));
+            }
+            self.protocol(
+                "Input.dispatchTouchEvent",
+                json!({"type": "touchEnd", "touchPoints": []}),
+            );
         }
 
         /// Type `text` on the keyboard, a key at a time, into whatever has

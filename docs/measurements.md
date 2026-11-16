@@ -5,6 +5,71 @@ on test stations (their own state folders, a fake agent unless a real one is nam
 a fleet in use. The Performance page in the Control Deck shows the same measures live for
 each station.
 
+## 16 Nov 2026: scrolling a terminal's history on a phone
+
+Asked for by the owner, from an iPhone: "On the phone, all terminals are choppy still, not
+like the chat window which is smooth.. have to fix terminal to be like chat." What was
+changed is in `DECISIONS.md`, "On a phone a terminal's history is scrolled by the phone".
+
+**How far to trust it: this is not an iPhone.** It is headless Chromium 156 on the Linux
+arm64 machine, at a phone's size (390 × 844) with touch turned on, and the page's processor
+slowed six times by the browser (`Emulation.setCPUThrottlingRate`). It measures the page's
+own thread: how much it had to do while a finger scrolled, and whether it kept giving
+frames. It cannot measure what a phone's screen showed. The browser's own scrolling is done
+off that thread, so for it these figures say only that the page was not in the way; that it
+is smooth on an iPhone is for the owner's iPhone to say.
+
+The measure (`cargo test -p spandeck --test phonescroll measure -- --ignored --nocapture`,
+`SPANDECK_THROTTLE` for the slowing, `SPANDECK_PLAIN=1` for the plain text): a shell pane
+fitted to the phone, 3,000 lines printed; then three quick drags of 300 px (the browser's
+own touches, 12 moves each, the finger starting on the text), 1.2 s apart, about 5 s in
+all. Three runs each; the range is given.
+
+| Slowed 6 times | View moved | Page thread busy | of which script | of which layout | Terminal drew | Frames, 95th / worst gap | Long tasks |
+|---|---|---|---|---|---|---|---|
+| Before, lines with colours | **70 px of 900 dragged** | 235–255 ms | 55–63 ms | 26–31 ms | 6 times | 17 / 17 ms | 0 |
+| Before, plain numbers | 1,596–1,610 px | **3,958–3,980 ms** | 2,431–2,461 ms | 143–174 ms | 113–116 times | 33 / 50–100 ms | 1 |
+| Before, with its two faults mended, lines with colours | 1,568–1,638 px | 1,589–1,751 ms | 338–377 ms | 384–397 ms | 117–120 times | 17 / 17 ms | 0 |
+| **After, lines with colours** | 1,142–1,198 px | **381–410 ms** | 85–91 ms | 7–8 ms | **0 times** | 17 / 17–50 ms | 0 |
+| After, plain numbers | 1,080–1,185 px | 316–318 ms | 60–63 ms | 6–9 ms | 0 times | 17 / 17 ms | 0 |
+
+Not slowed: before, plain numbers, the page thread was busy 3,741 ms of 4.9 s (script
+2,508 ms); after, 123 ms (script 28 ms).
+
+What the rows say:
+
+- **Before, a drag that began on coloured text stopped after its first line.** The terminal
+  library makes the pieces of a row again whenever it draws the row. The finger was on one
+  of those pieces; once it was gone, the browser sent the rest of that finger's moves, and
+  its lifting, to nothing the page listened on. One or two lines moved for each drag. On
+  lines of plain numbers the finger was on the row itself, which stays, and the drag worked;
+  that is why the scenario tests, which printed numbers, never saw it. An agent's output is
+  mostly coloured. This alone would read as "choppy, not that responsive".
+- **Before, after the finger lifted, the page ran its glide many times in every frame.** What
+  is done "once a frame" was asked for by both a frame and a timer; whichever ran first
+  asked again, and the other, still armed, ran it again at once. The page thread was busy
+  for three quarters of the five seconds, slowed or not.
+- **With both mended and nothing else changed** (the third row; not shipped as such), the
+  page still drew the terminal about 118 times and did four times the work of "after", but
+  in this browser it dropped no frames even slowed six times. So these figures do not show
+  that following the finger by arithmetic must be choppy. Whether the owner's "still
+  choppy" was those two faults, or the drawing on a slower phone, or the movement not being
+  the phone's own, they cannot tell apart.
+- **After**, the terminal drew nothing during the scrolls, the page thread was busy for 8%
+  of the time (reporting where the view is, and the counting this measure itself adds), and
+  every frame came on time but for one 50 ms gap in two of six runs.
+- **One thing found on the way and mended**: with the history as rows, the page laid every
+  row out again once a second, when the pane's strip was redrawn (8 long tasks, 851–900 ms,
+  layout 582–651 ms in the five seconds, slowed six times). The element that scrolls is now
+  closed off from the layout around it (`contain: strict`): layout 7–8 ms, no long task.
+  The scenario test holds that in place.
+
+What only the owner's iPhone can say, and how it will be read: each scroll of a terminal
+reports to its station (`spandeck rpc log.query '{"kind":"client.report"}'`, the entries
+with `"what":"term-scroll"`): how long it lasted, how far it went, how many frames the page
+got and the longest wait for one, how many lines of history there were. `"native": true`
+says the phone did the scrolling.
+
 ## 16 Nov 2026: 0.4.7, same machine against across machines
 
 Asked for by the owner: "make sure that every agent can [talk] to every other agent. And
