@@ -134,6 +134,21 @@ fn supervisor_log(s: &Station) -> String {
     std::fs::read_to_string(s.root.join("state/spandeckd-supervisor.log")).unwrap_or_default()
 }
 
+/// When a test fails, what the supervisor wrote: it has no console, and a
+/// failure on a machine nobody can log in to says nothing else.
+struct SaysOnFailure(std::path::PathBuf);
+
+impl Drop for SaysOnFailure {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!(
+                "---- the supervisor's log ----\n{}",
+                std::fs::read_to_string(&self.0).unwrap_or_default()
+            );
+        }
+    }
+}
+
 /// Upgrade in place and wait for the daemon that took over. Its pid.
 fn upgrade(s: &Station) -> u32 {
     let before = s.daemon_pid();
@@ -180,6 +195,7 @@ fn a_daemon_ended_after_an_upgrade_comes_back_by_itself_with_its_panes() {
     assert!(still_supervising(&mut s), "{}", supervisor_log(&s));
 
     Station::end_process(third);
+    let _told = SaysOnFailure(s.root.join("state/spandeckd-supervisor.log"));
     let fourth = wait_for("a daemon to be started again", 30, || {
         let i = s.try_call("station.info", json!({})).ok()?;
         let pid = i["pid"].as_u64()? as u32;

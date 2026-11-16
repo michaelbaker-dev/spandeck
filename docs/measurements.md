@@ -53,6 +53,11 @@ More than 99% of a real round trip is the model's own time.
 | Antigravity → anything | stops at the same prompt before sending | not run |
 | anything ↔ OpenCode | OpenCode could not take a turn (no provider signed in, free quota used) | the same |
 
+After the nudge was reworded to say "act on it" (later the same day), Claude Code → Claude
+Code on one station was run again: the recipient read its mail and replied 5 times of 5,
+with no second Enter needed. The Codex, OpenCode and Antigravity rows have not been run
+again since their fixes.
+
 Codex ran with its hooks switched off, because it asks the owner to trust them first. Every
 message that was sent was stored once, and order within a thread held. The faults this found
 are recorded in `DECISIONS.md` with their fixes.
