@@ -181,6 +181,38 @@ impl Daemon {
                 format!("serving on {}", web.join(", "))
             },
         );
+        // The deck over HTTPS (https.rs): whether, until when, and if
+        // not, what turns it on. Never a fault of the station: everything
+        // works over HTTP without it.
+        let https = self.https_view();
+        let text = |k: &str| https[k].as_str().unwrap_or_default().to_string();
+        let days = https["days_left"].as_i64();
+        add(
+            "secure deck (HTTPS)",
+            match text("state").as_str() {
+                "on" => days.is_none_or(|d| d >= crate::https::WARN_BELOW_DAYS),
+                "off" | "starting" => true,
+                _ => false,
+            },
+            false,
+            match text("state").as_str() {
+                "on" => format!(
+                    "serving https://{}:{}{}{}",
+                    text("name"),
+                    https["port"],
+                    match days {
+                        Some(d) if d < 0 => "; its certificate has run out".to_string(),
+                        Some(d) => format!("; its certificate is good for {d} more days"),
+                        None => String::new(),
+                    },
+                    if text("why").is_empty() { String::new() } else { format!(" ({})", text("why")) },
+                ),
+                "off" => format!("off: {}", text("why")),
+                "starting" => "being asked for".to_string(),
+                "needs_operator" => format!("not on: {}. In the Control Deck, open this station's menu and choose \"Turn on secure access (HTTPS)\": it asks for your password on this machine once. The deck works over HTTP meanwhile", text("why")),
+                _ => format!("not on: {}. The deck works over HTTP meanwhile", text("why")),
+            },
+        );
 
         for kind in spandeck_agents::catalogue::all().iter().map(|p| p.kind) {
             let program = self

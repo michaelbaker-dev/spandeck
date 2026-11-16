@@ -115,6 +115,9 @@ impl Daemon {
                 "macs": p.info.get("macs"),
                 "os": p.info.get("os"),
                 "service": p.info.get("service"),
+                // Where its deck is served over HTTPS: whose deck an
+                // origin is must be known while that station is off.
+                "https": crate::https::brief(&p.info),
             });
             known.push(keep);
         }
@@ -237,6 +240,7 @@ impl Daemon {
                         "macs": k.pointer("/info/macs").filter(|m| m.to_string().len() <= 1024),
                         "os": k.pointer("/info/os").and_then(|v| v.as_str()).filter(|o| o.len() <= 32),
                         "service": k.pointer("/info/service").and_then(|v| v.as_bool()),
+                        "https": k.get("info").map(crate::https::brief),
                     }),
                 };
                 match mine {

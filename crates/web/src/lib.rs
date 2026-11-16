@@ -44,6 +44,7 @@ use tokio_tungstenite::tungstenite;
 
 mod fence;
 mod lanes;
+mod tls;
 use lanes::{Lane, Lines, Scope};
 use spandeck_core::typed;
 
@@ -112,13 +113,58 @@ struct Listening {
     web: Web,
     app: Router,
     port: u16,
+    /// The same addresses over TLS, while a certificate is held (tls.rs).
+    tls_port: u16,
+    certs: Arc<tls::Certs>,
+    acceptor: Option<tokio_rustls::TlsAcceptor>,
+    tls_serving: Vec<Served>,
     /// Always wanted: localhost, or what `web_bind` names.
     fixed: Vec<IpAddr>,
     /// With no `web_bind`: this machine's Tailscale addresses, and its name
     /// there, as last read.
     tailnet: Vec<IpAddr>,
     dns: Option<String>,
-    serving: Vec<(IpAddr, SocketAddr, tokio::task::JoinHandle<()>)>,
+    serving: Vec<Served>,
+}
+
+type Served = (IpAddr, SocketAddr, tokio::task::JoinHandle<()>);
+
+/// Stop serving what is no longer wanted. Says whether anything went.
+fn drop_gone(serving: &mut Vec<Served>, wanted: &[IpAddr], what: &str) -> bool {
+    let (kept, gone): (Vec<_>, Vec<_>) = std::mem::take(serving)
+        .into_iter()
+        .partition(|(ip, _, _)| wanted.contains(ip));
+    *serving = kept;
+    for (ip, _, task) in &gone {
+        task.abort();
+        tracing::info!(%ip, "no longer listening{what}");
+    }
+    !gone.is_empty()
+}
+
+/// Bind what is wanted and not served yet.
+async fn bind_new(
+    serving: &[Served],
+    wanted: &[IpAddr],
+    port: u16,
+) -> Vec<(IpAddr, SocketAddr, tokio::net::TcpListener)> {
+    let mut fresh: Vec<(IpAddr, SocketAddr, tokio::net::TcpListener)> = vec![];
+    for ip in wanted {
+        if serving.iter().any(|(have, _, _)| have == ip)
+            || fresh.iter().any(|(have, _, _)| have == ip)
+        {
+            continue;
+        }
+        match tokio::net::TcpListener::bind(SocketAddr::new(*ip, port)).await {
+            Ok(listener) => match listener.local_addr() {
+                Ok(addr) => fresh.push((*ip, addr, listener)),
+                Err(e) => tracing::warn!(%ip, error = %e, "could not listen"),
+            },
+            // Tried again at the next round, ten seconds on.
+            Err(e) => tracing::warn!(%ip, port, error = %e, "could not listen"),
+        }
+    }
+    fresh
 }
 
 impl Listening {
@@ -131,41 +177,32 @@ impl Listening {
             .chain(self.tailnet.iter())
             .copied()
             .collect();
-        let mut changed = false;
+        // TLS on the same addresses, while there is a certificate to show.
+        let wanted_tls = match (&self.acceptor, self.certs.held()) {
+            (Some(_), true) => wanted.clone(),
+            _ => vec![],
+        };
         // Gone: stop accepting there first, then take it off the allowlist.
-        let (kept, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut self.serving)
-            .into_iter()
-            .partition(|(ip, _, _)| wanted.contains(ip));
-        self.serving = kept;
-        for (ip, _, task) in gone {
-            task.abort();
-            tracing::info!(%ip, "no longer listening: the address is gone");
-            changed = true;
-        }
+        let mut changed = drop_gone(&mut self.serving, &wanted, ": the address is gone");
+        changed |= drop_gone(&mut self.tls_serving, &wanted_tls, " for HTTPS");
         // New, or not bound before: bind, learn the port, fill in the Host
         // allowlist, and only then start answering. A request must never
         // race the allowlist.
-        let mut fresh = vec![];
-        for ip in wanted {
-            if self.serving.iter().any(|(have, _, _)| *have == ip)
-                || fresh.iter().any(|(have, _, _)| *have == ip)
-            {
-                continue;
-            }
-            match tokio::net::TcpListener::bind(SocketAddr::new(ip, self.port)).await {
-                Ok(listener) => match listener.local_addr() {
-                    Ok(addr) => fresh.push((ip, addr, listener)),
-                    Err(e) => tracing::warn!(%ip, error = %e, "could not listen"),
-                },
-                // Tried again at the next round, ten seconds on.
-                Err(e) => tracing::warn!(%ip, port = self.port, error = %e, "could not listen"),
-            }
-        }
-        if !changed && fresh.is_empty() && self.hosts() == *self.web.hosts.read().unwrap() {
+        let fresh = bind_new(&self.serving, &wanted, self.port).await;
+        let fresh_tls = bind_new(&self.tls_serving, &wanted_tls, self.tls_port).await;
+        self.web
+            .daemon
+            .https
+            .set_serving(!self.tls_serving.is_empty() || !fresh_tls.is_empty());
+        if !changed
+            && fresh.is_empty()
+            && fresh_tls.is_empty()
+            && self.hosts() == *self.web.hosts.read().unwrap()
+        {
             return;
         }
         let mut hosts = self.hosts();
-        for (_, addr, _) in &fresh {
+        for (_, addr, _) in fresh.iter().chain(&fresh_tls) {
             hosts.extend(self.hosts_of(addr));
         }
         hosts.sort();
@@ -185,6 +222,20 @@ impl Listening {
             tracing::info!(%addr, "Control Deck listening");
             self.serving.push((ip, addr, task));
         }
+        for (ip, addr, listener) in fresh_tls {
+            let Some(acceptor) = self.acceptor.clone() else {
+                continue;
+            };
+            let daemon = self.web.daemon.clone();
+            let task = tokio::spawn(tls::serve(
+                listener,
+                acceptor,
+                self.app.clone(),
+                move |tcp| no_delay(&daemon, tcp),
+            ));
+            tracing::info!(%addr, "Control Deck listening (HTTPS)");
+            self.tls_serving.push((ip, addr, task));
+        }
         *self.web.daemon.web_addrs.lock().unwrap() =
             self.serving.iter().map(|(_, a, _)| a.to_string()).collect();
     }
@@ -194,6 +245,7 @@ impl Listening {
         let mut hosts: Vec<String> = self
             .serving
             .iter()
+            .chain(&self.tls_serving)
             .flat_map(|(_, addr, _)| self.hosts_of(addr))
             .collect();
         hosts.sort();
@@ -290,6 +342,7 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
         .route("/api/device/request", post(device_request))
         .route("/api/device/collect", post(device_collect))
         .route("/api/ws", get(ws_upgrade))
+        .route("/api/ping", get(ping_upgrade))
         .route("/api/font/{id}", get(font))
         .fallback(get(asset))
         .layer(DefaultBodyLimit::max(100 << 20))
@@ -302,10 +355,40 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
     .await
     .ok()
     .flatten();
+    // HTTPS: what is held is asked for and renewed by a task of its own
+    // (https.rs); this one serves it. A station that is given no
+    // certificate serves everything over HTTP exactly as before.
+    let certs = Arc::new(tls::Certs::default());
+    let acceptor = tls::acceptor(certs.clone())
+        .map_err(|e| tracing::warn!(error = %e, "HTTPS cannot be served"))
+        .ok();
+    let asking = daemon.clone();
+    tokio::spawn(async move {
+        let mut force = false;
+        loop {
+            let d = asking.clone();
+            let _ = tokio::task::spawn_blocking(move || d.https_refresh(force)).await;
+            // Until it is on (or off for good), asked again every minute:
+            // Tailscale may not be up yet, or the owner is giving the
+            // right to ask. After that only the machine's name is looked
+            // at, and the certificate is asked for twice a day.
+            let settled = matches!(asking.https_view()["state"].as_str(), Some("on" | "off"));
+            let wait = std::time::Duration::from_secs(if settled { 600 } else { 60 });
+            force = tokio::select! {
+                _ = tokio::time::sleep(wait) => false,
+                _ = asking.https.kick.notified() => true,
+            };
+        }
+    });
+    let mut pem = daemon.https.pem.subscribe();
     let mut listening = Listening {
         web,
         app,
         port,
+        tls_port: daemon.cfg.web.https_port,
+        certs,
+        acceptor,
+        tls_serving: vec![],
         fixed,
         tailnet,
         dns,
@@ -320,9 +403,25 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
     tokio::spawn(async move {
         let mut watching = true;
         loop {
+            let mut renewed = false;
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
                 changed = own.changed(), if watching => watching = changed.is_ok(),
+                got = pem.changed() => renewed = got.is_ok(),
+            }
+            // A certificate that is new (or gone) is the next handshake's;
+            // the connections that are open are not touched.
+            if renewed || !listening.certs.held() {
+                let held = pem.borrow_and_update().clone();
+                let cert = held.as_ref().map(|p| tls::certified(&p.cert, p.key()));
+                match cert {
+                    Some(Ok(cert)) => listening.certs.set(Some(cert)),
+                    Some(Err(e)) => {
+                        tracing::warn!(error = %e, "the HTTPS certificate cannot be used");
+                        listening.certs.set(None);
+                    }
+                    None => listening.certs.set(None),
+                }
             }
             let now = own.borrow_and_update().clone();
             if let Some(now) = now {
@@ -345,33 +444,83 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
 
 // ------------------------------------------------------------------ checks
 
-/// Host must be one of ours; Origin, when a browser sends one, must match it.
-fn origin_ok(web: &Web, headers: &HeaderMap) -> Result<(), (StatusCode, &'static str)> {
-    let host = headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .map(|h| h.to_lowercase());
-    let Some(host) = host else {
+/// Whether a request arrived over TLS (tls.rs).
+struct Via(bool);
+
+impl<S: Sync> axum::extract::FromRequestParts<S> for Via {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Via(parts.extensions.get::<tls::Secure>().is_some()))
+    }
+}
+
+/// The page a browser's request came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Page {
+    /// This station's own deck, or no browser at all.
+    Own,
+    /// The deck of another member of this station's fleet, by its name:
+    /// a page that lost its own station and carries on through this one.
+    Deck(String),
+}
+
+/// Host must be one of ours; Origin, when a browser sends one, must match
+/// it, and be `https` on the TLS port. `decks`: the one other case, for
+/// the endpoints that allow it: the Origin is exactly the deck of a member
+/// of this station's own roster (`Daemon::member_decks`).
+fn origin_rule(
+    hosts: &[String],
+    host: Option<&str>,
+    origin: Option<&str>,
+    secure: bool,
+    decks: Option<&[(String, String)]>,
+) -> Result<Page, (StatusCode, &'static str)> {
+    let Some(host) = host.map(str::to_lowercase) else {
         return Err((StatusCode::BAD_REQUEST, "missing Host"));
     };
     let any_port = format!(
         "{}:*",
         host.rsplit_once(':').map(|(h, _)| h).unwrap_or(&host)
     );
-    let ours = {
-        let hosts = web.hosts.read().unwrap();
-        hosts.contains(&host) || hosts.contains(&any_port)
-    };
-    if !ours {
+    if !hosts.contains(&host) && !hosts.contains(&any_port) {
         return Err((StatusCode::FORBIDDEN, "this Host is not served here"));
     }
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()) {
-        let origin_host = origin.split("://").nth(1).unwrap_or("").to_lowercase();
-        if origin_host != host {
-            return Err((StatusCode::FORBIDDEN, "cross-origin requests are refused"));
-        }
+    let Some(origin) = origin.map(str::to_lowercase) else {
+        return Ok(Page::Own);
+    };
+    let (scheme, origin_host) = origin.split_once("://").unwrap_or(("", ""));
+    if origin_host == host && (!secure || scheme == "https") {
+        return Ok(Page::Own);
     }
-    Ok(())
+    match decks.and_then(|d| d.iter().find(|(deck, _)| *deck == origin)) {
+        Some((_, station)) => Ok(Page::Deck(station.clone())),
+        None => Err((StatusCode::FORBIDDEN, "cross-origin requests are refused")),
+    }
+}
+
+/// `decks`: this endpoint may be reached from another member's deck
+/// (`/api/ws` and `/api/ping` only), while `page_failover` is on.
+fn origin_ok(
+    web: &Web,
+    headers: &HeaderMap,
+    secure: bool,
+    decks: bool,
+) -> Result<Page, (StatusCode, &'static str)> {
+    let text = |name| {
+        headers
+            .get(name)
+            .and_then(|h: &HeaderValue| h.to_str().ok())
+    };
+    let (host, origin) = (text(header::HOST), text(header::ORIGIN));
+    let decks =
+        (decks && origin.is_some() && web.daemon.flag_on(spandeck_core::https::VIA_FLAG, true))
+            .then(|| web.daemon.member_decks());
+    let hosts = web.hosts.read().unwrap().clone();
+    origin_rule(&hosts, host, origin, secure, decks.as_deref())
 }
 
 async fn identify(web: &Web, ip: IpAddr) -> Remote {
@@ -411,6 +560,7 @@ async fn caller(
     addr: &SocketAddr,
     headers: &HeaderMap,
     token: Option<String>,
+    page: &Page,
 ) -> Result<Caller, (StatusCode, &'static str)> {
     let client = client_id(headers, addr);
     match identify(web, addr.ip()).await {
@@ -418,6 +568,21 @@ async fn caller(
         // it. So every caller also proves itself: a station in this fleet
         // with a signature, a browser with a token the owner approved.
         Remote::Loopback | Remote::Owner { .. } => {
+            // A page loaded from another member's deck: only a browser's
+            // own token, which every station of the fleet already takes.
+            // Never this station's local token, a pane's, or a signature.
+            if let Page::Deck(_) = page {
+                let device = token
+                    .filter(|t| t.starts_with("dev."))
+                    .and_then(|t| web.daemon.device_for_token(&t))
+                    .ok_or((StatusCode::UNAUTHORIZED, FROM_A_DECK))?;
+                return Ok(Caller {
+                    authority: Authority::Owner,
+                    pane: None,
+                    client,
+                    who: format!("you (device {device})"),
+                });
+            }
             if let Some(station) = gateway_station(web, headers) {
                 return Ok(Caller {
                     authority: Authority::Owner,
@@ -449,6 +614,11 @@ async fn caller(
 const NO_TAILSCALE: &str =
     "Tailscale is not answering here, so this station cannot tell who is connecting. It is asked again by itself.";
 
+/// Said to a page loaded from another station's deck that shows anything
+/// but a signed-in browser's token.
+const FROM_A_DECK: &str =
+    "sign in: from another station's deck only a signed-in browser's own token is accepted here";
+
 /// A station in this fleet relaying its own user's attach: it signs its name.
 fn gateway_station(web: &Web, headers: &HeaderMap) -> Option<String> {
     let station = headers.get("x-spandeck-station")?.to_str().ok()?;
@@ -473,12 +643,13 @@ async fn http_rpc(
     State(web): State<Web>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Via(secure): Via,
     Json(body): Json<Value>,
 ) -> axum::response::Response {
-    if let Err(e) = origin_ok(&web, &headers) {
+    if let Err(e) = origin_ok(&web, &headers, secure, false) {
         return refuse(e);
     }
-    let who = match caller(&web, &addr, &headers, None).await {
+    let who = match caller(&web, &addr, &headers, None, &Page::Own).await {
         Ok(c) => c,
         Err(e) => return refuse(e),
     };
@@ -508,9 +679,10 @@ async fn device_request(
     State(web): State<Web>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Via(secure): Via,
     Json(body): Json<Value>,
 ) -> axum::response::Response {
-    device_call(&web, &addr, &headers, |ip| {
+    device_call(&web, &addr, &headers, secure, |ip| {
         web.daemon.trust_request(
             "device",
             body.get("name")
@@ -527,10 +699,11 @@ async fn device_collect(
     State(web): State<Web>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Via(secure): Via,
     Json(body): Json<Value>,
 ) -> axum::response::Response {
     let get = |k: &str| body.get(k).and_then(|v| v.as_str()).unwrap_or("");
-    device_call(&web, &addr, &headers, |ip| {
+    device_call(&web, &addr, &headers, secure, |ip| {
         web.daemon.trust_collect(get("id"), get("collect"), ip)
     })
     .await
@@ -540,9 +713,10 @@ async fn device_call(
     web: &Web,
     addr: &SocketAddr,
     headers: &HeaderMap,
+    secure: bool,
     f: impl FnOnce(&str) -> spandeck_core::daemon::Result<Value>,
 ) -> axum::response::Response {
-    if let Err(e) = origin_ok(web, headers) {
+    if let Err(e) = origin_ok(web, headers, secure, false) {
         return refuse(e);
     }
     let remote = identify(web, addr.ip()).await;
@@ -722,12 +896,13 @@ async fn font(
     State(web): State<Web>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Via(secure): Via,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    if let Err(e) = origin_ok(&web, &headers) {
+    if let Err(e) = origin_ok(&web, &headers, secure, false) {
         return refuse(e);
     }
-    match caller(&web, &addr, &headers, None).await {
+    match caller(&web, &addr, &headers, None, &Page::Own).await {
         Ok(who) if who.is_owner() => {}
         Ok(_) => return refuse((StatusCode::FORBIDDEN, "fonts are for the user's clients")),
         Err(e) => return refuse(e),
@@ -765,9 +940,51 @@ async fn font(
     resp
 }
 
-async fn asset(uri: Uri) -> Response<Body> {
+/// What the page's worker is given in place of the two marks in `sw.js`:
+/// the build, and every file of it. The worker is the build: a station
+/// that serves other files serves another worker.
+fn shell_files() -> Vec<String> {
+    let mut files: Vec<String> = Assets::iter()
+        .map(|f| f.to_string())
+        .filter(|f| f != "sw.js")
+        .collect();
+    files.sort();
+    files
+}
+
+async fn asset(
+    State(web): State<Web>,
+    Via(secure): Via,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response<Body> {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
+    // `[web] redirect = true`: a browser that asks the plain port for the
+    // page at this machine's Tailscale name or address is sent to the
+    // HTTPS deck. Only the page, only while HTTPS is served, never
+    // localhost (the deck `spandeck cc` opens).
+    if !secure && path == "index.html" && web.daemon.cfg.web.redirect {
+        let https = web.daemon.https_view();
+        let host = headers
+            .get(header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("");
+        let local =
+            host.starts_with("localhost") || host.starts_with("127.") || host.starts_with('[');
+        if let (true, false, Some(name)) =
+            (https["on"] == json!(true), local, https["name"].as_str())
+        {
+            let mut resp = Response::new(Body::empty());
+            *resp.status_mut() = StatusCode::TEMPORARY_REDIRECT;
+            if let Ok(to) = HeaderValue::from_str(&format!("https://{name}:{}/", https["port"])) {
+                resp.headers_mut().insert(header::LOCATION, to);
+                resp.headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                return resp;
+            }
+        }
+    }
     match Assets::get(path) {
         Some(file) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
@@ -780,7 +997,16 @@ async fn asset(uri: Uri) -> Response<Body> {
             if ours && (path.ends_with(".html") || path.ends_with(".js")) {
                 if let Ok(text) = String::from_utf8(data.clone()) {
                     let v = assets_build();
-                    let text = if path.ends_with(".html") {
+                    let text = if path == "sw.js" {
+                        // `[flags] app_shell = false`: the worker that
+                        // takes the saved copy away.
+                        let keep = web.daemon.flag_on("app_shell", true);
+                        text.replace("__BUILD__", if keep { v } else { "" })
+                            .replace(
+                                "\"__FILES__\"",
+                                &serde_json::to_string(&shell_files()).unwrap_or_default(),
+                            )
+                    } else if path.ends_with(".html") {
                         text.replace("src=\"app.js\"", &format!("src=\"app.js?v={v}\""))
                             .replace("href=\"app.css\"", &format!("href=\"app.css?v={v}\""))
                     } else {
@@ -846,11 +1072,13 @@ async fn ws_upgrade(
     State(web): State<Web>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Via(secure): Via,
     ws: WebSocketUpgrade,
 ) -> axum::response::Response {
-    if let Err(e) = origin_ok(&web, &headers) {
-        return refuse(e);
-    }
+    let page = match origin_ok(&web, &headers, secure, true) {
+        Ok(page) => page,
+        Err(e) => return refuse(e),
+    };
     if matches!(identify(&web, addr.ip()).await, Remote::Stranger(_)) {
         return refuse((
             StatusCode::FORBIDDEN,
@@ -858,7 +1086,58 @@ async fn ws_upgrade(
         ));
     }
     ws.max_message_size(100 << 20)
-        .on_upgrade(move |socket| ws_session(web, addr, headers, socket))
+        .on_upgrade(move |socket| ws_session(web, addr, headers, page, socket))
+}
+
+/// How far away this station is, for a page choosing which station to
+/// work through: a socket that says who answers and then sends back what
+/// it is sent, a few times. No token: it says only what `station.hello`
+/// says to any device under the owner's login. A socket and not a plain
+/// request, so that the page's content policy stays as it is (`connect-src
+/// 'self' ws: wss:`) and no answer of this station is ever readable by
+/// another origin's `fetch`.
+async fn ping_upgrade(
+    State(web): State<Web>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Via(secure): Via,
+    ws: WebSocketUpgrade,
+) -> axum::response::Response {
+    if let Err(e) = origin_ok(&web, &headers, secure, true) {
+        return refuse(e);
+    }
+    match identify(&web, addr.ip()).await {
+        Remote::Stranger(_) => {
+            return refuse((
+                StatusCode::FORBIDDEN,
+                "this device is not under your Tailscale login",
+            ))
+        }
+        Remote::NoTailscale => return refuse((StatusCode::SERVICE_UNAVAILABLE, NO_TAILSCALE)),
+        Remote::Loopback | Remote::Owner { .. } => {}
+    }
+    ws.max_message_size(256).on_upgrade(move |mut socket| async move {
+        let hello = json!({"station": web.daemon.station, "version": spandeck_core::VERSION, "build": assets_build(), "caps": web.daemon.caps()});
+        if socket
+            .send(Message::Text(hello.to_string().into()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        // Sixteen at most, within ten seconds: then it is closed.
+        let end = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        for _ in 0..16 {
+            match tokio::time::timeout_at(end, socket.next()).await {
+                Ok(Some(Ok(Message::Text(t)))) if t.len() <= 64 => {
+                    if socket.send(Message::Text(t)).await.is_err() {
+                        return;
+                    }
+                }
+                _ => return,
+            }
+        }
+    })
 }
 
 enum Chan {
@@ -2057,7 +2336,7 @@ impl Running {
     }
 }
 
-async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebSocket) {
+async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, page: Page, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     // The token travels in the first message, never in a cookie or the URL.
     let first = match tokio::time::timeout(std::time::Duration::from_secs(10), stream.next()).await
@@ -2067,7 +2346,7 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
     };
     let auth = first.get("auth").cloned().unwrap_or(Value::Null);
     let token = auth.get("token").and_then(|t| t.as_str()).map(String::from);
-    let mut who = match caller(&web, &addr, &headers, token).await {
+    let mut who = match caller(&web, &addr, &headers, token, &page).await {
         Ok(c) => c,
         Err((_, msg)) => {
             let _ = sink
@@ -2153,7 +2432,23 @@ async fn ws_session(web: Web, addr: SocketAddr, headers: HeaderMap, socket: WebS
             .clone(),
         _ => Default::default(),
     };
-    let hello = json!({"auth": {"ok": true, "station": web.daemon.station, "version": spandeck_core::VERSION, "build": assets_build(), "client": who.client, "full": who.is_owner(), "device": device, "lanes": in_lanes, "caps": web.daemon.caps()}});
+    // A page that carries on through this station after losing its own:
+    // said in the ship's log, and to the page.
+    let via = match &page {
+        Page::Deck(station) => {
+            web.daemon.record(
+                "deck.via",
+                None,
+                None,
+                None,
+                Some(&who.who),
+                json!({"from": station, "client": who.client}),
+            );
+            Some(station.clone())
+        }
+        Page::Own => None,
+    };
+    let hello = json!({"auth": {"ok": true, "station": web.daemon.station, "version": spandeck_core::VERSION, "build": assets_build(), "client": who.client, "full": who.is_owner(), "device": device, "lanes": in_lanes, "caps": web.daemon.caps(), "via": via}});
     if sink
         .send(Message::Text(hello.to_string().into()))
         .await
@@ -3197,6 +3492,219 @@ fn assets_build() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reason: DECISIONS.md, "What 'working through another station' is"
+    /// and "What was reviewed" (Host, Origin): the one other origin a
+    /// station accepts is exactly the deck of a member of its own roster,
+    /// and only where the endpoint allows it; everything else refuses
+    /// other origins as before.
+    #[test]
+    fn only_a_members_deck_is_another_origin_that_is_accepted() {
+        let hosts: Vec<String> = [
+            "100.64.0.1:7391",
+            "100.64.0.1:7392",
+            "spark2.tail0.ts.net:7392",
+            "spark2.tail0.ts.net:*",
+        ]
+        .map(String::from)
+        .to_vec();
+        let decks = vec![
+            ("http://100.64.0.2:7391".to_string(), "m4".to_string()),
+            ("https://m4.tail0.ts.net:7392".to_string(), "m4".to_string()),
+        ];
+        let refused = Err((StatusCode::FORBIDDEN, "cross-origin requests are refused"));
+        let at =
+            |host: &str, origin: Option<&str>, secure: bool, decks: Option<&[(String, String)]>| {
+                origin_rule(&hosts, Some(host), origin, secure, decks)
+            };
+        // This station's own deck, and a caller that is no browser.
+        assert_eq!(at("100.64.0.1:7391", None, false, None), Ok(Page::Own));
+        assert_eq!(
+            at(
+                "100.64.0.1:7391",
+                Some("http://100.64.0.1:7391"),
+                false,
+                None
+            ),
+            Ok(Page::Own)
+        );
+        assert_eq!(
+            at(
+                "Spark2.tail0.ts.net:7392",
+                Some("https://spark2.tail0.ts.net:7392"),
+                true,
+                None
+            ),
+            Ok(Page::Own)
+        );
+        // Behind `tailscale serve` the browser's origin is https and this
+        // station sees the plain port: as before.
+        assert_eq!(
+            at(
+                "spark2.tail0.ts.net",
+                Some("https://spark2.tail0.ts.net"),
+                false,
+                None
+            ),
+            Ok(Page::Own)
+        );
+        // On the TLS port a page that is not https is not this deck.
+        assert_eq!(
+            at(
+                "spark2.tail0.ts.net:7392",
+                Some("http://spark2.tail0.ts.net:7392"),
+                true,
+                None
+            ),
+            refused
+        );
+        // A member's deck, by address and by name, where the endpoint
+        // allows it (`/api/ws`, `/api/ping`), on either port.
+        for secure in [false, true] {
+            let host = if secure {
+                "spark2.tail0.ts.net:7392"
+            } else {
+                "100.64.0.1:7391"
+            };
+            assert_eq!(
+                at(host, Some("http://100.64.0.2:7391"), secure, Some(&decks)),
+                Ok(Page::Deck("m4".into()))
+            );
+            assert_eq!(
+                at(
+                    host,
+                    Some("https://M4.tail0.ts.net:7392"),
+                    secure,
+                    Some(&decks)
+                ),
+                Ok(Page::Deck("m4".into()))
+            );
+        }
+        // Where it does not (`/api/rpc`, `/api/device/*`, `/api/font`,
+        // every file), or with the switch off: refused.
+        assert_eq!(
+            at(
+                "100.64.0.1:7391",
+                Some("http://100.64.0.2:7391"),
+                false,
+                None
+            ),
+            refused
+        );
+        // Not a member's deck: another site, another port or scheme of a
+        // member's machine, a name that only starts like one.
+        for other in [
+            "https://example.com",
+            "http://100.64.0.2:8080",
+            "https://100.64.0.2:7391",
+            "http://m4.tail0.ts.net:7392",
+            "https://m4.tail0.ts.net:7392.example.com",
+            "https://m4.tail0.ts.net",
+            "null",
+        ] {
+            assert_eq!(
+                at("100.64.0.1:7391", Some(other), false, Some(&decks)),
+                refused,
+                "{other}"
+            );
+        }
+        // A Host that is not this station's is refused whatever the origin.
+        assert_eq!(
+            at(
+                "evil.example:7391",
+                Some("http://100.64.0.2:7391"),
+                false,
+                Some(&decks)
+            ),
+            Err((StatusCode::FORBIDDEN, "this Host is not served here"))
+        );
+        assert_eq!(
+            origin_rule(&hosts, None, None, false, None),
+            Err((StatusCode::BAD_REQUEST, "missing Host"))
+        );
+    }
+
+    /// Reason: "A new certificate replaces the old one for new connections
+    /// only: connections that are open carry on."
+    #[tokio::test]
+    async fn a_renewed_certificate_is_the_next_connections() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
+        use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+
+        let make = || {
+            let made = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+            (
+                made.cert.pem(),
+                made.signing_key.serialize_pem(),
+                made.cert.der().clone(),
+            )
+        };
+        let (first, second) = (make(), make());
+        let certs = Arc::new(tls::Certs::default());
+        certs.set(Some(tls::certified(&first.0, &first.1).unwrap()));
+        // A key that is not the certificate's is not taken.
+        assert!(tls::certified(&first.0, &second.1).is_err());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/hello", get(|| async { "hello" }));
+        tokio::spawn(tls::serve(
+            listener,
+            tls::acceptor(certs.clone()).unwrap(),
+            app,
+            |_| {},
+        ));
+
+        let mut roots = RootCertStore::empty();
+        roots.add(first.2.clone()).unwrap();
+        roots.add(second.2.clone()).unwrap();
+        let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
+        let mut config = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        // A browser that resumes a session is not shown a certificate
+        // again: here every connection is a whole handshake.
+        config.resumption = tokio_rustls::rustls::client::Resumption::disabled();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+        let connect = || async {
+            let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let name = ServerName::try_from("localhost").unwrap();
+            let tls = connector.connect(name, tcp).await.unwrap();
+            let shown: CertificateDer<'static> =
+                tls.get_ref().1.peer_certificates().unwrap()[0].clone();
+            (tls, shown)
+        };
+        async fn ask(tls: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>) -> String {
+            tls.write_all(b"GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .unwrap();
+            let mut got = vec![];
+            let mut buf = [0u8; 1024];
+            while !got.ends_with(b"hello") {
+                let n = tls.read(&mut buf).await.unwrap();
+                assert!(n > 0, "the connection was closed");
+                got.extend_from_slice(&buf[..n]);
+            }
+            String::from_utf8_lossy(&got).into_owned()
+        }
+        let (mut open, shown) = connect().await;
+        assert_eq!(shown, first.2);
+        assert!(ask(&mut open).await.starts_with("HTTP/1.1 200"));
+        // Renewed: the next connection is shown the new one, and the one
+        // that was open still answers.
+        certs.set(Some(tls::certified(&second.0, &second.1).unwrap()));
+        let (mut next, shown) = connect().await;
+        assert_eq!(shown, second.2);
+        assert!(ask(&mut next).await.starts_with("HTTP/1.1 200"));
+        assert!(ask(&mut open).await.starts_with("HTTP/1.1 200"));
+        // With none held, a handshake fails and nothing is served.
+        certs.set(None);
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let name = ServerName::try_from("localhost").unwrap();
+        assert!(connector.connect(name, tcp).await.is_err());
+    }
 
     /// The audit's gap 13, measured on 0.4.2: every connection counted its
     /// channels from 1, so a key carrying a pane's number from before a

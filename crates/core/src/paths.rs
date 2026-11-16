@@ -207,6 +207,8 @@ pub struct Config {
     pub web_port: u16,
     /// Addresses to listen on. Empty: localhost plus the tailnet address.
     pub web_bind: Vec<String>,
+    /// HTTPS on the station's Tailscale name (`[web]`, https.rs).
+    pub web: WebConfig,
     pub keep_awake: bool,
     /// Stay awake whenever spandeckd runs, not only while an agent works, so
     /// the station can be reached from a phone at any time.
@@ -264,6 +266,41 @@ pub struct Config {
     pub flags: BTreeMap<String, toml::Value>,
 }
 
+/// `[web]`: the Control Deck over HTTPS (https.rs).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct WebConfig {
+    /// Not set: on wherever Tailscale gives this machine a certificate.
+    /// `false`: off, and the copy of the key is deleted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub https: Option<bool>,
+    /// The port TLS is answered on, beside `web_port`.
+    pub https_port: u16,
+    /// Answer a browser that asks the plain port for the page with a
+    /// redirect to the HTTPS address. Off: the deck offers it instead.
+    pub redirect: bool,
+    /// The command that prints the certificate and its key, instead of
+    /// `tailscale cert`. `{name}` is filled in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert_cmd: Option<Vec<String>>,
+    /// The name the certificate is for, instead of the machine's name on
+    /// the tailnet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        WebConfig {
+            https: None,
+            https_port: 7392,
+            redirect: false,
+            cert_cmd: None,
+            name: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct UpdateConfig {
@@ -290,6 +327,7 @@ impl Default for Config {
             labels: vec![],
             web_port: 7391,
             web_bind: vec![],
+            web: WebConfig::default(),
             keep_awake: true,
             stay_awake: false,
             keep_awake_cmd: None,
