@@ -244,18 +244,60 @@ impl Daemon {
             .unwrap_or_default()
     }
 
-    /// Where each agent looks for skills on this station.
+    /// Does this station write into the agents' own settings under the
+    /// user's home folder? Only the station of the account does (the usual
+    /// state directory, with the login service), or one whose config says
+    /// `agent_home = true`.
+    ///
+    /// What happened (16 Nov 2026): a throwaway station, started for a test
+    /// under its own state and config directories but with the owner's
+    /// real HOME, rewrote `~/.gemini/config/plugins/spandeck` to point at
+    /// its own binary and would have removed the setup's skills it did
+    /// not list. A second station has no business in those folders: what
+    /// its panes need goes on their own command line or environment, or
+    /// in a folder under its own state directory.
+    pub fn owns_agent_home(&self) -> bool {
+        self.cfg
+            .agent_home
+            .unwrap_or_else(|| self.paths.is_the_station(&self.home))
+    }
+
+    /// Why this station left the agents' settings alone, for a problem
+    /// list, a refusal and the doctor.
+    pub(crate) fn not_owning_words(&self) -> String {
+        format!(
+            "{} does not write into the agent settings in your home folder: it is not the station that starts at login from {} (a trial, a test or a second station). To let it, put `agent_home = true` in {}",
+            self.station,
+            spandeck_terminal::sys::default_dirs(&self.home).0.display(),
+            self.paths.config_file().display()
+        )
+    }
+
+    /// An Antigravity pane on a station that may not write Antigravity's
+    /// plugin has spandeck's tools only if the station of the account has
+    /// put the plugin there. Otherwise: what to tell the owner.
+    pub(crate) fn antigravity_without_tools(&self) -> Option<String> {
+        if self.owns_agent_home() || self.antigravity_plugin_dir().join(MARKER).exists() {
+            return None;
+        }
+        Some("started without spandeck's tools: Antigravity loads them only from a plugin in your home folder, which this station does not write (see `spandeck doctor`)".to_string())
+    }
+
+    /// Where each agent looks for skills on this station: the folders this
+    /// station may write.
     fn skill_dirs(&self) -> Vec<(AgentKind, PathBuf)> {
-        let mut dirs = vec![
-            (AgentKind::Claude, self.home.join(".claude/skills")),
+        let mut dirs = vec![];
+        let owns = self.owns_agent_home();
+        if owns {
+            dirs.push((AgentKind::Claude, self.home.join(".claude/skills")));
             // From Codex's documentation; not checked against a real Codex here.
-            (AgentKind::Codex, self.home.join(".codex/skills")),
-            // A folder of spandeck's own, named to OpenCode at launch.
-            (AgentKind::OpenCode, self.opencode_skills_dir()),
-        ];
+            dirs.push((AgentKind::Codex, self.home.join(".codex/skills")));
+        }
+        // A folder of spandeck's own, named to OpenCode at launch.
+        dirs.push((AgentKind::OpenCode, self.opencode_skills_dir()));
         // Only once an Antigravity pane has been started here.
         let plugin = self.antigravity_plugin_dir();
-        if plugin.join(MARKER).exists() {
+        if owns && plugin.join(MARKER).exists() {
             dirs.push((AgentKind::Antigravity, plugin.join("skills")));
         }
         dirs
@@ -345,6 +387,9 @@ impl Daemon {
     /// server and the fleet's shared ones, the hooks that report the
     /// conversation and the turn, and the skills. Returns what went wrong.
     pub(crate) fn antigravity_plugin(&self, setup: &AgentSetup) -> Vec<String> {
+        if !self.owns_agent_home() {
+            return vec![self.not_owning_words()];
+        }
         let dir = self.antigravity_plugin_dir();
         if dir.exists() && !dir.join(MARKER).exists() {
             return vec![format!(
@@ -401,6 +446,20 @@ impl Daemon {
     /// installed some other way are never touched.
     fn apply_skills(&self, setup: &AgentSetup) -> Vec<String> {
         let mut problems = vec![];
+        // Skills for the agents that read them from the home folder are
+        // the station of the account's to write, and to remove.
+        if !self.owns_agent_home()
+            && setup.skills.values().any(|s| {
+                [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity]
+                    .iter()
+                    .any(|k| applies(&s.agents, *k))
+            })
+        {
+            problems.push(format!(
+                "skills were not written for Claude Code, Codex or Antigravity: {}",
+                self.not_owning_words()
+            ));
+        }
         for (kind, dir) in self.skill_dirs() {
             if let Ok(entries) = std::fs::read_dir(&dir) {
                 for e in entries.flatten() {
@@ -465,7 +524,7 @@ impl Daemon {
         std::fs::rename(&tmp, self.setup_file())?;
         let mut problems = self.apply_skills(setup);
         // Antigravity reads the shared MCP servers from spandeck's plugin.
-        if self.antigravity_plugin_dir().join(MARKER).exists() {
+        if self.owns_agent_home() && self.antigravity_plugin_dir().join(MARKER).exists() {
             problems.extend(self.antigravity_plugin(setup));
             problems.sort();
             problems.dedup();

@@ -210,6 +210,13 @@ pub trait Adapter: Send + Sync {
     /// Observe (fallback): guess state from the visible screen.
     fn detect_screen(&self, lines: &[String]) -> Option<AgentState>;
 
+    /// `detect_screen`, with what the screen is waiting for when it is a
+    /// screen this adapter knows by name (a sign-in, a quota, a trust
+    /// question): plain words for the owner.
+    fn detect_screen_why(&self, lines: &[String]) -> Option<(AgentState, Option<String>)> {
+        self.detect_screen(lines).map(|state| (state, None))
+    }
+
     /// For an agent with no hooks to report its session id, but which starts
     /// a conversation under an id the caller chooses: what such an id starts
     /// with. The daemon makes one up at launch and resumes by it later.

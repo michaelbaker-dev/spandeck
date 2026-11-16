@@ -300,6 +300,11 @@ impl Daemon {
         let held = self
             .pane(id)
             .map(|p| {
+                // The owner acted on the pane: mail it has not taken is
+                // nudged for again from the start (wake.rs).
+                p.wake
+                    .owner_acted
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 let m = p.meta.lock().unwrap();
                 m.held_stopped.is_some() || m.held_restored.is_some()
             })

@@ -139,6 +139,27 @@ impl Daemon {
                 v["needs_reason"] = json!(words);
             }
         }
+        // An Antigravity pane of a station that may not write its plugin.
+        if v["needs_reason"].is_null()
+            && meta.exit.is_none()
+            && meta.agent == spandeck_agents::AgentKind::Antigravity
+        {
+            if let Some(words) = self.antigravity_without_tools() {
+                v["needs_reason"] = json!(words);
+            }
+        }
+        // Mail it was nudged for more than once and has not taken
+        // (wake.rs): said as the pane's reason, where it has none of its
+        // own, so the owner sees why an idle agent's mail is waiting. A
+        // look at the pane's mail that is under way is not waited for.
+        if let Ok(turn) = p.wake.turn.try_lock() {
+            if let Some(words) = crate::wake::not_taken_words(&turn, meta.state_since_ms) {
+                v["mail"] = json!({"nudged": turn.tries, "gave_up": turn.gave_up});
+                if v["needs_reason"].is_null() && meta.exit.is_none() {
+                    v["needs_reason"] = json!(words);
+                }
+            }
+        }
         v
     }
 

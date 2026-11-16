@@ -148,8 +148,48 @@ days, not hours.
 - **API keys.** With AgentVault connected, agents use keys through the vault and never
   hold them. See `docs/vault.md`, including what that does not protect against.
 
+- **What one agent can put into another agent's terminal** (16 Nov 2026). One line,
+  written by spandeck: how many messages wait, who sent them, and to read them with the
+  inbox tool and act on them. A message's text is never typed: it is read through the
+  inbox tool, where it is labelled as another agent's words. The sender's name in that
+  line is another agent's or another station's text, so it is cut to the characters an
+  address is made of before it is typed: no Enter, no escape sequence and no sentence
+  can ride in on a name. The line is typed again less and less often and then not at
+  all, never on top of a copy that was not sent, so a program that cannot take a turn
+  is not typed into for ever.
+- **Only the station of your account writes into the agents' own settings in your home
+  folder** (16 Nov 2026, after a test station with the real home folder rewrote
+  Antigravity's spandeck plugin to point at its own binary). That station is the one in
+  the usual state directory with the login service, or one whose own config file says
+  `agent_home = true`. Any other station gives a pane what it needs on the pane's own
+  command line or environment, or in a folder under its own state directory, and where
+  a program can only be wired from the home folder (Antigravity) it starts the program
+  without spandeck's tools and says so. This closes an accident, not an attack: any
+  program running as you can write those folders.
+- **spandeck does not answer an agent program's own prompts.** A sign-in, a quota
+  screen, "trust this folder", "trust these hooks", "allow calling this tool" are
+  shown as needing you, with the reason; nothing is typed at them. The one thing that
+  can stop Antigravity asking is your own command, `spandeck integration install
+  antigravity`, which adds allow rules to Antigravity's own settings for four tools
+  and no others: `inbox`, `send`, `reply` and `ack` of spandeck's own MCP server. With
+  them an Antigravity agent reads and sends agent mail without asking you each time,
+  as Claude Code and Codex panes already do; it still asks before every other tool,
+  spandeck's included. No hook of spandeck's answers a permission for you.
+- **Mail goes to the pane it was sent to.** When a pane is closed, what it had not
+  read goes back to the senders; a pane later given the same name does not get it. A
+  reply can mark as answered only a message that was sent to the pane that replies.
+
 ## Known limits
 
+- A screen is recognised by words on it (16 Nov 2026). A program, or anything that
+  prints in its pane, can show those words and make the pane read "needs you", or
+  show a time in a quota message that is then shown to you as text. That costs your
+  attention and holds back the pane's mail nudges while it lasts; it answers nothing
+  and blocks nothing.
+- The allow rules `spandeck integration install antigravity` writes rest on
+  Antigravity's documentation as read on 16 Nov 2026 and have not been tried with the
+  real program. If a later Antigravity names a plugin's server differently, the rules
+  match nothing and it asks as before.
 - What an agent's hook does while spandeck is not running rests on a file,
   `<state>/panes/<pane>.guard`, that says whether a rule is enforced for that pane. It
   is private to your account, and any program running as you can change or delete it,

@@ -230,7 +230,119 @@ pub fn config_path(kind: AgentKind, home: &Path) -> Result<PathBuf> {
     Ok(match kind {
         AgentKind::Claude => home.join(".claude").join("settings.json"),
         AgentKind::Codex => home.join(".codex").join("hooks.json"),
+        // Not hooks: permission rules for spandeck's own mail tools.
+        AgentKind::Antigravity => home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("settings.json"),
         other => bail!("{} has no hook integration", other.display()),
+    })
+}
+
+/// The permission rules `spandeck integration install antigravity` adds to
+/// the owner's Antigravity settings, and nothing else: allow, for the four
+/// mail tools of spandeck's own MCP server, and for no other tool.
+///
+/// Why (found 16 Nov 2026): Antigravity asks "Allow calling this tool?"
+/// before every call of an MCP tool, so an Antigravity agent could neither
+/// read nor send mail without the owner at its terminal. What this rests
+/// on, read 16 Nov 2026 and NOT run with a real `agy`:
+/// - https://antigravity.google/docs/permissions (CLI): rules are
+///   `action(target)` strings in `permissions.allow` / `ask` / `deny` of
+///   `~/.gemini/antigravity-cli/settings.json`; "`mcp`: `mcp(server/tool)`,
+///   `mcp(server/*)`, or `mcp(*)`"; "Unconfigured `mcp` tools ... default
+///   to Ask"; "Deny > Ask > Allow"; "The CLI ignores rules it can't parse".
+/// - https://antigravity.google/docs/build-plugins: a plugin's MCP server
+///   is "namespaced with the plugin name as `<plugin-name>_<server-key>`",
+///   so spandeck's server in spandeck's plugin is `spandeck_spandeck`,
+///   which is also the name the real prompt showed.
+///
+/// A PreToolUse hook answering "allow" was NOT built: the guide shipped
+/// in 1.5.9 says `"allow"` "automatically allow[s] the tool execution",
+/// the online guide says it "allows the tool call to proceed, delegating
+/// to the next hook or default policy" (which for an MCP tool is to ask)
+/// and names another value, `"auto_approve"`, that the shipped guide does
+/// not have; and neither says what a matcher is matched against for an
+/// MCP server's tool.
+pub const ANTIGRAVITY_MAIL_RULES: [&str; 4] = [
+    "mcp(spandeck_spandeck/inbox)",
+    "mcp(spandeck_spandeck/send)",
+    "mcp(spandeck_spandeck/reply)",
+    "mcp(spandeck_spandeck/ack)",
+];
+
+/// The `permissions.allow` list of an Antigravity settings file, made if
+/// it is not there. Refused, with nothing changed, when what is there is
+/// not what the documentation says it is.
+fn antigravity_allow(config: &mut Value) -> Result<&mut Vec<Value>> {
+    let root = config
+        .as_object_mut()
+        .context("the settings file is not a JSON object; not touching it")?;
+    let permissions = root.entry("permissions").or_insert_with(|| json!({}));
+    let permissions = permissions
+        .as_object_mut()
+        .context("`permissions` is not an object; not touching it")?;
+    permissions
+        .entry("allow")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .context("`permissions.allow` is not a list; not touching it")
+}
+
+fn antigravity_install(home: &Path, add: bool) -> Result<Status> {
+    let path = config_path(AgentKind::Antigravity, home)?;
+    if add || path.exists() {
+        let mut config = read_config(&path)?;
+        let before = config.clone();
+        let allow = antigravity_allow(&mut config)?;
+        allow.retain(|r| {
+            !r.as_str()
+                .is_some_and(|r| ANTIGRAVITY_MAIL_RULES.contains(&r))
+        });
+        if add {
+            allow.extend(ANTIGRAVITY_MAIL_RULES.iter().map(|r| json!(r)));
+        } else {
+            // Nothing of ours is left behind: an empty list or object that
+            // was made for these rules goes with them.
+            let empty = allow.is_empty();
+            let permissions = config["permissions"].as_object_mut();
+            if let (true, Some(p)) = (empty, permissions) {
+                p.remove("allow");
+                if p.is_empty() {
+                    config
+                        .as_object_mut()
+                        .map(|root| root.remove("permissions"));
+                }
+            }
+        }
+        if config != before {
+            write_config(&path, &config)?;
+        }
+    }
+    status(AgentKind::Antigravity, home)
+}
+
+fn antigravity_status(home: &Path) -> Result<Status> {
+    let path = config_path(AgentKind::Antigravity, home)?;
+    let config = read_config(&path)?;
+    let has = |rule: &str| {
+        config
+            .pointer("/permissions/allow")
+            .and_then(|a| a.as_array())
+            .is_some_and(|a| a.iter().any(|r| r.as_str() == Some(rule)))
+    };
+    let installed = ANTIGRAVITY_MAIL_RULES.iter().all(|r| has(r));
+    Ok(Status {
+        agent: AgentKind::Antigravity,
+        config_path: path,
+        installed,
+        version: None,
+        outdated: false,
+        note: Some(if installed {
+            "Antigravity no longer asks before spandeck's inbox, send, reply and ack; it asks before every other tool as before. A running Antigravity may need to be started again to read the rules.".to_string()
+        } else {
+            "Antigravity asks you before each spandeck tool call. `spandeck integration install antigravity` adds allow rules for spandeck's inbox, send, reply and ack to your Antigravity settings, and for nothing else.".to_string()
+        }),
     })
 }
 
@@ -254,6 +366,10 @@ fn write_config(path: &Path, value: &Value) -> Result<()> {
     }
     let tmp = path.with_extension("json.spandeck-tmp");
     fs::write(&tmp, format!("{}\n", serde_json::to_string_pretty(value)?))?;
+    // The file keeps who may read it (Antigravity's is the owner's alone).
+    if let Ok(meta) = fs::metadata(path) {
+        fs::set_permissions(&tmp, meta.permissions())?;
+    }
     fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -301,6 +417,9 @@ fn strip_ours(hooks: &mut Map<String, Value>) -> usize {
 }
 
 pub fn install(kind: AgentKind, home: &Path, bin: &str) -> Result<Status> {
+    if kind == AgentKind::Antigravity {
+        return antigravity_install(home, true);
+    }
     let path = config_path(kind, home)?;
     let mut config = read_config(&path)?;
     let root = config
@@ -322,6 +441,9 @@ pub fn install(kind: AgentKind, home: &Path, bin: &str) -> Result<Status> {
 }
 
 pub fn uninstall(kind: AgentKind, home: &Path) -> Result<Status> {
+    if kind == AgentKind::Antigravity {
+        return antigravity_install(home, false);
+    }
     let path = config_path(kind, home)?;
     if path.exists() {
         let mut config = read_config(&path)?;
@@ -341,6 +463,9 @@ pub fn uninstall(kind: AgentKind, home: &Path) -> Result<Status> {
 }
 
 pub fn status(kind: AgentKind, home: &Path) -> Result<Status> {
+    if kind == AgentKind::Antigravity {
+        return antigravity_status(home);
+    }
     let path = config_path(kind, home)?;
     let config = read_config(&path)?;
     let mut version: Option<u32> = None;
@@ -467,6 +592,76 @@ mod tests {
         assert!(home.path().join(".codex/hooks.json").exists());
         let st = uninstall(AgentKind::Codex, home.path()).unwrap();
         assert!(!st.installed);
+    }
+
+    /// Found with a real Antigravity on 16 Nov 2026: it asked "Allow
+    /// calling this tool?" before every spandeck tool call, so its agent
+    /// could neither read nor send mail without the owner at its
+    /// terminal. The owner's `integration install antigravity` adds allow
+    /// rules for spandeck's four mail tools and for nothing else: never a
+    /// wildcard, never another server, never another of spandeck's tools
+    /// (delegate, the vault). The owner's other settings and rules are
+    /// kept, an ask or deny rule of theirs is left to win, and uninstall
+    /// takes out exactly what was put in.
+    #[test]
+    fn antigravity_is_allowed_spandecks_mail_tools_and_nothing_else() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".gemini/antigravity-cli/settings.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let theirs = json!({
+            "agentMode": "accept-edits",
+            "permissions": {
+                "allow": ["command(git status)", "mcp(spandeck_spandeck/inbox)"],
+                "ask": ["mcp(spandeck_spandeck/send)"],
+                "deny": ["command(sudo)"]
+            }
+        });
+        fs::write(&path, theirs.to_string()).unwrap();
+        assert!(
+            !status(AgentKind::Antigravity, home.path())
+                .unwrap()
+                .installed
+        );
+        let read = || serde_json::from_str::<Value>(&fs::read_to_string(&path).unwrap()).unwrap();
+        for _ in 0..2 {
+            let st = install(AgentKind::Antigravity, home.path(), "spandeck").unwrap();
+            assert!(st.installed && !st.outdated);
+            let now = read();
+            assert_eq!(
+                now["permissions"]["allow"],
+                json!([
+                    "command(git status)",
+                    "mcp(spandeck_spandeck/inbox)",
+                    "mcp(spandeck_spandeck/send)",
+                    "mcp(spandeck_spandeck/reply)",
+                    "mcp(spandeck_spandeck/ack)"
+                ])
+            );
+            assert_eq!(now["permissions"]["ask"], theirs["permissions"]["ask"]);
+            assert_eq!(now["permissions"]["deny"], theirs["permissions"]["deny"]);
+            assert_eq!(now["agentMode"], json!("accept-edits"));
+        }
+        for rule in ANTIGRAVITY_MAIL_RULES {
+            assert!(
+                rule.starts_with("mcp(spandeck_spandeck/") && !rule.contains('*'),
+                "{rule}"
+            );
+        }
+        uninstall(AgentKind::Antigravity, home.path()).unwrap();
+        assert_eq!(
+            read()["permissions"]["allow"],
+            json!(["command(git status)"])
+        );
+        // A file with nothing in it but our rules is left with nothing.
+        fs::write(&path, "{}").unwrap();
+        install(AgentKind::Antigravity, home.path(), "spandeck").unwrap();
+        uninstall(AgentKind::Antigravity, home.path()).unwrap();
+        assert_eq!(read(), json!({}));
+        // Not what the documentation says it is: refused, and not touched.
+        let odd = "{\"permissions\": {\"allow\": \"everything\"}}";
+        fs::write(&path, odd).unwrap();
+        assert!(install(AgentKind::Antigravity, home.path(), "spandeck").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), odd);
     }
 
     #[test]

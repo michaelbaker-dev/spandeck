@@ -1170,13 +1170,25 @@ impl Daemon {
                     .await
                     .map_err(|e| invalid(e.to_string()))??
             }
-            "integration.status" => json!([AgentKind::Claude, AgentKind::Codex]
-                .iter()
-                .filter_map(|k| install::status(*k, &self.home).ok())
-                .collect::<Vec<_>>()),
+            "integration.status" => {
+                json!(
+                    [AgentKind::Claude, AgentKind::Codex, AgentKind::Antigravity]
+                        .iter()
+                        .filter_map(|k| install::status(*k, &self.home).ok())
+                        .collect::<Vec<_>>()
+                )
+            }
             "integration.install" | "integration.uninstall" => {
                 let kind = AgentKind::parse(s(&params, "agent")?)
-                    .ok_or_else(|| invalid("agent is claude or codex"))?;
+                    .ok_or_else(|| invalid("agent is claude, codex or antigravity"))?;
+                // The agents' own settings in the home folder are the
+                // station of the account's to change (setup.rs).
+                if !self.owns_agent_home() {
+                    return Err(Error::Denied(format!(
+                        "nothing was changed: {}",
+                        self.not_owning_words()
+                    )));
+                }
                 let st = if method == "integration.install" {
                     install::install(kind, &self.home, &self.exe.display().to_string())
                 } else {

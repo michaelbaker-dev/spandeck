@@ -385,6 +385,10 @@ impl Adapter for FakeAgent {
     fn detect_screen(&self, lines: &[String]) -> Option<AgentState> {
         detect::detect(detect::FAKE_RULES, lines)
     }
+
+    fn detect_screen_why(&self, lines: &[String]) -> Option<(AgentState, Option<String>)> {
+        detect::detect_why(detect::FAKE_RULES, lines)
+    }
 }
 
 #[cfg(test)]

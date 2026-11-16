@@ -743,7 +743,10 @@ impl Daemon {
         }
         let mut how = "Claude Code, Codex and OpenCode panes are given spandeck's vault tools when they start".to_string();
         let antigravity = spandeck_agents::AgentKind::Antigravity;
-        if self
+        if !self.owns_agent_home() {
+            // Its plugin is the station of the account's to keep.
+            how.push_str("; Antigravity panes use the plugin the station of this account keeps, if there is one");
+        } else if self
             .agent_probe(antigravity, Duration::from_secs(600))
             .path
             .is_some()

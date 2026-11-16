@@ -12,7 +12,7 @@ use common::*;
 use serde_json::{json, Value};
 
 /// The nudge that wakes an idle agent with mail, as its terminal shows it.
-const NUDGE: &str = "[fake] got: You have mail from";
+const NUDGE: &str = "[fake] got: You have ";
 
 fn reads_mail() -> Value {
     json!({"steps": [], "on_input": [{"rpc": {"method": "msg.inbox"}}, {"turn_end": "read my mail"}]})
@@ -171,4 +171,76 @@ fn an_idle_agent_is_woken_when_its_mail_arrives_and_nobody_else_is() {
         (a.text(&near).matches(NUDGE).count() == 10).then_some(())
     });
     a.call("station.flags", json!({"set": {"mail_wake": null}}));
+}
+
+/// Found with real agents on 16 Nov 2026: an OpenCode that was out of
+/// quota could not take a turn, was nudged every 60 seconds for ever, and
+/// had five copies of the nudge in its input box after five minutes. The
+/// agent here never takes Enter. With `nudge_secs = 1` it is told at once
+/// and after 1, 2 and 5 seconds more; 15 seconds after that it is left
+/// alone, the owner is told once, and the pane says why. The nudge is on
+/// its screen once throughout. New mail starts the telling again.
+#[test]
+#[ignore = "merge tier: waits out the whole back-off, 25 seconds"]
+fn an_agent_that_cannot_take_a_turn_is_nudged_less_and_less_then_left_alone_and_the_owner_told() {
+    let s = Station::start_with("alpha", "nudge_secs = 1\n", &[]);
+    let mut script = reads_mail();
+    script["drop_enters"] = json!(100_000);
+    let stuck = s.fake(script, json!({"name": "stuck"}));
+    s.wait_text(&stuck, "[fake] session");
+    s.call("msg.send", json!({"to": "stuck", "body": "are you there?"}));
+    wait_for("the station to stop nudging", 40, || {
+        (!logged(&s, "msg.nudge_gave_up", &stuck).is_empty()).then_some(())
+    });
+    let nudged = logged(&s, "msg.nudged", &stuck);
+    assert_eq!(nudged.len(), 4, "told four times: {nudged:?}");
+    // Each wait is its 1, 2 or 5 seconds, and up to the second between
+    // two looks more.
+    let gaps: Vec<u64> = nudged.windows(2).map(|w| w[1] - w[0]).collect();
+    for (gap, least) in gaps.iter().zip([1000, 2000, 5000]) {
+        assert!(
+            (least..least + 1200).contains(gap),
+            "each wait longer than the last: {gaps:?}"
+        );
+    }
+    let gave_up = logged(&s, "msg.nudge_gave_up", &stuck);
+    // (The log is written a moment after the nudge is counted from.)
+    assert!(
+        gave_up[0] + 1000 - nudged[3] >= 15_000,
+        "{gave_up:?} {nudged:?}"
+    );
+    let screen = s.text(&stuck);
+    assert_eq!(
+        screen.matches("new spandeck message").count(),
+        1,
+        "never a second copy on top of one that was not sent: {screen}"
+    );
+    let pane = s.pane(&stuck);
+    assert_eq!(
+        pane["needs_reason"],
+        json!("has mail it has not taken: nudged 4 times, and not again until it changes state, new mail arrives or you type into it")
+    );
+    assert_eq!(pane["mail"], json!({"nudged": 4, "gave_up": true}));
+    let notices = |s: &Station| {
+        s.call("notify.list", json!({}))
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n["title"] == json!("stuck has mail it has not taken"))
+            .count()
+    };
+    assert_eq!(notices(&s), 1);
+    // Left alone: nothing more for three seconds, and its mail is unread.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(logged(&s, "msg.nudged", &stuck).len(), 4);
+    assert_eq!(logged(&s, "msg.nudge_gave_up", &stuck).len(), 1);
+    assert_eq!(notices(&s), 1, "told once");
+    let unread = s.call_as_pane(&stuck, "msg.inbox", json!({"peek": true, "unread": true}));
+    assert_eq!(unread.unwrap().as_array().unwrap().len(), 1);
+    // New mail: told again, by Enter on the line that is still there.
+    s.call("msg.send", json!({"to": "stuck", "body": "one more thing"}));
+    wait_for("a nudge for the new mail", 10, || {
+        (logged(&s, "msg.nudged", &stuck).len() == 5).then_some(())
+    });
+    assert_eq!(s.text(&stuck).matches("new spandeck message").count(), 1);
 }

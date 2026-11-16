@@ -76,6 +76,10 @@ impl Adapter for OpenCode {
         detect::detect(detect::OPENCODE_RULES, lines)
     }
 
+    fn detect_screen_why(&self, lines: &[String]) -> Option<(AgentState, Option<String>)> {
+        detect::detect_why(detect::OPENCODE_RULES, lines)
+    }
+
     fn session_prefix(&self) -> Option<&'static str> {
         Some("ses_")
     }

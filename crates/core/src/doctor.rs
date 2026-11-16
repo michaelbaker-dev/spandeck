@@ -49,6 +49,31 @@ impl Daemon {
                 "spandeckd does not start at login: after a reboot this station stays down until someone starts it. Run `spandeck service --install`".into()
             },
         );
+        // Who writes into the agents' own settings under the home folder.
+        let owns = self.owns_agent_home();
+        let without = self.antigravity_without_tools();
+        add(
+            "agent settings",
+            without.is_none()
+                || self
+                    .agent_probe(AgentKind::Antigravity, std::time::Duration::from_secs(600))
+                    .path
+                    .is_none(),
+            false,
+            if owns {
+                "this station keeps spandeck's part of the agent settings in your home folder (Antigravity's plugin, skills, `spandeck integration install`)".into()
+            } else {
+                format!(
+                    "{}. Claude Code, Codex and OpenCode panes get spandeck's tools on their own command line all the same; Codex's hooks and skills from the agent setup are not installed by it; Antigravity panes {}",
+                    self.not_owning_words(),
+                    if without.is_some() {
+                        "start WITHOUT spandeck's tools, because Antigravity loads them only from a plugin in your home folder and there is none"
+                    } else {
+                        "use the plugin the station of this account put there"
+                    }
+                )
+            },
+        );
         // Asked without a terminal and given three seconds: on a Mac a
         // program asked its version from the daemon once never returned, and
         // the station check hung with it. It is not killed, and not answering
@@ -189,16 +214,33 @@ impl Daemon {
                     ),
                 },
             );
+            // Antigravity has no hooks to install: what `integration
+            // install` adds for it is allow rules for spandeck's mail
+            // tools. Said, never counted as a fault: it is the owner's
+            // choice whether Antigravity asks.
+            if kind == AgentKind::Antigravity {
+                if let Ok(st) = install::status(kind, &self.home) {
+                    add(
+                        "Antigravity mail tools",
+                        true,
+                        false,
+                        st.note.unwrap_or_default(),
+                    );
+                }
+                continue;
+            }
             if let Ok(st) = install::status(kind, &self.home) {
                 let detail = match (st.installed, st.outdated, kind) {
                     (true, true, _) => format!("hooks installed but out of date (v{}): a rule check is cut off after 10 seconds. Run `spandeck integration install {}`{}", st.version.unwrap_or(0), kind.as_str(), if kind == AgentKind::Codex { ", then trust the hooks again in Codex with /hooks" } else { "" }),
                     (true, false, _) => format!("hooks installed (v{}){}", st.version.unwrap_or(0), st.note.map(|n| format!("; {n}")).unwrap_or_default()),
                     (false, _, AgentKind::Claude) => "not installed globally; panes spandeck starts are hooked at launch anyway".to_string(),
+                    (false, _, _) if !owns => "not installed, and not this station's to install (see agent settings): Codex's state is read from its screen".to_string(),
                     (false, _, _) => "not installed: run `spandeck integration install codex`, then trust the hooks in Codex with /hooks".to_string(),
                 };
                 add(
                     &format!("{} hooks", kind.display()),
-                    st.installed && !st.outdated || (kind == AgentKind::Claude && !st.installed),
+                    st.installed && !st.outdated
+                        || ((kind == AgentKind::Claude || !owns) && !st.installed),
                     false,
                     detail,
                 );
