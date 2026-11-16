@@ -304,8 +304,8 @@ fn browser_opens_a_pane_types_copies_pastes_splits_resizes_and_drops_a_file() {
 
     // Type into the terminal through the browser.
     page.wait("terminal focus", "document.querySelector('.pane .xterm-helper-textarea') && (document.querySelector('.pane .xterm-helper-textarea').focus(), true)");
-    page.tab.type_str("echo typed-$((20+3))").unwrap();
-    page.tab.press_key("Enter").unwrap();
+    page.type_str("echo typed-$((20+3))");
+    page.press_key("Enter");
     wait_for("typed text on screen", 15, || {
         page.term_text().contains("typed-23").then_some(())
     });
@@ -382,7 +382,7 @@ fn browser_opens_a_pane_types_copies_pastes_splits_resizes_and_drops_a_file() {
             "(t => t ? (t.focus(), true) : false)({first}.querySelector('.xterm-helper-textarea'))"
         ),
     );
-    page.tab.press_key("Enter").unwrap();
+    page.press_key("Enter");
     s.wait_text(&a, "pasted-33");
 
     // Drag the gutter: the split is resized and the panes are re-fitted.
@@ -925,9 +925,9 @@ fn a_dialog_keeps_the_keyboard_while_a_pane_is_open() {
     page.js("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'k', ctrlKey: true, bubbles: true}))");
     page.wait("the palette", "!!document.querySelector('.dialog input')");
     page.js("(document.querySelector('.dialog input').focus(), window.__in = document.querySelector('.dialog input'), true)");
-    page.tab.type_str("new pro").unwrap();
+    page.type_str("new pro");
     page.redraw(&s, &pane);
-    page.tab.type_str("ject").unwrap();
+    page.type_str("ject");
     assert_eq!(
         page.js("[document.activeElement === window.__in, window.__in.value]"),
         json!([true, "new project"]),
@@ -1075,7 +1075,7 @@ fn a_saved_theme_is_used_again_and_a_panes_own_look_wins() {
         "{doc}"
     );
     assert_eq!(doc["deck"], json!({"theme": mine["id"]}), "{doc}");
-    page.js("location.reload()");
+    page.reload();
     shows("the theme after a reload", light);
 
     // One pane gets a look of its own: it wins there, and only there.
@@ -1238,7 +1238,7 @@ fn a_hidden_pane_gives_its_room_to_the_others_and_comes_back_as_it_was() {
     assert!(!page.term_text().contains("keep-42"));
 
     // Still hidden after a reload.
-    page.js("location.reload()");
+    page.reload();
     page.wait(
         "the layout after a reload",
         &format!("JSON.stringify({chips}) === '[\"three\"]' && document.querySelectorAll('.workspace .pane .xterm-rows').length === 2"),

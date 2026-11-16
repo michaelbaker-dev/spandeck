@@ -398,7 +398,15 @@ fn a_restarted_session_waits_for_the_owner() {
     {
         let page = common::browser::Page::open(&s, 1200, 800);
         let inbox = "[...document.querySelectorAll('.topbar button')].find(x => x.innerText.startsWith('Inbox'))";
-        page.wait("the inbox button", &format!("!!{inbox}"));
+        // The inbox shows what the page knew when it was opened: it is
+        // opened once the page has the notice (the button counts it) and
+        // the station.
+        page.wait(
+            "the inbox button, with the notice counted",
+            &format!(
+                "!!{inbox}?.querySelector('.count') && !!document.querySelector('a.tile.station')"
+            ),
+        );
         page.js(&format!("({inbox}.click(), true)"));
         let release = "[...document.querySelectorAll('button')].find(b => b.innerText.trim() === 'Release all on alpha')";
         page.wait(
@@ -582,7 +590,7 @@ fn the_deck_and_the_phone_show_a_held_pane_and_release_it() {
         let lines = "0123456789abcdef0123456789abcdef0123456789abcdef\r".repeat(420);
         s.call("pane.input", json!({"pane": deaf, "data": lines}));
         page.js("document.querySelector('.xterm-helper-textarea').focus()");
-        page.tab.type_str("abc").unwrap();
+        page.type_str("abc");
         // The keys are behind the lines, in the pane's input, when the
         // stop comes; the stop cannot reach the program, and says so.
         std::thread::sleep(Duration::from_millis(500));

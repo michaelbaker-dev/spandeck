@@ -863,6 +863,95 @@ pub mod browser {
     pub struct Page {
         _browser: headless_chrome::Browser,
         pub tab: std::sync::Arc<headless_chrome::Tab>,
+        wire: std::sync::Mutex<Option<Wire>>,
+        /// What was right-clicked last, while its menu is the one open.
+        menu_of: std::sync::Mutex<Option<String>>,
+    }
+
+    /// This page's own connection to the browser: what `Page` asks of the
+    /// page, and the keys it types, go over it. The `headless_chrome` crate
+    /// answers a call only after a tenth of a second or two (its reader
+    /// holds the connection's lock while it waits 100 ms for the browser to
+    /// say something, so a call waits for the lock and its answer waits for
+    /// the reader): a scenario that asked the page a hundred things, or
+    /// typed twenty letters, spent ten seconds on that. Chrome allows a
+    /// second connection to a tab, and on this one an answer is read as
+    /// soon as it arrives. Starting the browser, navigation, screenshots
+    /// and the list of tabs are still the crate's.
+    struct Wire {
+        socket: tokio_tungstenite::tungstenite::WebSocket<std::net::TcpStream>,
+        next: u64,
+    }
+
+    impl Wire {
+        fn open(browser: &headless_chrome::Browser, tab: &headless_chrome::Tab) -> Wire {
+            // ws://127.0.0.1:port/devtools/browser/… is the browser's; a
+            // tab's is /devtools/page/<its id> at the same address.
+            let ws = browser.get_ws_url();
+            let at = ws
+                .strip_prefix("ws://")
+                .and_then(|r| r.split('/').next())
+                .unwrap_or_else(|| panic!("the browser's address: {ws}"))
+                .to_string();
+            let stream = std::net::TcpStream::connect(&at).unwrap();
+            stream.set_nodelay(true).unwrap();
+            // A page that never answers fails its test; it does not hang it.
+            stream
+                .set_read_timeout(Some(Duration::from_secs(120)))
+                .unwrap();
+            let url = format!("ws://{at}/devtools/page/{}", tab.get_target_id());
+            let (socket, _) = tokio_tungstenite::tungstenite::client(url, stream)
+                .unwrap_or_else(|e| panic!("the page's own connection: {e}"));
+            Wire { socket, next: 0 }
+        }
+
+        /// One call of the DevTools protocol: its result, or what the
+        /// browser said instead.
+        fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+            use tokio_tungstenite::tungstenite::Message;
+            self.next += 1;
+            let call = json!({"id": self.next, "method": method, "params": params});
+            self.socket
+                .send(Message::text(call.to_string()))
+                .map_err(|e| e.to_string())?;
+            loop {
+                let m = self.socket.read().map_err(|e| e.to_string())?;
+                let Message::Text(text) = m else { continue };
+                let Ok(mut v) = serde_json::from_str::<Value>(text.as_str()) else {
+                    continue;
+                };
+                if v["id"] != json!(self.next) {
+                    continue;
+                }
+                if let Some(e) = v.get("error") {
+                    return Err(e["message"].as_str().unwrap_or("an error").to_string());
+                }
+                return Ok(v["result"].take());
+            }
+        }
+    }
+
+    /// A key of a US keyboard as the DevTools protocol names it: its code
+    /// and number, and the text it types. The same as the `headless_chrome`
+    /// crate sent for it (its table is Puppeteer's, and private), for the
+    /// keys the scenarios type; another key is added here when one needs it.
+    fn key_of(key: &str) -> (String, u32, String) {
+        if key == "Enter" {
+            return ("Enter".into(), 13, "\r".into());
+        }
+        let c = key.chars().next().unwrap_or(' ');
+        let (code, number) = match c {
+            'a'..='z' => (format!("Key{}", c.to_ascii_uppercase()), c as u32 - 32),
+            '0'..='9' => (format!("Digit{c}"), c as u32),
+            ' ' => ("Space".into(), 32),
+            '-' => ("NumpadSubtract".into(), 109),
+            '+' => ("NumpadAdd".into(), 107),
+            '$' => ("Digit4".into(), 52),
+            '(' => ("Digit9".into(), 57),
+            ')' => ("Digit0".into(), 48),
+            _ => panic!("a key the harness has no entry for: {key:?} (add it to `key_of`)"),
+        };
+        (code, number, key.to_string())
     }
 
     impl Page {
@@ -899,18 +988,22 @@ pub mod browser {
             )
             .unwrap();
             let tab = browser.new_tab().unwrap();
-            if signed_in {
-                tab.navigate_to(&format!("{at}#token={}", s.token()))
-                    .unwrap();
-                tab.wait_for_element(".topbar").unwrap();
-            } else {
-                tab.navigate_to(at).unwrap();
-                tab.wait_for_element("main.login").unwrap();
-            }
-            Page {
+            let page = Page {
                 _browser: browser,
                 tab,
+                wire: std::sync::Mutex::new(None),
+                menu_of: std::sync::Mutex::new(None),
+            };
+            if signed_in {
+                page.tab
+                    .navigate_to(&format!("{at}#token={}", s.token()))
+                    .unwrap();
+                page.wait("the deck", "!!document.querySelector('.topbar')");
+            } else {
+                page.tab.navigate_to(at).unwrap();
+                page.wait("the sign-in page", "!!document.querySelector('main.login')");
             }
+            page
         }
 
         /// The window this page opened at an address holding `at`, once
@@ -924,30 +1017,103 @@ pub mod browser {
             Page {
                 _browser: self._browser.clone(),
                 tab,
+                wire: std::sync::Mutex::new(None),
+                menu_of: std::sync::Mutex::new(None),
             }
         }
 
         pub fn js(&self, expr: &str) -> Value {
             // Values come back as JSON text, so arrays and objects survive.
             let wrapped = format!("(async () => JSON.stringify(await ({expr})))()");
-            let r = self
-                .tab
-                .evaluate(&wrapped, true)
-                .unwrap_or_else(|e| panic!("js failed: {e}\n{expr}"));
-            r.value
-                .and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
-                .unwrap_or(Value::Null)
+            let params = json!({"expression": wrapped, "awaitPromise": true});
+            match self.call("Runtime.evaluate", params) {
+                // A page that threw has no value: null.
+                Ok(v) => v["result"]["value"]
+                    .as_str()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or(Value::Null),
+                // The page went elsewhere while it was asked (a sign-in that
+                // loads it again, say): there is no answer, as from a page
+                // that threw, and a `wait` asks the new page.
+                Err(e) if e.contains("navigated or closed") || e.contains("context") => Value::Null,
+                Err(e) => panic!("js failed: {e}\n{expr}"),
+            }
+        }
+
+        fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+            let mut wire = self.wire.lock().unwrap();
+            wire.get_or_insert_with(|| Wire::open(&self._browser, &self.tab))
+                .call(method, params)
+        }
+
+        /// Press and let go of one key: a letter, a digit, a sign, "Enter".
+        pub fn press_key(&self, key: &str) {
+            let (code, number, text) = key_of(key);
+            for kind in ["keyDown", "keyUp"] {
+                self.call(
+                    "Input.dispatchKeyEvent",
+                    json!({"type": kind, "key": key, "text": text, "code": code,
+                        "windowsVirtualKeyCode": number, "nativeVirtualKeyCode": number}),
+                )
+                .unwrap_or_else(|e| panic!("the key {key:?}: {e}"));
+            }
+        }
+
+        /// Type `text` on the keyboard, a key at a time, into whatever has
+        /// the keyboard.
+        pub fn type_str(&self, text: &str) {
+            for c in text.chars() {
+                self.press_key(&c.to_string());
+            }
         }
 
         pub fn wait(&self, what: &str, expr: &str) -> Value {
-            wait_for(what, 20, || {
-                let v = self.js(expr);
-                (!v.is_null() && v != json!(false) && v != json!("")).then_some(v)
-            })
+            wait_for_or(
+                what,
+                20,
+                || self.showed(),
+                || {
+                    let v = self.js(expr);
+                    (!v.is_null() && v != json!(false) && v != json!("")).then_some(v)
+                },
+            )
+        }
+
+        /// Where the page is and the start of what it shows, for a wait
+        /// that ran out: several of those were reported with nothing to
+        /// find their cause by.
+        fn showed(&self) -> String {
+            let seen = "JSON.stringify([location.href.replace(/token=[^&]*/, 'token=…'), document.body ? document.body.innerText.slice(0, 1500) : ''])";
+            let params = json!({"expression": seen});
+            match self.call("Runtime.evaluate", params) {
+                Ok(v) => match serde_json::from_str::<Value>(
+                    v["result"]["value"].as_str().unwrap_or("[]"),
+                ) {
+                    Ok(v) => format!(
+                        "the page was at {} and showed:\n{}",
+                        v[0].as_str().unwrap_or("?"),
+                        v[1].as_str().unwrap_or("")
+                    ),
+                    Err(_) => "the page did not say what it showed".to_string(),
+                },
+                Err(e) => format!("the page did not answer: {e}"),
+            }
         }
 
         pub fn goto(&self, hash: &str) {
             self.js(&format!("location.hash = {}", json!(hash)));
+        }
+
+        /// Load the page again, and come back once the page that was there
+        /// is gone: what is asked next is asked of the new one. (A reload
+        /// takes a moment to begin; until it does, the old page still
+        /// answers, and a click on it is lost with it.)
+        pub fn reload(&self) {
+            self.js("(() => { window.__before = true; location.reload(); return true; })()");
+            self.wait(
+                "the page after a reload",
+                "!window.__before && !!document.body",
+            );
         }
 
         /// Open another station's Control Deck in the same browser.
@@ -977,21 +1143,57 @@ pub mod browser {
         }
 
         /// Right-click the element `el` (a JS expression) and wait for its menu.
+        /// The page closes a menu whenever it is drawn again, which it is
+        /// for every change it hears of (the change the step before made,
+        /// say): a menu that went that way before it was seen is opened
+        /// again. Three runs in sixteen failed here on two processors once
+        /// the page was asked without the tenth of a second between.
         pub fn right_click(&self, el: &str) {
-            self.wait(
-                "something to right-click",
-                &format!("(el => el ? (el.dispatchEvent(new MouseEvent('contextmenu', {{bubbles: true, cancelable: true, clientX: 300, clientY: 200}})), true) : false)({el})"),
-            );
-            self.wait("the menu", "!!document.querySelector('.menu')");
+            let began = Instant::now();
+            loop {
+                self.wait(
+                    "something to right-click",
+                    &format!("(el => el ? (el.dispatchEvent(new MouseEvent('contextmenu', {{bubbles: true, cancelable: true, clientX: 300, clientY: 200}})), true) : false)({el})"),
+                );
+                let asked = Instant::now();
+                let menu = || self.js("!!document.querySelector('.menu')") == json!(true);
+                while !menu() && asked.elapsed() < Duration::from_secs(1) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if menu() {
+                    break;
+                }
+                assert!(
+                    began.elapsed() < Duration::from_secs(20),
+                    "timed out waiting for the menu\n{}",
+                    self.showed()
+                );
+            }
+            *self.menu_of.lock().unwrap() = Some(el.to_string());
         }
 
         /// Choose the item of the open menu whose label starts with `label`.
+        /// A menu that a redraw took away between the right-click and this
+        /// is opened again; a menu that is there without the item fails at
+        /// once.
         pub fn choose(&self, label: &str) {
-            let done = self.js(&format!(
-                "(i => i && !i.disabled ? (i.click(), true) : [...document.querySelectorAll('.menu-item')].map(x => x.innerText))([...document.querySelectorAll('.menu-item')].find(i => i.innerText.startsWith({})))",
-                json!(label)
-            ));
-            assert_eq!(done, json!(true), "no menu item {label:?} to choose");
+            let began = Instant::now();
+            loop {
+                let done = self.js(&format!(
+                    "(i => i && !i.disabled ? (i.click(), true) : [...document.querySelectorAll('.menu-item')].map(x => x.innerText))([...document.querySelectorAll('.menu-item')].find(i => i.innerText.startsWith({})))",
+                    json!(label)
+                ));
+                let opener = self.menu_of.lock().unwrap().take();
+                if done == json!(true) {
+                    return;
+                }
+                match opener {
+                    Some(el) if done == json!([]) && began.elapsed() < Duration::from_secs(20) => {
+                        self.right_click(&el)
+                    }
+                    _ => assert_eq!(done, json!(true), "no menu item {label:?} to choose"),
+                }
+            }
         }
 
         /// The text on a pane's terminal as the browser shows it.

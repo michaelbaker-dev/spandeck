@@ -571,6 +571,23 @@ fn a_pane_on_another_station_keeps_one_size_whichever_station_serves_the_deck() 
         let p = b.pane(&pane);
         (p["cols"].as_u64().unwrap(), p["rows"].as_u64().unwrap())
     };
+    // The pane's size and who holds it, from one look at the pane. The
+    // station sets the size and then notes whose it is: for a moment the
+    // new size is there under the last holder's name. Asked one after the
+    // other, the answers came from either side of that moment (once on
+    // the Linux CI runner; seen here by asking without a pause).
+    let held = |what: &str, want: &dyn Fn((u64, u64), &Value) -> bool| {
+        wait_for_or(
+            what,
+            10,
+            || format!("the pane is {}", b.pane(&pane)),
+            || {
+                let p = b.pane(&pane);
+                let size = (p["cols"].as_u64().unwrap(), p["rows"].as_u64().unwrap());
+                want(size, &p["controller"]).then_some(size)
+            },
+        )
+    };
     let open = |s: &Station, w: u32, h: u32| {
         let page = Page::open(s, w, h);
         page.goto(&format!("/s/bravo/p/{pane}"));
@@ -615,9 +632,8 @@ fn a_pane_on_another_station_keeps_one_size_whichever_station_serves_the_deck() 
     // client of its own at bravo. It takes the size, and alpha's window is
     // told, as the window at bravo is.
     phone.js("[...document.querySelectorAll('.phone-pane button')].find(b => b.innerText === 'Fit to screen').click()");
-    let on_phone = wait_for("the phone's size", 10, || {
-        let s = size();
-        (s.0 < 80).then_some(s)
+    let on_phone = held("the phone's size, held by the phone", &|s, by| {
+        s.0 < 80 && !by.is_null() && *by != json!(who)
     });
     one.wait("alpha's window to give way", gave_way);
     assert_ne!(b.pane(&pane)["controller"], json!(who));
@@ -627,8 +643,8 @@ fn a_pane_on_another_station_keeps_one_size_whichever_station_serves_the_deck() 
     // Taking control back in alpha's window works through alpha, and both
     // of the others are told.
     one.js("[...document.querySelectorAll('.strip button')].find(b => b.innerText === 'Take control').click()");
-    wait_for("the size of alpha's window again", 10, || {
-        (size() == through_one).then_some(())
+    held("the size of alpha's window again, held by it", &|s, by| {
+        s == through_one && *by == json!(who)
     });
     assert_eq!(b.pane(&pane)["controller"], json!(who));
     phone.wait("the phone to give way", gave_way);
@@ -1096,8 +1112,8 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     // and the pane keeps its size.
     open("phone-sh");
     page.wait("terminal", "document.querySelector('.phone-pane .xterm-helper-textarea') && (document.querySelector('.phone-pane .xterm-helper-textarea').focus(), true)");
-    page.tab.type_str("echo typed-$((20+3))").unwrap();
-    page.tab.press_key("Enter").unwrap();
+    page.type_str("echo typed-$((20+3))");
+    page.press_key("Enter");
     s.wait_text(&sh, "typed-23");
     assert!(
         s.pane(&sh)["controller"].is_null(),
@@ -1118,17 +1134,22 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     set("seq 1000 1300");
     page.js("document.querySelector('.composer-row button[type=submit]').click()");
     s.wait_text(&sh, "1300");
-    let rows = "document.querySelector('.phone-pane .xterm-rows').innerText";
+    // The lines on the screen. A line that is "1300" is the end of the
+    // output; the command that was typed holds "1300" too, and is not.
+    let rows = "document.querySelector('.phone-pane .xterm-rows').innerText.split('\\n').map(x => x.trim())";
     page.wait("the end of the output", &format!("{rows}.includes('1300')"));
     // The drag is repeated until it takes: on a slow machine the first one
     // landed while the last lines were still being drawn, and the view went
     // back to the end (seen twice on the Mac CI runner).
-    // Earlier output is whatever is above the end: the failures on the CI
-    // runners (16 Nov 2026) showed the view at the very first lines, above
-    // the numbers this once looked for, and so waited for ever.
+    // The failures that remained on the Mac CI runner, and every run once
+    // this test asked the page faster: "1300" was looked for anywhere on the
+    // screen and found in the command just typed, so the drag came before
+    // the output; the view then stayed at the top of the history, where
+    // that command is, and looked like the end for good. When it fails
+    // again, it says what the page showed.
     let dragged = format!(
             "(() => {{ // The finger lands on the terminal's own element, as on a real phone.
-           if (!{rows}.includes('1300')) return /\\S/.test({rows});
+           if (!{rows}.includes('1300')) return {rows}.some(x => /^1[0-2][0-9][0-9]$/.test(x));
            const el = document.querySelector('.phone-pane .xterm-screen');
            const touch = (type, y) => {{ const ev = new Event(type, {{bubbles: true, cancelable: true}}); Object.defineProperty(ev, 'touches', {{value: y === null ? [] : [{{clientX: 100, clientY: y}}]}}); return ev; }};
            el.dispatchEvent(touch('touchstart', 200));
@@ -1616,7 +1637,7 @@ fn the_phones_appearance_sheet(s: &Station, page: &common::browser::Page, pane: 
     page.wait("the terminal again, under one bar", "!!document.querySelector('.phone-pane .xterm-rows') && document.querySelectorAll('.phone-pane .chat-bar').length === 1");
 
     // Kept in this browser, and by no station.
-    page.js("(location.reload(), true)");
+    page.reload();
     page.wait(
         "the sizes after a reload",
         &format!("document.readyState === 'complete' && {term} === 16 && getComputedStyle(document.documentElement).getPropertyValue('--chat-scale') === '1.2'"),
@@ -2484,8 +2505,14 @@ exec env -i PATH={remote_bin}:/usr/bin:/bin HOME={c}/home SPANDECK_STATE_DIR={c}
     ];
     assert!(service_files.iter().any(|f| f.exists()));
     let old_fleet = fleet_of(&a);
-    // From the station's menu. The dialog names the station, says what
-    // happens in order, and opens on Cancel.
+    // From the station's menu, once the page has heard that charlie is in
+    // the fleet (its tile no longer offers to add it): the dialog says what
+    // the page knows. The dialog names the station, says what happens in
+    // order, and opens on Cancel.
+    page.wait(
+        "charlie's tile as a station of the fleet",
+        "(t => !!t && !t.querySelector('button.add-station'))([...document.querySelectorAll('a.tile.station')].find(x => x.innerText.includes('charlie')))",
+    );
     page.right_click(
         "[...document.querySelectorAll('a.tile.station')].find(x => x.innerText.includes('charlie'))",
     );
@@ -3350,9 +3377,10 @@ fn a_request_is_seen_and_answered_at_any_station_of_the_fleet() {
     page.js("(localStorage.removeItem('spandeck.token'), true)");
     page.visit(a);
     page.js(&format!(
-        "(localStorage.setItem('spandeck.token', {}), location.reload(), true)",
+        "(localStorage.setItem('spandeck.token', {}), true)",
         json!(laptop_token)
     ));
+    page.reload();
     page.wait(
         "alpha's deck, signed in as the laptop",
         &format!(
@@ -3389,7 +3417,7 @@ fn a_request_is_seen_and_answered_at_any_station_of_the_fleet() {
             "{visited}"
         );
     }
-    assert!(relayed(b).is_none());
+    assert_eq!(relayed(b), None, "bravo was asked nothing");
     assert_eq!(devices(b), left);
     // A window that was not opened by the deck is told nothing, and the
     // window that was is answered once.
@@ -3403,9 +3431,10 @@ fn a_request_is_seen_and_answered_at_any_station_of_the_fleet() {
     );
     // The station's own token is never handed on: only a browser's.
     page.js(&format!(
-        "(localStorage.setItem('spandeck.token', {}), location.reload(), true)",
+        "(localStorage.setItem('spandeck.token', {}), true)",
         json!(a.token())
     ));
+    page.reload();
     page.wait(
         "alpha's deck, with alpha's own token",
         &format!(
@@ -4799,8 +4828,8 @@ fn the_rest_of_the_conversation_view() {
     // was typed for the agent and waits in its prompt: it goes with the
     // message.
     wide.js("(document.querySelector('.chat-box').focus(), true)");
-    wide.tab.type_str("from a computer").unwrap();
-    wide.tab.press_key("Enter").unwrap();
+    wide.type_str("from a computer");
+    wide.press_key("Enter");
     s.wait_text(&long, "tally.csv from a computer");
     click(&wide, "Terminal", &button("Terminal"));
     wide.wait("the terminal again", "!!document.querySelector('.station-main.zoomed .pane .xterm-rows') && !document.querySelector('.chat-pane')");

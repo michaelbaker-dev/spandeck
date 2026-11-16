@@ -1104,9 +1104,18 @@ fn a_layout_keeps_the_keyboard_and_the_keys_of_a_reconnect() {
     page.wait("the station to have read the page's clock", "api().ready");
     // The keyboard goes to the second pane, as a click puts it there.
     page.js(&format!("({term}.el.dispatchEvent(new MouseEvent('mousedown', {{bubbles: true}})), {term}.term.focus(), true)"));
-    page.tab.type_str("echo before-$((1+1))").unwrap();
-    page.tab.press_key("Enter").unwrap();
+    // What was typed has come back to the page, not only reached the pane:
+    // a connection lost before that leaves the page saying, rightly, that
+    // the keys may not have been sent, and the next step loses it.
+    let echoed = |what: &str| {
+        wait_for("what was typed to be on the page", 10, || {
+            page.term_text().contains(what).then_some(())
+        });
+    };
+    page.type_str("echo before-$((1+1))");
+    page.press_key("Enter");
     a.wait_text(&right, "before-2");
+    echoed("before-2");
     for round in 0..3 {
         // The connection is lost, and what is typed at that moment is held.
         page.js(&format!(
@@ -1125,11 +1134,10 @@ fn a_layout_keeps_the_keyboard_and_the_keys_of_a_reconnect() {
             json!(true),
             "round {round}"
         );
-        page.tab
-            .type_str(&format!("echo after{round}-$((3+3))"))
-            .unwrap();
-        page.tab.press_key("Enter").unwrap();
+        page.type_str(&format!("echo after{round}-$((3+3))"));
+        page.press_key("Enter");
         a.wait_text(&right, &format!("after{round}-6"));
+        echoed(&format!("after{round}-6"));
     }
     let (l, r) = (a.text(&left), a.text(&right));
     assert!(!l.contains("held") && !l.contains("after"), "{l}");
@@ -1295,6 +1303,14 @@ fn a_slow_link_that_is_alive_can_be_typed_over() {
     page.js(API);
     page.goto(&format!("#/s/alpha/p/{pane}"));
     ready(&page);
+    // The link turns slow under a page that is waiting for nothing: with
+    // answers still on their way, each one that arrives late is taken for
+    // proof of the link and the ping behind it is let go of, so the page
+    // never measures the round trip (it read 15 ms for forty seconds).
+    page.wait(
+        "the link to be quiet",
+        "(a => a.pingOut === null && a.awake - a.frameAwake > 500)(api())",
+    );
     wire.slow(2000);
     // The page learns the link's round trip from its pings.
     wait_for("the page to measure the slow link", 30, || {
