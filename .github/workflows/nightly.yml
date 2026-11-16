@@ -64,8 +64,12 @@ jobs:
         run: cargo test -p spandeck --test refresh -- --ignored --nocapture
       # Chat for every pane, in a real browser at a phone's width and a
       # computer's: a layout of a Codex whose hooks never ran and a shell,
-      # each with Chat and Terminal. About ten seconds.
-      - name: Chat for every pane (a hookless Codex and a shell in a layout, phone and computer)
+      # each with Chat and Terminal. And one chat for every pane: a Claude
+      # Code-shaped pane, a Codex one, an Antigravity one and one made from
+      # a screen are the same component, the log is the only thing that
+      # scrolls, and the message box sits on a phone's keyboard. About
+      # twenty seconds.
+      - name: Chat for every pane, and one chat for all of them (phone and computer, the keyboard)
         run: cargo test -p spandeck --test chat -- --ignored
   build:
     strategy:

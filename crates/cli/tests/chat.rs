@@ -355,6 +355,7 @@ fn a_shell_pane_is_served_as_what_was_sent_and_what_it_printed() {
 /// OpenCode's database in a station's throwaway home, with the two tables
 /// of OpenCode 2.3.0 that are read (their columns as its own schema has
 /// them, the ones not read left out where it allows).
+#[cfg(unix)]
 fn opencode_store(s: &Station) -> rusqlite::Connection {
     let dir = s.root.join("home/.local/share/opencode");
     std::fs::create_dir_all(&dir).unwrap();
@@ -372,6 +373,7 @@ fn opencode_store(s: &Station) -> rusqlite::Connection {
     conn
 }
 
+#[cfg(unix)]
 fn opencode_session(conn: &rusqlite::Connection, id: &str, dir: &Path, at: u64) {
     conn.execute(
         "INSERT INTO session_v2(id, project_id, slug, directory, version, time_created, time_updated)
@@ -381,6 +383,7 @@ fn opencode_session(conn: &rusqlite::Connection, id: &str, dir: &Path, at: u64) 
     .unwrap();
 }
 
+#[cfg(unix)]
 fn opencode_message(conn: &rusqlite::Connection, session: &str, seq: i64, ty: &str, data: Value) {
     let at = now() as i64;
     conn.execute(
@@ -402,6 +405,7 @@ fn opencode_message(conn: &rusqlite::Connection, session: &str, seq: i64, ty: &s
     .unwrap();
 }
 
+#[cfg(unix)]
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -412,6 +416,7 @@ fn now() -> u64 {
 /// One conversation of Antigravity's in a station's throwaway home, as
 /// `agy` 1.5.9 keeps one: a row of its summaries that says which folder it
 /// belongs to, and its transcript, cut (`transcript.jsonl`) and whole.
+#[cfg(unix)]
 fn antigravity_conversation(s: &Station, id: &str, dir: &Path, steps: &[Value], whole: &[Value]) {
     let agy = s.root.join("home/.gemini/antigravity-cli");
     let logs = agy.join("brain").join(id).join(".system_generated/logs");
@@ -433,6 +438,7 @@ fn antigravity_conversation(s: &Station, id: &str, dir: &Path, steps: &[Value], 
     .unwrap();
 }
 
+#[cfg(unix)]
 fn agy_step(n: u64, ty: &str, at: &str, extra: Value) -> Value {
     let mut step = json!({"step_index": n, "type": ty, "status": "DONE", "created_at": at,
         "source": if ty == "USER_INPUT" { "USER_EXPLICIT" } else { "MODEL" }});
@@ -443,6 +449,7 @@ fn agy_step(n: u64, ty: &str, at: &str, extra: Value) -> Value {
 }
 
 /// What the owner wrote, as Antigravity wraps it.
+#[cfg(unix)]
 fn agy_asked(n: u64, at: &str, text: &str) -> Value {
     agy_step(
         n,
@@ -452,6 +459,7 @@ fn agy_asked(n: u64, at: &str, text: &str) -> Value {
     )
 }
 
+#[cfg(unix)]
 fn wait_transcript(s: &Station, pane: &str, has: &str) -> Value {
     wait_for_or(
         "the pane's own conversation",
@@ -651,6 +659,127 @@ fn opencode_and_antigravity_panes_get_their_own_conversations() {
         "{b}"
     );
     assert!(!b.to_string().contains("grebes"));
+}
+
+/// A program that draws its screen itself, 120 columns wide, as the
+/// agent programs do: a title in a frame, what it answered (indented,
+/// wrapped by the program at its own width, markdown as it was
+/// written, bullets drawn as dots, a table), its message box with the
+/// cursor in it, and a status row.
+#[cfg(unix)]
+pub fn drawn_screen() -> String {
+    let rule = "─".repeat(112);
+    let mut rows = vec![
+        format!("  ╭{rule}╮"),
+        format!("  │ {:<110} │", "Tern Code 9.9 · ~/mere"),
+        format!("  ╰{rule}╯"),
+        String::new(),
+        "  ### Herons by the weir".into(),
+        String::new(),
+        "  The survey counts **nine nests** this year, three more than last spring. Most are high in the alders on the east".into(),
+        "  bank, where the water is slow and the fishing is easy.".into(),
+        String::new(),
+        "  1. six on the east bank".into(),
+        "  2. three on the island".into(),
+        String::new(),
+        "  ● they feed at dusk".into(),
+        "  ● `survey.md` has the dates".into(),
+        String::new(),
+        "  bank          nests     seen at dusk".into(),
+        "  east          6         yes".into(),
+        "  island        3         no".into(),
+    ];
+    rows.resize(31, String::new());
+    rows.push(format!("  ╭{rule}╮"));
+    rows.push(format!("  │ {:<110} │", "> "));
+    rows.push(format!("  ╰{rule}╯"));
+    rows.push("  tern-2-low · 12% context left · /help for commands".into());
+    // Drawn row by row, each at its place, and the cursor left in the box.
+    let mut out = String::from("\x1b[?1049h\x1b[2J");
+    for (n, row) in rows.iter().enumerate() {
+        out.push_str(&format!("\x1b[{};1H{row}", n + 1));
+    }
+    out.push_str("\x1b[33;5H");
+    out
+}
+
+/// A pane of `agent` whose program draws that screen, 120 columns by
+/// 36 rows, and draws it again after each message.
+#[cfg(unix)]
+pub fn drawn_pane(s: &Station, agent: &str, name: &str, dir: &Path) -> String {
+    let go = format!("go-{name}");
+    let id = pane(
+        s,
+        agent,
+        name,
+        dir,
+        json!({"no_hooks": true, "steps": [{"wait_file": go}, {"raw": drawn_screen()}], "on_input": [{"raw": drawn_screen()}]}),
+    );
+    s.wait_text(&id, "[fake] session");
+    s.call("pane.resize", json!({"pane": id, "cols": 120, "rows": 36}));
+    std::fs::write(dir.join(go), "").unwrap();
+    s.wait_text(&id, "tern-2-low");
+    id
+}
+
+/// The owner's report of 16 Nov 2026, with a picture of Antigravity's
+/// Chat: one box of terminal text, "lines running off the right edge and
+/// cut, wrapped fragments mixed with indentation, markdown shown raw". A
+/// program that draws its own screen, 120 columns wide, is served as parts
+/// to read: its paragraph one line again, its heading and its lists as
+/// they were written, its table as rows, and none of its frame, its
+/// message box or its status row; a long line that the terminal wrapped is
+/// one line. What the rows were is still served beside them, for a deck
+/// from before.
+#[test]
+#[cfg(unix)]
+fn what_an_agent_draws_on_its_screen_is_served_as_prose() {
+    let s = Station::start("alpha");
+    let tui = drawn_pane(&s, "opencode", "tui", &folder(&s, "mere"));
+    let a = conversation(&s, &tui, true);
+    assert_eq!(a["source"], json!("screen"), "{a}");
+    let item = a["items"].as_array().unwrap().last().unwrap();
+    assert_eq!(
+        (&item["kind"], &item["whole"], &item["open"]),
+        (&json!("screen"), &json!(true), &json!(true)),
+        "{a}"
+    );
+    assert_eq!(
+        item["parts"],
+        json!([
+            {"prose": true, "text": "Tern Code 9.9 · ~/mere\n\n### Herons by the weir\n\nThe survey counts **nine nests** this year, three more than last spring. Most are high in the alders on the east bank, where the water is slow and the fishing is easy.\n\n1. six on the east bank\n2. three on the island\n\n- they feed at dusk\n- `survey.md` has the dates"},
+            {"prose": false, "text": "bank          nests     seen at dusk\neast          6         yes\nisland        3         no"},
+        ]),
+        "{a}"
+    );
+    // The rows as they were drawn, for a deck that knows no parts.
+    let rows = item["text"].as_str().unwrap();
+    assert!(
+        rows.contains("╭──")
+            && rows.contains("  bank, where the water")
+            && rows.contains("tern-2-low"),
+        "{a}"
+    );
+
+    // A program that prints lines: one longer than the pane is wide is
+    // wrapped by the terminal, which says so, and is one line here; the
+    // lines the program ended stay lines.
+    let long = "The heron stood in the shallows for most of the morning ".repeat(6);
+    let log = pane(
+        &s,
+        "antigravity",
+        "log",
+        &folder(&s, "fen"),
+        json!({"no_hooks": true, "steps": [{"say": long.trim()}, {"say": "and then it flew"}]}),
+    );
+    s.wait_text(&log, "and then it flew");
+    let a = conversation(&s, &log, true);
+    let said = a["items"][0]["parts"][0]["text"].as_str().unwrap_or("");
+    assert_eq!(a["items"][0]["parts"][0]["prose"], json!(true), "{a}");
+    assert!(
+        said.contains(&format!("{}\nand then it flew", long.trim())),
+        "{a}"
+    );
 }
 
 /// What the two browser scenarios share: a Codex whose hooks never ran and
@@ -947,65 +1076,6 @@ mod in_a_browser {
         "And last spring?",
         "Where do they feed?",
     ];
-
-    /// A program that draws its screen itself, 120 columns wide, as the
-    /// agent programs do: a title in a frame, what it answered (indented,
-    /// wrapped by the program at its own width, markdown as it was
-    /// written, bullets drawn as dots, a table), its message box with the
-    /// cursor in it, and a status row.
-    pub fn drawn_screen() -> String {
-        let rule = "─".repeat(112);
-        let mut rows = vec![
-            format!("  ╭{rule}╮"),
-            format!("  │ {:<110} │", "Tern Code 9.9 · ~/mere"),
-            format!("  ╰{rule}╯"),
-            String::new(),
-            "  ### Herons by the weir".into(),
-            String::new(),
-            "  The survey counts **nine nests** this year, three more than last spring. Most are high in the alders on the east".into(),
-            "  bank, where the water is slow and the fishing is easy.".into(),
-            String::new(),
-            "  1. six on the east bank".into(),
-            "  2. three on the island".into(),
-            String::new(),
-            "  ● they feed at dusk".into(),
-            "  ● `survey.md` has the dates".into(),
-            String::new(),
-            "  bank          nests     seen at dusk".into(),
-            "  east          6         yes".into(),
-            "  island        3         no".into(),
-        ];
-        rows.resize(31, String::new());
-        rows.push(format!("  ╭{rule}╮"));
-        rows.push(format!("  │ {:<110} │", "> "));
-        rows.push(format!("  ╰{rule}╯"));
-        rows.push("  tern-2-low · 12% context left · /help for commands".into());
-        // Drawn row by row, each at its place, and the cursor left in the box.
-        let mut out = String::from("\x1b[?1049h\x1b[2J");
-        for (n, row) in rows.iter().enumerate() {
-            out.push_str(&format!("\x1b[{};1H{row}", n + 1));
-        }
-        out.push_str("\x1b[33;5H");
-        out
-    }
-
-    /// A pane of `agent` whose program draws that screen, 120 columns by
-    /// 36 rows, and draws it again after each message.
-    pub fn drawn_pane(s: &Station, agent: &str, name: &str, dir: &Path) -> String {
-        let go = format!("go-{name}");
-        let id = pane(
-            s,
-            agent,
-            name,
-            dir,
-            json!({"no_hooks": true, "steps": [{"wait_file": go}, {"raw": drawn_screen()}], "on_input": [{"raw": drawn_screen()}]}),
-        );
-        s.wait_text(&id, "[fake] session");
-        s.call("pane.resize", json!({"pane": id, "cols": 120, "rows": 36}));
-        std::fs::write(dir.join(go), "").unwrap();
-        s.wait_text(&id, "tern-2-low");
-        id
-    }
 
     pub struct Chats {
         pub s: Station,

@@ -209,7 +209,7 @@ class Conv {
     this.bar = h('header', { class: 'chat-bar' });
     this.log = h('div', { class: 'chat-log', role: 'log', 'aria-live': 'off', 'aria-label': 'Conversation', tabIndex: 0 });
     this.log.addEventListener('scroll', () => this.scrolled(), { passive: true });
-    if (typeof ResizeObserver === 'function') new ResizeObserver(() => this.resized()).observe(this.log);
+    if (typeof ResizeObserver === 'function') { this.sized = new ResizeObserver(() => this.resized()); this.sized.observe(this.log); }
     // Completed replies are said here, once each; the log itself is silent,
     // so a screen reader is not read every tool call as it happens.
     this.said = h('div', { class: 'sr-only', 'aria-live': 'polite' });
@@ -1173,6 +1173,7 @@ class Conv {
 
   dispose() {
     this.disposed = true;
+    if (this.sized) this.sized.disconnect();
     clearTimeout(this.retry);
     this.unwatch();
     this.stopTalking();
@@ -1203,11 +1204,11 @@ function readAloud(el, btn) {
   for (const c of copy.querySelectorAll('.md-code')) c.replaceWith(document.createTextNode(' (a block of code) '));
   const u = new window.SpeechSynthesisUtterance(copy.textContent || '');
   u.lang = navigator.language || 'en-US';
-  const me = { btn, done: () => { if (speaking === me) speaking = null; btn.textContent = 'Read aloud'; btn.setAttribute('aria-pressed', 'false'); } };
+  const me = { btn, done: () => { if (speaking === me) speaking = null; btn.textContent = btn.title = 'Read aloud'; btn.setAttribute('aria-pressed', 'false'); } };
   u.onend = me.done;
   u.onerror = me.done;
   speaking = me;
-  btn.textContent = 'Stop reading';
+  btn.textContent = btn.title = 'Stop reading';
   btn.setAttribute('aria-pressed', 'true');
   synth.speak(u);
 }
