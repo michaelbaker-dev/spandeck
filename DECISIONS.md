@@ -161,6 +161,20 @@ What was stored was a theme and nothing else (`{"deck":{"theme":"solarized-dark"
 - **Not changed:** in the editor on a computer, choosing a theme still drops the single settings made on top of the last one, a font among them (see above); the sheet keeps them.
   - Before this the phone's terminal was drawn at the deck's size (`termOptions`' "smaller" was never asked for).
 
+## The Inbox is one size of text, and nothing in it runs off its card (16 Nov 2026, the owner's report from an iPhone)
+
+"The inbox looks like random text sizes and overruns the box it's in"
+
+Each notice was one line that could not wrap (a button, and every button is `white-space: nowrap`), holding a title, what it said and where it was from: up to 2,200 px of text in a card 340 px wide, cut at the card's edge with nothing to say there was more, and on a computer wide enough to scroll the whole dialog sideways. The page never told a phone's browser to leave its text sizes alone (`text-size-adjust`), and an iPhone makes the text of a block that is wider than the screen larger, piece by piece: the longer a row's title or body, the larger it was drawn. In a desktop browser at the same width every piece measures 13 px; the sizes in the picture are the phone's doing, to rows that should never have been that wide.
+
+- **The page's text is the size the page says.** `text-size-adjust: 100%` at the root, for every screen of the deck. The sizes are the owner's (the look's `ui.size`, a phone's "Text"); a browser does not change them.
+- **One scale for every entry of the Inbox, a message or a notice:** a title (14 px at the default size, semibold), what it says (13 px), and a quiet line of where it is from and when (12 px), all three times `--ui-scale`. An entry is built in one place, so there is no second way for one to look.
+- **On a phone an entry is a card of three parts, each on its own lines:** the dot and the title (two lines at most, then an ellipsis), what it says (three lines; six for a message), and the line of station, "held" or "pushed", and when. A long word (an address, a path, a pane's id) breaks rather than widen the card. **A tap shows all of it, in place**, and reads a notice as a tap always did. On a computer a notice is one line, cut with an ellipsis where it does not fit, the whole text in its tooltip, and a click opens it the same way.
+- **A tap no longer goes to the pane; "Open" beside the notice does** (and reads it, and closes the Inbox, as the tap did). A tap had to mean one thing, and reading the rest is the one that has no other place. "Release all on …" stays a button beside its notice. On a phone every button of the Inbox is at least 44 px tall.
+- **The dialog's body is what scrolls**, up and down only; the page behind it does not move.
+- **The same rule for the lists beside it:** a row of any list in a dialog (the pane chooser, ⌘K, "add to a layout") is never wider than the dialog and cuts a long name with an ellipsis; a browser's line in "Stations and browsers" wraps, its address breaking where it must. "Approval requests" and the phone's home were checked and already wrap.
+- Not shown by a test, because no browser here does it: that an iPhone now draws every row at one size. The rows no longer give it a reason to (nothing is wider than the screen), and it is told not to; the test holds the first, and a look at the phone confirms the second.
+
 ## Fonts, icons and other terminals' themes (15 Nov 2026, the owner's request)
 
 "Think about how to setup fonts special characters colors etc." "Ligatures should work, emoji should work."
@@ -1198,7 +1212,7 @@ Codex shows "Hooks need review" the first time on each machine, and again whenev
 - Processes do not survive a daemon crash; agents resume by session id.
 
 ## Testing rules (from the Build and test plan tab)
-- Test where spandeck can break: the terminal, each agent integration, the Guarantees, the link between stations, upgrades. Target 150 to 300 tests (raised from 250 on 15 Nov 2026, with the performance and continuity plan; its new cases that start a station are a few scenario tests with many assertions each, marked ignored and run with `--ignored`, not one test per case). Counted on 16 Nov 2026: 378 on Linux (306 in the every-change tier; 72 ignored, of which 12 are pictures and live canaries), and 18 more that run only on Windows. That is over the target, and the target was not raised for it: whether it is raised, or which tests go, is the owner's to say.
+- Test where spandeck can break: the terminal, each agent integration, the Guarantees, the link between stations, upgrades. Target 150 to 300 tests (raised from 250 on 15 Nov 2026, with the performance and continuity plan; its new cases that start a station are a few scenario tests with many assertions each, marked ignored and run with `--ignored`, not one test per case). Counted on 16 Nov 2026: 379 on Linux (306 in the every-change tier; 73 ignored, of which 12 are pictures and live canaries), and 18 more that run only on Windows. That is over the target, and the target was not raised for it: whether it is raised, or which tests go, is the owner's to say.
 - A test needs a reason: a Guarantee, a phase's acceptance criterion, or a real bug. No tests of trivial code, no mocks of our own modules.
 - Every-change tier under 90 seconds; merge tier under 10 minutes. A flaky test is fixed or deleted within a day.
 - The station link sits behind a swappable transport so the message relay runs under Turmoil.

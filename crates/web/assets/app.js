@@ -1017,20 +1017,45 @@ async function inboxPanel() {
   const away = [...new Set([...(S.notesAway || []), ...failed])].sort();
   // Each notice is marked at the station that holds it; so is each message.
   const readAll = () => Promise.all(stations.flatMap(st => [api.on(st, 'notify.read', {}).catch(() => {}), api.on(st, 'msg.inbox', {}).catch(() => {})])).then(() => refreshSoon(0));
-  dialog('Inbox', (close) => h('div', {},
-    h('div', { class: 'row end' }, h('button', { class: 'mini', onclick: () => readAll().then(close) }, 'Mark all read'),
+  // One entry, a message or a notice: a title, what it says, and a line of
+  // where it is from and when. Every entry is built here, so every one has
+  // the same sizes (app.css, "The Inbox"). What it says is cut to a few
+  // lines; a tap on it shows all of it in place, and reads it. What it can
+  // do (its pane, "Release all") is a button of its own beside it. The words
+  // are an agent's or another station's: text, never markup.
+  const entry = (cls, unread, dot, title, body, meta, acts, onRead) => {
+    const main = h('button', { type: 'button', class: 'inbox-main', 'aria-expanded': 'false', onclick: () => {
+      const open = item.classList.toggle('open');
+      main.setAttribute('aria-expanded', String(open));
+      if (onRead && item.classList.contains('unread')) { item.classList.remove('unread'); onRead(); }
+    } },
+      dot ? h('span', { class: 'dot ' + dot }) : null,
+      h('span', { class: 'inbox-title', title }, title),
+      h('span', { class: 'inbox-body', title: body }, body),
+      h('span', { class: 'inbox-meta', title: meta }, meta));
+    const item = h('div', { class: `inbox-item ${cls} note` + (unread ? ' unread' : '') + (dot ? '' : ' no-dot') }, main,
+      acts.length ? h('div', { class: 'inbox-acts' }, acts) : null);
+    return item;
+  };
+  dialog('Inbox', (close) => h('div', { class: 'inbox' },
+    h('div', { class: 'row end inbox-top' }, h('button', { class: 'mini', onclick: () => readAll().then(close) }, 'Mark all read'),
       'Notification' in window && Notification.permission === 'default' ? h('button', { class: 'mini', onclick: () => Notification.requestPermission() }, 'Enable browser notifications') : null),
     away.length ? h('p', { class: 'muted small' }, `Not counted, because ${away.length === 1 ? 'it is' : 'they are'} not reachable: ${away.join(', ')}.`) : null,
     h('h3', {}, 'Messages to you'),
-    msgs.length ? h('div', { class: 'list' }, msgs.map(m => h('div', { class: 'note' + (m.read ? '' : ' unread') },
-      h('div', {}, h('b', {}, m.from), h('span', { class: 'muted' }, ` · ${m.station} · ${m.kind} · ${ago(m.ts)} ago`)), h('div', { class: 'pre' }, m.body)))) : h('p', { class: 'muted' }, 'No messages.'),
+    // A message is read with "Mark all read", as before: opening it to see
+    // the rest of it does not take it from the agent's list of what it sent.
+    msgs.length ? h('div', { class: 'list' }, msgs.map(m => entry('inbox-msg', !m.read, null, String(m.from), String(m.body ?? ''), `${m.station} · ${m.kind} · ${ago(m.ts)} ago`, [], null)))
+      : h('p', { class: 'muted' }, 'No messages.'),
     h('h3', {}, 'Notifications'),
-    S.notes.length ? h('div', { class: 'list' }, S.notes.map(n => [h('button', { class: 'list-row note' + (n.read ? '' : ' unread'), onclick: () => { readNote(n).then(() => refreshSoon(0)); if (n.url) { close(); location.hash = n.url.replace(/^\/#/, '#'); } } },
-      h('span', { class: 'dot ' + (n.kind === 'approval' ? 'needs_you' : n.kind) }), h('b', {}, n.title), h('span', { class: 'muted' }, n.body), h('span', { class: 'grow' }),
-      h('span', { class: 'muted' }, n.at.map(a => a.station).join(', '), ' · ', n.pushed === 2 ? 'held (you were here) · ' : n.pushed === 1 ? 'pushed · ' : '', ago(n.ts))),
-      // The recovery notice carries the one action that lets the restarted sessions take mail again.
-      ...(n.kind === 'station.recovered' ? n.at.map(a => a.station).filter(st => (S.fleet.stations.find(s => s.station === st)?.caps || []).includes('holds'))
-        .map(st => h('button', { class: 'mini', onclick: () => releaseAll(st) }, `Release all on ${st}`)) : [])]).flat()) : h('p', { class: 'muted' }, 'No notifications.')), { wide: true });
+    S.notes.length ? h('div', { class: 'list' }, S.notes.map(n => {
+      const read = () => readNote(n).then(() => refreshSoon(0));
+      return entry('inbox-note', !n.read, n.kind === 'approval' ? 'needs_you' : n.kind, String(n.title), String(n.body ?? ''),
+        [n.at.map(a => a.station).join(', '), n.pushed === 2 ? 'held (you were here)' : n.pushed === 1 ? 'pushed' : '', ago(n.ts)].filter(Boolean).join(' · '), [
+          n.url ? h('button', { class: 'mini', title: 'Open the pane this is about', onclick: () => { read(); close(); location.hash = n.url.replace(/^\/#/, '#'); } }, 'Open') : null,
+          // The recovery notice carries the one action that lets the restarted sessions take mail again.
+          ...(n.kind === 'station.recovered' ? n.at.map(a => a.station).filter(st => (S.fleet.stations.find(s => s.station === st)?.caps || []).includes('holds'))
+            .map(st => h('button', { class: 'mini', onclick: () => releaseAll(st) }, `Release all on ${st}`)) : [])].filter(Boolean), read);
+    })) : h('p', { class: 'muted' }, 'No notifications.')), { wide: true });
 }
 
 // "Release all on this station": every held agent there takes mail again.
