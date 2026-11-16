@@ -562,7 +562,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             if fix {
                 fix_with_sudo()?;
             }
-            let v = c.call("station.doctor", json!({}))?;
+            let v = c.call("station.doctor", json!({"reach": true}))?;
             show(j, &v, |v| {
                 v["checks"]
                     .as_array()

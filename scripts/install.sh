@@ -3,6 +3,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/michaelbaker-dev/spandeck/main/scripts/install.sh | sh
 # Options (environment): SPANDECK_VERSION=v0.1.0  SPANDECK_BIN_DIR=$HOME/.local/bin
 #   SPANDECK_RELEASES=<address of a copy of the release page>
+#   SPANDECK_ARCHIVE=<a release archive already on this machine>, with SPANDECK_VERSION
+#     and SPANDECK_ARCHIVE_SHA256=<its SHA-256>: nothing is downloaded
+# Ends with 75 when the release could not be downloaded, 1 for anything else.
 set -eu
 repo=michaelbaker-dev/spandeck
 bin_dir=${SPANDECK_BIN_DIR:-$HOME/.local/bin}
@@ -20,25 +23,47 @@ case "$(uname -m)" in
 esac
 target=$arch-$os
 
+# The release could not be had, as against: it was had and could not be installed.
+no_download() { echo "$1" >&2; exit 75; }
+sum_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d ' ' -f 1
+}
+
+archive=${SPANDECK_ARCHIVE:-}
 version=${SPANDECK_VERSION:-}
-if [ -z "$version" ]; then
-  version=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$releases/latest" | sed 's#.*/tag/##')
+if [ -n "$archive" ]; then
+  want=${SPANDECK_ARCHIVE_SHA256:-}
+  if [ -z "$version" ] || [ ! -f "$archive" ] || [ "${#want}" != 64 ]; then
+    echo "SPANDECK_ARCHIVE needs the file, SPANDECK_VERSION and SPANDECK_ARCHIVE_SHA256" >&2
+    exit 1
+  fi
+elif [ -z "$version" ]; then
+  version=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$releases/latest" | sed 's#.*/tag/##') || version=
+  case "$version" in v*) ;; *) no_download "could not find the latest release of $repo" ;; esac
 fi
-case "$version" in v*) ;; *) echo "could not find the latest release of $repo" >&2; exit 1 ;; esac
+case "$version" in v*) ;; *) echo "$version is not a release name" >&2; exit 1 ;; esac
 
 name=spandeck-$version-$target
 url=$releases/download/$version/$name.tar.gz
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-echo "Downloading $name"
-curl -fsSL -o "$tmp/$name.tar.gz" "$url"
-curl -fsSL -o "$tmp/$name.tar.gz.sha256" "$url.sha256"
-if command -v sha256sum >/dev/null 2>&1; then
-  (cd "$tmp" && sha256sum -c "$name.tar.gz.sha256" >/dev/null)
+if [ -n "$archive" ]; then
+  echo "Installing $name from $archive"
+  if [ "$(sum_of "$archive")" != "$want" ]; then
+    echo "$archive does not have the SHA-256 given for it. Nothing was installed." >&2
+    exit 1
+  fi
 else
-  (cd "$tmp" && shasum -a 256 -c "$name.tar.gz.sha256" >/dev/null)
+  echo "Downloading $name"
+  archive=$tmp/$name.tar.gz
+  curl -fsSL -o "$archive" "$url" || no_download "The download of $name did not finish."
+  curl -fsSL -o "$archive.sha256" "$url.sha256" || no_download "The checksum of $name could not be downloaded."
+  want=$(cut -d ' ' -f 1 < "$archive.sha256")
+  if [ "${#want}" != 64 ] || [ "$(sum_of "$archive")" != "$want" ]; then
+    no_download "The download does not match its published checksum. Nothing was installed."
+  fi
 fi
-tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
+tar -xzf "$archive" -C "$tmp"
 mkdir -p "$bin_dir"
 # Install beside, then rename, so a running daemon keeps its old file until upgraded.
 for b in spandeck sd; do

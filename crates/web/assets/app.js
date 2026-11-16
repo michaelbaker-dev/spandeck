@@ -1970,7 +1970,8 @@ function addBody(a) {
     h('div', { class: 'row end' }, h('button', { class: 'mini', onclick: (e) => { e.stopPropagation(); addAnswer(a, false); } }, 'Refuse'), h('button', { class: 'mini primary', onclick: (e) => { e.stopPropagation(); addAnswer(a, true); } }, 'Approve'))];
   if (a.stage === 'failed') return [a.problem?.worked ? h('div', {}, a.problem.worked) : null, h('div', { class: 'warn-text' }, a.problem?.text || (a.kind === 'uninstall' ? 'It was not uninstalled.' : 'It was not added.'))];
   if (a.stage === 'needs_password') return [h('div', {}, `It asks for a password for ${a.user}. Open this to enter it.`)];
-  return [h('div', {}, addStageWords(a)), h('div', { class: 'muted add-last' }, a.lines?.length ? a.lines[a.lines.length - 1] : '')];
+  // A release being sent over SSH is progress, said in the station's own words.
+  return [h('div', {}, a.note || addStageWords(a)), h('div', { class: 'muted add-last' }, a.lines?.length ? a.lines[a.lines.length - 1] : '')];
 }
 
 function addTile() {
@@ -2152,6 +2153,8 @@ function addMachineDialog(target) {
     return [
       h('p', {}, un ? `Uninstalling spandeck on ${a.name}, as ${a.user}.` : station ? `Asking ${a.name} to join, as ${a.user}.` : `Adding ${a.name} as ${a.user}.`),
       h('ol', { class: 'add-steps' }, steps.map(([, label], i) => h('li', { class: i < at ? 'done' : i === at ? 'now' : '' }, h('span', { 'aria-hidden': 'true' }, i < at ? '✓' : i === at ? '›' : '·'), label + (i === at ? '…' : '') + (i === at && a.stage === 'joining' ? ' (looking for its stations)' : '')))),
+      // What the steps do not say: the machine cannot download and is sent the release.
+      a.note ? h('p', { class: 'add-note' }, a.note) : null,
       log,
       h('div', { class: 'row end' }, h('button', { class: 'danger', onclick: () => addClear() }, 'Stop'), closeBtn('Hide'))];
   }
@@ -2160,7 +2163,7 @@ function addMachineDialog(target) {
     const a = again ? null : S.adding;
     if (a) setLog(a.lines);
     // Only a change of step redraws: the boxes being typed in are left alone.
-    const key = JSON.stringify(a ? [a.id, a.stage, a.problem?.kind, a.code] : [picked, listOpen, target, info && [info.enabled, info.tailscale, info.error, info.machines.map(x => x.id)]]);
+    const key = JSON.stringify(a ? [a.id, a.stage, a.problem?.kind, a.code, a.note] : [picked, listOpen, target, info && [info.enabled, info.tailscale, info.error, info.machines.map(x => x.id)]]);
     if (key === shown) return;
     shown = key;
     box.replaceChildren(...(a ? view(a) : picker()).flat().filter(Boolean));

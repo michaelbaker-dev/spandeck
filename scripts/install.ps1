@@ -2,6 +2,8 @@
 #   irm https://raw.githubusercontent.com/michaelbaker-dev/spandeck/main/scripts/install.ps1 | iex
 # Options (environment): SPANDECK_VERSION=v0.4.10   SPANDECK_BIN_DIR=<folder>
 #   SPANDECK_RELEASES=<address of a copy of the release page>
+#   SPANDECK_ARCHIVE=<a release .zip already on this machine>, with SPANDECK_VERSION
+#     and SPANDECK_ARCHIVE_SHA256=<its SHA-256>: nothing is downloaded
 #   SPANDECK_NO_SERVICE=1   do not set spandeck to start when you log on
 #   SPANDECK_NO_PATH=1      do not add the folder to your PATH
 # Works in Windows PowerShell 5.1 and PowerShell 7. Needs no administrator.
@@ -22,14 +24,23 @@ if ($arch -ne 'AMD64') {
 }
 $target = 'x86_64-pc-windows-msvc'
 
+# "The release could not be downloaded" begins every error of that kind: a
+# station that is adding this machine then sends the release itself.
 $version = $env:SPANDECK_VERSION
+$archive = $env:SPANDECK_ARCHIVE
+if ($archive -and (-not $version -or -not (Test-Path $archive) -or "$($env:SPANDECK_ARCHIVE_SHA256)".Length -ne 64)) {
+    throw 'SPANDECK_ARCHIVE needs the file, SPANDECK_VERSION and SPANDECK_ARCHIVE_SHA256.'
+}
 if (-not $version) {
     # The "latest" page redirects to the newest release's tag.
-    $request = [Net.WebRequest]::Create("$releases/latest")
-    $request.Method = 'HEAD'
-    $response = $request.GetResponse()
-    $version = ($response.ResponseUri.AbsolutePath -split '/')[-1]
-    $response.Close()
+    try {
+        $request = [Net.WebRequest]::Create("$releases/latest")
+        $request.Method = 'HEAD'
+        $response = $request.GetResponse()
+        $version = ($response.ResponseUri.AbsolutePath -split '/')[-1]
+        $response.Close()
+    }
+    catch { throw "The release could not be downloaded: $releases did not answer. $_" }
 }
 if ($version -notmatch '^v[0-9A-Za-z.\-]+$') {
     throw "Could not find the latest release of $repo."
@@ -40,12 +51,22 @@ $url = "$releases/download/$version/$name.zip"
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("spandeck-install-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
-    Write-Host "Downloading $name"
-    $zip = Join-Path $tmp "$name.zip"
-    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zip
-    $published = (Invoke-WebRequest -UseBasicParsing -Uri "$url.sha256").Content
-    if ($published -is [byte[]]) { $published = [Text.Encoding]::ASCII.GetString($published) }
-    $want = ($published.Trim() -split '\s+')[0].ToLower()
+    if ($archive) {
+        Write-Host "Installing $name from $archive"
+        $zip = $archive
+        $want = "$($env:SPANDECK_ARCHIVE_SHA256)".ToLower()
+    }
+    else {
+        Write-Host "Downloading $name"
+        $zip = Join-Path $tmp "$name.zip"
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zip
+            $published = (Invoke-WebRequest -UseBasicParsing -Uri "$url.sha256").Content
+        }
+        catch { throw "The release could not be downloaded: $_" }
+        if ($published -is [byte[]]) { $published = [Text.Encoding]::ASCII.GetString($published) }
+        $want = ($published.Trim() -split '\s+')[0].ToLower()
+    }
     # .NET directly, not Get-FileHash or Expand-Archive: those two are script
     # modules, and where scripts are restricted (seen on a CI machine)
     # PowerShell cannot load them and says the command does not exist.
@@ -53,7 +74,8 @@ try {
     $stream = [System.IO.File]::OpenRead($zip)
     try { $got = ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLower() } finally { $stream.Dispose(); $sha.Dispose() }
     if ($want.Length -ne 64 -or $want -ne $got) {
-        throw 'The download does not match its published checksum. Nothing was installed.'
+        if ($archive) { throw "$archive does not have the SHA-256 given for it. Nothing was installed." }
+        throw 'The release could not be downloaded: the download does not match its published checksum. Nothing was installed.'
     }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $tmp)

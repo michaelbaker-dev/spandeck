@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use std::collections::BTreeMap;
 
@@ -399,45 +398,23 @@ impl Daemon {
     pub async fn station_update(&self, version: Option<&str>, by: &str) -> Result<Value> {
         let target = release_target()
             .ok_or_else(|| invalid("there are no releases for this kind of machine"))?;
-        let base = self
-            .cfg
-            .update
-            .url
-            .clone()
-            .unwrap_or_else(|| RELEASES.to_string());
-        let base = base.trim_end_matches('/');
-        let http = crate::http::builder()
-            .timeout(Duration::from_secs(300))
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| invalid(e.to_string()))?;
-        let fetch = |url: String| {
-            let http = http.clone();
-            async move {
-                let r = http
-                    .get(&url)
-                    .send()
-                    .await
-                    .map_err(|e| invalid(format!("could not reach {url}: {e}")))?;
-                if !r.status().is_success() {
-                    return Err(invalid(format!("{url}: HTTP {}", r.status().as_u16())));
-                }
-                Ok(r)
+        // The release host and the check against the published SHA-256 are
+        // the ones a release sent to another machine goes through (supply.rs).
+        use crate::supply::{Fetch, ReleaseHost};
+        let told = |e: Fetch| match e {
+            Fetch::Unreachable(why) => invalid(why),
+            Fetch::Http(url, code) => invalid(format!("{url}: HTTP {code}")),
+            Fetch::Checksum => {
+                invalid("the download does not match its published checksum; nothing was changed")
             }
         };
+        let host = ReleaseHost::new(self.cfg.update.url.as_deref(), Duration::from_secs(300))
+            .map_err(invalid)?;
         let tag = match version {
             Some(v) => v.to_string(),
-            None => {
-                // The "latest" page redirects to the newest release's tag.
-                let r = fetch(format!("{base}/latest")).await?;
-                r.url().path().rsplit('/').next().unwrap_or("").to_string()
-            }
+            None => host.latest().await.map_err(told)?,
         };
-        if !tag.starts_with('v')
-            || !tag
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
-        {
+        if !crate::supply::valid_tag(&tag) {
             return Err(invalid(format!("{tag:?} is not a release name")));
         }
         if tag.trim_start_matches('v') == VERSION && version.is_none() {
@@ -452,26 +429,7 @@ impl Daemon {
         } else {
             ("tar.gz", "spandeck")
         };
-        let archive = fetch(format!("{base}/download/{tag}/{name}.{ext}"))
-            .await?
-            .bytes()
-            .await
-            .map_err(|e| invalid(format!("the download did not finish: {e}")))?;
-        let published = fetch(format!("{base}/download/{tag}/{name}.{ext}.sha256"))
-            .await?
-            .text()
-            .await
-            .map_err(|e| invalid(e.to_string()))?;
-        let want = published.split_whitespace().next().unwrap_or("");
-        let got: String = Sha256::digest(&archive)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        if want.len() != 64 || !crate::rpc::constant_eq(&got, &want.to_lowercase()) {
-            return Err(invalid(
-                "the download does not match its published checksum; nothing was changed",
-            ));
-        }
+        let (archive, _sum) = host.verified(&tag, &target).await.map_err(told)?;
         let dir: PathBuf = self.paths.state_dir.join("releases").join(&tag);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir)?;

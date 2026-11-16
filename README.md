@@ -208,7 +208,11 @@ there.
    already has an SSH key that works, nothing more is asked. Otherwise you are asked for
    the password. It is used for that one connection and is not saved or logged.
 4. The station connects over SSH and runs the install script above: you see its output
-   as it runs. spandeck is then started there, now and at login.
+   as it runs. spandeck is then started there, now and at login. A machine that cannot
+   reach GitHub is sent the release by the station, over the same SSH connection: the
+   station downloads the release for that kind of machine and checks it, or, if it cannot
+   reach GitHub either and is the same kind of machine, sends its own copy. The dialog
+   says which.
 5. The new station asks to join, and the tile shows its code with **Approve** and
    **Refuse**. Approve it, and the tile becomes the new station.
 
