@@ -38,6 +38,7 @@
 
 pub mod add;
 pub mod agents;
+pub mod beat;
 pub mod client;
 pub mod conversation;
 pub mod daemon;

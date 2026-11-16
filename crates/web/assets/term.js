@@ -17,6 +17,7 @@
 import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge, heldWords, RELEASE_SAYS } from './ui.js';
 import { paneIcon, iconName, hideIcon } from './icons.js';
 import { keyTyped, paneWrote } from './perf.js';
+import { retryIn } from './api.js';
 import { BASE, termOptions, applyPaneFrame, SIZING } from './look.js';
 
 // A terminal as every pane has it. Emoji take two cells, as the programs
@@ -56,6 +57,9 @@ export class PaneTerm {
     this.drawer = h('aside', { class: 'agents-drawer', 'aria-label': 'Agents under this one' });
     this.agentsOpen = false;
     this.note = h('div', { class: 'term-note', hidden: true });
+    // The page's own link to its station is down: said on every pane.
+    this.linkNote = h('div', { class: 'term-note link-note', role: 'status', hidden: true });
+    this.tries = 0;
     this.el = h('div', {
       class: 'pane', dataset: { pane: pane.id },
       onmousedown: () => opts.onFocus && opts.onFocus(this),
@@ -63,7 +67,7 @@ export class PaneTerm {
       ondragover: (e) => { if (this.control) { e.preventDefault(); this.el.classList.add('dropping'); } },
       ondragleave: () => this.el.classList.remove('dropping'),
       ondrop: (e) => this._drop(e),
-    }, this.strip, h('div', { class: 'pane-main' }, this.body, this.drawer), this.note);
+    }, this.strip, h('div', { class: 'pane-main' }, this.body, this.drawer), this.note, this.linkNote);
     // The element leads back to its terminal (the pane menu and tests use it).
     this.el.paneTerm = this;
 
@@ -78,6 +82,10 @@ export class PaneTerm {
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
     this.term.onData((data) => {
+      // Not connected, or the station is not answering: nothing typed is
+      // sent, now or later, and the pane says so at the first key. (The
+      // audit: 232 keys typed into a dead link were delivered a minute late.)
+      if (!this.api.live) return this.setLink(`Not connected to ${this.api.station}: typing is off. What you type now is not sent.`);
       if (this.control && this.chan !== null) { keyTyped(this); this.api.send('pane.input', { chan: this.chan, data }); }
       // On a phone the pane is watched at its own size, and can still be typed
       // into: the keys go as a request of their own, without taking the size.
@@ -155,14 +163,46 @@ export class PaneTerm {
     return this;
   }
 
+  _silentWords() {
+    const s = Math.round((Date.now() - this.silentSince) / 1000);
+    return `${this.station} has not answered for ${s < 60 ? s + ' s' : Math.floor(s / 60) + ' min'}: typing is off. Trying again…`;
+  }
+
+  // What the page says of its own link, or nothing.
+  setLink(text) {
+    this.linkNote.hidden = !text;
+    if (text && this.linkNote.textContent !== text) this.linkNote.textContent = text;
+    this.el.classList.toggle('link-down', !!text);
+  }
+
+  // The page has a new connection: the channel of the one before names
+  // nothing on it.
+  reattach() { this.chan = null; return this.attach(); }
+
   async attach() {
-    if (this.disposed) return;
+    if (this.disposed || this.attaching) return;
+    this.attaching = true;
+    try { await this._attach(); } finally { this.attaching = false; }
+  }
+
+  async _attach() {
+    if (!this.api.connected) return;
     try {
       const handlers = {
         onData: (b) => { paneWrote(this); this.term.write(b); },
         onResync: (b) => { this.term.reset(); this.term.write(b); },
         onExit: (info) => this._note(`This pane's process ended (${describeExit(info)}).`),
-        onUnreachable: () => this._note('The station stopped answering. Trying again…', () => this.attach()),
+        // The pane's station said nothing to the one serving this page
+        // for six seconds (or closed the connection): the channel is over.
+        // Typing is off until the pane is attached again, which is tried by
+        // itself: at once, then after 0.1, 0.2 … 5 s, then every 5 s.
+        onUnreachable: (why) => {
+          if (this.chan !== null) this.api.detach(this.chan);
+          this.chan = null;
+          // Since when, for what is said while it is tried again.
+          this.silentSince = why && why.quietMs !== null ? Date.now() - why.quietMs : null;
+          this._note(this.silentSince ? this._silentWords() : `${this.station} closed the connection: typing is off. Trying again…`, () => this.attach());
+        },
         // Numbers from another station: whole and within a terminal's range, or passed over.
         onResized: (r) => {
           if (Number.isInteger(r.cols) && Number.isInteger(r.rows) && r.cols >= 2 && r.cols <= 500 && r.rows >= 1 && r.rows <= 300) this.resizedBy(String(r.controller || ''), r.cols, r.rows);
@@ -178,6 +218,9 @@ export class PaneTerm {
       const res = await this.api.attach(this.station, this.pane.id, this.mode, handlers);
       if (this.disposed) { this.api.detach(res.chan); return; }
       this.chan = res.chan;
+      this.silentSince = null;
+      this.tries = 0;
+      this.setLink(null);
       this.me = res.client;
       this.size = { cols: res.info.cols, rows: res.info.rows };
       this.term.reset();
@@ -189,6 +232,8 @@ export class PaneTerm {
       // A pane that is gone does not come back by asking again: said once,
       // with a button, and not asked for every three seconds for ever.
       if (/no such pane/i.test(String(e.message))) this._note('This pane is no longer on its station.', () => this.attach(), 'manual');
+      // Its station is still silent: what the pane said stays, with the time.
+      else if (this.silentSince && ['not_answering', 'unreachable', 'busy', 'no_answer'].includes(e.code)) this._note(this._silentWords(), () => this.attach());
       else this._note(`Cannot show this pane: ${e.message}`, () => this.attach());
     }
   }
@@ -212,11 +257,13 @@ export class PaneTerm {
     this.note.hidden = !text;
     this.note.replaceChildren(...(text ? [text, retry ? h('button', { onclick: retry }, 'Retry') : null].filter(Boolean) : []));
     clearTimeout(this._retry);
-    if (retry && text && how !== 'manual') this._retry = setTimeout(() => !this.disposed && retry(), 3000);
+    // Tried again by the schedule every reconnect uses (api.js).
+    if (retry && text && how !== 'manual') this._retry = setTimeout(() => !this.disposed && retry(), Math.max(retryIn(this.tries++), 50));
   }
 
   // Keys and the like, sent to the pane whether this client holds its size or not.
   _send(data) {
+    if (!this.api.live) return;
     if (this.control && this.chan !== null) this.api.send('pane.input', { chan: this.chan, data });
     else if (this.opts.typeWhileWatching) this.api.on(this.station, 'pane.input', { pane: this.pane.id, data }).catch(() => {});
   }

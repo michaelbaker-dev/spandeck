@@ -801,6 +801,31 @@ mod tests {
         // And one silence after that is, again, not enough.
         silence.note(bravo, false, later + 7_000);
         assert_eq!(silence.since(bravo), None);
+        silence.note(bravo, true, later + 7_500);
+
+        // The heartbeat of a connection held to that station for one pane
+        // feeds the same state (unit 03a). Six seconds of pings unanswered
+        // are more than two calls: it is not answering at once, since it
+        // was last heard, and nobody had to call it to find that out.
+        let heard = later + 10_000;
+        silence.lost(bravo, heard);
+        assert_eq!(silence.since(bravo), Some(heard));
+        assert_eq!(
+            held_back(Lane::Attach, silence.since(bravo), || false),
+            Some(heard),
+            "a pane of it is not attached to either"
+        );
+        // A second connection given up later does not move the time, nor
+        // does one given up while calls were already failing.
+        silence.lost(bravo, heard + 3_000);
+        assert_eq!(silence.since(bravo), Some(heard));
+        // An answered ping on a connection that still stands ends it, as
+        // an answered call does.
+        silence.note(bravo, true, heard + 9_000);
+        assert_eq!(silence.since(bravo), None);
+        silence.note(bravo, false, heard + 10_000);
+        silence.lost(bravo, heard + 12_000);
+        assert_eq!(silence.since(bravo), Some(heard + 10_000));
     }
 
     /// Which lane: decided by the method that acts, wherever it is going.

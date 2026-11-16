@@ -821,7 +821,11 @@ fn a_pane_started_through_another_station_whose_answer_is_lost_is_one_pane() {
     let before = proxy.spawns();
     proxy.lose_next(1);
     let lost = a.try_call("peer.call", through("old")).unwrap_err();
-    assert!(lost.message.contains("unreachable"), "as before: {lost}");
+    assert!(
+        lost.message
+            .contains("bravo ended the connection before it answered"),
+        "as before, in plain words: {lost}"
+    );
     assert_eq!(proxy.spawns() - before, 1, "sent once, and never again");
     assert_eq!(panes_named(&b, "old"), 1);
     // And a caller's second try by id is refused here, never sent there.

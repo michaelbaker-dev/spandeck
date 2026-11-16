@@ -1930,7 +1930,12 @@ impl Daemon {
         params: Value,
         retry: Option<Retry>,
     ) -> Result<Value> {
-        let named = |e: String| Error::Other(anyhow::anyhow!("{station}: {e}"));
+        // No answer at all: "golf did not answer within 5 s". An answer
+        // that is an error: the station's words after its name.
+        let named = |e: String| match crate::fleet::NoAnswer::said(&e) {
+            true => Error::Other(anyhow::anyhow!("{station} {e}")),
+            false => Error::Other(anyhow::anyhow!("{station}: {e}")),
+        };
         let unknown = |why: &str| {
             Error::OutcomeUnknown(format!(
                 "{station}: could not confirm whether {method} was carried out there ({why}). Nothing was sent again: check before asking again."

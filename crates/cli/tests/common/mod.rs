@@ -845,7 +845,17 @@ pub mod browser {
             Page::open_as(s, width, height, false)
         }
 
+        /// The station's deck, reached at another port of this machine:
+        /// through something that stands in for the link between them.
+        pub fn open_through(s: &Station, port: u16, width: u32, height: u32) -> Page {
+            Page::open_at(&format!("http://127.0.0.1:{port}/"), s, width, height, true)
+        }
+
         fn open_as(s: &Station, width: u32, height: u32, signed_in: bool) -> Page {
+            Page::open_at(&s.url("/"), s, width, height, signed_in)
+        }
+
+        fn open_at(at: &str, s: &Station, width: u32, height: u32, signed_in: bool) -> Page {
             let path = chrome()
                 .expect("no Chrome found: set SPANDECK_CHROME to a Chrome or Chromium binary");
             let browser = headless_chrome::Browser::new(
@@ -860,11 +870,11 @@ pub mod browser {
             .unwrap();
             let tab = browser.new_tab().unwrap();
             if signed_in {
-                tab.navigate_to(&format!("{}#token={}", s.url("/"), s.token()))
+                tab.navigate_to(&format!("{at}#token={}", s.token()))
                     .unwrap();
                 tab.wait_for_element(".topbar").unwrap();
             } else {
-                tab.navigate_to(&s.url("/")).unwrap();
+                tab.navigate_to(at).unwrap();
                 tab.wait_for_element("main.login").unwrap();
             }
             Page {

@@ -65,6 +65,79 @@ pub enum Sent {
     Answered,
 }
 
+/// Why a call to another station got no answer at all, as far as this end
+/// can tell. The transport's own error is never shown to the owner: it
+/// named a URL and said nothing a person could act on (the audit: "golf:
+/// unreachable: error sending request for url (…)").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoAnswer {
+    /// The machine answered that nothing listens at the station's port.
+    Refused,
+    /// No connection within the 1.5 s given to make one.
+    NoConnection,
+    /// This machine has no way to that address at all.
+    NoRoute,
+    /// The request went out and nothing came back in the call's 5 s.
+    Timeout,
+    /// The connection ended before an answer came.
+    Broke,
+}
+
+impl NoAnswer {
+    /// From what is known of the failure: whether a connection was made,
+    /// whether time ran out, and the operating system's own error if there
+    /// was one.
+    pub fn from(connect: bool, timeout: bool, io: Option<std::io::ErrorKind>) -> NoAnswer {
+        use std::io::ErrorKind as K;
+        match (connect, timeout, io) {
+            (true, _, Some(K::ConnectionRefused)) => NoAnswer::Refused,
+            (true, _, Some(K::NetworkUnreachable | K::HostUnreachable | K::AddrNotAvailable)) => {
+                NoAnswer::NoRoute
+            }
+            (true, ..) => NoAnswer::NoConnection,
+            (false, true, _) => NoAnswer::Timeout,
+            (false, false, _) => NoAnswer::Broke,
+        }
+    }
+
+    fn of(e: &reqwest::Error) -> NoAnswer {
+        let mut io = None;
+        let mut source = std::error::Error::source(e);
+        while let Some(err) = source {
+            if let Some(found) = err.downcast_ref::<std::io::Error>() {
+                io = Some(found.kind());
+            }
+            source = err.source();
+        }
+        NoAnswer::from(e.is_connect(), e.is_timeout(), io)
+    }
+
+    /// What is said of the station, to follow its name: "golf did not
+    /// answer within 5 s". No address, no URL.
+    pub fn words(self) -> &'static str {
+        match self {
+            NoAnswer::Refused => "refused the connection (spandeck may be stopped there)",
+            NoAnswer::NoConnection => {
+                "could not be reached within 1.5 s (it may be asleep or off, or Tailscale may not be connected there)"
+            }
+            NoAnswer::NoRoute => {
+                "cannot be reached from this station (Tailscale may not be connected here)"
+            }
+            NoAnswer::Timeout => "did not answer within 5 s",
+            NoAnswer::Broke => "ended the connection before it answered",
+        }
+    }
+
+    /// Is this text one of the above? For a caller that puts the
+    /// station's name in front of it.
+    pub fn said(text: &str) -> bool {
+        use NoAnswer::*;
+        [Refused, NoConnection, NoRoute, Timeout, Broke]
+            .iter()
+            .any(|n| n.words() == text)
+    }
+}
+
 /// Who is on the other end of a connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Remote {
@@ -74,6 +147,10 @@ pub enum Remote {
     Owner { login: String, node: String },
     /// Anything else. Never trusted automatically.
     Stranger(String),
+    /// The local Tailscale client did not say who it is: nobody is let in
+    /// on its word, and nothing is concluded about the device either. It
+    /// is asked again at the next connection.
+    NoTailscale,
 }
 
 pub struct FleetState {
@@ -134,6 +211,21 @@ impl Silence {
             s.since_ms = now_ms;
         }
         s.fails = s.fails.saturating_add(1);
+    }
+
+    /// A connection to `addr` was given up after its pings went unanswered
+    /// (`beat::STATION`: three of them, six seconds): that is more than two
+    /// calls with no answer, so it is not answering from when it was last
+    /// heard, unless it already was from before.
+    pub fn lost(&mut self, addr: &str, last_heard_ms: u64) {
+        if self.by_addr.len() >= 256 && !self.by_addr.contains_key(addr) {
+            return;
+        }
+        let s = self.by_addr.entry(addr.to_string()).or_default();
+        if s.fails == 0 {
+            s.since_ms = last_heard_ms;
+        }
+        s.fails = s.fails.max(SILENT_AFTER);
     }
 
     /// Not answering, and since when: from the second call in a row with
@@ -239,6 +331,32 @@ impl FleetState {
         self.silent.lock().unwrap().since(&addr)
     }
 
+    /// What a connection held to `station` for one pane found (the
+    /// gateway's socket, `beat::STATION`), fed into the same state the
+    /// calls feed. `Some(last_heard_ms)`: its pings went unanswered and it
+    /// was given up. `None`: that station was heard on such a connection,
+    /// which ends a silence as an answered call does. (It is only told so
+    /// when the station was taken to be silent: a pong every two seconds on
+    /// every pane's connection is not otherwise worth a lock.)
+    pub fn heartbeat(&self, station: &str, lost: Option<u64>) {
+        let Some(addr) = self.addr_of(station) else {
+            return;
+        };
+        let mut silent = self.silent.lock().unwrap();
+        match lost {
+            Some(last_heard_ms) => silent.lost(&addr, last_heard_ms),
+            None => silent.note(&addr, true, now_ms()),
+        }
+    }
+
+    /// A connection for a pane of `station` was tried: made and answered,
+    /// or not at all. Counted as a call to it is.
+    pub fn connection_tried(&self, station: &str, answered: bool) {
+        if let Some(addr) = self.addr_of(station) {
+            self.note_answer(&addr, answered);
+        }
+    }
+
     /// May one call be let through to a station that is not answering, to
     /// find out whether it is back? Once every two seconds, for whoever
     /// asks first.
@@ -302,7 +420,10 @@ impl FleetState {
         {
             let me = self.me.lock().unwrap();
             if let Some((at, v)) = &*me {
-                if now_ms().saturating_sub(*at) < 60_000 {
+                // An answer is kept a minute; that there was none, two
+                // seconds, so that it is asked again almost at once.
+                let keep = if v.is_some() { 60_000 } else { 2_000 };
+                if now_ms().saturating_sub(*at) < keep {
                     return v.clone();
                 }
             }
@@ -354,7 +475,14 @@ impl FleetState {
         {
             return Remote::Loopback;
         }
-        let remote = match (self.tailnet_self(), tailscale_whois(ip)) {
+        let who = match tailscale_whois(ip) {
+            Whois::Is(who) => Some(who),
+            Whois::Unknown => None,
+            // Not kept: the next connection asks again, so the owner is
+            // let in as soon as Tailscale answers.
+            Whois::Failed => return Remote::NoTailscale,
+        };
+        let remote = match (self.tailnet_self(), who) {
             (Some(me), Some(who)) => {
                 let uid = who.pointer("/UserProfile/ID").and_then(|v| v.as_i64());
                 let login = who
@@ -382,6 +510,9 @@ impl FleetState {
                     })
                 }
             }
+            // Tailscale knows the device and did not say who this machine
+            // is: the same failure, and not kept either.
+            (None, Some(_)) => return Remote::NoTailscale,
             _ => Remote::Stranger(ip.to_string()),
         };
         self.whois
@@ -505,7 +636,7 @@ impl FleetState {
                 true => Sent::No,
                 false => Sent::Maybe,
             };
-            (sent, format!("unreachable: {e}"))
+            (sent, NoAnswer::of(&e).words().to_string())
         })?;
         self.note_answer(addr, true);
         let status = resp.status();
@@ -591,8 +722,48 @@ pub fn tailscale_status() -> Option<Value> {
     tailscale_json(&["status", "--json"])
 }
 
-fn tailscale_whois(ip: IpAddr) -> Option<Value> {
-    tailscale_json(&["whois", "--json", &ip.to_string()])
+/// What the local Tailscale client said of an address.
+enum Whois {
+    Is(Value),
+    /// It answered, and knows no such device.
+    Unknown,
+    /// It did not answer: the program could not be run, or says it cannot
+    /// reach its own service.
+    Failed,
+}
+
+/// Does what `tailscale` printed say that the client itself is not
+/// answering (as opposed to: it answered that it knows no such peer)?
+fn tailscale_is_down(stderr: &str) -> bool {
+    let said = stderr.to_lowercase();
+    [
+        "failed to connect",
+        "appear to be running",
+        "is stopped",
+        "not running",
+    ]
+    .iter()
+    .any(|w| said.contains(w))
+}
+
+fn tailscale_whois(ip: IpAddr) -> Whois {
+    static BIN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let Some(bin) = BIN.get_or_init(tailscale_bin).as_ref() else {
+        // No Tailscale on this machine at all: as before, nobody from
+        // another address is the owner.
+        return Whois::Unknown;
+    };
+    let out = std::process::Command::new(bin)
+        .args(["whois", "--json", &ip.to_string()])
+        .output();
+    match out {
+        Ok(out) if out.status.success() => match serde_json::from_slice(&out.stdout) {
+            Ok(who) => Whois::Is(who),
+            Err(_) => Whois::Failed,
+        },
+        Ok(out) if !tailscale_is_down(&String::from_utf8_lossy(&out.stderr)) => Whois::Unknown,
+        _ => Whois::Failed,
+    }
 }
 
 impl Daemon {
@@ -1496,5 +1667,59 @@ impl crate::rounds::Link for Daemon {
     fn ended(&self, addr: &str, took: Duration, outcome: Outcome) {
         self.perf
             .link_round(addr, took, outcome == Outcome::Answered);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::ErrorKind as K;
+
+    /// The audit (FAILURES section 4): the owner was shown "golf:
+    /// unreachable: error sending request for url (http://100.…/api/peer/rpc)",
+    /// the transport's own words, which name an address and say nothing of
+    /// what happened. Each way a call can get no answer has its own plain
+    /// words, which follow the station's name and hold no address.
+    #[test]
+    fn a_call_with_no_answer_is_said_in_plain_words() {
+        let said = |connect, timeout, io| NoAnswer::from(connect, timeout, io).words();
+        assert_eq!(
+            said(false, true, None),
+            "did not answer within 5 s",
+            "sent, and the call's five seconds ran out"
+        );
+        assert_eq!(
+            said(true, false, Some(K::ConnectionRefused)),
+            "refused the connection (spandeck may be stopped there)"
+        );
+        // No connection in the second and a half given to make one: the
+        // machine or its Tailscale, which this end cannot tell apart.
+        assert!(said(true, true, None).starts_with("could not be reached within 1.5 s"));
+        assert!(said(true, true, Some(K::TimedOut)).starts_with("could not be reached"));
+        // No way out of this machine: that is this station's own network.
+        for io in [K::NetworkUnreachable, K::HostUnreachable] {
+            assert!(said(true, false, Some(io)).contains("Tailscale may not be connected here"));
+        }
+        assert_eq!(
+            said(false, false, Some(K::ConnectionReset)),
+            "ended the connection before it answered"
+        );
+        for why in [
+            NoAnswer::Refused,
+            NoAnswer::NoConnection,
+            NoAnswer::NoRoute,
+            NoAnswer::Timeout,
+            NoAnswer::Broke,
+        ] {
+            let words = why.words();
+            assert!(NoAnswer::said(words));
+            assert!(
+                !words.contains("http") && !words.contains("url") && !words.contains("error"),
+                "{words}"
+            );
+        }
+        // An answer that is an error is the station's own words, and is
+        // not taken for one of these.
+        assert!(!NoAnswer::said("no such pane"));
     }
 }
