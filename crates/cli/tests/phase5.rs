@@ -3594,7 +3594,9 @@ fn each_station_reports_its_numbers_and_a_key_near_expiry_is_warned_of_once() {
     let title = "Tailscale key of bravo (bravo-ts) expires within 7 days";
     // Both raise it, in the same words (so the deck shows one entry), and
     // only alpha, the first by name, sends it on.
-    for s in [a, b] {
+    // (Each is read as it is found: asked again a moment later, a station
+    // once answered with none, on a loaded Mac, 16 Nov 2026. Not explained.)
+    let [at_a, at_b] = [a, b].map(|s| {
         wait_for_or(
             "the warning",
             30,
@@ -3604,11 +3606,11 @@ fn each_station_reports_its_numbers_and_a_key_near_expiry_is_warned_of_once() {
             },
             || {
                 s.call("fleet.refresh", json!({}));
-                (notices(s, "Tailscale key").len() == 1).then_some(())
+                let seen = notices(s, "Tailscale key");
+                (seen.len() == 1).then_some(seen)
             },
-        );
-    }
-    let (at_a, at_b) = (notices(a, "Tailscale key"), notices(b, "Tailscale key"));
+        )
+    });
     assert_eq!(
         (at_a[0]["title"].as_str(), at_b[0]["title"].as_str()),
         (Some(title), Some(title))

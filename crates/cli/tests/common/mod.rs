@@ -486,7 +486,9 @@ impl Station {
 
     pub fn wait_ready(&self) {
         // Ready means both the socket and the Control Deck listener are up.
-        wait_for("daemon to answer", 15, || {
+        // (Thirty seconds: fifteen was passed now and then on a Mac running
+        // every test at once.)
+        wait_for("daemon to answer", 30, || {
             let info = self.try_call("station.info", json!({})).ok()?;
             info["web"]
                 .as_array()
