@@ -787,6 +787,7 @@ fn the_deck_has_the_tick_the_note_the_one_tap_and_the_list() {
     page.js("document.querySelector('.dialog button[type=submit]').click()");
     let idea = pane_named("idea");
     s.wait_text(&idea, TRUSTED);
+    page.terminal_face();
     page.wait(
         "the pane to say its question was answered",
         "(n => !!n && n.innerText.includes(\"spandeck answered Antigravity's folder-trust question, as you chose for this folder\"))(document.querySelector('.strip-note'))",
@@ -827,6 +828,7 @@ fn the_deck_has_the_tick_the_note_the_one_tap_and_the_list() {
     page.js("document.querySelector('.dialog button[type=submit]').click()");
     let claude = pane_named("idea-claude");
     wait_asks(&s, &claude);
+    page.terminal_face();
     page.wait(
         "the one tap on the pane",
         "!!document.querySelector('.strip .trust-tap')",
@@ -939,10 +941,13 @@ fn the_deck_has_the_tick_the_note_the_one_tap_and_the_list() {
     s.wait_text(&asked, TRUSTED);
     phone.wait("the tap to go", "!document.querySelector('.trust-tap')");
     // A pane that was answered on the standing choice says so on a phone.
+    // (Since 16 Nov 2026 an Antigravity pane opens as Chat there, made
+    // from its screen, and the note is under its conversation; before, it
+    // was its terminal only, and the note was above that.)
     phone.goto(&format!("#/s/{}/p/{}", s.name, idea));
     phone.wait(
         "the note on the phone",
-        "(n => !!n && n.innerText.includes(\"spandeck answered Antigravity's folder-trust question\"))(document.querySelector('.trust-said'))",
+        "[...document.querySelectorAll('.trust-said, .chat-cards .chat-quiet')].some(n => n.innerText.includes(\"spandeck answered Antigravity's folder-trust question\"))",
     );
     shoot(&phone, "phone-3-pane-note");
     // Claude Code, whose pane a phone shows as a conversation: the card

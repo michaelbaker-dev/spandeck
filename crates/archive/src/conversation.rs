@@ -804,8 +804,15 @@ const CODEX_QUIET_EVENTS: &[&str] = &[
     "agent_reasoning",
 ];
 
-/// Text Codex puts in a user message that nobody typed.
-const CODEX_WRAPPERS: &[&str] = &["<environment_context>", "<user_instructions>"];
+/// How text begins that Codex puts in a user message and nobody typed. The
+/// last is the project's instructions file, which a real 0.169.0 wrote as
+/// the first user message of a session (seen on 16 Nov 2026, as the first
+/// bubble of a conversation; no file with it is among the fixtures).
+const CODEX_WRAPPERS: &[&str] = &[
+    "<environment_context>",
+    "<user_instructions>",
+    "# AGENTS.md instructions for ",
+];
 
 fn codex_text(content: &Value) -> String {
     content
@@ -1875,6 +1882,30 @@ mod tests {
         // A sub-agent's lines and Claude Code's notes to itself are not shown.
         let all = serde_json::to_string(&page).unwrap();
         assert!(!all.contains("sidechain") && !all.contains("caveat"));
+    }
+
+    /// Found with the real Codex 0.169.0 on 16 Nov 2026: the first bubble of
+    /// a conversation was "# AGENTS.md instructions for <folder>", which
+    /// Codex writes as a user message and the owner never said. (The line
+    /// here has the shape of the fixture's other user messages, with that
+    /// beginning: no real one has been captured yet.)
+    #[test]
+    fn the_instructions_codex_gives_itself_are_not_something_the_owner_said() {
+        let line = |text: &str| {
+            json!({"timestamp": "2026-11-16T09:00:00.000Z", "type": "response_item", "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": text}]}})
+            .to_string()
+        };
+        let given = line("# AGENTS.md instructions for /home/ada/weir\n\n<INSTRUCTIONS>\nRead DECISIONS.md first.\n</INSTRUCTIONS>");
+        assert!(parse_line(Dialect::Codex, 3, &given).items.is_empty());
+        // What the owner typed about that file is still theirs.
+        let typed = parse_line(
+            Dialect::Codex,
+            4,
+            &line("What does AGENTS.md say? # AGENTS.md instructions for me"),
+        );
+        assert_eq!(kinds(&typed.items), vec!["user"]);
     }
 
     /// Phase M1: the same for Codex, whose rollout file is another shape.

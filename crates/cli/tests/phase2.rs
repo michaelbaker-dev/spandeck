@@ -673,6 +673,7 @@ fn screenshots_of_every_view() {
         );
     }
     page.goto(&format!("/s/spark2/p/{dev}"));
+    page.terminal_face();
     page.wait("pane", "!!document.querySelector('.pane .xterm-rows')");
     shoot(&page, "3-pane");
     page.js("document.querySelector('.pane').dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, clientX: 700, clientY: 260}))");
@@ -950,6 +951,7 @@ fn a_dialog_keeps_the_keyboard_while_a_pane_is_open() {
         json!({"name": "dev"}),
     );
     page.goto(&format!("/s/alpha/p/{agent}"));
+    page.terminal_face();
     let strip = page.wait(
         "the model and the context gauge in the strip",
         "(m => m && document.querySelector('.strip .usage-ctx .gauge i') && document.querySelector('.strip .usage-ctx').title.includes('at list prices') ? [m.innerText, document.querySelector('.strip .usage-ctx').innerText, document.querySelector('.strip .usage-ctx').title] : false)(document.querySelector('.strip .usage-model'))",

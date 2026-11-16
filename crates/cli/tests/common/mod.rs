@@ -1027,6 +1027,17 @@ pub mod browser {
             }
         }
 
+        /// The pane on screen on a computer, as its terminal. An
+        /// agent's pane opens as its conversation ("Chat default for
+        /// agents terminal for terminals", the owner, 16 Nov 2026), and
+        /// "Terminal" on its bar is one click.
+        pub fn terminal_face(&self) {
+            self.wait(
+                "the pane as its terminal",
+                "(b => b ? (b.click(), false) : !!document.querySelector('.pane .xterm-rows'))([...document.querySelectorAll('.chat-pane .chat-switch button')].find(b => b.innerText === 'Terminal'))",
+            );
+        }
+
         pub fn js(&self, expr: &str) -> Value {
             // Values come back as JSON text, so arrays and objects survive.
             let wrapped = format!("(async () => JSON.stringify(await ({expr})))()");

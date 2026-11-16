@@ -46,7 +46,21 @@
 //!       `"reword"` replaces its title. The arrow keys move the marker and
 //!       Enter takes the choice: "[fake] hooks: trusted all", "review"
 //!       or "skipped".
-//! Beside the steps, `"hook_deadline"`: how long this agent gives a hook
+//!   {"codex_reply": "text"}             the agent's answer, written to the session
+//!                                        file as Codex writes one (see `"codex"`)
+//!   {"codex_new": true}                  Codex's `/new`: the next message begins
+//!                                        another session file
+//!   {"wait_file": "name"}                wait until that file is in the folder
+//!   {"hooks": true}                      this program's hooks run from here on
+//!   {"name_session": {"id": "…", "path": "…"}}  a hook names that session as this
+//!                                        program's, from here on
+//! Beside the steps, `"codex": true`: this program keeps its conversation as
+//! Codex 0.169.0 does: no session and no file until the first message, then
+//! `<CODEX_HOME or ~/.codex>/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl`,
+//! whose first line records the id, the folder and when it began, and a
+//! line for each message. `"no_hooks": true`: none of its hooks run, as
+//! for a Codex whose hooks the owner has not reviewed.
+//! `"hook_deadline"`: how long this agent gives a hook
 //! that can block, in seconds, and tells it (default: what spandeck
 //! installs now, 75 for a tool call); `"old"`: 10 seconds and the hook is
 //! told nothing, as in a session started before 16 Nov 2026;
@@ -83,6 +97,30 @@ struct Agent {
     /// are not taken, as a program that missed the key, or one that cannot
     /// take a turn (a sign-in screen, no quota left).
     drop_enters: u64,
+    /// The script's `no_hooks`, and the step `hooks`.
+    hooks: bool,
+    /// The script's `codex`: where Codex's session files go.
+    codex: Option<std::path::PathBuf>,
+    /// Whether the session file in use has its first line.
+    rollout: bool,
+}
+
+/// Milliseconds since 1970 as `2026-11-15T12:00:00.000Z`.
+fn iso(ms: u64) -> String {
+    let (secs, milli) = (ms / 1000, ms % 1000);
+    let days = (secs / 86_400) as i64;
+    let (h, mi, sec) = (secs % 86_400 / 3600, secs % 3600 / 60, secs % 60);
+    // Howard Hinnant's civil-date arithmetic.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{sec:02}.{milli:03}Z")
 }
 
 fn out(s: &str) {
@@ -102,6 +140,9 @@ impl Agent {
 
     /// Send one hook payload; returns the daemon's reply stdout as JSON.
     fn hook(&self, event: &str, mut extra: Value) -> Value {
+        if !self.hooks {
+            return Value::Null;
+        }
         let obj = extra.as_object_mut().expect("hook payload is an object");
         obj.insert("hook_event_name".into(), json!(event));
         obj.insert("session_id".into(), json!(self.session));
@@ -134,6 +175,9 @@ impl Agent {
     /// spandeck installs for those two tools by name, with its own long
     /// timeout, and told that it is the one that may wait.
     fn answering_hook(&self, mut extra: Value) -> Value {
+        if !self.hooks {
+            return Value::Null;
+        }
         let obj = extra.as_object_mut().expect("hook payload is an object");
         obj.insert("hook_event_name".into(), json!("PreToolUse"));
         obj.insert("session_id".into(), json!(self.session));
@@ -285,7 +329,65 @@ impl Agent {
         }
     }
 
-    fn append_transcript(&self, line: &Value) {
+    /// A message, as Codex 0.169.0 writes one to its session file (the
+    /// shapes of `crates/archive/fixtures/codex-0.169.0.jsonl`). The file
+    /// is begun with the first message, as the real program does.
+    fn codex_say(&mut self, role: &str, text: &str) {
+        let Some(sessions) = self.codex.clone() else {
+            return;
+        };
+        let now = spandeck_core::paths::now_ms();
+        if !self.rollout {
+            let id = spandeck_core::paths::new_id("019a")
+                .replace('_', "-")
+                .to_lowercase();
+            let day = iso(now);
+            let dir = sessions.join(&day[0..4]).join(&day[5..7]).join(&day[8..10]);
+            let _ = std::fs::create_dir_all(&dir);
+            let name = format!("rollout-{}-{id}.jsonl", day[0..19].replace(':', "-"));
+            self.transcript = dir.join(name).display().to_string();
+            self.session = id;
+            self.rollout = true;
+            self.write_line(
+                &json!({"timestamp": iso(now), "type": "session_meta", "payload": {
+                "id": self.session, "session_id": self.session, "timestamp": iso(now),
+                "cwd": self.cwd, "originator": "codex_cli_rs", "cli_version": "0.169.0",
+                "source": "cli", "model_provider": "openai"}}),
+            );
+        }
+        let (kind, extra) = if role == "user" {
+            ("input_text", json!({}))
+        } else {
+            (
+                "output_text",
+                json!({"phase": "final_answer", "status": "completed"}),
+            )
+        };
+        let mut payload = json!({"type": "message", "role": role,
+            "content": [{"type": kind, "text": text}]});
+        if let (Some(p), Some(e)) = (payload.as_object_mut(), extra.as_object()) {
+            p.extend(e.clone());
+        }
+        self.write_line(
+            &json!({"timestamp": iso(now), "type": "response_item", "payload": payload}),
+        );
+    }
+
+    fn append_transcript(&mut self, line: &Value) {
+        // Codex's file has Codex's lines: what the owner said, and no other.
+        if self.codex.is_some() {
+            if let (Some("user"), Some(text)) = (
+                line["type"].as_str(),
+                line.pointer("/message/content").and_then(|c| c.as_str()),
+            ) {
+                self.codex_say("user", text);
+            }
+            return;
+        }
+        self.write_line(line);
+    }
+
+    fn write_line(&self, line: &Value) {
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -472,6 +574,25 @@ impl Agent {
             }
         } else if let Some(line) = step.get("transcript") {
             self.append_transcript(line);
+        } else if let Some(text) = step.get("codex_reply").and_then(|s| s.as_str()) {
+            out(&format!("[fake] {text}"));
+            self.codex_say("assistant", text);
+        } else if let Some(name) = step.get("wait_file").and_then(|s| s.as_str()) {
+            let path = std::path::Path::new(&self.cwd).join(name);
+            while !path.exists() {
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        } else if step.get("codex_new").is_some() {
+            self.rollout = false;
+            out("[fake] new conversation");
+        } else if let Some(on) = step.get("hooks").and_then(|s| s.as_bool()) {
+            self.hooks = on;
+        } else if let Some(named) = step.get("name_session") {
+            self.hooks = true;
+            self.session = named["id"].as_str().unwrap_or("").to_string();
+            self.transcript = named["path"].as_str().unwrap_or("").to_string();
+            self.rollout = true;
+            self.hook("SessionStart", json!({"source": "resume"}));
         } else if let Some(n) = step.get("repeat").and_then(|s| s.as_u64()) {
             let steps = step["steps"].as_array().cloned().unwrap_or_default();
             for _ in 0..n {
@@ -773,6 +894,15 @@ fn main() {
         question_deadline: script["question_deadline"].as_u64(),
         paste: script["paste"].as_bool().unwrap_or(false),
         drop_enters: script["drop_enters"].as_u64().unwrap_or(0),
+        hooks: script["no_hooks"] != json!(true),
+        codex: (script["codex"] == json!(true)).then(|| {
+            let home = std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default();
+            spandeck_agents::sessions::codex_sessions_dir(&home)
+        }),
+        rollout: false,
     };
     if agent.paste {
         let _ = std::io::stdout().write_all(b"\x1b[?2004h");

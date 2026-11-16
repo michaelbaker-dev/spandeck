@@ -1057,6 +1057,7 @@ fn the_deck_shows_who_works_for_whom_and_who_is_talking() {
     let page = Page::open(&s, 1400, 860);
     // On the lead's pane: the agents under it, and theirs.
     page.goto(&format!("/s/alpha/p/{lead}"));
+    page.terminal_face();
     page.wait("the agents button", "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.strip button')].find(b => b.innerText.includes('Agents 2')))");
     let drawer = page.wait(
         "the drawer",

@@ -492,6 +492,7 @@ fn the_deck_and_the_phone_show_a_held_pane_and_release_it() {
     );
     let page = Page::open(&s, 1200, 800);
     page.goto(&format!("#/s/alpha/p/{worker}"));
+    page.terminal_face();
     let strip = "document.querySelector('.strip')";
     let said = page.wait(
         "the strip to say it is stopped, with its mail",

@@ -33,6 +33,8 @@
 //!   tailnet   Tailscale key expiry: read from the local client, shown, warned of
 //!   http      the one outgoing HTTPS client builder, and what it trusts
 //!   restore   after a restart: what is put right and listed, the one notice, `[flags]`
+//!   discover  a pane's session found among its program's own files, when no hook names it
+//!   screentalk  the screen as a conversation: what was sent to a pane and what it printed after
 //!   holds     a stopped or restarted agent stays put: the marks, what they gate, release
 //!   rids      a change tried again is done once: request ids, the answers kept, who is given one
 
@@ -45,6 +47,7 @@ pub mod conversation;
 pub mod daemon;
 pub mod db;
 pub mod deck;
+pub mod discover;
 pub mod doctor;
 pub mod fleet;
 pub mod foldertrust;
@@ -76,6 +79,7 @@ pub mod restore;
 pub mod rids;
 pub mod rounds;
 pub mod rpc;
+pub mod screentalk;
 pub mod server;
 pub mod setup;
 pub mod snapshot;

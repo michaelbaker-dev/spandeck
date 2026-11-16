@@ -1087,11 +1087,12 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
         .unwrap()
         .to_string();
     open("phone-sh");
-    // A shell has no conversation: it is its terminal, and the bar says why
-    // where the choice of Chat or Terminal would be.
+    // A shell opens as its terminal, and has the choice of Chat or Terminal
+    // like every pane (16 Nov 2026; its Chat is in `chat.rs`). Until then
+    // the bar said "Terminal only: it runs a shell, not an agent" there.
     assert_eq!(
-        page.js("[document.querySelector('.phone-pane .chat-why')?.innerText, !!document.querySelector('.chat-switch')]"),
-        json!(["Terminal only: it runs a shell, not an agent", false])
+        page.wait("the shell's bar", "(b => b.length === 2 && [!!document.querySelector('.phone-pane .chat-why'), b.map(x => x.innerText + (x.classList.contains('on') ? '*' : '')).join(' ')])([...document.querySelectorAll('.phone-pane .chat-switch button')])"),
+        json!([false, "Chat Terminal*"])
     );
     set("sleep 300");
     page.js("document.querySelector('.composer-row button[type=submit]').click()");
@@ -1147,9 +1148,12 @@ fn the_phone_view_shows_blockers_answers_an_approval_and_stops_an_agent() {
     // the output; the view then stayed at the top of the history, where
     // that command is, and looked like the end for good. When it fails
     // again, it says what the page showed.
+    // Earlier output is whatever is above the end: other failures on the CI
+    // runners (16 Nov 2026) showed the view at the very first lines, above
+    // the numbers this once looked for, and so waited for ever.
     let dragged = format!(
             "(() => {{ // The finger lands on the terminal's own element, as on a real phone.
-           if (!{rows}.includes('1300')) return {rows}.some(x => /^1[0-2][0-9][0-9]$/.test(x));
+           if (!{rows}.includes('1300')) return {rows}.some(x => x !== '');
            const el = document.querySelector('.phone-pane .xterm-screen');
            const touch = (type, y) => {{ const ev = new Event(type, {{bubbles: true, cancelable: true}}); Object.defineProperty(ev, 'touches', {{value: y === null ? [] : [{{clientX: 100, clientY: y}}]}}); return ev; }};
            el.dispatchEvent(touch('touchstart', 200));
@@ -2020,21 +2024,19 @@ fn the_pane_of_a_layout_is_the_pane_itself(s: &Station, page: &common::browser::
     );
     s.wait_text(&tallier, "[fake] got: wrens, then");
 
-    // Scrolled up, and something half written: then on to the shell. It is
-    // its terminal, the bar says why, and nothing of the agent's pane is
-    // watched or attached any more.
+    // Scrolled up, and something half written: then on to the shell. It
+    // opens as its terminal, with the same choice on its bar, and nothing of
+    // the agent's pane is watched or attached any more (what is watched is
+    // the shell's own conversation, as for any pane on screen).
     page.wait(
         "the message as a bubble, then the next pane",
         &format!("document.querySelectorAll('.phone-layout .chat-user').length === 2 && document.querySelector('.chat-box').value === '' && (async () => {{ {log}.scrollTop = 40; await new Promise(r => setTimeout(r, 60)); window.__top = {log}.scrollTop; const b = document.querySelector('.chat-box'); b.value = 'kept'; b.dispatchEvent(new Event('input')); document.querySelector('.lay-nav .lay-step:last-child').click(); return true; }})()"),
     );
     let shell_seen = page.wait(
         "the shell's terminal, then the pane before",
-        &format!("{showing} === 'pair › scratch · 2 of 2' && !!document.querySelector('.phone-layout .xterm-rows') && !document.querySelector('.phone-layout .chat-log') && {watched} === '0 watched, 1 attached' && [document.querySelector('.phone-layout > .chat-bar .chat-why').innerText, !!document.querySelector('.phone-layout .composer .keys'), document.querySelector('.lay-nav .lay-step').click()]"),
+        &format!("{showing} === 'pair › scratch · 2 of 2' && !!document.querySelector('.phone-layout .xterm-rows') && !document.querySelector('.phone-layout .chat-log') && {watched} === '1 watched, 1 attached' && document.querySelectorAll('.phone-layout > .chat-bar .chat-switch button').length === 2 && [document.querySelector('.phone-layout > .chat-bar .chat-switch button.on').innerText, !!document.querySelector('.phone-layout .composer .keys'), document.querySelector('.lay-nav .lay-step').click()]"),
     );
-    assert_eq!(
-        shell_seen,
-        json!(["Terminal only: it runs a shell, not an agent", true, null])
-    );
+    assert_eq!(shell_seen, json!(["Terminal", true, null]));
     // (Where it was scrolled to is whatever the browser made of 40: with
     // Windows' fonts the conversation may be too short to scroll that far.)
     page.wait(
@@ -4553,7 +4555,7 @@ fn pictures_of_the_conversation_view() {
         phone.wait("banner", "!!document.querySelector('.chat-card.wait') && document.querySelector('.chat-peek')?.innerText.length > 5");
         shot(&phone, &format!("phone-{theme}-7-waiting-in-terminal"));
         phone.goto(&pane(&sh));
-        phone.wait("shell", "!!document.querySelector('.phone-pane .xterm-rows') && !!document.querySelector('.chat-why')");
+        phone.wait("shell", "!!document.querySelector('.phone-pane .xterm-rows') && document.querySelectorAll('.phone-pane .chat-switch button').length === 2");
         shot(&phone, &format!("phone-{theme}-8-shell"));
         if theme == "dark" {
             phone.goto(&pane(&heron));
@@ -4585,14 +4587,18 @@ fn pictures_of_the_conversation_view() {
 
         let wide = Page::open(&s, 1400, 900);
         wide.goto(&pane(&heron));
+        wide.terminal_face();
         click(&wide, "Chat", "document.querySelector('.strip .face-btn')");
         wide.wait("heron", "!!document.querySelector('.chat-pane .chat-acts')");
         click(&wide, "the fold", "document.querySelector('.chat-fold')");
         shot(&wide, &format!("desktop-{theme}-1-pane-as-conversation"));
         wide.goto("#/l/survey");
-        wide.wait("the layout", "!!document.querySelector('.workspace .chat-pane') && !!document.querySelector('.workspace .xterm-rows')");
+        // (Every agent's cell opens as its conversation: Terminal is
+        // picked in the last, for a picture of one of each.)
+        wide.wait("the layout", "(t => (!document.querySelector('.workspace .xterm-rows') && t.length > 1 && t[t.length - 1].click(), !!document.querySelector('.workspace .chat-pane') && !!document.querySelector('.workspace .xterm-rows')))([...document.querySelectorAll('.workspace .chat-pane .chat-switch button')].filter(b => b.innerText === 'Terminal'))");
         shot(&wide, &format!("desktop-{theme}-2-layout-one-of-each"));
         wide.goto(&pane(&asker));
+        wide.terminal_face();
         wide.wait("terminal", "!!document.querySelector('.strip .face-btn')");
         click(&wide, "Chat", "document.querySelector('.strip .face-btn')");
         wide.wait(
@@ -4805,7 +4811,7 @@ fn the_rest_of_the_conversation_view() {
     );
     click(&phone, "Shell", "[...document.querySelectorAll('.dialog.sheet .tile-pick')].find(b => b.innerText.trim() === 'Shell')");
     click(&phone, "Start", &button("Start"));
-    phone.wait("the new pane", "/#\\/s\\/alpha\\/p\\//.test(location.hash) && !!document.querySelector('.phone-pane .xterm-rows') && document.querySelector('.chat-why')?.innerText.includes('it runs a shell')");
+    phone.wait("the new pane", "/#\\/s\\/alpha\\/p\\//.test(location.hash) && !!document.querySelector('.phone-pane .xterm-rows') && document.querySelector('.phone-pane .chat-switch button.on')?.innerText === 'Terminal'");
     drop(phone);
 
     // On a computer: Chat on a terminal's title bar, in a pane at full size
@@ -4818,9 +4824,11 @@ fn the_rest_of_the_conversation_view() {
     );
     let wide = Page::open(&s, 1400, 900);
     wide.goto("#/l/two");
+    // (An agent's cell opens as its conversation since 16 Nov 2026:
+    // Terminal is picked in each, and it goes on from two terminals.)
     wide.wait(
         "two terminals",
-        "document.querySelectorAll('.workspace .pane .xterm-rows').length === 2",
+        "([...document.querySelectorAll('.workspace .chat-pane .chat-switch button')].filter(b => b.innerText === 'Terminal').forEach(b => b.click()), document.querySelectorAll('.workspace .pane .xterm-rows').length === 2)",
     );
     let fitted = wait_for("the layout to fit its panes", 10, || {
         let p = s.pane(&long);
@@ -5129,6 +5137,7 @@ fn pictures_of_answering_in_place() {
 
         let wide = Page::open(&s, 1400, 900);
         wide.goto(&pane(&two));
+        wide.terminal_face();
         wide.wait(
             "the terminal",
             "!!document.querySelector('.strip .face-btn')",
@@ -5144,6 +5153,7 @@ fn pictures_of_answering_in_place() {
         );
         shot(&wide, &format!("desktop-{theme}-2-question"));
         wide.goto(&pane(&planner));
+        wide.terminal_face();
         wide.wait(
             "the terminal",
             "!!document.querySelector('.strip .face-btn')",
@@ -5298,7 +5308,7 @@ fn pictures_of_the_phones_layout_view() {
         );
         phone.wait(
             "the shell",
-            "!!document.querySelector('.phone-layout .xterm-rows') && !!document.querySelector('.phone-layout .chat-why')",
+            "!!document.querySelector('.phone-layout .xterm-rows') && document.querySelectorAll('.phone-layout .chat-switch button').length === 2",
         );
         shot(&phone, &format!("{theme}-5-shell"));
         drop(phone);

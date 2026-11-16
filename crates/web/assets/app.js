@@ -21,7 +21,7 @@ import { phoneLook } from './phonelook.js';
 import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook, refreshAsked, refreshCorrected } from './perf.js';
 import { qrSvg } from './qr.js';
 import { sendAct } from './typed.js';
-import { initChat, conversation, faceOf, chatToggle, termBox, chatBeforeRender, chatAfterRender, chatPark, sync as syncKids, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
+import { initChat, conversation, faceOf, setFace, chatToggle, termBox, chatBeforeRender, chatAfterRender, chatPark, sync as syncKids, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
 
 // The page opens in the look this browser last had, before anything is asked.
 applyRemembered();
@@ -1135,7 +1135,9 @@ function commandDialog(st, pane) {
       const out = await rpc(pane ? st : api.station, 'agents.command', params);
       if (pane) {
         close();
-        // Commands like /login are finished by hand: bring the terminal up.
+        // Commands like /login are finished by hand: bring the terminal up
+        // (an agent's pane opens as its conversation otherwise).
+        setFace(st, pane, 'terminal');
         go(paneUrl(st, pane.id));
         return;
       }
@@ -3427,8 +3429,10 @@ function phonePaneView(st, id) {
   if (!p) return h('main', { class: 'phone' }, h('p', {}, 'That pane is gone.'), h('a', { href: '#/fleet' }, 'Back'));
   // A pane has two faces. Its conversation (chat.js) never attaches to the
   // pane, so it sets no size; the terminal below is as it always was, under
-  // the same bar, which is where Chat and Terminal are chosen. A shell, or an
-  // agent with no conversation, is its terminal, and the bar says why.
+  // the same bar, which is where Chat and Terminal are chosen. Every pane
+  // has both: a shell's conversation, and that of an agent the station
+  // cannot read, is made from its screen. A pane on a station from before
+  // that is its terminal, and the bar says why.
   const conv = conversation(st, p, 'phone');
   if (faceOf(st, p) === 'chat') return conv.phoneMain();
   const fitKey = `${st}/${p.id}`;

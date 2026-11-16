@@ -270,6 +270,9 @@ pub struct PaneEntry {
     /// pane had before, and the reason given, so that it is taken back
     /// when the screen no longer shows it and nothing else has spoken.
     pub screen_needs: Mutex<Option<(AgentState, String)>>,
+    /// What was sent to this pane and what it printed after each
+    /// (screentalk.rs): its Chat face when it has no transcript.
+    pub talk: Mutex<crate::screentalk::Talk>,
 }
 
 impl PaneEntry {
@@ -418,6 +421,9 @@ pub struct Inner {
     /// pane -> (session, line): how far the owner has read each pane's
     /// conversation. Kept in the key-value table; this is its copy in memory.
     pub(crate) read_marks: Mutex<HashMap<String, (String, u64)>>,
+    /// pane -> the session found for it among its program's own files
+    /// (discover.rs), and when it was last looked for.
+    pub(crate) finds: Mutex<crate::discover::Finds>,
     /// Set while this image is being replaced: no helper is started then.
     pub(crate) keep_awake_held: std::sync::atomic::AtomicBool,
     /// The pane host this daemon's panes live in, where one is used.
@@ -589,6 +595,7 @@ impl Daemon {
             hooks_trust: Default::default(),
             keep_awake: Mutex::new(None),
             read_marks: Mutex::new(HashMap::new()),
+            finds: Mutex::new(HashMap::new()),
             keep_awake_held: std::sync::atomic::AtomicBool::new(false),
             host: Mutex::new(None),
             seq: AtomicU64::new(0),
@@ -1236,6 +1243,9 @@ impl Daemon {
             }
         };
         let sink = self.make_sink(&id, tx.clone());
+        // Taken before the program exists: what it writes first (a session
+        // file, discover.rs) is never dated before its pane's start.
+        let starting = now_ms();
         let term = match self.pane_host() {
             Some(host) => {
                 let host = host.map_err(|e| invalid(format!("the pane host is not there: {e}")))?;
@@ -1278,7 +1288,7 @@ impl Daemon {
             launcher: opts.program.clone(),
             launcher_recorded: true,
             resumed: resume.is_some(),
-            proc_started_ms: Some(now),
+            proc_started_ms: Some(starting),
             ended_by: None,
             ended_ms: 0,
             held_back: false,
@@ -1299,9 +1309,13 @@ impl Daemon {
             meta: Mutex::new(meta),
             wake: Default::default(),
             screen_needs: Default::default(),
+            talk: Default::default(),
         });
         panes.insert(id.clone(), entry.clone());
         drop(panes);
+        if let Some(prompt) = &opts.prompt {
+            self.screen_started_with(&entry, prompt);
+        }
         self.save_pane(&entry);
         // What its hooks do if this daemon is away (guard.rs): written
         // before the agent can have made its first tool call.
@@ -2367,6 +2381,7 @@ impl Daemon {
                         meta: Mutex::new(meta.clone()),
                         wake: Default::default(),
                         screen_needs: Default::default(),
+                        talk: Default::default(),
                     });
                     self.panes.write().unwrap().insert(h.id.clone(), entry);
                     self.record(
@@ -2702,6 +2717,7 @@ impl Daemon {
                         meta: Mutex::new(hp.meta),
                         wake: Default::default(),
                         screen_needs: Default::default(),
+                        talk: Default::default(),
                     });
                     self.panes.write().unwrap().insert(id, entry.clone());
                     self.save_pane(&entry);
@@ -2769,6 +2785,7 @@ impl Daemon {
                     meta: Mutex::new(hp.meta),
                     wake: Default::default(),
                     screen_needs: Default::default(),
+                    talk: Default::default(),
                 });
                 self.panes.write().unwrap().insert(id, entry);
             }

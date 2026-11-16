@@ -254,6 +254,29 @@ pub struct Screen {
     cols: u16,
     rows: u16,
     title: String,
+    /// A row has been tagged by `mark` (see there). False: nothing was
+    /// marked yet, and what was printed "since" is everything there is.
+    marked: bool,
+}
+
+/// A bit of a cell's flags the engine gives no meaning to: the tag `mark`
+/// leaves on a row. It is carried with the cell when lines scroll into the
+/// history and when a resize wraps them anew, and it goes when the program
+/// erases or rewrites the cell.
+const MARK: Flags = Flags::from_bits_retain(1 << 15);
+
+/// What a pane printed since a place was marked (`Screen::printed`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Printed {
+    /// The last lines of it, oldest first, right-trimmed, with no blank
+    /// lines at either end.
+    pub lines: Vec<String>,
+    /// How many lines there were before the cut to the last ones.
+    pub total: usize,
+    /// The marked row is gone (the program redrew its screen, or it
+    /// scrolled out of the history), or a full-screen program is open:
+    /// these lines are the whole screen as it is, not a log since the mark.
+    pub whole: bool,
 }
 
 pub const DEFAULT_HISTORY: usize = 5000;
@@ -288,6 +311,7 @@ impl Screen {
             cols,
             rows,
             title: String::new(),
+            marked: false,
         }
     }
 
@@ -390,6 +414,74 @@ impl Screen {
         (-hist..self.rows as i32)
             .map(|i| self.line_text(Line(i)))
             .collect()
+    }
+
+    /// The row that carries the tag, if it is still there: the lowest one.
+    fn mark_line(&self) -> Option<Line> {
+        let grid = self.term.grid();
+        let top = -(grid.history_size() as i32);
+        (top..self.rows as i32).rev().map(Line).find(|line| {
+            (0..self.cols as usize).any(|col| grid[*line][Column(col)].flags.contains(MARK))
+        })
+    }
+
+    /// Remember this place: what is printed from the cursor's row on is
+    /// "since the mark" (`printed`). The row above the cursor is tagged,
+    /// since the cursor's own row is the one a prompt rewrites. One mark at
+    /// a time: an earlier one is taken away.
+    pub fn mark(&mut self) {
+        let cols = self.cols as usize;
+        let top = -(self.term.grid().history_size() as i32);
+        let cursor = self.term.grid().cursor.point.line;
+        let grid = self.term.grid_mut();
+        for line in (top..self.rows as i32).map(Line) {
+            for col in 0..cols {
+                grid[line][Column(col)].flags.remove(MARK);
+            }
+        }
+        // With nothing above the cursor, everything there is comes after.
+        self.marked = cursor.0 > top;
+        if self.marked {
+            grid[Line(cursor.0 - 1)][Column(0)].flags.insert(MARK);
+        }
+    }
+
+    /// What was printed since `mark` (since the pane began, when nothing
+    /// was marked), as text: at most the last `max` lines. `to_cursor`:
+    /// only what is above the cursor's row, which is where the next thing
+    /// sent will be echoed.
+    pub fn printed(&self, to_cursor: bool, max: usize) -> Printed {
+        let grid = self.term.grid();
+        let alt = self.term.mode().contains(TermMode::ALT_SCREEN);
+        let top = -(grid.history_size() as i32);
+        let from = match (alt, self.marked) {
+            (true, _) => None,
+            (false, false) => Some(top),
+            (false, true) => self.mark_line().map(|l| l.0 + 1),
+        };
+        let whole = from.is_none();
+        let end = if to_cursor && !whole {
+            grid.cursor.point.line.0
+        } else {
+            self.rows as i32
+        };
+        let mut lines: Vec<String> = (from.unwrap_or(0)..end)
+            .map(|i| self.line_text(Line(i)))
+            .collect();
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        let blank = lines.iter().take_while(|l| l.is_empty()).count();
+        lines.drain(..blank);
+        let total = lines.len();
+        if total > max {
+            lines.drain(..total - max);
+        }
+        Printed {
+            lines,
+            total,
+            whole,
+        }
     }
 
     /// Number of scrollback lines currently held.
@@ -771,5 +863,84 @@ mod tests {
         s.resize(40, 10);
         assert_eq!(s.lines()[0], "keep me");
         assert_eq!((s.cols(), s.rows()), (40, 10));
+    }
+
+    /// The owner's report of 16 Nov 2026 ("Every window should have the
+    /// chat and terminal option"): a pane with no transcript shows what it
+    /// printed after each message sent to it. The cut is a tag on a row. It
+    /// must stay with its line through more output than the screen holds
+    /// and through a resize that wraps lines anew, and when the program
+    /// redraws over it, when it has left the history, or while a
+    /// full-screen program is open, what is given is the screen as it is,
+    /// and says so.
+    #[test]
+    fn what_was_printed_since_a_mark_is_cut_at_the_marked_line() {
+        let mut s = Screen::with_history(30, 4, 200);
+        // Nothing marked: everything there is.
+        s.feed(b"one\r\ntwo\r\n$ ");
+        let p = s.printed(false, 100);
+        assert_eq!((p.lines.join("|").as_str(), p.whole), ("one|two|$", false));
+        // Marked at the prompt: the prompt's row and what follows.
+        s.mark();
+        s.feed(b"ls\r\n");
+        for n in 0..40 {
+            s.feed(format!("file {n} with a long name\r\n").as_bytes());
+        }
+        s.feed(b"$ ");
+        let p = s.printed(false, 100);
+        assert_eq!(p.total, 42, "{:?}", p.lines);
+        assert_eq!(p.lines[0], "$ ls");
+        assert_eq!(p.lines[41], "$");
+        assert!(!p.whole);
+        // Only the last lines are given, and how many there were.
+        let cut = s.printed(false, 3);
+        assert_eq!((cut.lines.len(), cut.total), (3, 42));
+        assert_eq!(cut.lines[2], "$");
+        // Up to the cursor's row: the next prompt is the next block's.
+        let before = s.printed(true, 100);
+        assert_eq!(before.lines.last().unwrap(), "file 39 with a long name");
+        // A narrower pane wraps every line anew: the cut stays on its line.
+        s.resize(12, 4);
+        let p = s.printed(false, 500);
+        assert_eq!(p.lines[0], "$ ls");
+        assert!(!p.whole);
+        s.resize(30, 4);
+        // A second mark replaces the first.
+        s.mark();
+        s.feed(b"pwd\r\n/home/ada\r\n$ ");
+        let p = s.printed(false, 100);
+        assert_eq!(p.lines, vec!["$ pwd", "/home/ada", "$"]);
+        // More output than the history holds: the marked line is gone, and
+        // what is given is the screen.
+        for n in 0..300 {
+            s.feed(format!("line {n}\r\n").as_bytes());
+        }
+        let p = s.printed(false, 100);
+        assert!(p.whole);
+        assert_eq!(p.lines, vec!["line 297", "line 298", "line 299"]);
+        // A program that draws the whole screen itself.
+        s.mark();
+        s.feed(b"\x1b[?1049h\x1b[2J\x1b[Hmenu\r\n> first");
+        let p = s.printed(true, 100);
+        assert_eq!(
+            (p.lines, p.whole),
+            (vec!["menu".to_string(), "> first".to_string()], true)
+        );
+        // And when it has closed, the mark made before it is found again.
+        s.feed(b"\x1b[?1049l");
+        s.feed(b"after\r\n");
+        assert!(!s.printed(false, 100).whole);
+        // A program that redraws over the marked line.
+        s.feed(b"\x1b[2J\x1b[3J\x1b[Hfresh\r\n> ");
+        s.mark();
+        s.feed(b"\x1b[H\x1b[2Kdrawn again\r\n\x1b[2Kand again");
+        let p = s.printed(false, 100);
+        assert_eq!(
+            (p.lines, p.whole),
+            (
+                vec!["drawn again".to_string(), "and again".to_string()],
+                true
+            )
+        );
     }
 }
