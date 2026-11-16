@@ -11,7 +11,11 @@ const DAY = 86400000;
 // ---- what this browser measures (its own; sent nowhere) ----
 
 const keep = (list, v, max = 200) => { list.push(v); if (list.length > max) list.shift(); };
-export const mine = { echo: [], refresh: [], asked: new Map(), calls: [], corrections: 0, corrected: [] };
+export const mine = { echo: [], refresh: [], asked: new Map(), calls: [], corrections: 0, corrected: [], notSent: 0, notSentAt: 0 };
+// Keys (and pastes) typed in this page that were not sent: refused here
+// because the page could not send them in time, or by a station because
+// they arrived too late.
+export const keysNotSent = (n) => { if (n > 0) { mine.notSent += n; mine.notSentAt = Date.now(); } };
 const typed = new WeakMap();
 // A key was typed into a pane this browser controls; the next output of that
 // pane is taken as its echo. A pane that is printing anyway reads too short.
@@ -334,6 +338,8 @@ export function perfPage(ctx) {
         h('div', { class: 'fact heartbeat', title: api.pings ? `This page asks ${api.station} "are you there" whenever it has heard nothing for a second, while the page is being looked at; this is how long the answer takes (the middle one of the last 8). An answer later than 1.5 s, or four times this, turns typing off and says so; nothing heard for 10 s makes a new connection.` : `${api.station} does not answer pings (a version from before, or the switch deck_ping is off): a connection that goes silent is not noticed until it closes.` },
           h('span', { class: 'muted' }, 'Heartbeat round trip'), h('b', {}, api.pings ? (api.rtt() === null ? 'not yet' : ms(api.rtt())) : 'no heartbeat'),
           h('span', { class: 'muted' }, api.connected ? `last heard ${ms(Date.now() - api.frameWall)} ago` : api.frameWall ? `not connected · last heard ${ago(api.frameWall)} ago` : 'not connected')),
+        h('div', { class: 'fact keys-not-sent', title: 'Keys and pastes typed into a pane in this page that were not sent: the page could not send them within 1.5 seconds (it was not connected, or its station was not answering), or a station refused them because they reached it more than 2 seconds and twice the round trip after they were typed. Each time, the pane said how many. Nothing typed is delivered late.' },
+          h('span', { class: 'muted' }, 'Keys not sent'), h('b', {}, String(mine.notSent)), mine.notSent ? h('span', { class: 'muted' }, `last ${ago(mine.notSentAt)} ago`) : null),
         api.lastGap ? h('div', { class: 'fact', title: 'The last time this page was not connected, or its station did not answer: for how long, counting only the time the page was being looked at.' }, h('span', { class: 'muted' }, 'Last gap'), h('b', {}, ms(api.lastGap.ms)), h('span', { class: 'muted' }, `ended ${ago(api.lastGap.at)} ago`)) : null,
         h('div', { class: 'fact', title: 'One round of the questions this page asks every station, every 2.5 seconds' }, h('span', { class: 'muted' }, 'Refresh (last / p95)'), h('b', {}, mine.refresh.length ? `${ms(mine.refresh[mine.refresh.length - 1])} / ${ms(pct(mine.refresh, 0.95))}` : 'not yet')),
         h('div', { class: 'fact', title: 'Questions this page asked to keep itself up to date, in the last minute: one for the list of stations and one for each station at every round (seven for a station on 0.4.5 or earlier), and one for a station when something happens there. Before, every round was 34 questions for four stations.' }, h('span', { class: 'muted' }, 'Refresh questions'), h('b', {}, `${askedLastMinute()} a minute`)),

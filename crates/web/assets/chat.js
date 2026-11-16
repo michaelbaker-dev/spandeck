@@ -22,6 +22,7 @@
 
 import { h, showMenu, toast, dialog, copyText, dot, stateOf, STATE_LABEL, fmtTokens, heldWords, RELEASE_SAYS } from './ui.js';
 import { renderMarkdown } from './md.js';
+import { sendAct } from './typed.js';
 import { retryIn } from './api.js';
 
 let env = null;
@@ -883,6 +884,8 @@ class Conv {
     // keyboard has Send beside the box.
     this.box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !env.isPhone()) { e.preventDefault(); this.send(); } });
     this.sendBtn = h('button', { type: 'submit', class: 'primary chat-send' }, 'Send');
+    // A message that was not sent: why, while its text stays in the box.
+    this.sendSaid = h('p', { class: 'send-said', role: 'alert', hidden: true });
     this.slash = h('div', { class: 'chat-slash', role: 'group', 'aria-label': 'Commands', hidden: true });
 
     // Dictation fills the box; nothing is sent until Send. A tap starts and
@@ -932,12 +935,13 @@ class Conv {
         { note: `It is saved on ${this.st} and its path is typed for the agent.` }]);
     };
     this.composer = h('form', { class: 'chat-composer', onsubmit: (e) => { e.preventDefault(); this.working && !this.box.value.trim() ? this.stopTurn() : this.send(); } },
-      this.slash, h('div', { class: 'chat-row' }, plus, this.box, mic, this.sendBtn));
+      this.slash, this.sendSaid, h('div', { class: 'chat-row' }, plus, this.box, mic, this.sendBtn));
   }
 
   typed() {
     const v = this.box.value;
     v ? drafts.set(this.key, v) : drafts.delete(this.key);
+    if (!this.sending) this.sendSaid.hidden = true;
     // As tall as what is written, up to a limit the style sheet sets.
     this.box.style.height = 'auto';
     this.box.style.height = Math.min(this.box.scrollHeight + 2, 240) + 'px';
@@ -963,17 +967,30 @@ class Conv {
   }
 
   // Sent the way the phone's message box sends: as one paste, then Enter.
+  // One deliberate act (typed.js): sent now or not at all, and refused by
+  // the station when it arrives more than ten seconds late. Not sent, or
+  // not known to be: what was written stays in the box, which says why.
   async send() {
     const text = this.box.value.trim();
     if (!text || this.sending) return;
     this.sending = true;
+    this.sendSaid.hidden = true;
+    this.sendBtn.disabled = true;
+    this.sendBtn.dataset.stop = 'sending';
+    this.sendBtn.textContent = 'Sending…';
+    let failed = null;
     try {
-      await env.rpc(this.st, 'pane.paste', { pane: this.p.id, text, enter: true });
+      await sendAct(env.api, this.st, 'pane.paste', { pane: this.p.id, text, enter: true });
       this.box.value = '';
-      this.typed();
       this.stuck = true;
       this.placed();
-    } catch (e) { /* said by rpc; what was written stays */ } finally { this.sending = false; }
+    } catch (e) { failed = e; } finally {
+      this.sending = false;
+      this.sendBtn.disabled = false;
+      this.typed();
+      this.sendState();
+    }
+    if (failed) { this.sendSaid.textContent = `${failed.message} Your message is still in the box.`; this.sendSaid.hidden = false; }
   }
 
   stopTurn() { env.rpc(this.st, 'pane.stop', { pane: this.p.id }).then(() => toast('Stopped. It takes no mail until you release it or send it a message.')).catch(() => {}); }

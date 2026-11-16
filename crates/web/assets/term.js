@@ -16,7 +16,8 @@
 
 import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge, heldWords, RELEASE_SAYS } from './ui.js';
 import { paneIcon, iconName, hideIcon } from './icons.js';
-import { keyTyped, paneWrote } from './perf.js';
+import { keyTyped, paneWrote, keysNotSent } from './perf.js';
+import { HOLD_MS, isTyping, isPaste, holdTake, heldTooLong, keysWords, wasWere, offWords, droppedWords, sendAct } from './typed.js';
 import { retryIn } from './api.js';
 import { BASE, termOptions, applyPaneFrame, SIZING } from './look.js';
 
@@ -59,7 +60,19 @@ export class PaneTerm {
     this.note = h('div', { class: 'term-note', hidden: true });
     // The page's own link to its station is down: said on every pane.
     this.linkNote = h('div', { class: 'term-note link-note', role: 'status', hidden: true });
+    // What was typed here and not sent: how many keys, and why.
+    this.typeNote = h('div', { class: 'term-note type-note', role: 'alert', hidden: true });
     this.tries = 0;
+    // What is typed (typed.js). `iseq`: the number of the last thing sent on
+    // this attachment. `hold`: typed while this terminal could not send, for
+    // at most 1.5 s. `off`: after that, until it can send again, every key is
+    // refused at once and counted: { keys, pastes, why }. `sent`: the last
+    // things sent, to say which of them a station did not take, or which may
+    // not have arrived when the link went silent.
+    this.iseq = 0;
+    this.hold = [];
+    this.off = null;
+    this.sent = [];
     this.el = h('div', {
       class: 'pane', dataset: { pane: pane.id },
       onmousedown: () => opts.onFocus && opts.onFocus(this),
@@ -67,7 +80,7 @@ export class PaneTerm {
       ondragover: (e) => { if (this.control) { e.preventDefault(); this.el.classList.add('dropping'); } },
       ondragleave: () => this.el.classList.remove('dropping'),
       ondrop: (e) => this._drop(e),
-    }, this.strip, h('div', { class: 'pane-main' }, this.body, this.drawer), this.note, this.linkNote);
+    }, this.strip, h('div', { class: 'pane-main' }, this.body, this.drawer), this.note, h('div', { class: 'term-notes' }, this.linkNote, this.typeNote));
     // The element leads back to its terminal (the pane menu and tests use it).
     this.el.paneTerm = this;
 
@@ -81,15 +94,13 @@ export class PaneTerm {
     });
     this.fit = new FitAddon.FitAddon();
     this.term.loadAddon(this.fit);
-    this.term.onData((data) => {
-      // Not connected, or the station is not answering: nothing typed is
-      // sent, now or later, and the pane says so at the first key. (The
-      // audit: 232 keys typed into a dead link were delivered a minute late.)
-      if (!this.api.live) return this.setLink(`Not connected to ${this.api.station}: typing is off. What you type now is not sent.`);
-      if (this.control && this.chan !== null) { keyTyped(this); this.api.send('pane.input', { chan: this.chan, data }); }
-      // On a phone the pane is watched at its own size, and can still be typed
-      // into: the keys go as a request of their own, without taking the size.
-      else if (!this.control && opts.typeWhileWatching) this.api.on(this.station, 'pane.input', { pane: this.pane.id, data }).catch(() => {});
+    this.term.onData((data) => this._typed(data));
+    // The link changed, or the station has read this page's clock: what was
+    // held may go now. The page was not running: what was held is too old.
+    this._offStatus = api.onStatus(() => this._linkChanged());
+    this._offEvents = api.onEvent((ev) => {
+      if (ev.kind === 'input.ready') this._flush();
+      else if (ev.kind === 'page.woke') this._refuseHeld('asleep');
     });
     this.term.onResize(() => {});
     // Ctrl+Shift+C copies what is selected, and Ctrl+Shift+V is left to the
@@ -158,6 +169,9 @@ export class PaneTerm {
 
   mount() {
     this.term.open(this.body);
+    // Whoever is typed into last is who gets the keyboard back after a
+    // reconnect, however it got it (a click, Tab, the layout's own keys).
+    this.term.textarea?.addEventListener('focus', () => this.opts.onFocus && this.opts.onFocus(this));
     this.ro.observe(this.body);
     this.attach();
     return this;
@@ -176,8 +190,192 @@ export class PaneTerm {
   }
 
   // The page has a new connection: the channel of the one before names
-  // nothing on it.
+  // nothing on it (it was let go of when that connection ended, `onClosed`).
   reattach() { this.chan = null; return this.attach(); }
+
+  // ---- what is typed (DECISIONS.md, "What is typed") ----
+  //
+  // A key is sent at once when this terminal can send: the page is
+  // connected and answering, the station has read this page's clock, and
+  // this terminal's own attach has been answered. Otherwise it is held for
+  // at most 1.5 s and 256 bytes and goes out, in order, the moment the
+  // terminal can send; and when that does not come in time it is refused
+  // where the owner can see it, with how many keys, and never sent later.
+  // (The audit: keys typed in a gap were dropped without a word, or
+  // delivered a minute late in one burst.)
+
+  // Can this terminal send what is typed, now?
+  _canSend() {
+    if (!this.api.ready) return false;
+    return this.control ? this.chan !== null : !!this.opts.typeWhileWatching;
+  }
+  // Why not: the page's own link, or this pane not being attached.
+  _offWhy() { return this.api.offWhy || 'pane'; }
+
+  _typed(data) {
+    const typing = isTyping(data);
+    if (this._canSend()) return this._put({ data, t: performance.now() }, typing);
+    // What the terminal says by itself (focus, the mouse, an answer to
+    // the program) has nowhere to go and is nobody's typing.
+    if (!typing) return;
+    if (!this.control && !this.opts.typeWhileWatching) return;
+    const paste = isPaste(data);
+    // Already told that typing is off: counted, with a flash, at once.
+    if (this.off) return this._refuse(paste ? 0 : 1, paste ? 1 : 0, this.off.why);
+    // A station that does not judge what is typed takes it however late:
+    // nothing is held to be sent to it later.
+    const took = this.api.stamps ? holdTake(this.hold, { data, t: performance.now(), wall: Date.now() }) : 'full';
+    if (took !== 'held') return this._refuse(this.hold.length + (paste ? 0 : 1), paste ? 1 : 0, this._offWhy());
+    if (!this._holdTimer) this._holdTimer = setTimeout(() => { this._holdTimer = null; this._flush(true); }, HOLD_MS + 10);
+  }
+
+  // Send what was held, in the order it was typed, if this terminal can
+  // send now; `due`: the oldest has waited its 1.5 s, so what cannot go now
+  // is refused.
+  _flush(due = false) {
+    const can = this._canSend();
+    // It can send again: what the pane said of keys not sent stays for a
+    // few seconds, without "typing is off".
+    if (can && this.off) {
+      const o = this.off;
+      this.off = null;
+      this._say('off', `${keysWords(o.keys, o.pastes)} typed into ${this.pane.name} ${wasWere(o.keys, o.pastes)} not sent. Typing works again.`);
+    }
+    if (!this.hold.length) return;
+    const now = performance.now(), wall = Date.now();
+    if (can) {
+      const held = this.hold;
+      this.hold = [];
+      clearTimeout(this._holdTimer); this._holdTimer = null;
+      // Never one that waited too long, nor anything typed after it.
+      const stale = held.findIndex(x => heldTooLong(x, now, wall));
+      const go = stale < 0 ? held : held.slice(0, stale);
+      for (const x of go) this._put(x, true);
+      if (stale >= 0) this._refuse(held.length - stale, 0, 'asleep');
+    } else if (due || this.hold.some(x => heldTooLong(x, now, wall))) this._refuseHeld(this._offWhy());
+  }
+
+  _refuseHeld(why) {
+    if (this.hold.length) this._refuse(this.hold.length, 0, why);
+  }
+
+  // Keys (and pastes) that were typed here are not sent, now or later:
+  // counted, said on the pane, and every further key flashes the pane until
+  // it can send again.
+  _refuse(keys, pastes, why) {
+    this.hold = [];
+    clearTimeout(this._holdTimer); this._holdTimer = null;
+    if (!this.off) this.off = { keys: 0, pastes: 0, why };
+    this.off.keys += keys; this.off.pastes += pastes;
+    keysNotSent(keys + pastes);
+    const o = this.off, name = this.pane.name;
+    // A page that was asleep can send again as soon as it is awake.
+    if (o.why === 'asleep') this.off = null;
+    const lead = o.why === 'asleep' ? 'This page was not running for a moment' : offWords(o.why, this.api.station, this.station);
+    this._say('off', `${lead}: ${keysWords(o.keys, o.pastes)} typed into ${name} ${wasWere(o.keys, o.pastes)} not sent.${o.why === 'asleep' ? '' : ' Typing is off until it is back.'}`, o.why !== 'asleep');
+    this.el.classList.remove('bell');
+    void this.el.offsetWidth;
+    this.el.classList.add('bell');
+  }
+
+  // What the pane says of what was typed: one sentence of each kind (keys
+  // refused here, keys a station refused, keys that may not have arrived),
+  // each for twelve seconds, or (`stay`) until typing works again.
+  _say(kind, text, stay = false) {
+    const says = this.says || (this.says = new Map()), was = says.get(kind);
+    if (was) clearTimeout(was.timer);
+    if (!text) says.delete(kind);
+    else says.set(kind, { text, timer: stay ? null : setTimeout(() => this._say(kind, null), 12000) });
+    this.typeNote.hidden = !says.size;
+    this.typeNote.replaceChildren(...[...says.values()].map(x => h('div', {}, x.text)));
+    this.el.classList.toggle('type-off', !!this.off);
+  }
+
+  // One thing typed goes to the pane: numbered on its attachment, stamped
+  // with the time it was typed (the station refuses it when it arrives too
+  // late), and never sent a second time.
+  _put(item, typing) {
+    const stamp = this.api.stamps ? { t: item.t } : {};
+    if (this.control && this.chan !== null) {
+      if (typing) keyTyped(this);
+      const iseq = ++this.iseq;
+      this.api.send('pane.input', { chan: this.chan, data: item.data, ...(this.api.stamps ? { iseq } : {}), ...stamp });
+      this.sent.push({ iseq, at: performance.now(), typing, paste: isPaste(item.data), chan: this.chan });
+      if (this.sent.length > 512) this.sent.splice(0, 256);
+      if (typing) this.api.typed();
+    } else if (this.opts.typeWhileWatching) {
+      // On a phone the pane is watched at its own size, and can still be
+      // typed into: the keys go as a request of their own, without taking
+      // the size. A refusal is an answer, and is said like any other.
+      const paste = isPaste(item.data), sent = { iseq: null, at: performance.now(), typing, paste, chan: null };
+      this.sent.push(sent);
+      if (this.sent.length > 512) this.sent.splice(0, 256);
+      if (typing) this.api.typed();
+      const answered = () => { const i = this.sent.indexOf(sent); if (i >= 0) this.sent.splice(i, 1); };
+      this.api.on(this.station, 'pane.input', { pane: this.pane.id, data: item.data, ...stamp }).then(answered, (e) => {
+        answered();
+        // The connection ended first: whether it arrived is not known, and
+        // the pane has said so ("may not have been sent").
+        if (!typing || e.code === 'connection_lost') return;
+        keysNotSent(1);
+        if (this.maybe) { this.maybe -= 1; if (this.maybe <= 0) { this.maybe = 0; this._say('maybe', null); } }
+        // Several in a row are one sentence with their count.
+        const b = this._lost || (this._lost = { keys: 0, pastes: 0 });
+        if (paste) b.pastes += 1; else b.keys += 1;
+        clearTimeout(this._lostTimer);
+        this._lostTimer = setTimeout(() => { this._lost = null; }, 3000);
+        // How late: the latest of them.
+        if (e.late) b.late = { ...e.late, ageMs: Math.max(e.late.ageMs, b.late ? b.late.ageMs : 0), station: e.late.station || this.api.station };
+        this._say('lost', e.late ? droppedWords('late', b.keys, b.pastes, this.pane.name, b.late)
+          : `${keysWords(b.keys, b.pastes)} typed into ${this.pane.name} ${wasWere(b.keys, b.pastes)} not sent: ${String(e.message || 'refused').replace(/^not sent: /i, '').replace(/\.$/, '')}.`);
+      });
+    }
+  }
+
+  // A station did not take something typed here (it arrived too late, or
+  // the station it was for was silent): which, and why. Several in a row
+  // are one sentence with their count.
+  _dropped(d) {
+    const i = this.sent.findIndex(x => x.iseq === d.iseq && x.chan === this.chan);
+    const item = i >= 0 ? this.sent.splice(i, 1)[0] : null;
+    // Something the terminal said by itself was not typed: nothing to say.
+    if (item && !item.typing) return;
+    const b = this._late && this._late.why === d.why ? this._late : (this._late = { why: d.why, keys: 0, pastes: 0, d });
+    if (item && item.paste) b.pastes += 1; else b.keys += 1;
+    b.d = { ...d, ageMs: Math.max(d.ageMs || 0, b.d.ageMs || 0), station: d.station || this.station };
+    keysNotSent(1);
+    // It is known now: not "may not have been sent" any more.
+    if (this.maybe) { this.maybe -= 1; if (this.maybe <= 0) { this.maybe = 0; this._say('maybe', null); } }
+    this._say('late', droppedWords(b.why, b.keys, b.pastes, this.pane.name, b.d));
+    clearTimeout(this._lateTimer);
+    this._lateTimer = setTimeout(() => { this._late = null; }, 3000);
+  }
+
+  // The page's link changed. Gone silent, or closed: what was typed in the
+  // moment before, and has had nothing come back since, may not have
+  // arrived, and the pane says how many keys that is. Answering again: what
+  // was held goes.
+  _linkChanged() {
+    const api = this.api;
+    if (api.live) {
+      // Answering again on the connection that went silent: every key that
+      // was in it has by now been taken or refused, and a refusal is said.
+      // With nothing refused, "may not have been sent" is over.
+      if (api.ready && this._wasDown && this.maybe && this._downAt === api.reconnects) {
+        setTimeout(() => { if (this.maybe) { this.maybe = 0; this._say('maybe', null); } }, 1500);
+      }
+      if (api.ready) this._wasDown = false;
+      return this._flush();
+    }
+    if (this._wasDown) return;
+    this._wasDown = true;
+    this._downAt = api.reconnects;
+    // Sent after the last thing heard from the station.
+    const n = this.sent.filter(x => x.typing && x.at > api.framePerf).length;
+    if (!n || this.off) return;
+    this.maybe = n;
+    this._say('maybe', `${api.station} stopped answering: the last ${keysWords(n)} typed into ${this.pane.name} may not have been sent. Look at the pane before typing ${n === 1 ? 'it' : 'them'} again.`);
+  }
 
   async attach() {
     if (this.disposed || this.attaching) return;
@@ -189,6 +387,13 @@ export class PaneTerm {
     if (!this.api.connected) return;
     try {
       const handlers = {
+        // This terminal was closed while the pane was being attached.
+        gone: () => this.disposed,
+        // The connection this attachment was on has ended: from now until
+        // this terminal's own next attach is answered it has no channel,
+        // and nothing typed into it is sent.
+        onClosed: () => { this.chan = null; },
+        onDropped: (d) => this._dropped(d),
         onData: (b) => { paneWrote(this); this.term.write(b); },
         onResync: (b) => { this.term.reset(); this.term.write(b); },
         onExit: (info) => this._note(`This pane's process ended (${describeExit(info)}).`),
@@ -216,8 +421,10 @@ export class PaneTerm {
         },
       };
       const res = await this.api.attach(this.station, this.pane.id, this.mode, handlers);
-      if (this.disposed) { this.api.detach(res.chan); return; }
+      if (!res) return;
       this.chan = res.chan;
+      // A new attachment counts what is typed from 1.
+      this.iseq = 0;
       this.silentSince = null;
       this.tries = 0;
       this.setLink(null);
@@ -228,6 +435,10 @@ export class PaneTerm {
       this.term.write(res.snapshot);
       this._ended(res.exited);
       this.layout();
+      // This terminal's own attach is answered: what was held goes now,
+      // and whoever had the keyboard has it again.
+      this._flush();
+      if (this.opts.onAttached) this.opts.onAttached(this);
     } catch (e) {
       // A pane that is gone does not come back by asking again: said once,
       // with a button, and not asked for every three seconds for ever.
@@ -262,10 +473,10 @@ export class PaneTerm {
   }
 
   // Keys and the like, sent to the pane whether this client holds its size or not.
+  // Nobody typed these (a finger's drag turned into wheel turns): they are
+  // sent when they can be, and are nothing when they cannot.
   _send(data) {
-    if (!this.api.live) return;
-    if (this.control && this.chan !== null) this.api.send('pane.input', { chan: this.chan, data });
-    else if (this.opts.typeWhileWatching) this.api.on(this.station, 'pane.input', { pane: this.pane.id, data }).catch(() => {});
+    if (this._canSend()) this._put({ data, t: performance.now() }, false);
   }
 
   // Scroll by a finger drag. A full-screen program (Claude Code, an editor, a
@@ -391,8 +602,11 @@ export class PaneTerm {
   pasteText(text) {
     if (!text) return Promise.resolve(false);
     if (!this.control && !this.opts.typeWhileWatching) { toast('This pane is only being watched here. Take control to paste into it.', 'error'); return Promise.resolve(false); }
-    return this.api.on(this.station, 'pane.paste', { pane: this.pane.id, text, enter: false }).then(() => true).catch((e) => { toast('Could not paste: ' + e.message, 'error'); return false; });
+    return this.pasteNow(text).then(() => true).catch((e) => { toast(`${e.message} (pasting into ${this.pane.name})`, 'error'); return false; });
   }
+  // One deliberate act: sent now or not at all, and refused by the station
+  // when it arrives more than ten seconds late. Rejects with what to show.
+  pasteNow(text) { return sendAct(this.api, this.station, 'pane.paste', { pane: this.pane.id, text, enter: false }); }
 
   update(pane) { this.pane = pane; this.renderStrip(); }
 
@@ -489,6 +703,12 @@ export class PaneTerm {
     this.disposed = true;
     clearInterval(this._tick);
     clearTimeout(this._retry);
+    clearTimeout(this._holdTimer);
+    for (const x of (this.says || new Map()).values()) clearTimeout(x.timer);
+    clearTimeout(this._lateTimer);
+    clearTimeout(this._lostTimer);
+    this._offStatus();
+    this._offEvents();
     this.ro.disconnect();
     if (this.chan !== null) this.api.detach(this.chan);
     this.term.dispose();
