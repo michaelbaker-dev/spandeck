@@ -38,6 +38,7 @@
 import { h, showMenu, toast, dialog, copyText, dot, stateOf, STATE_LABEL, fmtTokens, fmtCost, exact, modelShort, heldWords, RELEASE_SAYS, trustAnsweredWords, trustTick, trustCard, hooksTick } from './ui.js';
 import { renderMarkdown } from './md.js';
 import { sendAct } from './typed.js';
+import { micFor } from './mic.js';
 import { retryIn } from './api.js';
 
 let env = null;
@@ -977,7 +978,7 @@ class Conv {
     this.keysEl.hidden = !this.keysOpen;
     this.keysBtn.setAttribute('aria-expanded', String(!!this.keysOpen));
     this.keysBtn.classList.toggle('on', !!this.keysOpen);
-    const says = this.p.agent === 'shell' ? 'Type or paste a command' : this.speech ? 'Message or hold to talk' : 'Message';
+    const says = this.p.agent === 'shell' ? 'Type or paste a command' : this.mic.can() ? 'Message or hold to talk' : 'Message';
     if (this.box.placeholder !== says) this.box.placeholder = says;
     this.working = working;
     this.sendState();
@@ -1504,11 +1505,9 @@ class Conv {
 
   buildComposer() {
     const p = this.p;
-    const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
-    this.speech = !!Speech;
     this.keysEl = h('div', { class: 'wait-keys chat-keys', role: 'group', 'aria-label': 'Keys for the terminal', hidden: true },
       SCREEN_KEYS.map(([label, bytes]) => h('button', { type: 'button', class: 'key', 'aria-label': SCREEN_KEY_SAYS[label] || label, onclick: () => this.key1(bytes) }, label)));
-    this.box = h('textarea', { class: 'chat-box', rows: 1, placeholder: Speech ? 'Message or hold to talk' : 'Message', 'aria-label': 'Message', enterkeyhint: 'send', dataset: { keep: 'chat:' + this.key } });
+    this.box = h('textarea', { class: 'chat-box', rows: 1, placeholder: 'Message', 'aria-label': 'Message', enterkeyhint: 'send', dataset: { keep: 'chat:' + this.key } });
     this.box.value = drafts.get(this.key) || '';
     this.box.addEventListener('input', () => this.typed());
     // On a computer Enter sends and Shift+Enter starts a line; a phone's
@@ -1526,35 +1525,10 @@ class Conv {
     this.slash = h('div', { class: 'chat-slash', role: 'group', 'aria-label': 'Commands', hidden: true });
 
     // Dictation fills the box; nothing is sent until Send. A tap starts and
-    // stops it; holding the button talks for as long as it is held.
-    let rec = null, held = false, timer = null;
-    const mic = h('button', { type: 'button', class: 'mic chat-mic', title: 'Dictate: tap to start and stop, or hold to talk', 'aria-label': 'Dictate', 'aria-pressed': 'false' }, '🎤');
-    const stop = () => { if (rec) rec.stop(); };
-    const start = () => {
-      if (rec) return;
-      if (!Speech) {
-        toast(window.isSecureContext ? 'Dictation is not available here. Use the microphone on the keyboard.'
-          : 'Dictation is not available here: it needs the HTTPS address of this station. Use the microphone on the keyboard.', 'error');
-        return;
-      }
-      const r = new Speech(), before = this.box.value ? this.box.value.replace(/\s*$/, ' ') : '';
-      r.lang = navigator.language || 'en-US';
-      r.interimResults = true;
-      r.continuous = true;
-      r.onresult = (e) => { this.box.value = before + Array.from(e.results, x => x[0].transcript).join(''); this.typed(); };
-      r.onerror = (e) => { if (e.error !== 'aborted' && e.error !== 'no-speech') toast(e.error === 'not-allowed' ? 'Dictation needs microphone permission, and the HTTPS address of this station.' : 'Dictation stopped: ' + e.error, 'error'); };
-      r.onend = () => { rec = null; mic.classList.remove('on'); mic.setAttribute('aria-pressed', 'false'); };
-      try { r.start(); rec = r; mic.classList.add('on'); mic.setAttribute('aria-pressed', 'true'); } catch (e) { toast('Dictation is not available here. Use the microphone on the keyboard.', 'error'); }
-    };
-    mic.addEventListener('pointerdown', () => { held = false; clearTimeout(timer); timer = setTimeout(() => { held = true; start(); }, 350); });
-    const up = () => { clearTimeout(timer); if (held) stop(); };
-    mic.addEventListener('pointerup', up);
-    mic.addEventListener('pointercancel', up);
-    mic.addEventListener('pointerleave', up);
-    mic.addEventListener('contextmenu', (e) => e.preventDefault());
-    // The tap, and the keyboard's way to the same thing.
-    mic.addEventListener('click', () => { if (held) { held = false; return; } rec ? stop() : start(); });
-    this.stopTalking = () => { clearTimeout(timer); if (rec) rec.abort(); };
+    // stops it; holding the button talks for as long as it is held (mic.js).
+    this.mic = micFor({ box: this.box, changed: () => this.typed(), st: this.st, chat: true });
+    const mic = this.mic.button;
+    this.stopTalking = () => this.mic.stop();
 
     const plus = h('button', { type: 'button', class: 'chat-plus', title: 'Attach a photo or a file', 'aria-label': 'Attach a photo or a file', 'aria-haspopup': 'menu' }, '+');
     plus.onclick = () => {
@@ -1574,7 +1548,7 @@ class Conv {
     // One card: what is written above, and under it what can be added on
     // the left and how it is sent on the right. The same in every pane.
     this.composer = h('form', { class: 'chat-composer', onsubmit: (e) => { e.preventDefault(); this.working && !this.box.value.trim() ? this.stopTurn() : this.send(); } },
-      this.keysEl, this.slash, this.sendSaid,
+      this.keysEl, this.slash, this.sendSaid, this.mic.said,
       h('div', { class: 'chat-row', onclick: (e) => { if (e.target === e.currentTarget || e.target.classList.contains('chat-tools')) this.box.focus(); } },
         this.box, h('div', { class: 'chat-tools' }, plus, this.keysBtn, this.modelBtn, h('span', { class: 'grow' }), mic, this.sendBtn)));
   }

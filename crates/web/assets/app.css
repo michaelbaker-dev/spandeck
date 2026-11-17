@@ -383,7 +383,10 @@ html.kbd .dialog-head { padding-top: 6px; } html.kbd .dialog-body { padding-top:
 .composer-row { display: flex; gap: 8px; align-items: flex-end; }
 .composer-box { flex: 1; min-height: 48px; max-height: 40dvh; font-size: max(16px, calc(15px * var(--chat-scale, var(--ui-scale)))); padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: inherit; resize: vertical; }
 .composer-row button { min-height: 48px; min-width: 56px; }
-.composer .mic.on { outline: 2px solid var(--mic); }
+.composer .mic.on { outline: 2px solid var(--mic); color: var(--mic); }
+/* A finger held on the microphone talks: it selects nothing and calls no menu. */
+.mic { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+.mic-said.live { color: var(--muted); }
 .phone-pane .pane { min-height: 38dvh; }
 .phone-pane .pane { touch-action: none; overscroll-behavior: contain; }
 .phone-pane .keep { display: contents; }
@@ -754,7 +757,7 @@ button.ask-opt.on { border-color: var(--accent-line); background: var(--accent-b
 .chat-box { flex: 1 1 0; min-width: 0; min-height: 44px; max-height: 40dvh; resize: none; font-size: max(16px, calc(15px * var(--ui-scale))); line-height: 1.35; padding: 10px 12px; border-radius: 22px; background: var(--panel); scrollbar-width: none; }
 .chat-box::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
 .chat-row button { flex: none; min-height: 44px; min-width: 44px; justify-content: center; border-radius: 22px; }
-.chat-plus { font-size: 20px; padding: 0; } .chat-send { padding: 0 13px; font-weight: 600; } .chat-mic { padding: 0; } .chat-mic.on { outline: 2px solid var(--mic); }
+.chat-plus { font-size: 20px; padding: 0; } .chat-send { padding: 0 13px; font-weight: 600; } .chat-mic { padding: 0; } .chat-mic.on { outline: 2px solid var(--mic); --ico: var(--ico-stop); }
 .chat-slash { display: flex; flex-wrap: wrap; gap: 6px; } button.chip.slash { background: none; min-height: 32px; color: var(--text); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
 
 /* ---- One chat for every pane (16 Nov 2026; DECISIONS.md) ----

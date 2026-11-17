@@ -223,6 +223,10 @@ const OWNER_READS: &[&str] = &[
     "foldertrust.choice",
     "foldertrust.list",
     "hookstrust.choice",
+    // Nothing is kept of it: the recording is deleted and the text goes
+    // back to the deck. Beside the others, so that a model that takes ten
+    // seconds holds up nothing else the page asks of this station.
+    "speech.transcribe",
 ];
 
 /// Does this method only read? Such a call changes nothing, so a Control
@@ -281,6 +285,22 @@ mod agent_program_calls {
         }
         assert!(allowed(Authority::ReadOnly, "agents.status"));
         assert!(!allowed(Authority::Agent, "agents.status"));
+    }
+}
+
+/// The microphone (17 Nov 2026): a recording of the owner's voice is the
+/// owner's alone. No agent, no station acting for itself and no read-only
+/// caller may hand this station a clip to run its speech program on.
+#[cfg(test)]
+mod speech_calls {
+    use super::*;
+
+    #[test]
+    fn only_the_owner_may_have_a_recording_transcribed() {
+        assert!(allowed(Authority::Owner, "speech.transcribe"));
+        for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
+            assert!(!allowed(who, "speech.transcribe"));
+        }
     }
 }
 
@@ -348,6 +368,8 @@ const REPEATABLE: &[&str] = &[
     "sync.pull",
     "presence.touch",
     "client.report",
+    // The same recording gives the same text; nothing is kept of either.
+    "speech.transcribe",
     // Kill: the process ends. Ending it twice is ending it.
     "pane.kill",
     // The owner's folder-trust choices: read, or set to what they are.
@@ -1224,6 +1246,7 @@ impl Daemon {
                 let pane = self.restart_pane(s(&params, "pane")?, flag(&params, "fresh"), by)?;
                 self.pane_view(&pane)
             }
+            "speech.transcribe" => self.speech_transcribe(&params).await?,
             "pane.close" => {
                 let id = self.pane(s(&params, "pane")?)?.id.clone();
                 self.close(&id, by)?;
