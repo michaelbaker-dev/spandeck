@@ -514,12 +514,20 @@ command the station answers it and no `prompt` is ever set.
 | `picker.footer`, `hint` | Rows between the list and the key names, and the key names as the program wrote them. |
 | `session_key` | Its key names say `s` chooses for the session alone (Claude Code's `/model`). |
 
+A `screen` is also what the pane says when nothing can be read and the program is known
+not to be at its ordinary wait for a message (Antigravity: something under its message box
+but its status row; OpenCode: a window whose title row ends with `esc`), while it is not in
+a turn and the screen is still: `picker.choices` is empty, `picker.footer` holds the
+screen's last rows (16 at most), and `name` is `its own screen`. `pane.pick {pane, hide:
+true}` hides what is shown now while the screen is exactly that.
+
 Read by structure, not by words: the screen ends with a row of key names; above it rows in
 one column of which exactly one carries the program's marker (`❯`, `›`), set in from the
 edge. It is said once it is read the same at two looks (half a second), and cleared when it
 is gone. Known from real screens: Claude Code 2.1.326's `/model`, `/config`, `/resume` and
-`/permissions`. Other programs' lists are read only as far as they have this structure;
-Antigravity's marker (`>` at the edge) is not read.
+`/permissions`, Codex 0.169.0's `/model` and Antigravity 1.5.9's `/model` (their marker is
+at the left edge: read as a list's only with choices straight above or below it and key
+names under them). OpenCode 2.3.0's `/models` has no marker a row carries: a `screen`.
 
 ## `pane.pick`
 
@@ -628,6 +636,7 @@ station's own call and the read-only caller. For a pane on another station:
 {id, approve: true}                                       a plan: approve it
 {id, approve: false, text?: "what to change"}             a plan: keep planning
 {id, release: true}                                       either: answer in the terminal instead
+{id, cancel: true}                                        a question: the owner declines to answer
 ```
 
 | Parameter | Meaning |
@@ -636,6 +645,7 @@ station's own call and the read-only caller. For a pane on another station:
 | `answers` | One entry for each question, in order. `picked`: places in that question's `options` (from 0). `other`: an answer of the owner's own, 4,000 characters at most. A question with `multi: false` takes exactly one of the two, and one place; one with `multi: true` takes any number of places and, beside or instead, `other`. Every question must have an answer. |
 | `approve`, `text` | For a plan. `text`: a note for the agent, sent only with `approve: false`, 4,000 characters at most. |
 | `release` | Let it go: the hook says nothing and the agent shows its own prompt in the terminal at once. Nothing is answered. |
+| `cancel` | A question only (17 Nov 2026): the call is refused, and the agent is told "The owner saw this question in spandeck and chose not to answer it. Do not ask it again as it is: go on as you judge best with what you know, or stop and say what you need." The item's `status` becomes `dismissed`. |
 
 ```json
 {"ok": true, "saved": true, "delivered": true}

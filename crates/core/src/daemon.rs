@@ -325,6 +325,18 @@ impl Drop for Holding {
     }
 }
 
+impl PaneMeta {
+    /// The pane's state, with "needs you" for what its program shows on
+    /// its screen (picker.rs) read as the state that is under it: a pane
+    /// that waits at a list was not in a turn.
+    pub(crate) fn state_before_prompt(&self) -> AgentState {
+        match (&self.prompt, self.state) {
+            (Some(_), AgentState::NeedsYou) => AgentState::Idle,
+            (_, state) => state,
+        }
+    }
+}
+
 impl PaneEntry {
     /// `client` has this pane's terminal open in control until what is
     /// returned is dropped.

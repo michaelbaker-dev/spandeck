@@ -108,7 +108,7 @@ pub struct Picker {
     pub exact: bool,
 }
 
-const MARKERS: [char; 3] = ['❯', '›', '▶'];
+const MARKERS: [char; 4] = ['❯', '›', '▶', '>'];
 const MAX_CHOICES: usize = 40;
 
 /// Words that make a screen one that grants something. Compared without
@@ -141,6 +141,12 @@ fn is_hint(row: &str) -> bool {
         "ctrl+",
     ];
     let named = keys.iter().filter(|k| low.contains(*k)).count();
+    if low.contains("interrupt") {
+        return false;
+    }
+    if named >= 3 && row.chars().count() <= 200 {
+        return true;
+    }
     row.chars().count() <= 200
         && low.contains(" to ")
         && (named >= 2 || (named >= 1 && row.matches(" · ").count() >= 2))
@@ -160,6 +166,9 @@ struct Row {
     /// The column its words begin in; for a marked row, after its marker.
     indent: usize,
     marked: bool,
+    /// Its marker is at the very left edge: where a program's own message
+    /// box has its mark too.
+    edge: bool,
     checked: Option<bool>,
     text: String,
 }
@@ -173,10 +182,11 @@ fn row(line: &str) -> Row {
     let mut indent = line.chars().take_while(|c| *c == ' ').count();
     let mut rest = line.trim_start();
     let mut marked = false;
+    let mut edge = false;
     if let Some(after) = rest.strip_prefix(MARKERS) {
-        // (At the very edge it is the program's own message box.)
-        if after.starts_with(' ') && indent >= 1 {
+        if after.starts_with(' ') {
             marked = true;
+            edge = indent == 0;
             indent += 1 + after.chars().take_while(|c| *c == ' ').count();
             rest = after.trim_start();
         }
@@ -203,6 +213,7 @@ fn row(line: &str) -> Row {
     Row {
         indent,
         marked,
+        edge,
         checked,
         text: rest.to_string(),
     }
@@ -242,6 +253,17 @@ fn choice(r: &Row) -> Choice {
         }
         None => name,
     };
+    let (name, detail) = match (name.strip_suffix("(current)"), detail) {
+        (Some(n), _) => {
+            c.current = true;
+            (n.trim_end(), detail)
+        }
+        (None, "(current)") => {
+            c.current = true;
+            (name, "")
+        }
+        _ => (name, detail),
+    };
     c.text = name.to_string();
     c.detail = detail.to_string();
     c
@@ -250,7 +272,15 @@ fn choice(r: &Row) -> Choice {
 /// Read the bottom of a screen as a list to choose from, as something
 /// shown with key names under it, or as neither.
 pub fn read(lines: &[String]) -> Option<Picker> {
-    let end = lines.iter().rposition(|l| !clean(l).is_empty())? + 1;
+    let mut end = lines.iter().rposition(|l| !clean(l).is_empty())? + 1;
+    // (A program's status row at the right edge, under everything, as
+    // Antigravity draws its model: not part of what is shown.)
+    if status_row(&lines[end - 1]) {
+        end = lines[..end - 1]
+            .iter()
+            .rposition(|l| !clean(l).is_empty())?
+            + 1;
+    }
     let lines = &lines[..end];
     // The key names: the last row, and the row above when they wrap.
     let mut at = lines.len() - 1;
@@ -264,24 +294,19 @@ pub fn read(lines: &[String]) -> Option<Picker> {
     }
     let rows: Vec<Row> = lines[..at].iter().map(|l| row(l)).collect();
     let blank = |i: usize| rows[i].text.is_empty();
-    let Some(marker_at) = rows.iter().rposition(|r| r.marked) else {
+    // Nothing marked, or a mark at the edge that is no list (the
+    // program's own message box, a line of its history): what it shows
+    // with key names under it, with no rows.
+    let shown = |hint: String| -> Option<Picker> {
         // Nothing is marked. A screen the program says Esc leaves is
         // something it is showing; anything else is not read.
         let low = hint.to_lowercase();
-        if ![
-            "esc to cancel",
-            "esc to clear",
-            "esc to close",
-            "esc to go back",
-        ]
-        .iter()
-        .any(|w| low.contains(w))
-        {
+        if !low.contains("esc") && !low.contains("enter") {
             return None;
         }
-        let (title, about, free_text, tabs) = title_above(lines, at);
+        let (title, about, free_text, tabs) = title_above(lines, at, false);
         let class = class_of(&format!("{title} {about}"));
-        return Some(Picker {
+        Some(Picker {
             tabs,
             title,
             about,
@@ -294,120 +319,189 @@ pub fn read(lines: &[String]) -> Option<Picker> {
             free_text,
             class,
             exact: false,
-        });
+        })
     };
-    let column = rows[marker_at].indent;
-    let (mut more_above, mut more_below, mut grouped) = (false, false, false);
-    let part = |i: usize| {
-        !blank(i) && !rows[i].marked && rows[i].indent >= column && more(&rows[i].text).is_none()
+    let Some(marker_at) = rows.iter().rposition(|r| r.marked) else {
+        return shown(hint);
     };
-    let mut first = marker_at;
-    while first > 0 {
-        let i = first - 1;
-        if part(i) {
-            first = i;
-        } else if blank(i) && i > 0 && part(i - 1) {
-            grouped = true;
-            first = i - 1;
-        } else {
-            more_above = !blank(i) && more(&rows[i].text) == Some(false);
-            break;
+    let edge = rows[marker_at].edge;
+    let list = (|| -> Option<Picker> {
+        let hint = hint.clone();
+        let column = rows[marker_at].indent;
+        let (mut more_above, mut more_below, mut grouped) = (false, false, false);
+        let part = |i: usize| {
+            !blank(i)
+                && !rows[i].marked
+                && rows[i].indent >= column
+                && more(&rows[i].text).is_none()
+        };
+        let mut first = marker_at;
+        while first > 0 {
+            let i = first - 1;
+            if part(i) {
+                first = i;
+            } else if blank(i) && i > 0 && part(i - 1) && !rows[marker_at].edge {
+                grouped = true;
+                first = i - 1;
+            } else {
+                more_above = !blank(i) && more(&rows[i].text) == Some(false);
+                break;
+            }
         }
-    }
-    let mut last = marker_at;
-    while last + 1 < rows.len() {
-        let i = last + 1;
-        if part(i) {
-            last = i;
-        } else if blank(i) && i + 1 < rows.len() && part(i + 1) {
-            grouped = true;
-            last = i + 1;
-        } else {
-            break;
+        let mut last = marker_at;
+        while last + 1 < rows.len() {
+            let i = last + 1;
+            if part(i) {
+                last = i;
+            } else if blank(i) && i + 1 < rows.len() && part(i + 1) && !rows[marker_at].edge {
+                grouped = true;
+                last = i + 1;
+            } else {
+                break;
+            }
         }
-    }
-    // Under the list: its "more" row, and a few rows before the key names.
-    let mut footer = vec![];
-    for (n, r) in rows.iter().enumerate().skip(last + 1) {
-        if r.marked {
+        // Under the list: its "more" row, and a few rows before the key names.
+        let mut footer = vec![];
+        for (n, r) in rows.iter().enumerate().skip(last + 1) {
+            if r.marked {
+                return None;
+            }
+            if r.text.is_empty() {
+                continue;
+            }
+            if n == last + 1 && more(&r.text) == Some(true) {
+                more_below = true;
+            } else {
+                footer.push(r.text.clone());
+            }
+        }
+        if footer.len() > 4 {
             return None;
         }
-        if r.text.is_empty() {
-            continue;
-        }
-        if n == last + 1 && more(&r.text) == Some(true) {
-            more_below = true;
-        } else {
-            footer.push(r.text.clone());
-        }
-    }
-    if footer.len() > 4 {
-        return None;
-    }
-    let mut choices: Vec<Choice> = vec![];
-    let mut fresh = true;
-    for r in &rows[first..=last] {
-        if r.text.is_empty() {
-            fresh = true;
-            continue;
-        }
-        // An entry begins after an empty row where entries are set apart
-        // by them, and at the list's own column where they are not.
-        let begins = if grouped {
-            fresh
-        } else {
-            r.indent == column || choices.is_empty()
-        };
-        fresh = false;
-        if begins {
-            choices.push(choice(r));
-        } else if let Some(c) = choices.last_mut() {
-            if !c.detail.is_empty() {
-                c.detail.push(' ');
+        let mut choices: Vec<Choice> = vec![];
+        let mut fresh = true;
+        for r in &rows[first..=last] {
+            if r.text.is_empty() {
+                fresh = true;
+                continue;
             }
-            c.detail.push_str(&r.text);
+            // An entry begins after an empty row where entries are set apart
+            // by them, and at the list's own column where they are not.
+            let begins = if grouped {
+                fresh
+            } else {
+                r.indent == column || choices.is_empty()
+            };
+            fresh = false;
+            if begins {
+                choices.push(choice(r));
+            } else if let Some(c) = choices.last_mut() {
+                if !c.detail.is_empty() {
+                    c.detail.push(' ');
+                }
+                c.detail.push_str(&r.text);
+            }
         }
-    }
-    if choices.len() < 2
-        || choices.len() > MAX_CHOICES
-        || choices.iter().filter(|c| c.marked).count() != 1
-    {
-        return None;
-    }
-    if choices
-        .iter()
-        .any(|c| c.text.is_empty() || c.text.chars().count() > 160)
-    {
-        return None;
-    }
-    let (title, about, free_text, tabs) =
-        title_above(lines, first.saturating_sub(usize::from(more_above)));
-    let multi = choices.iter().all(|c| c.checked.is_some());
-    if !multi {
-        choices.iter_mut().for_each(|c| c.checked = None);
-    }
-    let said = format!(
-        "{title} {about} {}",
-        choices
+        if choices.len() < 2
+            || choices.len() > MAX_CHOICES
+            || choices.iter().filter(|c| c.marked).count() != 1
+        {
+            return None;
+        }
+        if choices
             .iter()
-            .map(|c| c.text.as_str())
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-    Some(Picker {
-        tabs,
-        title,
-        about,
-        choices,
-        multi,
-        more_above,
-        more_below,
-        footer,
-        hint,
-        free_text,
-        class: class_of(&said),
-        exact: true,
-    })
+            .any(|c| c.text.is_empty() || c.text.chars().count() > 160)
+        {
+            return None;
+        }
+        let (title, about, free_text, tabs) =
+            title_above(lines, first.saturating_sub(usize::from(more_above)), true);
+        let multi = choices.iter().all(|c| c.checked.is_some());
+        if !multi {
+            choices.iter_mut().for_each(|c| c.checked = None);
+        }
+        let said = format!(
+            "{title} {about} {}",
+            choices
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        Some(Picker {
+            tabs,
+            title,
+            about,
+            choices,
+            multi,
+            more_above,
+            more_below,
+            footer,
+            hint,
+            free_text,
+            class: class_of(&said),
+            exact: true,
+        })
+    })();
+    match list {
+        None if edge => shown(hint),
+        other => other,
+    }
+}
+
+/// A short row set against the right edge, with nothing that could be a
+/// choice or a question in it: a program's status row.
+fn status_row(line: &str) -> bool {
+    let text = line.trim();
+    let before = line.chars().take_while(|c| *c == ' ').count();
+    let len = text.chars().count();
+    (1..=40).contains(&len) && before >= len && before >= 20 && !text.contains(['>', '❯', '›', '?'])
+}
+
+/// Is a program showing something of its own that is not its ordinary
+/// wait for a message, though nothing on it can be read as a list? Only
+/// what is known from a real screen of that program:
+///
+/// - **Antigravity 1.5.9** (captured 17 Nov 2026): its message box is a
+///   row `>` between two rules, and when it waits for a message nothing
+///   is under the box but its status row. Anything else under it is
+///   something it shows.
+/// - **OpenCode 2.3.0** (captured the same day): its windows have their
+///   title on a row that ends, far to the right, with `esc`.
+///
+/// Claude Code's and Codex's waiting screens are not captured, so for
+/// them this says nothing: their lists are read by structure (`read`).
+pub fn showing(agent: crate::AgentKind, lines: &[String]) -> bool {
+    use crate::AgentKind;
+    let Some(end) = lines.iter().rposition(|l| !clean(l).is_empty()) else {
+        return false;
+    };
+    match agent {
+        AgentKind::Antigravity => {
+            let rule =
+                |l: &String| l.trim().chars().count() >= 20 && l.trim().chars().all(|c| c == '─');
+            let boxed = (1..end).rev().find(|i| {
+                (lines[*i].trim_end() == ">" || lines[*i].starts_with("> "))
+                    && rule(&lines[i - 1])
+                    && lines.get(i + 1).is_some_and(rule)
+            });
+            match boxed {
+                Some(i) => lines[i + 2..=end]
+                    .iter()
+                    .any(|l| !clean(l).is_empty() && !status_row(l)),
+                None => false,
+            }
+        }
+        AgentKind::OpenCode => lines[..=end].iter().any(|l| {
+            let t = l.trim_end();
+            t.ends_with("   esc")
+                && t.trim_start()
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_alphabetic)
+        }),
+        _ => false,
+    }
 }
 
 fn class_of(said: &str) -> Class {
@@ -421,7 +515,13 @@ fn class_of(said: &str) -> Class {
 
 /// The rows of words above row `top`, up to the program's rule: the
 /// title, what is said under it, and a field to type in.
-fn title_above(lines: &[String], top: usize) -> (String, String, Option<String>, Vec<String>) {
+/// `nearest`: only the rows of words nearest above (to the first empty
+/// row over them): a list's own title, where the program draws no rule.
+fn title_above(
+    lines: &[String],
+    top: usize,
+    nearest: bool,
+) -> (String, String, Option<String>, Vec<String>) {
     let mut words: Vec<String> = vec![];
     let mut tabs: Vec<String> = vec![];
     let mut field = None;
@@ -432,10 +532,17 @@ fn title_above(lines: &[String], top: usize) -> (String, String, Option<String>,
         }
         let text = clean(line);
         if text.is_empty() {
+            if nearest && !words.is_empty() {
+                break;
+            }
             continue;
         }
         if let Some(shown) = text.strip_prefix('⌕') {
             field = Some(shown.trim().to_string());
+            continue;
+        }
+        if matches!(text.as_str(), "Search" | "Search:") {
+            field = Some("Search".to_string());
             continue;
         }
         if !text.chars().any(char::is_alphanumeric) || words.len() == 4 {
@@ -561,6 +668,77 @@ pub mod real {
 
 
      Ctrl+A to show all projects · Ctrl+B to only show current branch · Ctrl+W to show all worktrees · Space to";
+    /// Codex 0.169.0, `/model`: its marker is at the left edge.
+    pub const CODEX_MODEL: &str = "  Select Model and Effort
+
+
+› 1. GPT-6.1-Sol (current)  Latest workhorse model for coding and everyday work.
+  2. GPT-6-Astra            Frontier intelligence for the most demanding work.
+  3. GPT-6.1 Terra          GPT-6.1 Terra Codex model.
+  4. GPT-6-Sol              Previous generation workhorse model.
+  5. GPT-6-Luna             Fast and affordable model for easier tasks.
+  6. GPT-5.6-Sol            Older generation workhorse model.
+  7. GPT-5.6-Terra          Older balanced model for straightforward work.
+  8. GPT-5.6-Luna           Older fast and efficient model.
+
+  enter select · esc back";
+    /// Antigravity 1.5.9, `/model`, from its message box down.
+    pub const ANTIGRAVITY_MODEL: &str = "────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────
+Switch Model
+
+  Search:
+          ────────────────────
+
+> Gemini 4 Carbon       (current)
+  Gemini 4 Argon
+  Gemini 4 Hydrogen
+  Orchestrator (Carbon)
+  Orchestrator (Argon)
+  Gemini 3.8 Flash
+  Claude Opus 5.5
+  Claude Sonnet 5.5
+  GPT-OSS 120B (Medium)
+
+  Effort  ◂        ●━━━━━━━━━━━━━━◉──────────────○        ▸
+                  low          medium          high
+            Balanced speed and reasoning quality for most tasks
+
+Keyboard: ↑/↓ Navigate  ←/→ Effort  enter Select  esc Go Back
+
+                                                                                                Gemini 4 Carbon · medium";
+    /// Antigravity 1.5.9 waiting for a message: the same box, and its
+    /// status row. (The words typed in it are made up.)
+    pub const ANTIGRAVITY_IDLE: &str = "  The nests are counted.
+
+────────────────────────────────────────────────────────────
+> count the egrets too
+────────────────────────────────────────────────────────────
+
+                                                                                                Gemini 4 Carbon · medium";
+    /// OpenCode 2.3.0, `/models`: a window over its screen; the row in
+    /// use has `●`, and its highlight is a colour, which no row carries.
+    pub const OPENCODE_MODELS: &str = "                                  Select model                                     esc
+
+                                  Search
+
+                                  Big Pickle                                      Free
+                                ● DeepSeek V4.1 Flash Free                        Free
+                                  GLM-5.3-Flash Free                              Free
+                       ┃          Hy4 flash Free                                  Free
+                       ┃  Ask     Iceman Free                                     Free
+                       ╹▀▀▀▀▀▀    Flint 40B Free                                  Free    ▀▀▀▀▀▀▀▀
+                       ~/code/    Nemotron 3.5 Super VL Free                      Free    commands
+                                  Beam Free                                       Free
+
+                                  View all integrations ctrl+a  Favorite ctrl+f
+
+
+
+
+
+  ⊙ 1 MCP /mcps                                                                                                  2.3.0";
     pub const PERMISSIONS: &str = "❯ /resume
   ⎿  Resume cancelled
 
@@ -702,6 +880,98 @@ mod tests {
             (p.class, p.choices[0].number, p.choices[0].marked),
             (Class::Plain, Some(1), true)
         );
+    }
+
+    /// The owner, 17 Nov 2026: "Confirm the picker works on any agent at
+    /// anytime a multiple choice would come up for any reason". It did
+    /// not: Codex's and Antigravity's `/model` lists have their marker at
+    /// the left edge, and OpenCode's has none. As captured from the three.
+    #[test]
+    fn the_other_programs_lists_are_read_as_captured() {
+        use crate::AgentKind;
+        let p = read(&lines(real::CODEX_MODEL)).expect("Codex /model");
+        assert_eq!(
+            (
+                p.title.as_str(),
+                p.choices.len(),
+                p.exact,
+                p.class,
+                p.hint.as_str()
+            ),
+            (
+                "Select Model and Effort",
+                8,
+                true,
+                Class::Plain,
+                "enter select · esc back"
+            )
+        );
+        let c = &p.choices[0];
+        assert_eq!(
+            (
+                c.number,
+                c.text.as_str(),
+                c.marked,
+                c.current,
+                c.detail.as_str()
+            ),
+            (
+                Some(1),
+                "GPT-6.1-Sol",
+                true,
+                true,
+                "Latest workhorse model for coding and everyday work."
+            )
+        );
+        assert_eq!(p.choices[7].text, "GPT-5.6-Luna");
+
+        let p = read(&lines(real::ANTIGRAVITY_MODEL)).expect("Antigravity /model");
+        assert_eq!(
+            (
+                p.title.as_str(),
+                p.choices.len(),
+                p.free_text.as_deref(),
+                p.exact
+            ),
+            ("Switch Model", 9, Some("Search"), true)
+        );
+        assert_eq!(
+            (
+                p.choices[0].text.as_str(),
+                p.choices[0].marked,
+                p.choices[0].current,
+                p.choices[8].text.as_str()
+            ),
+            ("Gemini 4 Carbon", true, true, "GPT-OSS 120B (Medium)")
+        );
+        assert_eq!(p.footer.len(), 3);
+        assert!(p.hint.starts_with("Keyboard: ↑/↓ Navigate"), "{}", p.hint);
+        // Waiting for a message, with words typed in its box: nothing.
+        assert_eq!(read(&lines(real::ANTIGRAVITY_IDLE)), None);
+        assert!(!showing(
+            AgentKind::Antigravity,
+            &lines(real::ANTIGRAVITY_IDLE)
+        ));
+        assert!(showing(
+            AgentKind::Antigravity,
+            &lines(real::ANTIGRAVITY_MODEL)
+        ));
+
+        // OpenCode's has no marker a row carries: not a list, but known
+        // to be something it shows.
+        assert_eq!(read(&lines(real::OPENCODE_MODELS)), None);
+        assert!(showing(AgentKind::OpenCode, &lines(real::OPENCODE_MODELS)));
+        assert!(!showing(
+            AgentKind::OpenCode,
+            &lines("  The nests are counted.\n\n  ┃  Ask anything\n\n  ⊙ 1 MCP /mcps      2.3.0")
+        ));
+        // Nothing is said of a program whose waiting screen is not known.
+        assert!(
+            !showing(AgentKind::Claude, &lines(real::MODEL))
+                && !showing(AgentKind::Codex, &lines(real::CODEX_MODEL))
+        );
+        // Codex's own message box, its mark at the same edge: not a list.
+        assert_eq!(read(&lines("  The nests are counted.\n  1. east\n  2. west\n\n› Ask Codex to do anything\n\n  gpt-6.1-sol · 97% left · ~/marsh")), None);
     }
 
     /// The same report's other half: what is not such a list is not read

@@ -860,6 +860,10 @@ class Conv {
     // A question or a plan the station holds for the owner: answered here.
     const held = this.available === true && !exited && Array.isArray(L.questions) ? L.questions.filter(q => q && typeof q.id === 'string' && (q.kind === 'question' || q.kind === 'plan')) : [];
     for (const id of [...this.asking.keys()]) if (!held.some(q => q.id === id)) this.asking.delete(id);
+    // (A card that has just appeared has the room: the keys are put away,
+    // and are one tap back.)
+    if (held.length && this.hadHeld !== held[0].id) this.keysOpen = false;
+    this.hadHeld = held.length ? held[0].id : null;
     // One that waits and is not held is answered in the terminal: it was
     // not answered here in time, or its session cannot be held. Not shown
     // in the moment between the call being written and its hook asking.
@@ -1091,9 +1095,11 @@ class Conv {
         cur.multi ? h('span', { class: 'muted small' }, ' · choose any') : null),
       h('b', { class: 'ask-q' }, String(cur.question || '')),
       list,
-      many || submit ? h('div', { class: 'row ask-nav' },
+      h('div', { class: 'row ask-nav' },
         many && n > 0 ? h('button', { type: 'button', disabled: s.busy, onclick: () => { s.step = n - 1; redraw(); } }, 'Back') : null,
-        h('span', { class: 'grow' }), submit) : null,
+        h('button', { type: 'button', class: 'ask-cancel', disabled: s.busy, title: 'The agent is told you did not answer, and goes on or stops as it judges.', onclick: () => this.cancelQuestion(q) }, 'Cancel'),
+        h('span', { class: 'grow' }), submit),
+      h('div', { class: 'muted small ask-cancel-says' }, 'Cancel: the agent is told you did not answer.'),
       s.busy && !submit ? h('div', { class: 'muted small' }, 'Sent…') : null,
       this.heldFoot(q, s));
   }
@@ -1186,14 +1192,20 @@ class Conv {
     const timer = setInterval(() => (rows.isConnected ? read() : clearInterval(timer)), 1000);
     const why = this.pickSaid ? this.pickSaid + ' Its screen is below: finish there with the keys.'
       : k.class === 'grants' ? `${name} asks for something only you should grant. It is shown as it is, and answered with its own keys: nothing here chooses for you.`
-        : `${name} is showing this in its terminal. Nothing on it is marked as a choice, so it is shown as it is, with its keys.`;
+        : `${name} is showing this in its terminal, and it is not its ordinary wait for a message. Nothing on it can be read as rows to tap, so it is shown as it is, with its keys.`;
     return h('div', { class: 'list-window screen' },
       h('p', { class: this.pickSaid ? 'warn-text list-said' : 'muted small', role: this.pickSaid ? 'alert' : 'note' }, why),
       rows,
       h('div', { class: 'wait-keys', role: 'group', 'aria-label': 'Keys for the terminal' },
         WAIT_KEYS.map(([label, bytes]) => h('button', { type: 'button', class: 'key', 'aria-label': KEY_SAYS[label] || label, onclick: () => this.key1(bytes) }, label))),
+      // Typed through to the program as keys, never as a message.
+      (() => { const f = h('input', { class: 'ask-other list-type', placeholder: 'Type into it, then Enter here', 'aria-label': 'Type into its terminal', autocapitalize: 'off', autocorrect: 'off', spellcheck: false, enterkeyhint: 'go' });
+        f.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); e.stopPropagation(); const v = f.value.replace(/[\x00-\x1f\x7f]/g, ''); f.value = ''; if (v) this.key1(v); } });
+        return f; })(),
       h('div', { class: 'row sheet-foot' },
         this.pickSaid ? h('button', { type: 'button', class: 'list-again', onclick: () => { this.pickSaid = ''; this.drawDock(); } }, 'Show the list again') : null,
+        // A wrong guess is one tap: this exact screen is not said again.
+        this.pickSaid || k.class === 'grants' ? null : h('button', { type: 'button', class: 'list-hide', title: 'This screen is not asking anything: do not show it again while it is exactly this.', onclick: () => env.rpc(this.st, 'pane.pick', { pane: this.p.id, hide: true }).catch(() => {}) }, 'Not a prompt: hide'),
         h('button', { type: 'button', class: 'primary', onclick: () => setFace(this.st, this.p, 'terminal') }, 'Open terminal')));
   }
 
@@ -1229,7 +1241,8 @@ class Conv {
     });
     // A second column that is a setting's value stands at the right.
     const value = (c) => c.detail && c.detail.length <= 24 && !/[.!?]$/.test(c.detail) && k.choices.filter(x => x.detail && x.detail.length <= 24).length * 2 >= k.choices.length;
-    const effort = (Array.isArray(k.footer) ? k.footer : []).find(f => f.includes('←/→'));
+    // (Its effort, where its rows or its key names say ←/→ adjusts it.)
+    const effort = (Array.isArray(k.footer) ? k.footer : []).find(f => f.includes('←/→')) || (/←\/→ Effort/.test(String(k.hint || '')) ? 'Effort' : undefined);
     return h('div', { class: 'list-window' },
       k.tabs?.length ? h('div', { class: 'chat-switch list-tabs', role: 'tablist', 'aria-label': `${name}'s tabs` }, k.tabs.map((t, i) => h('span', { class: 'list-tab' + (i === 0 ? ' on' : ''), role: 'tab' }, t))) : null,
       k.about ? h('p', { class: 'muted small' }, String(k.about)) : null,
@@ -1253,7 +1266,7 @@ class Conv {
         P.session_key && marked ? h('button', { type: 'button', class: 'primary list-session', disabled: busy, onclick: () => pick(marked, 'session') }, 'This session only') : null,
         P.session_key && marked ? h('button', { type: 'button', class: 'list-default', disabled: busy, onclick: () => pick(marked, 'enter') }, 'Set as default') : null,
         k.multi ? h('button', { type: 'button', class: 'primary list-done', disabled: busy, onclick: () => this.key1('\r') }, 'Done') : null,
-        h('button', { type: 'button', class: 'list-cancel', disabled: busy, onclick: () => this.key1('\x1b') }, k.choices.some(c => c.submenu) || !P.session_key ? 'Cancel' : 'Cancel')),
+        h('button', { type: 'button', class: 'list-cancel', disabled: busy, onclick: () => this.key1('\x1b') }, 'Back or cancel (Esc)')),
       P.session_key ? h('p', { class: 'muted small' }, `A tap on a row chooses it for this session only. "Set as default" is ${name}'s Enter: it keeps the marked row as the default for new sessions.`) : null,
       h('p', { class: 'muted small list-hint' }, `${name}'s own keys: ${String(k.hint || '')}`));
   }
@@ -1269,7 +1282,23 @@ class Conv {
         h('button', { type: 'button', class: 'danger', onclick: () => answer(false) }, 'Deny')));
   }
 
+  // The question the station holds for the owner here, if any.
+  heldQuestion() {
+    const qs = this.live?.questions;
+    return (Array.isArray(qs) && qs.find(q => q && q.kind === 'question' && typeof q.id === 'string')) || null;
+  }
+
+  // "Cancel" on a question, and Esc while one is held: the agent is told
+  // the owner did not answer. (The program's own dialog is not on its
+  // screen while the station holds the question, so an Esc typed into the
+  // pane reaches nothing.)
+  cancelQuestion(q) {
+    const s = this.askState(q);
+    this.answerHeld(q, s, { cancel: true }, 'Cancelled: the agent is told you did not answer');
+  }
+
   key1(bytes) {
+    if (bytes === '\x1b' && this.heldQuestion()) return this.cancelQuestion(this.heldQuestion());
     env.api.on(this.st, 'pane.input', { pane: this.p.id, data: bytes }).then(() => setTimeout(() => this.peek(), 250)).catch(e => toast(e.message, 'error'));
   }
 
@@ -1719,6 +1748,22 @@ function readAloud(el, btn) {
 
 export function initChat(e) {
   env = e;
+  // Esc always means cancel, and it always works: in the window for what
+  // a program shows it is the program's own Esc (the window then goes
+  // with the program's list), and on a held question's card it cancels
+  // the question. (Before anything else that listens for Esc.)
+  window.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape' || ev.isComposing) return;
+    for (const c of convs.values()) {
+      const inWindow = c.listBox && c.listBox.body.isConnected;
+      const onCard = !inWindow && c.cards.isConnected && c.cards.contains(document.activeElement) && c.heldQuestion() && !document.querySelector('.backdrop, .menu');
+      if (!inWindow && !onCard) continue;
+      ev.preventDefault(); ev.stopImmediatePropagation();
+      if (inWindow) env.api.on(c.st, 'pane.input', { pane: c.p.id, data: '\x1b' }).catch(err => toast(err.message, 'error'));
+      else c.cancelQuestion(c.heldQuestion());
+      return;
+    }
+  }, true);
   env.api.onEvent((ev) => { if (ev.kind === 'connection.restored') for (const c of convs.values()) c.restored(); });
   document.addEventListener('visibilitychange', () => { for (const c of convs.values()) c.maybeRead(); });
   setInterval(() => {
