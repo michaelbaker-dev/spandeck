@@ -1496,6 +1496,15 @@ impl Daemon {
                 // agent may do with them is decided by spandeck, and logged.
                 args.push("--allowedTools".to_string());
                 args.push("mcp__spandeck".to_string());
+                // Files the owner attaches to a message are kept by the
+                // station outside the pane's folder. Found with the real
+                // Claude Code, 17 Nov 2026: it stopped to ask "Allow this
+                // read outside the working directories?" for each one.
+                // Reading the pane's own folder of attached files is
+                // allowed by a rule (adding the folder as a working
+                // directory makes Claude Code ask to trust it at every start).
+                let attached = self.paths.drops_dir().join(pane).join("attached");
+                args.push(format!("Read(/{}/**)", attached.display()));
             }
             AgentKind::Codex => args.extend([
                 "-c".to_string(),

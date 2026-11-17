@@ -288,7 +288,22 @@ pub fn read(lines: &[String]) -> Option<Picker> {
     if !is_hint(&hint) {
         return None;
     }
+    // (The real Antigravity 1.5.10 at work, 17 Nov 2026: under its box
+    // is "esc to cancel" and its status, and nothing else names a key.
+    // That is a program in its turn saying how to stop it, and nothing it
+    // shows: the pane read as needing the owner at the start of every turn.)
+    let mut lone_stop = {
+        let left = lines[at].trim_start();
+        let left = left
+            .split("          ")
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        left == "esc to cancel" || left == "esc to interrupt"
+    };
     if at > 0 && is_hint(&clean(&lines[at - 1])) {
+        lone_stop = false;
         at -= 1;
         hint = format!("{} {hint}", clean(&lines[at]));
     }
@@ -301,7 +316,7 @@ pub fn read(lines: &[String]) -> Option<Picker> {
         // Nothing is marked. A screen the program says Esc leaves is
         // something it is showing; anything else is not read.
         let low = hint.to_lowercase();
-        if !low.contains("esc") && !low.contains("enter") {
+        if lone_stop || (!low.contains("esc") && !low.contains("enter")) {
             return None;
         }
         let (title, about, free_text, tabs) = title_above(lines, at, false);
@@ -854,6 +869,26 @@ Keyboard: ↑/↓ Navigate  ←/→ Effort  enter Select  esc Go Back
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real Antigravity 1.5.10 at the start of a turn (17 Nov 2026).
+    #[test]
+    fn antigravity_at_work_shows_nothing() {
+        let rule = "\u{2500}".repeat(120);
+        let lines: Vec<String> = vec![
+            "\u{2500}".repeat(60),
+            "> Reply with the single word ok.".to_string(),
+            "\u{28ef}  Generating...".to_string(),
+            rule.clone(),
+            ">".to_string(),
+            rule,
+            format!(
+                "esc to cancel{}Gemini 4 Carbon \u{b7} medium",
+                " ".repeat(83)
+            ),
+        ];
+        assert!(read(&lines).is_none());
+        assert!(!showing(crate::AgentKind::Antigravity, &lines));
+    }
 
     /// The real Antigravity 1.5.10, idle (17 Nov 2026): under its box is one
     /// row, a hint at the left and its status at the right. That is the

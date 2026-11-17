@@ -5314,11 +5314,8 @@ fn the_rest_of_the_conversation_view() {
     );
     phone.js("(b => { b.value = ''; b.dispatchEvent(new Event('input')); return true; })(document.querySelector('.chat-box'))");
 
-    // "+" sends a file: the station writes it and types its path for the agent.
-    click(&phone, "+", "document.querySelector('.chat-plus')");
-    click(&phone, "a file", "[...document.querySelectorAll('.menu-item')].find(i => i.innerText.startsWith('A photo or a file'))");
-    phone.js("(i => { const d = new DataTransfer(); d.items.add(new File(['heron,37'], 'tally.csv')); i.files = d.files; i.dispatchEvent(new Event('change')); return true; })(document.querySelector('#overlays input[type=file]'))");
-    s.wait_text(&long, "tally.csv");
+    // ("+" and files: a file waits in the message box and goes with the
+    // message, in `chat.rs`, since 17 Nov 2026.)
 
     // While the agent works and nothing is written, Send is Stop.
     let busy = s.fake(
@@ -5422,13 +5419,11 @@ fn the_rest_of_the_conversation_view() {
     );
     wide.goto(&pane(&long));
     wide.wait("the same face at full size", "!!document.querySelector('.station-main.zoomed .chat-pane .chat-text') && !document.querySelector('.station-main .xterm')");
-    // Enter sends, on a computer. The path of the file sent from the phone
-    // was typed for the agent and waits in its prompt: it goes with the
-    // message.
+    // Enter sends, on a computer.
     wide.js("(document.querySelector('.chat-box').focus(), true)");
     wide.type_str("from a computer");
     wide.press_key("Enter");
-    s.wait_text(&long, "tally.csv from a computer");
+    s.wait_text(&long, "from a computer");
     click(&wide, "Terminal", &button("Terminal"));
     wide.wait("the terminal again", "!!document.querySelector('.station-main.zoomed .pane .xterm-rows') && !document.querySelector('.chat-pane')");
 }

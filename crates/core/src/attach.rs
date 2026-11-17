@@ -45,6 +45,24 @@ pub const WITH_MESSAGE_MAX: usize = 10;
 /// The words before a file's path in the message the program is given.
 pub const LEAD: &str = "Attached file: ";
 
+/// The owner's words without the wrapper a program puts round a message of
+/// several lines. Found with the real Claude Code, 17 Nov 2026: its session
+/// file had the message as `<pasted_content id="…">` … `</pasted_content id="…">`,
+/// and the bubble showed that.
+fn unwrapped(words: &str) -> &str {
+    let Some(rest) = words.strip_prefix("<pasted_content") else {
+        return words;
+    };
+    let Some(open) = rest.find('>') else {
+        return words;
+    };
+    let inner = &rest[open + 1..];
+    match inner.rfind("</pasted_content") {
+        Some(close) if inner[close..].trim_end().ends_with('>') => inner[..close].trim(),
+        _ => words,
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct File {
     id: String,
@@ -388,7 +406,7 @@ impl Daemon {
                 if files.is_empty() {
                     continue;
                 }
-                item["text"] = json!(words.trim());
+                item["text"] = json!(unwrapped(words.trim()));
                 item["attachments"] = json!(files.iter().map(|f| view(f)).collect::<Vec<_>>());
             }
         }
@@ -404,6 +422,20 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_programs_wrapper_round_the_message_is_not_the_owners_words() {
+        let wrapped = "<pasted_content id=\"4d4f\">\nTwo files.\n\n</pasted_content id=\"4d4f\">";
+        assert_eq!(unwrapped(wrapped), "Two files.");
+        assert_eq!(
+            unwrapped("plain <pasted_content> words"),
+            "plain <pasted_content> words"
+        );
+        assert_eq!(
+            unwrapped("<pasted_content id=\"1\">never closed"),
+            "<pasted_content id=\"1\">never closed"
+        );
+    }
 
     /// The owner, 17 Nov 2026: "add a photo or document to the agent just
     /// like Claude or open ai". A name from a device is never a path, and
