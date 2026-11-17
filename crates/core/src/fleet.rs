@@ -764,19 +764,46 @@ pub(crate) fn tailscale_bin() -> Option<String> {
         ];
     }
     places.into_iter().find(|p| {
-        std::process::Command::new(p)
+        tailscale_cmd(p)
             .arg("version")
-            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+            .output()
+            .is_ok_and(|o| {
+                o.status.success() && says_a_version(&String::from_utf8_lossy(&o.stdout))
+            })
     })
+}
+
+/// Tailscale's program, to be run as a command. On a Mac the program inside
+/// the app is also the app: started with no terminal, as a station that
+/// starts at login is, it tries to open its window, prints "The Tailscale
+/// GUI failed to start" and ends with success. `TAILSCALE_BE_CLI` tells it
+/// which it is to be. (Found on the owner's Mac "monitoring", 17 Nov 2026:
+/// its station saw no machine of the fleet, and said Tailscale was not
+/// running, which it was.)
+pub(crate) fn tailscale_cmd(bin: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.env("TAILSCALE_BE_CLI", "1");
+    cmd
+}
+
+/// Is this what `tailscale version` prints: a version number first, and not
+/// words about a window that would not open.
+fn says_a_version(out: &str) -> bool {
+    out.trim_start()
+        .split(|c: char| c.is_whitespace() || c == '-')
+        .next()
+        .is_some_and(|v| {
+            let mut parts = v.split('.');
+            parts.clone().count() >= 2
+                && parts.all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
 }
 
 fn tailscale_json(args: &[&str]) -> Option<Value> {
     static BIN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     let bin = BIN.get_or_init(tailscale_bin).as_ref()?;
-    let out = std::process::Command::new(bin).args(args).output().ok()?;
+    let out = tailscale_cmd(bin).args(args).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -818,7 +845,7 @@ fn tailscale_whois(ip: IpAddr) -> Whois {
         // another address is the owner.
         return Whois::Unknown;
     };
-    let out = std::process::Command::new(bin)
+    let out = tailscale_cmd(bin)
         .args(["whois", "--json", &ip.to_string()])
         .output();
     match out {
@@ -1759,6 +1786,23 @@ impl crate::rounds::Link for Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The owner's Mac "monitoring" (17 Nov 2026): Tailscale's program,
+    /// started with no terminal, printed that its window failed to start and
+    /// ended with success, and the station took that for Tailscale.
+    #[test]
+    fn what_tailscale_prints_for_its_version_is_told_from_a_window_that_would_not_open() {
+        assert!(says_a_version("1.102.3\n  tailscale commit: 9329c36\n"));
+        assert!(says_a_version("1.104.5-t0123abcd\n"));
+        assert!(!says_a_version(
+            "The Tailscale GUI failed to start: The operation couldn\u{2019}t be completed. (Tailscale.CLIError error 3.)"
+        ));
+        assert!(!says_a_version(""));
+        let cmd = tailscale_cmd("tailscale");
+        assert!(cmd
+            .get_envs()
+            .any(|(k, v)| k == "TAILSCALE_BE_CLI" && v == Some(std::ffi::OsStr::new("1"))));
+    }
     use std::io::ErrorKind as K;
 
     /// The audit (FAILURES section 4): the owner was shown "golf:

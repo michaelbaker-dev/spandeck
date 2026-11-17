@@ -672,7 +672,7 @@ impl Daemon {
                     .get_or_init(crate::fleet::tailscale_bin)
                     .as_ref()
                     .ok_or(NoCert::NoTailscale)?;
-                let mut cmd = Command::new(bin);
+                let mut cmd = crate::fleet::tailscale_cmd(bin);
                 cmd.args(["cert", "--cert-file", "-", "--key-file", "-"]);
                 if min_validity {
                     cmd.args(["--min-validity", "504h"]);
