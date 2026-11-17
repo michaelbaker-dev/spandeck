@@ -6002,6 +6002,10 @@ fn pictures_of_the_phones_layout_view() {
 #[test]
 #[ignore = "merge tier: a browser"]
 fn add_a_machine_on_a_phone_is_typed_in_sight_and_says_what_happened() {
+    // Another kind of machine than this one, whichever this one is: a Mac
+    // on Apple silicon, or, where the test itself runs on one, a Linux PC.
+    let other = common::other_kind();
+    let (kind_target, kind_words, kind_tailscale) = (other.target, other.words, other.tailscale);
     use common::browser::Page;
     const RIGHT: &str = "c0rrect-horse-staple-91";
     let dir = tempfile::tempdir().unwrap();
@@ -6029,7 +6033,7 @@ fn add_a_machine_on_a_phone_is_typed_in_sight_and_says_what_happened() {
             (
                 format!("key-{name}"),
                 json!({"ID": format!("n-{name}"), "HostName": name, "DNSName": format!("{name}.tail0000.ts.net."),
-                    "OS": if i % 3 == 0 { "linux" } else { "macOS" }, "UserID": 7, "Online": true,
+                    "OS": kind_tailscale, "UserID": 7, "Online": true,
                     "TailscaleIPs": [format!("100.64.0.{}", i + 20)]}),
             )
         })
@@ -6068,7 +6072,7 @@ IFS= read -r boot; case "$boot" in printf*) echo "@spandeck script" ;; esac
 while IFS= read -r line; do case "$line" in "main 3<&0"*) break ;; esac; done
 echo "@spandeck step install"
 echo "This machine could not reach the release page"
-echo "@spandeck supply aarch64-apple-darwin network"
+echo "@spandeck supply {kind_target} network"
 IFS= read -r answer
 set -- $answer
 if [ "$1" != release ]; then echo "@spandeck fail supply"; exit 1; fi
@@ -6092,7 +6096,7 @@ exit 1
     // The release page, for the station: it holds a Mac release (a few
     // bytes; the stand-in above does not unpack it).
     let mac = format!(
-        "spandeck-{}-aarch64-apple-darwin.tar.gz",
+        "spandeck-{}-{kind_target}.tar.gz",
         common::fake_releases::TAG
     );
     let releases =
@@ -6386,7 +6390,7 @@ exit 1
     assert_eq!(
         page.js("[document.querySelector('.dialog .add-problem').innerText, !!document.querySelector('.dialog .add-worked'), !!document.querySelector('.dialog .add-note')]"),
         json!([
-            format!("kestrel cannot reach 127.0.0.1:{p}, and neither can alpha to fetch the macOS (Apple silicon) build; no other station of your fleet is answering now. Add it when a station of your fleet can reach 127.0.0.1:{p} (any of them then supplies it), or from a station that is the same kind of machine, which sends its own copy. No station of your fleet is known to be the same kind of machine as kestrel (macOS (Apple silicon)).", p = releases.port),
+            format!("kestrel cannot reach 127.0.0.1:{p}, and neither can alpha to fetch the {kind_words} build; no other station of your fleet is answering now. Add it when a station of your fleet can reach 127.0.0.1:{p} (any of them then supplies it), or from a station that is the same kind of machine, which sends its own copy. No station of your fleet is known to be the same kind of machine as kestrel ({kind_words}).", p = releases.port),
             false,
             false
         ])
@@ -6490,13 +6494,17 @@ fn supply_tailnet(dir: &std::path::Path, machines: &[(&str, &str, &str)]) {
 #[cfg_attr(windows, ignore = "the machines are stand-ins run by sh")]
 fn a_release_for_another_kind_of_machine_is_fetched_checked_kept_and_sent_over_ssh() {
     use common::fake_releases::{Releases, TAG};
+    // Another kind of machine than this one, whichever this one is: a Mac
+    // on Apple silicon, or, where the test itself runs on one, a Linux PC.
+    let other = common::other_kind();
+    let (kind_target, kind_words, kind_tailscale) = (other.target, other.words, other.tailscale);
     let dir = tempfile::tempdir().unwrap();
     let at = |p: &str| dir.path().join(p);
     for d in ["standin", "remote-bin", "pack"] {
         std::fs::create_dir_all(at(d)).unwrap();
     }
     // The Mac release: `spandeck` and `sd` that answer what the script asks.
-    let name = format!("spandeck-{TAG}-aarch64-apple-darwin");
+    let name = format!("spandeck-{TAG}-{kind_target}");
     std::fs::create_dir_all(at("pack").join(&name)).unwrap();
     for b in ["spandeck", "sd"] {
         executable(
@@ -6520,15 +6528,18 @@ fn a_release_for_another_kind_of_machine_is_fetched_checked_kept_and_sent_over_s
     supply_tailnet(
         &at("standin"),
         &[
-            ("studio", "macOS", "100.64.0.8"),
-            ("mini", "macOS", "100.64.0.9"),
-            ("rogue", "macOS", "100.64.0.10"),
+            ("studio", kind_tailscale, "100.64.0.8"),
+            ("mini", kind_tailscale, "100.64.0.9"),
+            ("rogue", kind_tailscale, "100.64.0.10"),
         ],
     );
     // The machines: Macs, by their `uname`, with no way out.
     executable(
         &at("remote-bin/uname"),
-        "#!/bin/sh\ncase \"$1\" in -m) echo arm64 ;; *) echo Darwin ;; esac\n",
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in -m) echo {} ;; *) echo {} ;; esac\n",
+            other.uname.1, other.uname.0
+        ),
     );
     executable(&at("remote-bin/curl"), "#!/bin/sh\nexit 7\n");
     executable(&at("remote-bin/sleep"), "#!/bin/sh\nexit 0\n");
@@ -6551,7 +6562,7 @@ while IFS= read -r line; do case "$line" in "main 3<&0"*) break ;; esac; done
     echo "@spandeck step install"
     echo "@spandeck supply ../../etc/passwd network"
     IFS= read -r answer; echo "first answer: $answer"
-    echo "@spandeck supply aarch64-apple-darwin network"
+    echo "@spandeck supply {kind_target} network"
     echo "second request sent"
     echo "@spandeck fail supply"
     exit 1 ;;
@@ -6603,7 +6614,7 @@ exec env -i PATH={dir}/remote-bin:/usr/bin:/bin HOME={dir}/$m/home TMPDIR={dir}/
     )
     .join("supply")
     .join(TAG)
-    .join("aarch64-apple-darwin.tar.gz");
+    .join(format!("{kind_target}.tar.gz"));
     let sent =
         format!("studio cannot reach {host}: sending spandeck {TAG} from alpha over SSH (1 KB)…");
 
@@ -6613,7 +6624,7 @@ exec env -i PATH={dir}/remote-bin:/usr/bin:/bin HOME={dir}/$m/home TMPDIR={dir}/
     let v = add("studio");
     let said = v["lines"].to_string();
     for piece in [
-        format!("studio cannot reach {host}. Getting spandeck for macOS (Apple silicon) on alpha to send it over SSH…"),
+        format!("studio cannot reach {host}. Getting spandeck for {kind_words} on alpha to send it over SSH…"),
         sent.clone(),
         format!("Received {} bytes, and their SHA-256 matches.", mac.len()),
         format!("Installed spandeck {TAG} to "),
@@ -6646,11 +6657,7 @@ exec env -i PATH={dir}/remote-bin:/usr/bin:/bin HOME={dir}/$m/home TMPDIR={dir}/
     let logged = logged.expect("the sending is in the ship's log");
     assert_eq!(
         (&logged["release"], &logged["platform"], &logged["bytes"]),
-        (
-            &json!(TAG),
-            &json!("aarch64-apple-darwin"),
-            &json!(mac.len())
-        ),
+        (&json!(TAG), &json!(kind_target), &json!(mac.len())),
         "{logged}"
     );
     assert!(logged["from"]
@@ -6711,7 +6718,7 @@ exec env -i PATH={dir}/remote-bin:/usr/bin:/bin HOME={dir}/$m/home TMPDIR={dir}/
             &json!("failed"),
             &json!("no_release"),
             &json!(format!(
-                "studio cannot reach {host}, and neither can alpha to fetch the macOS (Apple silicon) build; no other station of your fleet is answering now. Add it when a station of your fleet can reach {host} (any of them then supplies it), or from a station that is the same kind of machine, which sends its own copy. No station of your fleet is known to be the same kind of machine as studio (macOS (Apple silicon))."
+                "studio cannot reach {host}, and neither can alpha to fetch the {kind_words} build; no other station of your fleet is answering now. Add it when a station of your fleet can reach {host} (any of them then supplies it), or from a station that is the same kind of machine, which sends its own copy. No station of your fleet is known to be the same kind of machine as studio ({kind_words})."
             ))
         ),
         "{v}"
@@ -6730,7 +6737,7 @@ exec env -i PATH={dir}/remote-bin:/usr/bin:/bin HOME={dir}/$m/home TMPDIR={dir}/
     );
     assert!(
         v["problem"]["text"].as_str().unwrap().starts_with(&format!(
-            "alpha downloaded the macOS (Apple silicon) build of {TAG} to send to studio, and it does not match its published checksum, so nothing was sent and nothing was installed."
+            "alpha downloaded the {kind_words} build of {TAG} to send to studio, and it does not match its published checksum, so nothing was sent and nothing was installed."
         )),
         "{v}"
     );

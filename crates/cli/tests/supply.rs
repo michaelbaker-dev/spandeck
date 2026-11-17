@@ -565,12 +565,16 @@ fn executable(path: &std::path::Path, text: &str) {
 #[test]
 #[cfg_attr(windows, ignore = "the machine is a stand-in run by sh")]
 fn a_station_adding_a_machine_gets_its_release_from_a_station_that_can_reach_the_host() {
+    // Another kind of machine than this one, whichever this one is: a Mac
+    // on Apple silicon, or, where the test itself runs on one, a Linux PC.
+    let other = common::other_kind();
+    let (kind_target, kind_words, kind_tailscale) = (other.target, other.words, other.tailscale);
     let dir = tempfile::tempdir().unwrap();
     let at = |p: &str| dir.path().join(p);
     for d in ["standin", "remote-bin", "pack", "mac/home", "mac/tmp"] {
         std::fs::create_dir_all(at(d)).unwrap();
     }
-    let name = format!("spandeck-{TAG}-aarch64-apple-darwin");
+    let name = format!("spandeck-{TAG}-{kind_target}");
     std::fs::create_dir_all(at("pack").join(&name)).unwrap();
     for b in ["spandeck", "sd"] {
         executable(
@@ -595,7 +599,7 @@ fn a_station_adding_a_machine_gets_its_release_from_a_station_that_can_reach_the
         json!({"Self": {"UserID": 7, "HostName": "alpha", "TailscaleIPs": ["100.64.0.1"]},
             "User": {"7": {"LoginName": "owner@example.com"}},
             "Peer": {"key-studio": {"ID": "n-studio", "HostName": "studio", "DNSName": "studio.tail0000.ts.net.",
-                "OS": "macOS", "UserID": 7, "Online": true, "TailscaleIPs": ["100.64.0.8"]}}})
+                "OS": kind_tailscale, "UserID": 7, "Online": true, "TailscaleIPs": ["100.64.0.8"]}}})
         .to_string(),
     )
     .unwrap();
@@ -608,7 +612,10 @@ fn a_station_adding_a_machine_gets_its_release_from_a_station_that_can_reach_the
     );
     executable(
         &at("remote-bin/uname"),
-        "#!/bin/sh\ncase \"$1\" in -m) echo arm64 ;; *) echo Darwin ;; esac\n",
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in -m) echo {} ;; *) echo {} ;; esac\n",
+            other.uname.1, other.uname.0
+        ),
     );
     executable(&at("remote-bin/curl"), "#!/bin/sh\nexit 7\n");
     executable(&at("remote-bin/sleep"), "#!/bin/sh\nexit 0\n");
@@ -653,7 +660,7 @@ fn a_station_adding_a_machine_gets_its_release_from_a_station_that_can_reach_the
     );
     let said = v["lines"].to_string();
     for piece in [
-        "studio cannot reach 127.0.0.1:9. Getting spandeck for macOS (Apple silicon) on alpha to send it over SSH…".to_string(),
+        format!("studio cannot reach 127.0.0.1:9. Getting spandeck for {kind_words} on alpha to send it over SSH…"),
         format!("studio cannot reach 127.0.0.1:9, and neither can alpha: sending the release bravo fetched and checked, {TAG}, from alpha over SSH (1 KB)…"),
         format!("Received {} bytes, and their SHA-256 matches.", mac.len()),
         format!("Installed spandeck {TAG} to "),

@@ -2127,6 +2127,41 @@ pub mod fake_vault {
     }
 }
 
+/// A kind of machine other than the one the tests run on, for the tests in
+/// which a station must fetch a release it could not run itself (its own
+/// copy is sent only to a machine of its own kind: a test that named a Mac
+/// on Apple silicon as "another kind" was wrong on such a Mac).
+#[allow(dead_code)]
+pub struct OtherKind {
+    /// The release's platform name.
+    pub target: &'static str,
+    /// The same in the owner's words.
+    pub words: &'static str,
+    /// What Tailscale calls its system.
+    pub tailscale: &'static str,
+    /// What `uname -s` and `uname -m` say there.
+    pub uname: (&'static str, &'static str),
+}
+
+#[allow(dead_code)]
+pub fn other_kind() -> OtherKind {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        OtherKind {
+            target: "x86_64-unknown-linux-gnu",
+            words: "Linux (x86-64)",
+            tailscale: "linux",
+            uname: ("Linux", "x86_64"),
+        }
+    } else {
+        OtherKind {
+            target: "aarch64-apple-darwin",
+            words: "macOS (Apple silicon)",
+            tailscale: "macOS",
+            uname: ("Darwin", "arm64"),
+        }
+    }
+}
+
 /// A stand-in for the project's release page: one release, holding the same
 /// binary the tests run, so an update can be exercised end to end.
 #[allow(dead_code)]
