@@ -658,7 +658,9 @@ fn a_panes_tasks_its_model_and_its_cleared_notes_are_the_owners() {
     s.wait_text(&mute, "[fake] model switched to Sonnet 5.5");
     let named = wait_for("the model as the program named it", 10, || {
         let l = live(&mute);
-        (l["model"]["set"] == json!("Sonnet 5.5")).then_some(l)
+        // (Both: the model the agent last reported is read from its
+        // session a moment after the program's own word arrives.)
+        (l["model"]["set"] == json!("Sonnet 5.5") && !l["model"]["model"].is_null()).then_some(l)
     });
     assert_eq!(named["model"]["model"], json!("claude-opus-5-5"), "{named}");
     assert!(

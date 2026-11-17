@@ -403,6 +403,7 @@ class Conv {
     if (!this.log.isConnected) return;
     const to = this.stuck ? this.log.scrollHeight : this.top;
     if (Math.abs(this.log.scrollTop - to) > 1) this.log.scrollTop = to;
+    this.top = this.log.scrollTop;
     this.tall = this.log.clientHeight || this.tall;
     this.maybeRead();
   }
@@ -579,7 +580,10 @@ class Conv {
     }
     sync(this.log, out);
     for (const key of [...cache.keys()]) if (!used.has(key)) cache.delete(key);
-    if (this.stuck) this.log.scrollTop = this.log.scrollHeight;
+    // (Where it was put is where it is known to be: otherwise the next
+    // redraw takes the log for moved by the owner, and a log that has since
+    // grown, as fonts arrive, for one no longer at its end.)
+    if (this.stuck) { this.log.scrollTop = this.log.scrollHeight; this.top = this.log.scrollTop; }
     this.maybeRead();
   }
 
