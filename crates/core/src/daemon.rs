@@ -2952,6 +2952,10 @@ impl Daemon {
         if self.flag_on(crate::typed::INPUT_FLAG, true) && self.flag_on(crate::beat::FLAG, true) {
             caps.push(crate::typed::INPUT_CAP);
         }
+        // A recording is turned into text here, by the owner's program.
+        if self.cfg.speech.configured().is_some() {
+            caps.push(crate::speech::CAP);
+        }
         // The deck is also served over HTTPS, at `https.name` and `port`.
         if self.https.serving() {
             caps.push(crate::https::CAP);

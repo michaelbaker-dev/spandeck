@@ -22,6 +22,7 @@ import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS
 import { qrSvg } from './qr.js';
 import { initFailover } from './failover.js';
 import { sendAct } from './typed.js';
+import { initMic, micFor } from './mic.js';
 import { initChat, chatMenu, draftCount, conversation, faceOf, setFace, chatToggle, termBox, chatBeforeRender, chatAfterRender, chatPark, chatResized, sync as syncKids, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
 
 // The page opens in the look this browser last had, before anything is asked.
@@ -3401,25 +3402,12 @@ function composer(st, p) {
   box.addEventListener('input', () => { if (!sending) said.hidden = true; });
   // A key of the row: stamped like any key, so it is refused when late.
   const key1 = (bytes) => rpc(st, 'pane.input', { pane: p.id, data: bytes, ...(api.stamps ? { t: performance.now() } : {}) });
-  const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
-  let listening = null;
-  const mic = Speech ? h('button', { type: 'button', class: 'mic', title: 'Dictate', 'aria-label': 'Dictate', 'aria-pressed': 'false' }, '🎤') : null;
-  if (mic) mic.onclick = () => {
-    if (listening) { listening.stop(); return; }
-    const rec = new Speech();
-    const before = box.value ? box.value.replace(/\s*$/, ' ') : '';
-    rec.lang = navigator.language || 'en-US';
-    rec.interimResults = true;
-    rec.continuous = true;
-    rec.onresult = (e) => { box.value = before + Array.from(e.results, r => r[0].transcript).join(''); };
-    rec.onerror = (e) => { if (e.error !== 'aborted' && e.error !== 'no-speech') toast(e.error === 'not-allowed' ? 'Dictation needs microphone permission, and the HTTPS address of this station.' : 'Dictation stopped: ' + e.error, 'error'); };
-    rec.onend = () => { listening = null; mic.classList.remove('on'); mic.setAttribute('aria-pressed', 'false'); };
-    try { rec.start(); listening = rec; mic.classList.add('on'); mic.setAttribute('aria-pressed', 'true'); }
-    catch (e) { toast('Dictation is not available here. Use the microphone on the keyboard.', 'error'); }
-  };
+  // Dictation fills the box and sends nothing (mic.js).
+  const talk = micFor({ box, changed: () => box.dispatchEvent(new Event('input')), st: st || api.station });
+  const mic = talk.button;
   c = h('div', { class: 'composer' },
     h('div', { class: 'keys', role: 'group', 'aria-label': 'Keys' }, PHONE_KEYS.map(([label, bytes]) => h('button', { type: 'button', class: 'key', 'aria-label': KEY_NAMES[label] || label, onclick: () => key1(bytes) }, label))),
-    said,
+    said, talk.said,
     h('form', { class: 'composer-row', onsubmit: (e) => { e.preventDefault(); send(); } }, box, mic, sendBtn));
   composers.set(key, c);
   // What is being written goes with the owner between Chat and Terminal.
@@ -4096,6 +4084,13 @@ if (window.visualViewport) {
 
 // The conversation view is given what it needs of the page: nothing of it
 // reaches a station but through the calls the page already makes.
+// The microphone of every message box: where the secure deck is, and which
+// stations turn a recording into text.
+initMic({
+  api, hasCap, hopTo,
+  stationsWith: (cap) => S.fleet.stations.filter(s => s.state === 'online' && (s.caps || []).includes(cap)).map(s => s.station),
+  secureDeck: () => { const me = S.fleet.stations.find(s => s.self), t = me?.https; return t && t.on && t.name ? { origin: `https://${t.name}:${t.port}`, what: `${me.station}'s secure deck` } : null; },
+});
 initChat({
   api, isPhone, update, go, paneUrl, rpc, findPane, paneMenu, usage: usageDialog, online, onlineStations, panesOf, freeName, lastSessionNote, pref, setPref,
   AGENTS: AGENT_CHOICES,

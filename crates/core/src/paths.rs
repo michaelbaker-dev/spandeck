@@ -135,6 +135,10 @@ impl Paths {
     pub fn drops_dir(&self) -> PathBuf {
         self.state_dir.join("drops")
     }
+    /// A recording being transcribed (speech.rs): there only meanwhile.
+    pub fn speech_dir(&self) -> PathBuf {
+        self.state_dir.join("speech")
+    }
     pub fn log_file(&self) -> PathBuf {
         self.state_dir.join("spandeckd.log")
     }
@@ -209,6 +213,8 @@ pub struct Config {
     pub web_bind: Vec<String>,
     /// HTTPS on the station's Tailscale name (`[web]`, https.rs).
     pub web: WebConfig,
+    /// Speech to text by a program of the owner's (`[speech]`, speech.rs).
+    pub speech: SpeechConfig,
     pub keep_awake: bool,
     /// Stay awake whenever spandeckd runs, not only while an agent works, so
     /// the station can be reached from a phone at any time.
@@ -264,6 +270,36 @@ pub struct Config {
     /// set one while the station runs (`station.flags`), which wins.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub flags: BTreeMap<String, toml::Value>,
+}
+
+/// `[speech]`: a recording from the deck is turned into text by a program
+/// on this station (speech.rs). Off until `command` is set.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SpeechConfig {
+    /// The program and its arguments, run as written (no shell). `{file}`
+    /// is the recording's path; without it the path is the last argument.
+    /// It prints the text. Example, whisper.cpp:
+    /// `["whisper-cli", "-m", "/models/ggml-large-v3-turbo.bin", "-nt", "-np", "-f", "{file}"]`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+    /// The longest recording a deck makes for this station.
+    pub max_seconds: u64,
+    /// The largest recording taken.
+    pub max_bytes: usize,
+    /// How long the program is given before it is ended.
+    pub timeout_secs: u64,
+}
+
+impl Default for SpeechConfig {
+    fn default() -> Self {
+        SpeechConfig {
+            command: None,
+            max_seconds: 60,
+            max_bytes: 4 << 20,
+            timeout_secs: 60,
+        }
+    }
 }
 
 /// `[web]`: the Control Deck over HTTPS (https.rs).
@@ -328,6 +364,7 @@ impl Default for Config {
             web_port: 7391,
             web_bind: vec![],
             web: WebConfig::default(),
+            speech: SpeechConfig::default(),
             keep_awake: true,
             stay_awake: false,
             keep_awake_cmd: None,

@@ -302,8 +302,12 @@ On a computer a pane's title bar has **Chat**, which shows the same conversation
 of the terminal.
 
 Dictation: the message box is an ordinary text field, so the microphone on the phone's
-keyboard works everywhere. The 🎤 button uses the browser's own speech recognition; it
-appears only where the browser offers it and needs the HTTPS address (below).
+keyboard works everywhere, on the phone itself: on an iPhone that is the way to talk.
+The 🎤 button uses the browser's own speech recognition where the page is secure (the
+HTTPS address, below) and the browser has it; elsewhere it says why. It fills the box and
+never sends. A station can instead turn a recording into text with a program of your own
+(`[speech] command = ["whisper-cli", "-m", "…", "-f", "{file}"]` in its `config.toml`; off
+by default): the sound then stays on your machines.
 
 **HTTPS, and the deck saved on your phone.** Where Tailscale gives the machine a
 certificate (HTTPS certificates switched on for your tailnet, in Tailscale's admin

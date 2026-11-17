@@ -86,6 +86,14 @@ jobs:
       # twenty seconds.
       - name: Chat for every pane, and one chat for all of them (phone and computer, the keyboard)
         run: cargo test -p spandeck --test chat -- --ignored
+      # The microphone of the message box, with stand-ins for the browser's
+      # dictation and recorder: a start that throws, one that is never
+      # answered, results without end, a stop that is never heard, a hold
+      # never let go, a hidden page, a page that is not secure. And a
+      # recording turned into text by a stand-in for the owner's speech
+      # program, for the owner alone, and deleted. About fifteen seconds.
+      - name: The microphone never holds the page; a recording is the owner's alone and is deleted
+        run: cargo test -p spandeck --test mic -- --ignored
       # A terminal's history on a phone is the browser's to scroll: the rest
       # of it, with the browser's own touches. A pane another window holds
       # (sideways and up), the whole width, a program that prints more than
