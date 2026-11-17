@@ -5365,7 +5365,7 @@ fn the_rest_of_the_conversation_view() {
         json!({"name": "asks"}),
     );
     phone.goto(&pane(&asks));
-    phone.wait("the question", "document.querySelector('.chat-card.ask')?.innerText.includes('Which herons count?') && document.querySelectorAll('.chat-card.ask.terminal .key').length === 9 && !document.querySelector('.chat-card.held')");
+    phone.wait("the question", "document.querySelector('.chat-card.ask')?.innerText.includes('Which herons count?') && document.querySelectorAll('.chat-card.ask.terminal .key').length === 11 && !document.querySelector('.chat-card.held')");
     click(
         &phone,
         "Answer in the terminal",
