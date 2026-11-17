@@ -906,6 +906,316 @@ fn a_panes_tasks_its_model_and_its_cleared_notes_are_the_owners() {
     );
 }
 
+/// A pane whose program draws a list to choose from for whatever is typed.
+fn lister(s: &Station, name: &str, dir: &Path, picker: Value) -> String {
+    let id = pane(
+        s,
+        "fake",
+        name,
+        dir,
+        json!({"steps": [{"prompt": "x"}, {"turn_end": "ok"}], "on_input": [{"picker": picker}, {"turn_end": "ok"}]}),
+    );
+    s.wait_state(&id, "done");
+    id
+}
+
+/// Claude Code's own `/model` list, as captured (agents/picker.rs).
+fn model_list() -> Value {
+    json!({"title": "Select model", "marked": 4,
+        "choices": [["1.  Default (recommended)", "Opus 5.5 · Best for everyday, complex tasks"], ["2.  Opus 5.5", "For complex work and everyday tasks"],
+            ["3.  Fable 5.2", "For your toughest challenges"], ["4.  Sonnet 5.5", "Most efficient for simpler tasks"], ["5.  Haiku 5.5 ✔", "Fastest for quick answers"]],
+        "hint": "Enter to set as default · s to use this session only · Esc to cancel"})
+}
+
+fn shown(s: &Station, pane: &str, kind: &str) -> Value {
+    wait_for_or(
+        "the pane to say what its program shows",
+        10,
+        || format!("{}\n{}", s.pane(pane), s.text(pane)),
+        || {
+            let p = s.pane(pane);
+            (p["prompt"]["kind"] == json!(kind) && p["state"] == json!("needs_you")).then_some(p)
+        },
+    )
+}
+
+/// The owner's report of 17 Nov 2026: "When I type /model in Claude it
+/// gives me a list to pick from, I see that list in terminal but not in
+/// chat. I should see this in chat. Sometime an agent might give a
+/// multiple choice picker for questions it has, I'm worried that these
+/// won't show up in chat". And: "can a pick be [done] with a tap and not
+/// moving arrows?"
+///
+/// A list a pane's program draws is on the pane's record, with its rows;
+/// the pane needs the owner and says what it shows. A row is chosen with
+/// one call: the station moves the program's marker there, reads the
+/// screen again, and confirms once. A list that changes under the choice
+/// is not confirmed. Where several may be ticked, each is ticked. One
+/// that grants something has no rows to choose. A message sent meanwhile
+/// is not typed into it, and no agent chooses.
+#[test]
+#[ignore = "merge tier: seven panes, each drawing a list"]
+fn a_list_a_program_draws_is_chosen_from_and_never_typed_into() {
+    let s = Station::start("alpha");
+    let dir = folder(&s, "mere");
+    let ask = |pane: &str, text: &str| {
+        s.call(
+            "pane.input",
+            json!({"pane": pane, "data": format!("{text}\r")}),
+        )
+    };
+
+    // `/model`: its rows, as Claude Code draws them.
+    let model = lister(&s, "model", &dir, model_list());
+    ask(&model, "/model");
+    let p = shown(&s, &model, "picker");
+    assert_eq!(
+        p["needs_reason"],
+        json!("shows a list to choose from: Select model"),
+        "{p}"
+    );
+    let k = &p["prompt"]["picker"];
+    let rows: Vec<(u64, &str, bool)> = k["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["number"].as_u64().unwrap(),
+                c["text"].as_str().unwrap(),
+                c["marked"] == json!(true),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (1, "Default (recommended)", false),
+            (2, "Opus 5.5", false),
+            (3, "Fable 5.2", false),
+            (4, "Sonnet 5.5", false),
+            (5, "Haiku 5.5", true)
+        ]
+    );
+    assert_eq!(
+        (
+            &k["choices"][4]["current"],
+            &p["prompt"]["session_key"],
+            &k["class"]
+        ),
+        (&json!(true), &json!(true), &json!("plain")),
+        "{k}"
+    );
+    assert_eq!(
+        conversation(&s, &model, true)["live"]["prompt"]["kind"],
+        json!("picker")
+    );
+    // A message is not typed into it; an agent cannot choose.
+    let held = s
+        .try_call(
+            "pane.paste",
+            json!({"pane": model, "text": "count the egrets too", "enter": true}),
+        )
+        .unwrap_err();
+    assert!(
+        held.code == "invalid" && held.message.contains("choose from what it shows"),
+        "{held}"
+    );
+    let refused = s
+        .call_as_pane(
+            &model,
+            "pane.pick",
+            json!({"pane": model, "text": "Fable 5.2"}),
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, "denied");
+    // The third row, by one call: two arrows up, read again, Enter once.
+    let picked = s.call("pane.pick", json!({"pane": model, "text": "Fable 5.2"}));
+    assert_eq!(picked["picked"], json!(true), "{picked}");
+    s.wait_text(&model, "[fake] picked: 3.  Fable 5.2");
+    assert!(
+        !s.text(&model).contains("swallowed") && !s.text(&model).contains("egrets"),
+        "{}",
+        s.text(&model)
+    );
+    let after = wait_for("the pane as it was", 10, || {
+        let p = s.pane(&model);
+        p["prompt"].is_null().then_some(p)
+    });
+    assert_eq!(
+        (&after["state"], &after["needs_reason"]),
+        (&json!("done"), &Value::Null),
+        "{after}"
+    );
+    // Its key for the session alone, only where its key names say so.
+    ask(&model, "/model");
+    shown(&s, &model, "picker");
+    s.call(
+        "pane.pick",
+        json!({"pane": model, "text": "Opus 5.5", "key": "session"}),
+    );
+    s.wait_text(&model, "[fake] picked for this session: 2.  Opus 5.5");
+    wait_for("the list gone from the pane's record", 10, || {
+        s.pane(&model)["prompt"].is_null().then_some(())
+    });
+    // The model sheet's "For this session only" goes the same way:
+    // the program's command, its list read, the row, its key.
+    s.wait_state(&model, "done");
+    let only = s.call(
+        "pane.model",
+        json!({"pane": model, "model": "sonnet", "session_only": true}),
+    );
+    assert_eq!(
+        (&only["session_only"], &only["picked"]),
+        (&json!(true), &json!("Sonnet 5.5")),
+        "{only}"
+    );
+    s.wait_text(&model, "[fake] picked for this session: 4.  Sonnet 5.5");
+    s.wait_state(&model, "done");
+    wait_for("the list gone from the pane's record", 10, || {
+        s.pane(&model)["prompt"].is_null().then_some(())
+    });
+    let none = s.call(
+        "pane.model",
+        json!({"pane": model, "model": "gpt-9", "session_only": true}),
+    );
+    assert_eq!(
+        (&none["ok"], &none["closed"]),
+        (&json!(false), &json!(true)),
+        "{none}"
+    );
+    s.wait_text(&model, "[fake] list closed");
+
+    // A list that is another list after the first move: not confirmed.
+    let turns = lister(
+        &s,
+        "turns",
+        &dir,
+        json!({"title": "Pick a bank", "choices": ["east", "west", "island", "weir"], "change_after": 1}),
+    );
+    ask(&turns, "/bank");
+    shown(&s, &turns, "picker");
+    let stopped = s.call("pane.pick", json!({"pane": turns, "text": "island"}));
+    assert!(
+        stopped["picked"] == json!(false)
+            && stopped["why"]
+                .as_str()
+                .unwrap()
+                .contains("nothing was confirmed"),
+        "{stopped}"
+    );
+    assert!(
+        !s.text(&turns).contains("[fake] picked"),
+        "{}",
+        s.text(&turns)
+    );
+    let no_key = s
+        .try_call(
+            "pane.pick",
+            json!({"pane": turns, "text": "east", "key": "session"}),
+        )
+        .unwrap_err();
+    assert_eq!(no_key.code, "invalid");
+
+    // Several may be ticked: each with one call, then the program's Enter.
+    let many = lister(
+        &s,
+        "many",
+        &dir,
+        json!({"title": "Which rivers", "multi": true, "choices": ["Avon", "Exe", "Tamar"], "hint": "Space to toggle · Enter to confirm · Esc to cancel"}),
+    );
+    ask(&many, "/rivers");
+    let p = shown(&s, &many, "picker");
+    assert_eq!(p["prompt"]["picker"]["multi"], json!(true));
+    for river in ["Exe", "Tamar"] {
+        assert_eq!(
+            s.call(
+                "pane.pick",
+                json!({"pane": many, "text": river, "key": "space"})
+            )["picked"],
+            json!(true)
+        );
+    }
+    wait_for("both ticked", 5, || {
+        let c = s.pane(&many)["prompt"]["picker"]["choices"].clone();
+        (c[1]["checked"] == json!(true)
+            && c[2]["checked"] == json!(true)
+            && c[0]["checked"] == json!(false))
+        .then_some(())
+    });
+    s.call("pane.input", json!({"pane": many, "data": "\r"}));
+    s.wait_text(&many, "[fake] picked: Exe, Tamar");
+
+    // A long one: what its window shows, and that there is more.
+    let long = lister(
+        &s,
+        "long",
+        &dir,
+        json!({"title": "Resume session", "window": 4, "choices": (1..=9).map(|n| format!("session {n}")).collect::<Vec<_>>()}),
+    );
+    ask(&long, "/resume");
+    let p = shown(&s, &long, "picker");
+    assert_eq!(
+        (
+            p["prompt"]["picker"]["choices"].as_array().unwrap().len(),
+            &p["prompt"]["picker"]["more_below"],
+            &p["prompt"]["picker"]["more_above"]
+        ),
+        (4, &json!(true), &json!(false)),
+        "{p}"
+    );
+    s.call(
+        "pane.input",
+        json!({"pane": long, "data": "\u{1b}[B".repeat(5)}),
+    );
+    wait_for("the list scrolled", 5, || {
+        let k = s.pane(&long)["prompt"]["picker"].clone();
+        (k["more_above"] == json!(true)
+            && k["choices"].as_array().is_some_and(|c| {
+                c.iter()
+                    .any(|c| c["text"] == json!("session 6") && c["marked"] == json!(true))
+            }))
+        .then_some(())
+    });
+
+    // One that grants something, and Claude Code's own `/permissions`
+    // (nothing marked): shown as the screen, with no row to choose.
+    let grant = lister(
+        &s,
+        "grant",
+        &dir,
+        json!({"title": "Allow calling this tool?", "choices": ["Yes", "Yes, and don't ask again", "No"]}),
+    );
+    ask(&grant, "go");
+    let p = shown(&s, &grant, "screen");
+    assert_eq!(
+        (&p["needs_reason"], &p["prompt"]["picker"]["class"]),
+        (
+            &json!("shows something in its terminal: Allow calling this tool?"),
+            &json!("grants")
+        ),
+        "{p}"
+    );
+    let no = s.call("pane.pick", json!({"pane": grant, "text": "Yes"}));
+    assert!(no["picked"] == json!(false), "{no}");
+    assert!(!s.text(&grant).contains("[fake] picked"));
+    let perms = lister(
+        &s,
+        "perms",
+        &dir,
+        json!({"raw": spandeck_agents::picker::real::PERMISSIONS.lines().collect::<Vec<_>>()}),
+    );
+    ask(&perms, "/permissions");
+    let p = shown(&s, &perms, "screen");
+    assert_eq!(p["prompt"]["picker"]["choices"], json!([]), "{p}");
+    assert!(s
+        .try_call(
+            "pane.paste",
+            json!({"pane": perms, "text": "hello", "enter": true})
+        )
+        .is_err());
+}
+
 /// OpenCode's database in a station's throwaway home, with the two tables
 /// of OpenCode 2.3.0 that are read (their columns as its own schema has
 /// them, the ones not read left out where it allows).
@@ -2567,6 +2877,175 @@ mod in_a_browser {
                 && last[1] == json!("alert"),
             "{last}"
         );
+    }
+
+    /// The owner, 17 Nov 2026: "Can you make any picker in a nice window,
+    /// something that look good, can a pick be [done] with a tap and not
+    /// moving arrows? Or both?"
+    ///
+    /// At a phone's size: when a pane's program draws a list, a sheet
+    /// opens over Chat by itself with its rows; a tap on a row chooses it
+    /// (for `/model`, for the session alone) and the sheet goes when the
+    /// program's list goes. Claude Code's own `/config` and `/resume`, as
+    /// captured, are sheets with their tabs, their search field, their
+    /// values and their two-row entries. A list that grants something is
+    /// shown as its screen with keys. On a computer the same window, and
+    /// the arrow keys in it go to the program.
+    #[test]
+    #[ignore = "merge tier: a browser"]
+    fn a_programs_list_is_a_window_in_chat_and_a_tap_chooses() {
+        use spandeck_agents::picker::real;
+        let s = Station::start("alpha");
+        let dir = folder(&s, "mere");
+        let raw = |text: &str| json!({"raw": text.lines().collect::<Vec<_>>()});
+        let model = lister(&s, "model", &dir, model_list());
+        let config = lister(&s, "config", &dir, raw(real::CONFIG));
+        let resume = lister(&s, "resume", &dir, raw(real::RESUME));
+        let many = lister(
+            &s,
+            "many",
+            &dir,
+            json!({"title": "Which rivers", "multi": true, "choices": [["Avon", "slow, wide"], ["Exe", "fast"], ["Tamar", "tidal"]], "hint": "Space to toggle · Enter to confirm · Esc to cancel"}),
+        );
+        let grant = lister(
+            &s,
+            "grant",
+            &dir,
+            json!({"title": "Allow calling this tool?", "choices": ["Yes", "Yes, and don't ask again", "No"]}),
+        );
+        let page = Page::open(&s, 390, 844);
+        page.phone_screen();
+        let open = |id: &str| {
+            page.goto(&format!("#/s/alpha/p/{id}"));
+            page.wait("the pane's chat", &format!("location.hash.endsWith('{id}') && !!document.querySelector('.phone-chat .chat-box')"));
+        };
+        let win = "document.querySelector('.dialog.list-sheet')";
+
+        // `/model`, sent from Chat... which is the model sheet's; typed
+        // in the terminal it is the program's own list, as a window.
+        open(&model);
+        s.call("pane.input", json!({"pane": model, "data": "/model\r"}));
+        let sheet = page.wait("the window, by itself", &format!("(w => w && w.querySelectorAll('.list-opt').length === 5 && [w.querySelector('h2').innerText, [...w.querySelectorAll('.list-opt')].map(o => [o.querySelector('b').innerText, o.classList.contains('on'), !!o.querySelector('.model-tick'), Math.round(o.getBoundingClientRect().height) >= 48]), [...w.querySelectorAll('.list-foot button')].map(b => b.innerText), Math.round(w.getBoundingClientRect().bottom), getComputedStyle(w).borderTopLeftRadius])({win})"));
+        assert_eq!(sheet[0], json!("Select model"));
+        assert_eq!(
+            sheet[1][2],
+            json!(["3. Fable 5.2", false, false, true]),
+            "{sheet}"
+        );
+        assert_eq!(
+            sheet[1][4],
+            json!(["5. Haiku 5.5", true, true, true]),
+            "{sheet}"
+        );
+        assert_eq!(
+            sheet[2],
+            json!(["This session only", "Set as default", "Cancel"])
+        );
+        assert_eq!(
+            (&sheet[3], &sheet[4]),
+            (&json!(844), &json!("18px")),
+            "a sheet from the bottom: {sheet}"
+        );
+        shoot(&page, "window-model");
+        // One tap: the row, for this session only. No arrows of the owner's.
+        page.js(&format!("[...{win}.querySelectorAll('.list-opt')].find(o => o.dataset.text === 'Fable 5.2').click()"));
+        assert_eq!(page.wait("it says it is choosing", &format!("(o => o && o.innerText.includes('choosing') || !{win})([...({win} || document).querySelectorAll('.list-opt.busy')][0])")), json!(true));
+        s.wait_text(&model, "[fake] picked for this session: 3.  Fable 5.2");
+        page.wait(
+            "the window gone with the program's list",
+            &format!("!{win} && !document.querySelector('.phone-chat .list-line')"),
+        );
+
+        // `/config`: tabs, the search field, values at the right, more below.
+        open(&config);
+        s.call("pane.input", json!({"pane": config, "data": "/config\r"}));
+        let cfg = page.wait("the settings window", &format!("(w => w && w.querySelector('.list-value') && [[...w.querySelectorAll('.list-tab')].map(t => t.innerText), w.querySelector('.list-filter').placeholder, (o => [o.querySelector('b').innerText, o.querySelector('.list-value').innerText])([...w.querySelectorAll('.list-opt')].find(o => o.dataset.text === 'Session recap')), !![...w.querySelectorAll('.list-more')].find(b => b.innerText.includes('more rows'))])({win})"));
+        assert_eq!(
+            cfg,
+            json!([
+                ["Settings", "Status", "Config", "Usage", "Stats"],
+                "Search settings…",
+                ["Session recap", "on"],
+                true
+            ])
+        );
+        shoot(&page, "window-config");
+        // What is typed in its field goes to the program as keys.
+        page.js(&format!("(f => {{ f.value = 'rec'; f.dispatchEvent(new Event('input')); return true; }})({win}.querySelector('.list-filter'))"));
+        page.js(&format!("{win}.querySelector('.list-cancel').click()"));
+        s.wait_text(&config, "[fake] the list swallowed: rec");
+        page.wait("closed by the program's Esc", &format!("!{win}"));
+
+        // `/resume`: entries of two rows.
+        open(&resume);
+        s.call("pane.input", json!({"pane": resume, "data": "/resume\r"}));
+        let res = page.wait("the sessions window", &format!("(w => w && w.querySelectorAll('.list-opt').length >= 3 && (o => [o.querySelector('b').innerText, o.querySelector('.list-name .muted').innerText, o.classList.contains('on')])([...w.querySelectorAll('.list-opt')].find(o => o.dataset.text === 'Heron counts for the marsh survey')))({win})"));
+        assert_eq!(
+            res,
+            json!([
+                "Heron counts for the marsh survey",
+                "⧉ 2 28 seconds ago · main · 86.5MB",
+                true
+            ])
+        );
+        shoot(&page, "window-resume");
+        page.js(&format!("{win}.querySelector('.list-cancel').click()"));
+        page.wait("closed", &format!("!{win}"));
+
+        // Several to tick, then Done.
+        open(&many);
+        s.call("pane.input", json!({"pane": many, "data": "/rivers\r"}));
+        page.wait(
+            "the rivers",
+            &format!("(w => w && w.querySelectorAll('.list-opt').length === 3)({win})"),
+        );
+        for river in ["Exe", "Tamar"] {
+            page.wait("a tap ticks", &format!("(o => o && !o.disabled && (o.click(), true))([...{win}.querySelectorAll('.list-opt')].find(o => o.dataset.text === '{river}' && o.querySelector('.ask-mark').innerText === ''))"));
+            page.wait("ticked", &format!("(o => o && o.querySelector('.ask-mark').innerText === '✓')([...({win} || document).querySelectorAll('.list-opt')].find(o => o.dataset.text === '{river}'))"));
+        }
+        shoot(&page, "window-multi");
+        page.js(&format!("{win}.querySelector('.list-done').click()"));
+        s.wait_text(&many, "[fake] picked: Exe, Tamar");
+
+        // One that grants: its screen and the keys, no row that says Yes.
+        open(&grant);
+        s.call("pane.input", json!({"pane": grant, "data": "go\r"}));
+        let scr = page.wait("the screen in the window", &format!("(w => w && w.querySelector('.list-screen') && w.querySelector('.list-screen').innerText.includes('Allow calling this tool?') && [w.querySelectorAll('.list-opt').length, w.querySelector('.list-window p').innerText, [...w.querySelectorAll('.wait-keys .key')].map(k => k.innerText).join(' ')])({win})"));
+        assert_eq!(scr[0], json!(0));
+        assert!(
+            scr[1].as_str().unwrap().contains("only you should grant"),
+            "{scr}"
+        );
+        assert!(
+            scr[2].as_str().unwrap().contains("Enter") && scr[2].as_str().unwrap().contains("↓"),
+            "{scr}"
+        );
+        shoot(&page, "window-grants-screen");
+        // A message written meanwhile stays in the box.
+        page.js(&format!("{win}.querySelector('.icon-btn').click()"));
+        page.wait(
+            "the line that opens it again",
+            "!!document.querySelector('.phone-chat .list-line .list-open')",
+        );
+        page.js(&say(".phone-chat", "count the egrets too"));
+        page.wait("the message kept", "(p => p && !p.hidden && p.innerText.includes('choose from what it shows'))(document.querySelector('.phone-chat .send-said'))");
+        s.call("pane.input", json!({"pane": grant, "data": "\u{1b}"}));
+
+        // A computer: the same window, and its keys go to the program.
+        let wide = Page::open(&s, 1300, 900);
+        wide.goto(&format!("#/s/alpha/p/{model}"));
+        wide.wait(
+            "the pane",
+            "!!document.querySelector('.chat-pane .chat-box')",
+        );
+        s.wait_state(&model, "done");
+        s.call("pane.input", json!({"pane": model, "data": "/model\r"}));
+        wide.wait("the window on a computer", &format!("(w => w && w.querySelectorAll('.list-opt').length === 5 && w.getBoundingClientRect().width < 900)({win})"));
+        wide.js(&format!("({win}.focus(), {win}.dispatchEvent(new KeyboardEvent('keydown', {{key: 'ArrowUp', bubbles: true}})), true)"));
+        wide.wait("the window follows the program's marker", &format!("(o => o && o.dataset.text === 'Sonnet 5.5')({win} && {win}.querySelector('.list-opt.on'))"));
+        shoot(&wide, "window-model-desktop");
+        wide.js(&format!("({win}.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', bubbles: true}})), true)"));
+        s.wait_text(&model, "[fake] picked: 4.  Sonnet 5.5");
     }
 
     /// Pictures of each kind of pane's Chat, for a human to lay side by

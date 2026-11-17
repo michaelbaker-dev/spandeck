@@ -499,8 +499,52 @@ Enter (`pane.input {data: "\r"}`) switches and Esc goes back. The pane's state i
 `prompt` is in `pane.list` and `pane.get`. When the question follows `pane.model`'s own
 command the station answers it and no `prompt` is ever set.
 
+**A list the program draws to choose from** (17 Nov 2026; `crates/agents/src/picker.rs`,
+`crates/core/src/picker.rs`). `prompt` is also
+`{kind: "picker" | "screen", name, since_ms, session_key, picker}`:
+
+| Field | Meaning |
+|---|---|
+| `kind` | `picker`: a list read whole from the screen that grants nothing: draw its rows; a row is chosen with `pane.pick`. `screen`: the program shows something with key names under it that is a grant (trust, a permission, a sign-in: `picker.class == "grants"`) or has nothing marked (`choices` empty): show the screen itself (`pane.text`) with keys (`pane.input`), never a row. |
+| `name` | Its title. The pane is `needs_you`, with `needs_reason` `shows a list to choose from: <title>` or `shows something in its terminal: <title>`. |
+| `picker.title`, `about`, `tabs` | The first row of words above the list, the rows under it, and the title row's parts when it is a row of tabs. |
+| `picker.choices[]` | `{text, detail?, marked, checked?, number?, current?, submenu?}`: the row's words; its second column or the words under it; the program's marker is on it; ticked (where `multi`); the program's own number; the program marks it as in use (`✔`); it opens another list (`▸`). Exactly one is `marked`. Only what the screen shows now: 40 at most. |
+| `picker.multi`, `more_above`, `more_below` | Several may be ticked; the program says its list goes on (send arrow keys with `pane.input` and the next look has the rows). |
+| `picker.free_text` | `null`, or the words in its field to type a filter in: type through with `pane.input`, a letter at a time. |
+| `picker.footer`, `hint` | Rows between the list and the key names, and the key names as the program wrote them. |
+| `session_key` | Its key names say `s` chooses for the session alone (Claude Code's `/model`). |
+
+Read by structure, not by words: the screen ends with a row of key names; above it rows in
+one column of which exactly one carries the program's marker (`❯`, `›`), set in from the
+edge. It is said once it is read the same at two looks (half a second), and cleared when it
+is gone. Known from real screens: Claude Code 2.1.326's `/model`, `/config`, `/resume` and
+`/permissions`. Other programs' lists are read only as far as they have this structure;
+Antigravity's marker (`>` at the edge) is not read.
+
+## `pane.pick`
+
+The owner's only (an agent, a station for itself and the read-only caller are refused).
+
+```
+{pane, text, key?}   →   {"ok": true, "picked": true}
+                         {"ok": false, "picked": false, "why": "the list changed, or its marker did not reach that row: nothing was confirmed. Look again"}
+```
+
+`text` is a choice's `text` as `prompt.picker` gave it; it must be one row of the list on
+the screen now. The station sends the arrow keys that take the program's marker there,
+reads the screen again, and presses the key **only when the marker is on the row with the
+same words and the list is the same list**; else nothing is confirmed. `key`: `enter` (the
+default), `space` (tick it; only where `multi`), `session` (`s`; only where `session_key`).
+Never for a `screen`. Keys only, never pasted text.
+
+`pane.model {pane, model, session_only: true}` (Claude Code): types `/model`, waits for its
+list, takes the marker to the model's row ("opus" is the row that begins "Opus") and
+presses `s`. `{session_only: true, picked}`; or `ok: false` with `why` (and `closed: true`
+when the model is not a row of the list, which is then closed with Esc).
+`live.model.only_session` says the program has such a list.
+
 **While a question of the program's own is on a pane's screen** (this one, `trust.asks`,
-`hooks_trust.asks`), `pane.paste`, `pane.send_text`, `agents.command` and `pane.model` type
+`hooks_trust.asks`, or a `picker`/`screen` prompt), `pane.paste`, `pane.send_text`, `agents.command` and `pane.model` type
 nothing: the first two answer `invalid` ("not sent: … is asking … in this pane"), the others
 `sent: false` with `why`. Keep what was written and say why. `pane.input` is not refused.
 

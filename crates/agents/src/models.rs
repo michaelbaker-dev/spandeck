@@ -47,6 +47,9 @@ pub struct Menu {
     /// pane that is started again with them and changes nothing else.
     pub start_model: Option<&'static str>,
     pub start_effort: Option<&'static str>,
+    /// The command that opens the program's own list of models, when that
+    /// list has a key that chooses for the session alone.
+    pub session_list: Option<&'static str>,
     /// Where this was read, and when.
     pub source: &'static str,
 }
@@ -106,6 +109,9 @@ const CLAUDE: Menu = Menu {
     // Its documentation names both flags (model-config.md).
     start_model: Some("--model"),
     start_effort: Some("--effort"),
+    // Captured from 2.1.326 on 17 Nov 2026: `/model` draws "Select
+    // model", and its key names end "s to use this session only".
+    session_list: Some("/model"),
     source: "code.claude.com/docs/en/model-config.md and commands.md, read 16 Nov 2026",
 };
 
@@ -129,6 +135,7 @@ const CODEX: Menu = Menu {
     saves: "",
     start_model: None,
     start_effort: None,
+    session_list: None,
     source: "learn.chatgpt.com/docs/developer-commands and codex-rs/tui at rust-v0.169.0, read 16 Nov 2026",
 };
 
@@ -145,6 +152,7 @@ const OPENCODE: Menu = Menu {
     saves: "",
     start_model: None,
     start_effort: None,
+    session_list: None,
     source: "opencode.ai/docs/tui/, read 16 Nov 2026",
 };
 
@@ -165,6 +173,7 @@ const ANTIGRAVITY: Menu = Menu {
     saves: "Antigravity keeps an effort set this way as its default for new sessions.",
     start_model: None,
     start_effort: None,
+    session_list: None,
     source: "antigravity.google/docs/cli/reference/ and /commands/effort/, read 16 Nov 2026",
 };
 

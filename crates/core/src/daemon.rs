@@ -1705,6 +1705,9 @@ impl Daemon {
         trust.extend(self.hooks_trust_look());
         // And Claude Code's "Switch model?" (modelswitch.rs).
         trust.extend(self.model_switch_look());
+        // And any list a program draws to choose from (picker.rs).
+        let lists = self.picker_look(&trust);
+        trust.extend(lists);
         for p in self.list_panes() {
             let (agent, hooks_seen, exited, state, reason) = {
                 let m = p.meta.lock().unwrap();

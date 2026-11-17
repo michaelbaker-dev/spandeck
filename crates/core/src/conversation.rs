@@ -571,6 +571,8 @@ impl Daemon {
             "efforts": if menu.effort_cmd.is_some() { menu.efforts } else { &[] },
             "can_set": menu.model_cmd.is_some(),
             "saves": menu.saves,
+            // Its own list of models has a key for "this session only".
+            "only_session": menu.session_list.is_some(),
             "only_pane": {
                 "model": menu.start_model.is_some(), "effort": menu.start_effort.is_some(),
                 // What the pane was last started with, for it alone.
@@ -593,6 +595,20 @@ impl Daemon {
         // For this pane alone: its program is started again with its own
         // flags and resumes its conversation. Nothing is typed, and the
         // program's saved defaults are not touched.
+        // For this session alone, through the program's own list.
+        if params.get("session_only").and_then(|v| v.as_bool()) == Some(true) {
+            let menu = spandeck_agents::models::menu(meta.agent);
+            let (Some(command), Some(model)) = (menu.and_then(|m| m.session_list), word("model"))
+            else {
+                return Err(invalid(
+                    "this program has no list of models with a key for the session alone",
+                ));
+            };
+            if !spandeck_agents::models::name_ok(model) {
+                return Err(invalid("a model's name is one word"));
+            }
+            return self.model_for_session(&p, command, model, by).await;
+        }
         if params.get("only_pane").and_then(|v| v.as_bool()) == Some(true) {
             let args = spandeck_agents::models::start_args(
                 meta.agent,
