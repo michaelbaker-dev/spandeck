@@ -305,7 +305,31 @@ Dictation: the message box is an ordinary text field, so the microphone on the p
 keyboard works everywhere. The 🎤 button uses the browser's own speech recognition; it
 appears only where the browser offers it and needs the HTTPS address (below).
 
-For HTTPS: `tailscale serve --bg 7391`, then open the station's `https://` Tailscale name.
+**HTTPS, and the deck saved on your phone.** Where Tailscale gives the machine a
+certificate (HTTPS certificates switched on for your tailnet, in Tailscale's admin
+console under DNS), a station also serves its deck at
+`https://<machine>.<tailnet>.ts.net:7392/`; the plain address keeps working. On macOS and
+Windows that happens by itself. On Linux Tailscale gives the certificate only to root or
+to a user it was told to trust: the deck offers **Turn on secure access (HTTPS)** in the
+station's menu, which asks for your password on that machine once and runs one command
+with it (`sudo tailscale set --operator=<you>`; the password is not kept). Turning HTTPS
+on publishes the machine's Tailscale name in the public certificate-transparency logs;
+the machine is still reached only from your tailnet. `[web] https = false` in
+`config.toml` turns it off.
+
+Open the HTTPS address on the phone and choose **Add to Home Screen**: the deck is then
+kept on the phone and opens even while that station is off.
+
+**When a station stops answering**, a deck that is open (or the saved one, when it is
+opened) lists the other stations of the fleet that answer, fastest first, and carries on
+through the fastest after five seconds unless you pick another or are writing; what you
+were writing stays. When the first station is back the deck offers to go back. A page
+loaded over plain HTTP can do this through any updated station; a page loaded over HTTPS
+only through a station that has HTTPS too, so turn it on at two stations at least.
+`[flags] page_failover = false` turns it off at a station.
+
+(`tailscale serve --bg 7391` still works as before, with the browser's device no longer
+checked against your Tailscale login, since every caller then comes from localhost.)
 
 A station can only be reached while it is awake. spandeck keeps it awake while an agent
 is working. To keep it awake whenever spandeckd runs, add `stay_awake = true` to

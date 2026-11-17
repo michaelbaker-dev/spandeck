@@ -996,6 +996,52 @@ pub mod browser {
             Page::open_at(&s.url("/"), s, width, height, signed_in)
         }
 
+        /// A browser at any address (a station's HTTPS deck, say), holding
+        /// `token` as a browser signed in from another device holds its
+        /// own. Nothing is waited for but the page's own script.
+        pub fn open_as_device(at: &str, token: &str, width: u32, height: u32, spki: &str) -> Page {
+            let page = Page::bare(width, height, spki);
+            page.tab.navigate_to(at).unwrap();
+            page.wait("the page's script", "!!document.getElementById('app')?.api");
+            page.js(&format!(
+                "localStorage.setItem('spandeck.token', '{token}')"
+            ));
+            page.tab.reload(false, None).unwrap();
+            page.wait("the deck", "!!document.querySelector('.topbar')");
+            page
+        }
+
+        /// `spki`: the key of the certificates the test's stations serve.
+        fn bare(width: u32, height: u32, spki: &str) -> Page {
+            let trust =
+                std::ffi::OsString::from(format!("--ignore-certificate-errors-spki-list={spki}"));
+            let path = chrome()
+                .expect("no Chrome found: set SPANDECK_CHROME to a Chrome or Chromium binary");
+            let browser = headless_chrome::Browser::new(
+                headless_chrome::LaunchOptions::default_builder()
+                    .path(Some(path))
+                    .window_size(Some((width, height)))
+                    .sandbox(false)
+                    // The stations' certificates are made in the test:
+                    // theirs are taken, by their key, and no other.
+                    .ignore_certificate_errors(false)
+                    .args(vec![trust.as_os_str()])
+                    .idle_browser_timeout(Duration::from_secs(120))
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+            let tab = (0..3)
+                .find_map(|_| browser.new_tab().ok())
+                .expect("the browser gave no tab in three tries");
+            Page {
+                _browser: browser,
+                tab,
+                wire: std::sync::Mutex::new(None),
+                menu_of: std::sync::Mutex::new(None),
+            }
+        }
+
         fn open_at(at: &str, s: &Station, width: u32, height: u32, signed_in: bool) -> Page {
             let path = chrome()
                 .expect("no Chrome found: set SPANDECK_CHROME to a Chrome or Chromium binary");

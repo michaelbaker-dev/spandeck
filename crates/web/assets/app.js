@@ -20,8 +20,9 @@ import { lookEditor } from './lookedit.js';
 import { phoneLook } from './phonelook.js';
 import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook, refreshAsked, refreshCorrected } from './perf.js';
 import { qrSvg } from './qr.js';
+import { initFailover } from './failover.js';
 import { sendAct } from './typed.js';
-import { initChat, conversation, faceOf, setFace, chatToggle, termBox, chatBeforeRender, chatAfterRender, chatPark, chatResized, sync as syncKids, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
+import { initChat, chatMenu, draftCount, conversation, faceOf, setFace, chatToggle, termBox, chatBeforeRender, chatAfterRender, chatPark, chatResized, sync as syncKids, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
 
 // The page opens in the look this browser last had, before anything is asked.
 applyRemembered();
@@ -216,6 +217,8 @@ function askFleet() {
   if (fleetAsking) { fleetNext ||= fleetAsking.then(() => askFleet()); return fleetNext; }
   fleetAsking = ask(null, 'fleet.view').then((v) => {
     S.fleet = v;
+    // This device's own list of the fleet's stations (failover.js).
+    fo.keep(v);
     // What was held of a station that is no longer listed is let go.
     for (const st of held.keys()) if (!v.stations.some(s => s.station === st)) { held.delete(st); S.busy.delete(st); for (const m of [S.panes, S.projects, S.tasks, S.msgs]) m.delete(st); }
     for (const s of v.stations) if (s.state !== 'online') S.busy.delete(s.station);
@@ -433,7 +436,9 @@ function lookTaken(doc) {
   // deck and not on another's.
   loadFonts(async (id) => {
     try { return await api.file('/api/font/' + id); } catch (e) {
-      for (const st of onlineStations().filter(x => x !== api.station)) {
+      // (While this page works through another station, that station is
+      // asked first: every station holds a copy.)
+      for (const st of onlineStations().filter(x => api.target || x !== api.station).sort((a, b) => (b === api.station) - (a === api.station))) {
         try { return Uint8Array.from(atob((await api.on(st, 'look.font.fetch', { id })).data_b64), c => c.charCodeAt(0)).buffer; } catch (e2) { /* the next station */ }
       }
       throw e;
@@ -650,6 +655,9 @@ function paneMenu(e, st, p, where, term) {
     { label: p.muted ? 'Unmute notifications' : 'Mute notifications', action: act('pane.set', { muted: !p.muted }) },
     '-',
     agent && { label: 'Usage', action: () => usageDialog(st, p) },
+    // What the pane's conversation adds: its background tasks, its cleared
+    // notes, and the numbers of the screen (chat.js).
+    ...chatMenu(st, p),
     { label: 'Show changes (diff)', action: () => diffPanel(st, p) },
     agent && { label: 'Standing orders for this pane', action: () => ordersPanel(st, p) },
     agent && p.project && alive && { label: 'Start a review loop on its work', action: () => rpc(st, 'recipe.review', { pane: p.id }).then(() => toast('Review loop started')) },
@@ -1429,7 +1437,7 @@ function versionBar() {
   versionKey = key;
   versionBox = h('div', { class: 'vault-prompt version-bar', role: 'region', 'aria-label': 'Stations on different versions' },
     h('div', { class: 'grow' },
-      h('b', {}, me ? `This deck is served by ${api.station}, which runs an older spandeck (${me.version})` : `${behind.length === 1 ? 'A station runs' : 'Some stations run'} an older spandeck`),
+      h('b', {}, me ? `This deck is ${api.target ? 'working through' : 'served by'} ${api.station}, which runs an older spandeck (${me.version})` : `${behind.length === 1 ? 'A station runs' : 'Some stations run'} an older spandeck`),
       h('div', { class: 'muted' }, `${on} ${on.includes(',') ? 'run' : 'runs'} ${newest}. Older: ${names(behind)}. `,
         me ? `What you see here can differ from the deck ${on.includes(',') ? 'those stations serve' : on + ' serves'}, and newer things may be missing. ` : 'A deck served by an older station can look different, and what the fleet keeps the same may not be kept there. ',
         behind.some(s => s.state !== 'online') ? 'A station that is off or cannot be controlled from here is updated at that machine.' : '')),
@@ -1735,9 +1743,13 @@ function hopOrigin(s) {
 // Called from the click itself, so the browser does not treat it as a popup.
 function hopOpen(s) {
   const origin = hopOrigin(s);
-  if (!origin) return;
+  if (origin) hopTo(origin, `${s.station}'s Control Deck`);
+}
+// The same steps towards an origin this page was told of by its own
+// station: another station's deck, or this station's secure deck (HTTPS).
+function hopTo(origin, what) {
   const opened = window.open(origin + '/#/fleet', '_blank');
-  if (!opened) return toast(`This browser did not let ${s.station}'s Control Deck open in a new window. Open ${origin} yourself and sign in there: the request shows on every station.`, 'error');
+  if (!opened) return toast(`This browser did not let ${what} open in a new window. Open ${origin} yourself and sign in there: the request shows on every station.`, 'error');
   hops.push({ opened, origin, until: Date.now() + 120000 });
 }
 addEventListener('message', (e) => {
@@ -1790,6 +1802,7 @@ function stationMenu(e, s) {
     up && { label: 'New project here…', action: () => newProjectDialog(s.station) },
     up && { label: 'Check this station', action: () => doctorPanel(s.station) },
     hopOrigin(s) && { label: `Open ${s.station}'s own Control Deck`, action: () => hopOpen(s) },
+    up && s.https && { label: s.https.on ? 'Secure access (HTTPS)…' : s.https.state === 'needs_operator' ? 'Turn on secure access (HTTPS)…' : 'Secure access (HTTPS)…', action: () => fo.httpsDialog(s) },
     { label: 'Agent programs and versions…', action: agentsPanel },
     { label: 'Usage: tokens and estimated cost…', action: fleetUsageDialog },
     { label: 'Performance…', action: () => go('#/perf') },
@@ -3827,6 +3840,18 @@ const clockOf = (at) => new Date(at).toLocaleTimeString([], { hour: '2-digit', m
 const linkChip = h('span', { class: 'chip link-chip', role: 'status', hidden: true });
 const linkAsOf = h('span', { class: 'chip warn as-of link-as-of', hidden: true });
 const linkBar = h('div', { class: 'link-bar', role: 'alert', hidden: true });
+// Carrying on through another station, the secure deck and the saved copy.
+const fo = initFailover({
+  api, update, render, hopOpen, hopTo,
+  fleet: () => S.fleet,
+  full: () => true,
+  refresh: () => refreshSoon(0),
+  linkTick: () => linkTick(),
+  // Something written and not sent: in a message box on the page, or kept
+  // for a view that is off it.
+  hasDraft: () => draftCount() > 0 || [...document.querySelectorAll('textarea:not(.xterm-helper-textarea):not(.copy-buffer)')].some(t => t.value.trim()),
+});
+root.failover = fo;
 let linkShown = 0, linkDrawn = 0, linkBarKey = '';
 // What is on the page is from before a gap, and is marked so.
 const linkOld = () => api.link().level >= 2;
@@ -3854,14 +3879,17 @@ function linkTick() {
     linkAsOf.title = `Everything on this page (who needs you, approvals, the inbox, every station's agents) is as it was at ${clockOf(l.asOf)}, when ${me} last answered.`;
   }
   linkBar.hidden = l.level < 3;
-  if (l.level >= 3) {
+  // A page that can carry on through another station offers the ones that
+  // answer, and takes the fastest after a few seconds (failover.js).
+  if (l.level < 3) fo.calm(linkBar);
+  if (l.level >= 3 && fo.drawBar(linkBar, l, spanWords)) { /* drawn there */ } else if (l.level >= 3) {
     const said = l.level >= 4 ? `${me} last answered ${spanWords(l.wall)} ago (${clockOf(l.asOf)}).` : `${me} has not answered for ${spanWords(l.wall)}.`;
     // The other stations' own decks, by the hand-over (`hopOpen`): the
     // buttons are made again only when the list changes, so that one being
     // clicked is not replaced under the finger.
     const others = S.fleet.stations.filter(s => hopOrigin(s));
     const key = others.map(s => s.station).join(' ');
-    if (key !== linkBarKey || !linkBar.firstChild) {
+    if (key !== linkBarKey || !linkBar.querySelector('.link-said') || linkBar.querySelector('.fo-list')) {
       linkBarKey = key;
       linkBar.replaceChildren(h('div', { class: 'grow' }, h('b', { class: 'link-said' }), ' Your agents keep running there. ',
         h('span', { class: 'muted' }, 'This page keeps trying by itself. What it shows is from before.')),
@@ -3886,7 +3914,8 @@ function linkBack(ms) {
   // A pane that said "typing is off" at a key says so no longer.
   for (const t of S.terms.values()) t.setLink(null);
   linkTick();
-  if (ms >= 10000) toast(`${api.station} is back after ${spanWords(ms)}.`);
+  // (A page that moved to another station said so itself.)
+  if (ms >= 10000 && !api.target) toast(`${api.station} is back after ${spanWords(ms)}.`);
   refreshSoon(0);
 }
 
@@ -3894,6 +3923,8 @@ function linkBack(ms) {
 
 let drawnAt = null;
 function render() {
+  // The saved copy of the deck, opened while no station answers.
+  if (fo.none()) { root.replaceChildren(fo.noneScreen()); return; }
   if (!api.connected && api.authError) {
     if (S.signIn) return;
     const needsSignIn = /^sign in/.test(api.authError);
@@ -3936,7 +3967,7 @@ function render() {
   if (!layCtx) arranging = null;
   // A view that is already on the page stays attached: replacing it would
   // take the keyboard away from whatever is being typed into.
-  const kids = [linkBar, signInBar(), versionBar(), vaultPromptBox, main].filter(Boolean);
+  const kids = [linkBar, fo.viaBar(), fo.shellBar(), fo.secureBar(), signInBar(), versionBar(), vaultPromptBox, main].filter(Boolean);
   if (root.children.length === kids.length + 1 && kids.every((k, i) => root.children[i + 1] === k)) root.replaceChild(topbar(), root.children[0]);
   else root.replaceChildren(topbar(), ...kids);
   const side = document.querySelector('.sidebar');
@@ -4017,15 +4048,21 @@ addEventListener('keydown', (e) => {
 // While the keyboard is up the bars that are not the pane's step aside.
 // (What the viewport is, is read each time: `window.visualViewport`.)
 if (window.visualViewport) {
+  // The tallest the screen has been at each width: a browser that makes
+  // the window itself shorter with the keyboard up (and not only what is
+  // in sight) still has its keyboard known.
+  const tallest = new Map();
   const fit = () => {
     const vv = window.visualViewport, app = document.getElementById('app');
+    const wide = Math.round(vv.width), was = tallest.get(wide) || 0;
+    if (Math.max(vv.height, window.innerHeight) > was) tallest.set(wide, Math.max(vv.height, window.innerHeight));
     // (Zoomed in with two fingers, what is in sight is a part of the page
     // and no keyboard: the page stays as it is, to be looked over.)
     const zoomed = (vv.scale || 1) > 1.01;
     const top = zoomed ? 0 : Math.max(0, Math.round(vv.offsetTop || 0));
     app.style.height = zoomed ? '' : vv.height + 'px';
     app.style.top = top ? top + 'px' : '';
-    const keyboard = !zoomed && vv.height < window.innerHeight * 0.78;
+    const keyboard = !zoomed && vv.height < Math.max(window.innerHeight, tallest.get(wide) || 0) * 0.78;
     app.classList.toggle('kbd', keyboard);
     app.classList.toggle('kbd-term', keyboard && !!document.activeElement?.closest?.('.xterm'));
     // Dialogs, sheets and toasts are in what is in sight too (app.css, the
@@ -4045,15 +4082,18 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('scroll', fit);
   window.addEventListener('resize', fit);
   window.addEventListener('scroll', fit, { passive: true });
-  document.addEventListener('focusin', () => setTimeout(fit, 50));
-  document.addEventListener('focusout', () => setTimeout(fit, 50));
+  // (And again once the keyboard has finished moving: iOS has told of the
+  // viewport's new size before it was final, and not again after.)
+  const soon = () => { for (const ms of [50, 350, 800]) setTimeout(fit, ms); };
+  document.addEventListener('focusin', soon);
+  document.addEventListener('focusout', soon);
   fit();
 }
 
 // The conversation view is given what it needs of the page: nothing of it
 // reaches a station but through the calls the page already makes.
 initChat({
-  api, isPhone, update, go, paneUrl, rpc, findPane, paneMenu, online, onlineStations, panesOf, freeName, lastSessionNote, pref, setPref,
+  api, isPhone, update, go, paneUrl, rpc, findPane, paneMenu, usage: usageDialog, online, onlineStations, panesOf, freeName, lastSessionNote, pref, setPref,
   AGENTS: AGENT_CHOICES,
   approvals: () => S.approvals,
   stations: () => stationsByName(),
@@ -4072,8 +4112,8 @@ api.onStatus(() => {
   render();
   if (had && had.el.isConnected && !document.querySelector('.dialog') && !had.el.contains(document.activeElement)) had.focus();
 });
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
-api.connect().then((ok) => {
+fo.shell();
+fo.boot().then((ok) => {
   if (!ok) return render();
   if (!location.hash || location.hash === '#') history.replaceState(null, '', '#/fleet');
   render();

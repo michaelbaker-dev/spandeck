@@ -46,6 +46,15 @@ base64 = "0.23"
 rand = "0.10"
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde"] }
 reqwest = { version = "0.13", features = ["json"] }
+# TLS for the Control Deck on the station's own Tailscale name
+# (crates/web/src/tls.rs). All four are already in the tree, through
+# reqwest and axum, with the same TLS library and provider.
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
+hyper = "1"
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
+tower = { version = "0.5", features = ["util"] }
+# Tests only: a throwaway authority and certificates for stations on localhost.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 insta = { version = "1", features = ["json"] }
 proptest = "1"
 turmoil = "0.7"

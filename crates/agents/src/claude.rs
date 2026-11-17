@@ -197,6 +197,13 @@ pub(crate) fn normalize_claude_dialect(agent: AgentKind, p: &Value) -> Option<Ag
         tool,
         message,
         source,
+        // Claude Code's hook reference (read 16 Nov 2026): the events of a
+        // tool call and a turn's end carry `effort`, an object with `level`.
+        effort: p
+            .pointer("/effort/level")
+            .and_then(|l| l.as_str())
+            .filter(|l| l.len() <= 16 && l.chars().all(|c| c.is_ascii_alphanumeric()))
+            .map(String::from),
         raw_event: raw,
     })
 }

@@ -229,8 +229,73 @@ days, not hours.
 - **Mail goes to the pane it was sent to.** When a pane is closed, what it had not
   read goes back to the senders; a pane later given the same name does not get it. A
   reply can mark as answered only a message that was sent to the pane that replies.
+- **The deck over HTTPS** (17 Nov 2026). Where Tailscale gives the machine a
+  certificate for its own name (`<machine>.<tailnet>.ts.net`), spandeckd also answers
+  TLS on a second port (7392) and ends the TLS connection itself, so the caller's real
+  address is still what is checked against your Tailscale login; `tailscale serve` is
+  not used. The plain port is unchanged and nothing is redirected unless you set
+  `[web] redirect = true`. No `Strict-Transport-Security` header is ever sent: it
+  belongs to a host name and would turn every plain-HTTP address of that machine, on
+  every port, into HTTPS in your browser. The certificate's key is fetched by each
+  station for itself, kept in its state folder for that user only, never logged, in no
+  answer of the API and never sent to another station. `[web] https = false` turns it
+  off and deletes the key.
+- **The one other origin a station accepts.** A browser's token was already taken by
+  every station of the fleet. Since 17 Nov 2026 a page that was loaded from one
+  station's deck may open its connection to another station when its own stops
+  answering. That station accepts the other origin only on two WebSocket addresses
+  (`/api/ws`, and `/api/ping`, which says who answers and nothing else), only when the
+  origin is exactly the deck of a member of its own roster (by the address it itself
+  looks at, or by the name its own Tailscale client gives that address and the port
+  that member announced), and only with a browser's own token: never the station's
+  local token, a pane's token or a station's signature. No cookie is used anywhere, so
+  another site cannot ride on your sign-in. `/api/rpc`, `/api/peer/rpc`,
+  `/api/device/*`, uploaded fonts and every file still refuse other origins, and no
+  answer carries `Access-Control-Allow-Origin`. `[flags] page_failover = false`
+  refuses the other origin again.
+- **The copy of the deck saved on a device** (HTTPS and localhost only) holds the
+  page's own files: exactly the list the station's build names. It never holds an
+  answer of the API, what a terminal shows, or anything with a token; it adds nothing
+  while the page runs.
+- **The machine's password, for one command.** On Linux Tailscale gives the
+  certificate only to root or to the user it was told to trust. "Turn on secure access
+  (HTTPS)" in the deck asks for your password on that machine and runs exactly
+  `sudo -S -k -p '' tailscale set --operator=<the station's own user>` there: an
+  argument vector, no shell, the user name read from the system, `sudo` and
+  `tailscale` taken only from system folders and only if they are root's own files.
+  The password goes to sudo's standard input and nowhere else: never logged, never
+  stored, not in the ship's log (which records each use and its outcome), wiped when
+  the command ends. It is taken only by the station it is for, from a page connected
+  to that station, and is never passed from one station to another; an agent, another
+  station and a read-only caller cannot make the call. Three wrong tries a minute.
 
 ## Known limits
+
+- Turning HTTPS on at a station publishes its name, `<machine>.<tailnet>.ts.net`, in
+  the public certificate-transparency logs, for good: the machine's name and your
+  tailnet's. The names resolve only inside your tailnet and nothing becomes reachable
+  from outside it.
+- The password you type for "Turn on secure access (HTTPS)" passes through the
+  browser and the station's memory. On the way to a station at its plain address it
+  is protected by the tailnet's own encryption (WireGuard, device to device), like
+  everything else the deck sends there, and by nothing else.
+- After that command, programs running as your user on that machine, your agents
+  included, can change Tailscale's settings there without a password (`tailscale
+  set`, `up`, `down`, `serve`, `logout`). That is what Tailscale's "operator" means;
+  spandeck needs only the certificate. Undo it in the same dialog, or with `sudo
+  tailscale set --operator=` at the machine. (A narrower right, `TS_PERMIT_CERT_UID`
+  in tailscaled's own environment, exists; it needs root and a restart of tailscaled
+  at the machine, and spandeck does not set it.)
+- A deck at `http://<machine>.<tailnet>.ts.net:7391` keeps its token for that plain
+  origin. On a network where Tailscale is off and something else answers for that
+  name, that something could serve a page at the same origin and read the token; it
+  could use it only from a device that is on your tailnet. The HTTPS origin is not
+  open to this (nobody else can have a certificate for the name); prefer it.
+- With `page_failover` on, a page at the deck origin of any member of the fleet can
+  open a connection to any other member. A member's machine is already trusted with
+  the fleet key; what this adds is that a page served from that exact address and
+  port (by whatever answers there) could try, and it still needs a browser's token,
+  which only your signed-in browser has for that origin.
 
 - A screen is recognised by words on it (16 Nov 2026). A program, or anything that
   prints in its pane, can show those words and make the pane read "needs you", or

@@ -68,6 +68,8 @@ export async function copyText(text, said = 'Copied') {
     overlays().append(box);
     box.focus();
     box.select();
+    // (iOS selects nothing in a box that is read-only with `select()` alone.)
+    try { box.setSelectionRange(0, text.length); } catch (e) { /* selected already */ }
     let ok = false;
     try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
     box.remove();

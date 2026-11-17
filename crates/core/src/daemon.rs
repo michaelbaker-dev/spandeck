@@ -168,6 +168,10 @@ pub struct PaneMeta {
     /// Sub-agents the agent itself has running (its own, not spandeck helpers).
     #[serde(default)]
     pub subagents: Vec<SubAgent>,
+    /// How hard the model is asked to think, as the agent's hooks last
+    /// said. `None`: it has not said.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// The program the pane was asked to run instead of its agent's usual
     /// one (tests and custom launchers), so a restart uses it again. Only
     /// meaningful when `launcher_recorded`: older panes did not keep it.
@@ -497,6 +501,8 @@ pub struct Inner {
     pub perf: Arc<crate::perf::Perf>,
     /// What the local Tailscale client last said of key expiry.
     pub tailnet: crate::tailnet::TailnetState,
+    /// The HTTPS certificate, and how things stand with it (https.rs).
+    pub https: Arc<crate::https::HttpsState>,
     /// The switches later steps read (`[flags]` in the config, and what the
     /// owner set with `station.flags`), and what the last start found.
     pub(crate) restore: crate::restore::RestoreState,
@@ -606,6 +612,7 @@ impl Daemon {
             fleet: crate::fleet::FleetState::new(&cfg, trust.clone(), perf.clone()),
             perf,
             tailnet: Default::default(),
+            https: Default::default(),
             restore: Default::default(),
             db_told: Default::default(),
             rounds: crate::rounds::Rounds::new(crate::fleet::ROUND_DEADLINE),
@@ -1326,6 +1333,7 @@ impl Daemon {
             turn: TurnStats::default(),
             controller: None,
             subagents: vec![],
+            effort: None,
             launcher: opts.program.clone(),
             launcher_recorded: true,
             resumed: resume.is_some(),
@@ -2897,6 +2905,15 @@ impl Daemon {
         if self.flag_on(crate::typed::INPUT_FLAG, true) && self.flag_on(crate::beat::FLAG, true) {
             caps.push(crate::typed::INPUT_CAP);
         }
+        // The deck is also served over HTTPS, at `https.name` and `port`.
+        if self.https.serving() {
+            caps.push(crate::https::CAP);
+        }
+        // A signed-in browser's page loaded from another member's deck may
+        // connect here (`page_failover`, the web crate's `deck_origin`).
+        if self.flag_on(crate::https::VIA_FLAG, true) {
+            caps.push(crate::https::VIA_CAP);
+        }
         caps
     }
 
@@ -2938,6 +2955,9 @@ impl Daemon {
             "keep_awake": self.keep_awake_active(),
             "at_keyboard": self.at_keyboard(),
             "web": self.web_addrs.lock().unwrap().clone(),
+            // The deck over HTTPS: whether, at which name and port, and if
+            // not, why. Nothing of the key, and not when it runs out.
+            "https": self.https_brief(),
             "load": load_average(),
             "macs": crate::manage::mac_addresses(),
             // The fleet's members as this station knows them, and the ones

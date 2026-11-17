@@ -325,7 +325,7 @@ apply is absent, not null.
 | | `summary`: `text`, `more?` | The summary a compaction left. Fold it. |
 | | `error`: `text`, `level?` | An API error, or an error the agent program reported. |
 | | `info`: `text`, `level` | A line the agent program showed (`info`, `notice`, `warning`, `suggestion`). |
-| | `away_summary`: `text` | Claude Code's "while you were away". |
+| | `away_summary`: `text` | Claude Code's "while you were away" (its `system` record of the subtype `away_summary`). It ends with the program's own hint, "(disable recaps in /config)". |
 | | `command_output`: `text` | What a slash command printed. |
 | | `task`: `text`, `level?` | A background task reported: `text` is its summary, `level` its status (`completed`, `failed`). |
 
@@ -355,6 +355,9 @@ kind as a quiet line with its name, never as an error.
 | `held` | `null`, or why the agent takes no mail until the owner releases it: `{stopped, restored, mail}`. `stopped` is `null` or `{at_ms, by, reached}`: the owner (or a "stop every agent") stopped it; `reached: false` means the program was not reading and the stop did not reach it ("use Kill"). `restored` is `null` or `{at_ms, why}`: the station started it again after a restart (`why`: `crash`, `stop`, `upgrade`). `mail` is how many messages wait. Show it with a Release button: `pane.release {pane}` (the owner's only; `{all: true}` for every pane on the station), answered `{ok, pane, released, still_paused, saved}`. Sending the pane anything (`pane.send_text`, `pane.paste`, `pane.input`) releases it too. `paused` is apart: Release never changes it. The same `held` is in `pane.list` and `pane.get`. A station from before this has no `held`. |
 | `approvals` | Requests held for the owner for this pane, oldest first. Each: `{kind: "approval", id: "approval:<approval id>", approval, what, summary, tool, ts_ms, item}`. `approval` is the id `approval.answer {id, allow, reason?}` takes, as today. `what` is the kind of request (`permission`, `route`). `item` is the `id` of the `tool` item the request is about, or `null`: draw the card anyway. It is set only when the station is sure which call it is: the call with the id the hook gave, else the newest running call of that tool with the same command or file. It can name an item on a line after this answer's `cursor`, which the next answer brings. They are not in `items`: they are not in the session file. |
 | `questions` | A question or a plan the station holds for the owner for this pane, oldest first (eight at most). Below. A station from before 16 Nov 2026 has no such field. |
+| `tasks` | What the agent has running beside its turn, and what of it is over (17 Nov 2026). Below. A station from before has no such field: count `subagents`. |
+| `model` | `null` for a shell; else what the model chip shows and offers (17 Nov 2026). Below. |
+| `cleared` | The ids of the notes of this conversation the owner cleared (`pane.notes.clear`, below): leave those items out. |
 | `unread`, `read_line` | Whether the agent has said something after the read mark, and the mark. Below. |
 | `now_ms` | The station's clock. |
 
@@ -411,6 +414,114 @@ turn ends: `approval.resolved` with `status: "cancelled"`. A row of `approval.li
 until when, never what it says (agents read the pane list). The pane's state is `needs_you`
 and its `needs_reason` reads `asks you a question: answer it in Chat (in the terminal from
 14:12 UTC)` (or `asks you to approve its plan: …`).
+
+### `live.tasks`: background tasks
+
+```json
+"tasks": {
+  "running": [
+    {"id": "21.0", "kind": "agent", "name": "Explore", "title": "Look for other tally scripts",
+     "status": "running", "background": true, "started_ms": 1794736851000, "transcript": true},
+    {"id": "30.0", "kind": "shell", "title": "cargo watch -x test", "status": "running",
+     "background": true, "started_ms": 1794736900000, "transcript": false},
+    {"id": "pane:p_01jz", "kind": "helper", "name": "builder-3f2a", "title": "build the importer",
+     "pane": "p_01jz", "status": "running", "state": "working", "background": true,
+     "started_ms": 1794736700000, "can_stop": true}
+  ],
+  "finished": [ {"id": "12.0", "kind": "agent", "status": "completed", "ended_ms": 1794736800000, "...": "..."} ],
+  "finished_total": 152
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `running` | Everything that runs, oldest first (50 at most). Its length is the "N running tasks" of the view. |
+| `finished`, `finished_total` | The 30 newest that are over, newest first, and how many there are in all (the station keeps 200 a session). |
+| `id` | For a task of the agent's own: the `id` of the item of the call that started it. `pane:<pane id>` for a helper pane; `child:<id>` for a conversation the program began itself. |
+| `kind` | `agent` (a sub-agent), `shell` (a command left running), `helper` (a pane the agent started through spandeck: `pane` is its id, `name` its name). |
+| `name`, `title` | A sub-agent's kind, and what it was asked or the command, in one line (200 characters). Either may be empty. |
+| `status` | `running`; for a task left in the background, the program's own word when it reported it over (`completed`, `failed`, …; `done` when it gave none); for a sub-agent that was waited for, its result's (`ok`, `error`, `denied`, `interrupted`); `lost`: the file has it as running, and the pane's program has ended or was started again since it began; for a helper its pane's state, or `ended`. |
+| `started_ms`, `ended_ms` | When the records say; on the station's clock for a helper. Absent when a record carries no time. |
+| `transcript` | The sub-agent has a conversation of its own that can be read: `pane.conversation.detail {pane, task: <id>, session}`, below. |
+| `can_stop` | A helper only: its turn can be stopped with `pane.stop {pane: <its pane>}`. No other task has a stop: an agent's own sub-agents and commands stop with its turn. |
+| `sure` | `false`: the program's store does not say whether this one still runs (Antigravity); it is `running` while its transcript was written to in the last fifteen seconds. |
+
+Where the rows come from: Claude Code's session file (a sub-agent: its `Agent`/`Task` call, in the
+background when the result says `async_launched`/`isAsync`, over with its
+`<task-notification>`, tied by `tool-use-id` or `task-id`; a command: a call whose result has
+`backgroundTaskId`); the conversations OpenCode and Antigravity began under this one
+(`session_v2.parent_id`, `parent_conversation_id`; read at most every two seconds); and for
+every agent the panes whose `parent_pane` is this pane. Codex's file has none: its sub-agents
+are in `subagents`, when its hooks report them. A view shows `subagents` as rows when
+`running` has no `agent`.
+
+**A sub-agent's transcript: `pane.conversation.detail {pane, task, session?}`** answers
+`{pane, session, task, items, cut}`: `items` are items as everywhere (the last 200), read from
+the sub-agent's own file (Claude Code: the last 2 MB of
+`<session file without .jsonl>/subagents/agent-<agentId>.jsonl`) or the child conversation's
+store, when asked for and kept nowhere. `cut`: its beginning is not here. There is no detail
+of an item of it and no watch. `not_found`: no such task, or it has no transcript.
+
+### `live.model`: the model, and how hard it thinks
+
+```json
+"model": {"model": "claude-fable-5-2", "effort": "medium",
+  "models": [{"id": "fable", "name": "Fable", "says": "For your hardest and longest-running tasks"}],
+  "efforts": ["low", "medium", "high", "xhigh", "max"],
+  "can_set": true, "picker": null,
+  "note": "Claude Code also keeps a model chosen here as the default for new sessions.",
+  "source": "code.claude.com/docs/en/model-config.md and commands.md, read 16 Nov 2026"}
+```
+
+| Field | Meaning |
+|---|---|
+| `model` | The model behind the agent's latest reply, from its session data (as `usage.model` in the pane list), or `null`. |
+| `effort` | What the agent's hooks last said (Claude Code: `effort.level`), or `null`. |
+| `models` | What the station's adapter lists for this program (`crates/agents/src/models.rs`): never the whole truth, so always offer a field for another name. May be empty. |
+| `efforts` | The levels `pane.model {effort}` takes; empty when the program has no such typed command. |
+| `can_set` | `pane.model {model}` types a command. `false`: the program chooses its model only in a picker. |
+| `picker` | The command that opens that picker in its terminal (`agents.command {pane, command}`, then show the terminal), or `null`. Never send keys into a picker. |
+
+| Program | Model | Effort | Read (16 Nov 2026) |
+|---|---|---|---|
+| Claude Code | `/model <alias or name>` | `/effort <level>` | code.claude.com/docs: model-config, commands |
+| Codex 0.169.0 | `/model <model>` | `/model --reasoning=<level>` | its commands page; `codex-rs/tui` |
+| Antigravity | picker (`/model`) | `/effort <level>` | antigravity.google/docs/cli |
+| OpenCode | picker (`/models`) | none | opencode.ai/docs/tui |
+
+## `pane.model`
+
+The owner's only (an agent, a station for itself and the read-only caller are refused).
+
+```
+{pane, model: "opus"}      or      {pane, effort: "high"}
+→ {"ok": true, "sent": true, "command": "/model opus"}
+→ {"ok": false, "sent": false, "busy": true, "why": "in the middle of a turn", "command": "/model opus"}
+```
+
+The station types the program's own command into the pane, with Enter, as `agents.command`
+does and through it: only while the agent is not in the middle of a turn. `model` is one
+word (letters, digits and `. _ : / @ [ ] -`, 120 at most); `effort` is one of `efforts`.
+`invalid`: anything else, both at once, a shell, or a program that takes no such command
+(the message names its picker). Nothing says the program took it: `live.model` follows
+what the agent then reports.
+
+## `pane.notes.clear`
+
+The owner's only.
+
+```
+{pane, session, item}          hide this item for the owner
+{pane, session, restore: true} bring every cleared one back
+→ {"pane": "p_01jx", "session": "…", "cleared": ["27.0"]}
+```
+
+`session` is the answer's `session`; `item` an item's `id`. Kept at the pane's station (200 a
+pane; a clearing made in another session of the pane counts for nothing; it goes when the
+pane is closed), so it is the same on every device. Nothing is removed from the session file
+or the archive, and the item is still served: `live.cleared` says which to leave out. Meant
+for notes: a `notice` whose `what` is `away_summary`, `info`, `task`, `command_output` or
+`summary`.
 
 ## `question.answer`
 

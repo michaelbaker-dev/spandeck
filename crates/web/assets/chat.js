@@ -35,7 +35,7 @@
 // - Times are the station's: an elapsed time is worked out from the clock the
 //   station sent with its answer, plus the time since that answer arrived.
 
-import { h, showMenu, toast, dialog, copyText, dot, stateOf, STATE_LABEL, fmtTokens, heldWords, RELEASE_SAYS, trustAnsweredWords, trustTick, trustCard, hooksTick } from './ui.js';
+import { h, showMenu, toast, dialog, copyText, dot, stateOf, STATE_LABEL, fmtTokens, fmtCost, exact, modelShort, heldWords, RELEASE_SAYS, trustAnsweredWords, trustTick, trustCard, hooksTick } from './ui.js';
 import { renderMarkdown } from './md.js';
 import { sendAct } from './typed.js';
 import { retryIn } from './api.js';
@@ -43,6 +43,9 @@ import { retryIn } from './api.js';
 let env = null;
 const convs = new Map();   // "station/pane id" -> Conv
 const drafts = new Map();  // what was being written, when its view is not on the page
+// How many message boxes hold something not sent, off the page (failover.js
+// says "Your draft is kept" when the page moves to another station).
+export const draftCount = () => drafts.size;
 const termBoxes = new Map(); // the terminal face's message box on a phone, per pane
 const titles = new Map();  // "station/pane id" -> the session's title, for the list
 const noTitles = new Map(); // station -> when to ask it for titles again
@@ -64,6 +67,21 @@ const SLASH = { claude: [['/compact', 'make room: summarise the conversation so 
 // The tests' stand-in agent speaks Claude Code's dialect (as in the archive).
 SLASH.fake = SLASH.claude;
 const NO_CONV = 'no conversation for this pane: ';
+// Notices that are something to read, and may be long: each is one quiet
+// line that opens, and can be cleared (DECISIONS.md, 17 Nov 2026). Never an
+// error, a turn's end, or anything that waits for the owner.
+const NOTES = new Set(['away_summary', 'info', 'task', 'command_output', 'summary']);
+// What Claude Code puts at the end of its own recap.
+const RECAP_HINT = /\s*\(disable recaps in \/config\)\s*$/;
+const TASK_KIND = { agent: ['◇', 'Agent'], shell: ['>_', 'Shell'], helper: ['▣', 'Helper pane'] };
+// "claude-fable-5-2" is "Fable 5.2" on the chip; a name of another shape
+// is shown as it is.
+export function modelName(model) {
+  const short = modelShort(model);
+  const m = /^([a-z]+)((?:-\d+)+)$/.exec(short);
+  return m ? m[1][0].toUpperCase() + m[1].slice(1) + ' ' + m[2].slice(1).replace(/-/g, '.') : short;
+}
+const cap1 = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '');
 const canSpeak = () => 'speechSynthesis' in window && typeof window.SpeechSynthesisUtterance === 'function';
 
 // ---- words ----
@@ -443,7 +461,8 @@ class Conv {
     const title = this.title || titles.get(this.key) || p.name;
     const sub = [p.agent === 'shell' ? 'shell' : p.agent_name, this.st, p.project].filter(Boolean).join(' · ');
     const state = stateOf(p);
-    const sig = JSON.stringify([phone, title, sub, state, p.needs_reason, face, this.available, this.available === false ? this.reason : '', next.length, next[0] && keyOf(next[0].st, next[0].p), this.where, p.name]);
+    const pct = [p.usage ? 1 : 0, p.usage?.context_pct ?? null, p.usage?.context_tokens ?? null];
+    const sig = JSON.stringify([phone, title, sub, state, p.needs_reason, face, this.available, this.available === false ? this.reason : '', next.length, next[0] && keyOf(next[0].st, next[0].p), this.where, p.name, pct]);
     if (sig === this.barSig) return;
     this.barSig = sig;
     const pick = (to) => h('button', { type: 'button', class: face === to ? 'on' : '', 'aria-pressed': String(face === to), onclick: (e) => { e.currentTarget.blur(); if (face !== to) setFace(this.st, p, to); } }, to === 'chat' ? 'Chat' : 'Terminal');
@@ -461,8 +480,54 @@ class Conv {
         : h('div', { class: 'chat-switch', role: 'group', 'aria-label': 'Show this pane as' }, pick('chat'), pick('terminal')),
       next.length ? h('button', { type: 'button', class: 'chat-next', title: `Next: ${next[0].p.name} on ${next[0].st} (${next[0].why})`, 'aria-label': `Next of ${plural(next.length, 'pane')} that need you: ${next[0].p.name}, ${next[0].why}`,
         onclick: () => env.go(env.paneUrl(next[0].st, next[0].p.id)) }, 'Next ›', h('span', { class: 'count' }, next.length)) : null,
+      this.ringEl(),
       h('button', { type: 'button', class: 'icon-btn chat-more', 'aria-label': 'Pane menu', title: 'Pane menu', 'aria-haspopup': 'menu', onclick: menu }, '⋯'),
     ].filter(Boolean));
+  }
+
+  // How full the agent's context is, as a small ring, in every agent's
+  // chat. Filled only by what the agent's own session data says: with a
+  // count and no known limit the ring is empty and says the count; with
+  // nothing reported it is a dashed ring that says so. Never a made-up
+  // share. (A shell has no context and no ring.)
+  ringEl() {
+    const u = this.p.usage;
+    if (!u) return null;
+    const pct = typeof u.context_pct === 'number' ? u.context_pct : null;
+    const known = u.context_tokens !== null && u.context_tokens !== undefined;
+    const level = pct === null ? (known ? ' count' : ' none') : pct >= 90 ? ' full' : pct >= 70 ? ' high' : '';
+    const says = pct !== null ? `Context ${pct}% used` : known ? `Context ${fmtTokens(u.context_tokens)} tokens used, its limit is not known` : 'Context not reported';
+    const ring = h('span', { class: 'ring', 'aria-hidden': 'true' });
+    ring.style.setProperty('--pct', String(Math.max(0, Math.min(100, pct || 0))));
+    return h('button', { type: 'button', class: 'chat-ring' + level, 'aria-label': says, title: says, 'aria-haspopup': 'dialog', dataset: { pct: pct === null ? '' : String(pct) },
+      onclick: (e) => { e.currentTarget.blur(); this.usageSheet(); } }, ring);
+  }
+
+  // What is known of the agent's model and what it has used. Only what
+  // the station was told: a line that is not known is not there.
+  usageSheet() {
+    const u = this.p.usage || {}, M = this.live?.model || {};
+    const fact = (label, value) => (value ? h('div', { class: 'fact' }, h('span', { class: 'muted' }, label), h('b', {}, value)) : null);
+    const known = (n) => n !== null && n !== undefined;
+    const now = (this.live?.now_ms || 0) + (performance.now() - this.liveAt);
+    const packed = [...this.items].reverse().find(x => x.kind === 'notice' && x.what === 'compacted' && typeof x.ts_ms === 'number');
+    const box = dialog('Context and usage', (close) => h('div', { class: 'usage-sheet' },
+      h('div', { class: 'facts' },
+        fact('Model', u.model || M.model || ''),
+        fact('Effort', M.effort ? cap1(M.effort) : ''),
+        fact('Context', known(u.context_tokens) ? (u.context_window ? `${fmtTokens(u.context_tokens)} of ${fmtTokens(u.context_window)} (${u.context_pct}% used)` : `${fmtTokens(u.context_tokens)} tokens (the model's window is not known)`) : ''),
+        fact('Tokens in', known(u.input_tokens) ? exact(u.input_tokens) : ''),
+        fact('Tokens out', known(u.output_tokens) ? exact(u.output_tokens) : ''),
+        fact('Estimated cost', known(u.cost_estimate) ? fmtCost(u.cost_estimate) + ' at list prices' : ''),
+        fact('Last compacted', packed && now > packed.ts_ms ? dur(now - packed.ts_ms) + ' ago' : '')),
+      h('p', { class: 'muted small usage-why' }, u.note === 'not reported by this agent' ? `${this.p.agent_name || 'This agent'} keeps no usage where spandeck can read it: nothing is shown rather than a guess.`
+        : !known(u.total_tokens) ? 'Nothing is reported yet: the numbers come with the agent\'s first reply.'
+          : !u.context_window && known(u.context_tokens) ? 'The limit of this model\'s context is not known (it is not in the session data, and the price list does not name it), so no share is drawn.'
+            : 'From the agent\'s own session data, for this conversation. A cost is an estimate at list prices, never a bill.'),
+      h('div', { class: 'row end sheet-foot' },
+        h('button', { type: 'button', onclick: close }, 'Close'),
+        env.usage ? h('button', { type: 'button', class: 'primary usage-more', onclick: () => { close(); env.usage(this.st, this.p); } }, 'All usage for this pane') : null)));
+    box.body.parentNode.classList.add('sheet', 'chat-sheet');
   }
 
   drawLog() {
@@ -493,6 +558,8 @@ class Conv {
         }
         // A reply is complete when the turn went on to something that is not
         // more of it, or the agent is no longer working.
+        // A note the owner cleared: left out, here and on every device.
+        if (it.kind === 'notice' && NOTES.has(it.what) && this.isCleared(it.id)) { i += 1; continue; }
         const next = items[i + 1];
         const said = it.kind === 'text' || it.kind === 'screen';
         const done = said && (next ? !(RUN.has(next.kind) || next.kind === 'text') : !working);
@@ -626,10 +693,48 @@ class Conv {
 
   // Under what an agent said, once it is whole: copy it, and hear it. Small
   // marks, with their words for a screen reader and on a long press.
-  actsEl(text, body, copied) {
+  // (Copy is under every reply, as soon as it is there, and copies that
+  // reply's own source: the markdown as the agent wrote it. Read aloud is
+  // under a reply that is whole.)
+  actsEl(text, body, copied, speak = true) {
     return h('div', { class: 'chat-acts' },
-      h('button', { type: 'button', class: 'chat-act act-copy', title: 'Copy', onclick: () => copyText(text, copied) }, 'Copy'),
-      canSpeak() ? h('button', { type: 'button', class: 'chat-act act-speak', title: 'Read aloud', 'aria-pressed': 'false', onclick: (e) => readAloud(body, e.currentTarget) }, 'Read aloud') : null);
+      h('button', { type: 'button', class: 'chat-act act-copy', title: 'Copy', onclick: () => copyText(text, copied || 'Copied') }, 'Copy'),
+      speak && canSpeak() ? h('button', { type: 'button', class: 'chat-act act-speak', title: 'Read aloud', 'aria-pressed': 'false', onclick: (e) => readAloud(body, e.currentTarget) }, 'Read aloud') : null);
+  }
+
+  isCleared(id) {
+    if (this.showCleared) return false;
+    return this.hid?.has(id) || (Array.isArray(this.live?.cleared) && this.live.cleared.includes(id));
+  }
+
+  // Clear a note: it is hidden in this conversation on every device of
+  // the owner's (the pane's station keeps which). Nothing is deleted from
+  // the agent's transcript or the archive.
+  clearNote(it) {
+    (this.hid ||= new Set()).add(it.id);
+    this.drawLog();
+    env.rpc(this.st, 'pane.notes.clear', { pane: this.p.id, session: this.session, item: it.id })
+      .catch(() => { this.hid.delete(it.id); this.drawLog(); });
+  }
+
+  // "Show cleared notes", from the pane's menu.
+  restoreNotes() {
+    this.hid = new Set();
+    env.rpc(this.st, 'pane.notes.clear', { pane: this.p.id, session: this.session, restore: true }).then(() => toast('The cleared notes are back')).catch(() => {});
+  }
+
+  // Something to read that is not part of the talk: one quiet line, which
+  // opens, and a small mark that clears it.
+  noteEl(it, label, text, body) {
+    const flag = 'n:' + it.id, open = this.open.has(flag);
+    const line = label + (label && text ? ': ' : '') + text.replace(/\s+/g, ' ');
+    return h('div', { class: 'chat-note' + (open ? ' open' : ''), dataset: { note: it.what } },
+      h('div', { class: 'chat-note-row' },
+        h('button', { type: 'button', class: 'chat-note-line', 'aria-expanded': String(open), onclick: () => this.toggle(flag, it.id) },
+          h('span', { class: 'note-text' }, open ? label : line), h('span', { class: 'chev', 'aria-hidden': 'true' }, open ? '▾' : '▸')),
+        this.source === 'screen' && !this.session ? null
+          : h('button', { type: 'button', class: 'chat-note-x', 'aria-label': 'Clear this note', title: 'Clear this note: it is hidden here on all your devices. The pane\'s menu brings cleared notes back.', onclick: () => this.clearNote(it) }, '×')),
+      open ? h('div', { class: 'chat-note-body' }, body()) : null);
   }
 
   itemEl(it, done) {
@@ -642,7 +747,8 @@ class Conv {
       const label = it.origin in from ? from[it.origin] : String(it.origin || '');
       return h('div', { class: 'chat-user' + (mine ? '' : ' other') },
         label ? h('div', { class: 'chat-from' }, label) : null,
-        h('div', { class: 'chat-bubble' }, text, it.images ? h('div', { class: 'chat-from' }, plural(Number(it.images) || 0, 'picture') + ' attached') : null), rest);
+        h('div', { class: 'chat-bubble' }, text, it.images ? h('div', { class: 'chat-from' }, plural(Number(it.images) || 0, 'picture') + ' attached') : null), rest,
+        text ? h('div', { class: 'chat-acts mine' }, h('button', { type: 'button', class: 'chat-act act-copy', title: 'Copy', onclick: () => copyText(text, 'Copied') }, 'Copy')) : null);
     }
     // What the pane printed, from its terminal. An agent's comes as parts:
     // prose, drawn like any reply, and rows that are a layout, in the block
@@ -675,12 +781,12 @@ class Conv {
           : h('button', { type: 'button', class: 'mini', onclick: () => { this.open.add(flag); this.whole(it); } }, 'Show all of it');
       return h('div', { class: 'chat-text chat-screen' + (it.open ? ' open' : '') },
         label ? h('div', { class: 'chat-from' }, label) : null, more, body,
-        done ? this.actsEl(copy, body, 'Copied what it printed') : null);
+        done || !it.open ? this.actsEl(copy, body, 'Copied', done) : null);
     }
     if (it.kind === 'text') {
       const body = md(text);
       return h('div', { class: 'chat-text' + (it.phase === 'commentary' ? ' commentary' : '') }, body, rest,
-        done ? this.actsEl(text, body, 'Copied the reply') : null);
+        this.actsEl(text, body, 'Copied', done));
     }
     if (it.kind === 'question') {
       const held = it.status === 'waiting' && this.heldFor(it.id);
@@ -715,12 +821,18 @@ class Conv {
         case 'interrupted': return quiet('Stopped before it finished');
         case 'compacted': return quiet('The conversation was compacted' + (it.trigger === 'auto' ? ' by itself' : '')
           + (typeof it.pre_tokens === 'number' && typeof it.post_tokens === 'number' ? ` · ${fmtTokens(it.pre_tokens)} to ${fmtTokens(it.post_tokens)} tokens` : ''));
-        case 'summary': return fold('Summary of the conversation before this', () => h('div', { class: 'chat-detail' }, md(text), rest));
-        case 'command_output': return fold('What the command printed', () => h('div', { class: 'chat-detail' }, h('pre', { class: 'chat-out' }, text)));
+        case 'summary': return this.noteEl(it, 'Summary of the conversation before this', '', () => [md(text), rest]);
+        case 'command_output': return this.noteEl(it, 'What the command printed', text, () => h('pre', { class: 'chat-out' }, text));
         case 'error': return quiet('Error: ' + text, 'err');
-        case 'away_summary': return quiet('While you were away: ' + text);
-        case 'task': return quiet(`A background task ${it.level || 'reported'}: ${text}`);
-        case 'info': return quiet(text, it.level === 'warning' ? 'warn' : '');
+        // Claude Code's own recap (a `system` record of the subtype
+        // `away_summary`). Its hint is kept for the opened note, with
+        // where that setting is: it is a screen of Claude Code's own.
+        case 'away_summary': return this.noteEl(it, 'While you were away', text.replace(RECAP_HINT, ''), () => [
+          h('div', {}, text.replace(RECAP_HINT, '')),
+          RECAP_HINT.test(text) ? h('div', { class: 'muted small' }, 'This recap is Claude Code\'s own. To turn recaps off, type /config in the terminal and switch them off there: it is a screen of Claude Code\'s, so spandeck does not press its keys for you.') : null]);
+        case 'task': return this.noteEl(it, `A background task ${it.level || 'reported'}`, text, () => h('div', {}, text));
+        // A short line is said as it is; a long one folds like the rest.
+        case 'info': return text.length <= 120 ? quiet(text, it.level === 'warning' ? 'warn' : '') : this.noteEl(it, '', text, () => h('div', {}, text));
         default: return quiet(String(it.what || 'notice'));
       }
     }
@@ -770,7 +882,9 @@ class Conv {
       const el = status[status.length - 1];
       if (from && L.now_ms) this.clocks.push({ el: el.querySelector('.act-time'), base: L.now_ms - from });
     }
-    if (subs.length) status.push(this.node(cache, used, 'subs', subs.length, () => h('button', { type: 'button', class: 'chat-tasks', onclick: () => this.tasksSheet() }, plural(subs.length, 'running task'), ' ›')));
+    const tasks = this.tasksNow();
+    if (tasks.running.length) status.push(this.node(cache, used, 'subs', tasks.running.length, () => h('button', { type: 'button', class: 'chat-tasks', 'aria-haspopup': 'dialog', onclick: () => this.tasksSheet() }, plural(tasks.running.length, 'running task'))));
+    if (this.tasksBox) this.tasksBox();
     if (this.peekOpen && (working || blocked)) { status.push(this.peekEl); if (!this.peeked) this.peek(); } else this.peeked = false;
     sync(this.acts, status);
 
@@ -822,6 +936,7 @@ class Conv {
     if (this.box.placeholder !== says) this.box.placeholder = says;
     this.working = working;
     this.sendState();
+    this.modelState();
     // Until when each held card waits here, by the station's clock.
     this.waits = held.map(q => ({ el: cache.get('held:' + q.id)?.el.querySelector('.ask-wait'), until: q.until_ms }));
     this.tick();
@@ -997,16 +1112,157 @@ class Conv {
     } catch (e) { this.peekEl.textContent = 'The terminal could not be read: ' + e.message; }
   }
 
+  // What the agent has running beside its turn, and what of it is over:
+  // as the station says (`live.tasks`: from the agent's own session file,
+  // and the panes it started through spandeck). Sub-agents its hooks
+  // report and its file does not (Codex; a station from before) are rows
+  // too, with what the hook said: a kind and since when.
+  tasksNow() {
+    const L = this.live || {}, T = L.tasks && typeof L.tasks === 'object' ? L.tasks : {};
+    const rows = (a) => (Array.isArray(a) ? a.filter(t => t && typeof t.id === 'string') : []);
+    const running = rows(T.running), finished = rows(T.finished);
+    if (!running.some(t => t.kind === 'agent')) {
+      for (const [i, s] of (Array.isArray(L.subagents) ? L.subagents : []).entries()) running.push({ id: 'hook:' + i, kind: 'agent', name: String(s.kind || ''), title: '', status: 'running', started_ms: s.since_ms });
+    }
+    return { running, finished, total: Math.max(Number(T.finished_total) || 0, finished.length) };
+  }
+
   tasksSheet() {
-    const L = this.live || {}, now = (L.now_ms || 0) + (performance.now() - this.liveAt);
-    const subs = Array.isArray(L.subagents) ? L.subagents : [];
-    const asked = this.items.filter(x => x.kind === 'tasks' && x.status === 'running');
-    const box = dialog('Running tasks', () => h('div', { class: 'list' },
-      subs.map(s => h('div', { class: 'note row' }, h('span', { class: 'dot working' }), h('b', {}, String(s.kind || 'agent')), h('span', { class: 'grow' }), h('span', { class: 'muted' }, s.since_ms ? 'for ' + dur(now - s.since_ms) : ''))),
-      asked.length ? h('h3', {}, 'What they were asked') : null,
-      asked.map(t => h('div', { class: 'note' }, h('b', {}, String(t.name || 'agent')), ' ', String(t.summary || ''))),
-      h('p', { class: 'muted small' }, `Sub-agents ${this.p.name} started itself. They stop when its turn is stopped.`)));
-    box.body.parentNode.classList.add('sheet');
+    const list = h('div', { class: 'task-list' });
+    let showDone = false;
+    const row = (t, now) => {
+      const [mark, kind] = TASK_KIND[t.kind] || ['·', String(t.kind || 'task')];
+      const run = t.status === 'running';
+      const took = typeof t.started_ms === 'number' ? (run ? now - t.started_ms : typeof t.ended_ms === 'number' ? t.ended_ms - t.started_ms : null) : null;
+      const how = run ? '' : { lost: 'no longer running (its program ended or was started again)', ok: 'finished', completed: 'completed', done: 'finished', error: 'failed', failed: 'failed', interrupted: 'stopped', ended: 'its pane has ended' }[t.status] || String(t.status || '');
+      const title = String(t.title || '') || (t.kind === 'helper' ? String(t.name || '') : t.name ? `${t.name} sub-agent` : t.from ? 'A sub-agent\'s conversation' : kind);
+      return h('div', { class: 'task-row' + (run ? ' running' : ''), dataset: { task: t.id, kind: String(t.kind || '') } },
+        h('span', { class: 'task-mark', 'aria-hidden': 'true' }, mark),
+        h('div', { class: 'task-what' },
+          h('b', {}, title),
+          h('span', { class: 'muted' }, [t.kind === 'helper' && t.title ? `${kind} ${t.name || ''}`.trim() : t.kind === 'agent' && t.name && t.title ? `${kind} · ${t.name}` : kind, took !== null && took >= 0 ? dur(took) : '', how, t.sure === false ? (run ? 'written to just now' : 'not written to lately') : ''].filter(Boolean).join(' · ')),
+          t.kind === 'agent' && t.transcript ? h('button', { type: 'button', class: 'mini task-open', onclick: () => this.sideSheet(t) }, 'View transcript') : null,
+          t.kind === 'helper' && t.pane ? h('button', { type: 'button', class: 'mini task-open', onclick: () => { this.tasksClose?.(); env.go(env.paneUrl(this.st, t.pane)); } }, 'Open its pane') : null),
+        // Only a helper's turn can be stopped by itself: it is a pane,
+        // and the station stops a pane's turn. An agent's own sub-agents
+        // and commands stop with its turn.
+        t.kind === 'helper' && t.can_stop && t.pane ? h('button', { type: 'button', class: 'task-stop', 'aria-label': `Stop ${t.name || 'this helper'}'s turn`, title: 'Stop this helper\'s turn. Its pane stays.',
+          onclick: () => env.rpc(this.st, 'pane.stop', { pane: t.pane }).then(() => toast(`Stopped ${t.name || 'the helper'}`)).catch(() => {}) }, '■') : null);
+    };
+    const draw = () => {
+      if (!list.isConnected && list.dataset.drawn) { this.tasksBox = null; return; }
+      list.dataset.drawn = '1';
+      const T = this.tasksNow(), now = (this.live?.now_ms || 0) + (performance.now() - this.liveAt);
+      sync(list, [
+        h('h3', {}, `Running${T.running.length ? ' · ' + T.running.length : ''}`),
+        ...(T.running.length ? T.running.map(t => row(t, now)) : [h('p', { class: 'muted' }, 'Nothing is running in the background.')]),
+        T.total ? h('button', { type: 'button', class: 'task-fold', 'aria-expanded': String(showDone), onclick: () => { showDone = !showDone; draw(); } }, `Finished · ${T.total}`, h('span', { class: 'chev', 'aria-hidden': 'true' }, showDone ? '▾' : '›')) : null,
+        ...(showDone ? T.finished.map(t => row(t, now)) : []),
+        showDone && T.total > T.finished.length ? h('p', { class: 'muted small' }, `The ${T.finished.length} newest are listed.`) : null,
+        h('p', { class: 'muted small' }, `What ${this.p.name} left running, its sub-agents, and the panes it started through spandeck. Its own sub-agents and commands stop when its turn is stopped; a helper pane has a stop of its own.`),
+      ].filter(Boolean));
+    };
+    const box = dialog('Background tasks', () => list, { onClose: () => { this.tasksBox = null; this.tasksClose = null; } });
+    box.body.parentNode.classList.add('sheet', 'chat-sheet');
+    this.tasksBox = draw;
+    this.tasksClose = box.close;
+    draw();
+  }
+
+  // A sub-agent's own conversation, drawn by what draws every
+  // conversation, to read only: nothing can be sent to it or answered.
+  async sideSheet(t) {
+    const log = h('div', { class: 'chat-log side-log', role: 'log', 'aria-label': 'The sub-agent\'s conversation' }, quiet('Loading…'));
+    const box = dialog(`${t.name || 'Sub-agent'} · ${String(t.title || '').slice(0, 60)}`, () => h('div', { class: 'chat-body side-body' }, log));
+    box.body.parentNode.classList.add('sheet', 'chat-sheet');
+    let r;
+    try { r = await env.api.on(this.st, 'pane.conversation.detail', { pane: this.p.id, task: t.id, session: this.session }); } catch (e) { log.replaceChildren(quiet('Its transcript could not be read: ' + e.message, 'warn')); return; }
+    const items = (Array.isArray(r.items) ? r.items : []).filter(x => x && typeof x.id === 'string');
+    // The same drawing, with nothing behind it to ask: a row opens to
+    // nothing more, and no note is cleared from here.
+    const v = Object.create(this);
+    Object.assign(v, { open: new Set(), revs: new Map(), full: new Map(), details: new Map(), showCleared: true, heldFor: () => null, whole: () => {},
+      detailEl: () => h('div', { class: 'chat-detail muted' }, 'What a sub-agent\'s call was given and what came back are in its file, not shown here.'),
+      clearNote: () => {} });
+    const draw = () => {
+      const out = [];
+      if (r.cut) out.push(quiet('The start of this transcript is too far back to show here.'));
+      if (!items.length) out.push(quiet('Nothing is written in its transcript yet.'));
+      for (let i = 0; i < items.length;) {
+        if (RUN.has(items[i].kind)) { let j = i; while (j < items.length && RUN.has(items[j].kind)) j += 1; out.push(v.runEl(items.slice(i, j))); i = j; continue; }
+        out.push(v.itemEl(items[i], true));
+        i += 1;
+      }
+      log.replaceChildren(...out);
+    };
+    v.touch = (id) => { v.revs.set(id, (v.revs.get(id) || 0) + 1); draw(); };
+    v.drawLog = draw;
+    draw();
+    box.body.scrollTop = box.body.scrollHeight;
+  }
+
+  // ---- the model, and how hard it thinks ----
+
+  // The chip says what the agent last reported, never what was asked for.
+  modelState() {
+    const M = this.live?.model, b = this.modelBtn;
+    b.hidden = !M || typeof M !== 'object' || this.available !== true;
+    if (b.hidden) return;
+    const model = M.model || this.p.usage?.model || '';
+    const label = model ? [modelName(model), M.effort ? cap1(String(M.effort)) : ''].filter(Boolean).join(' · ') : 'Model';
+    const waits = this.modelQueued ? ' · queued' : '';
+    if (b.textContent !== label + waits) b.textContent = label + waits;
+    b.title = model ? `Model: ${model}${M.effort ? ', effort ' + M.effort : ''}. Tap to change.` : 'Choose the model';
+    b.setAttribute('aria-label', (model ? `Model ${label}` : 'Choose the model') + (waits ? ', a change is queued' : ''));
+    // A choice made in the middle of a turn goes when the turn is over.
+    if (this.modelQueued && this.live.state !== 'working') { const q = this.modelQueued; this.modelQueued = null; this.setModel(q, true); }
+  }
+
+  // `pane.model`: the station types the agent program's own command into
+  // the pane, as the owner would, and only while the agent is idle.
+  setModel(params, late) {
+    return env.rpc(this.st, 'pane.model', { pane: this.p.id, ...params }).then((r) => {
+      if (r && r.sent) toast(`Sent ${r.command} to ${this.p.name}. The chip follows what it reports with its next reply.`);
+      else if (r && r.busy && !late) { this.modelQueued = params; toast('It is in the middle of a turn. It will be sent when this turn ends, while this page stays open.'); }
+      else toast(`Not sent: ${this.p.name} is ${r?.why || 'not ready'}.`, 'error');
+      this.modelState();
+    }).catch(() => {});
+  }
+
+  modelSheet() {
+    const M = this.live?.model || {}, name = this.p.agent_name || 'The agent';
+    const current = String(M.model || this.p.usage?.model || '');
+    const models = Array.isArray(M.models) ? M.models.filter(m => m && typeof m.id === 'string') : [];
+    const efforts = Array.isArray(M.efforts) ? M.efforts.filter(e => typeof e === 'string') : [];
+    // An alias is ticked when the model in use is of its family
+    // ("fable" for claude-fable-5-2); "default" is a way back, not a model.
+    const is = (m) => m.id !== 'default' && current !== '' && (current === m.id || modelShort(current).split(/[-.]/).includes(m.id));
+    const box = dialog('Model', (close) => {
+      const pick = (params) => { close(); this.setModel(params); };
+      const other = h('input', { class: 'ask-other model-other', placeholder: 'A model\'s name, as the program takes it', 'aria-label': 'Another model\'s name', maxLength: 120, autocapitalize: 'off', autocorrect: 'off', spellcheck: false, enterkeyhint: 'send' });
+      const set = h('button', { type: 'button', class: 'primary model-set', onclick: () => { const v = other.value.trim(); if (v) pick({ model: v }); } }, 'Set');
+      other.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); set.click(); } });
+      const toPicker = () => { close(); env.rpc(this.st, 'agents.command', { pane: this.p.id, command: M.picker }).then((r) => {
+        const skipped = r?.stations?.[0]?.skipped?.[0];
+        if (skipped) toast(`${name} is ${skipped.why}: its picker was not opened. Type ${M.picker} in the terminal when it is free.`, 'error');
+        this.keysOpen = true;
+        setFace(this.st, this.p, 'terminal');
+      }).catch(() => {}); };
+      return h('div', { class: 'model-sheet' },
+        current ? h('p', { class: 'muted small model-now' }, `In use now, as ${name} last reported: ${current}${M.effort ? ' · effort ' + M.effort : ''}`) : h('p', { class: 'muted small model-now' }, `${name} has not reported its model yet.`),
+        M.can_set ? h('div', { class: 'ask-opts model-list', role: 'radiogroup', 'aria-label': 'Models' },
+          models.map(m => h('button', { type: 'button', class: 'ask-opt model-opt' + (is(m) ? ' on' : ''), role: 'radio', 'aria-checked': String(is(m)), dataset: { model: m.id }, onclick: () => pick({ model: m.id }) },
+            h('span', { class: 'ask-label' }, h('b', {}, String(m.name || m.id)), m.says ? h('span', { class: 'muted' }, String(m.says)) : null),
+            h('span', { class: 'model-tick', 'aria-hidden': 'true' }, is(m) ? '✓' : '')))) : null,
+        M.can_set ? h('div', { class: 'model-other-row' }, h('label', { class: 'muted small' }, 'Other…'), h('div', { class: 'row' }, other, set)) : null,
+        !M.can_set && M.picker ? h('button', { type: 'button', class: 'primary model-picker', onclick: toPicker }, `Open its picker in the terminal (${M.picker})`) : null,
+        efforts.length ? h('div', { class: 'model-effort' }, h('h3', {}, 'Effort'),
+          h('div', { class: 'chat-switch effort-switch', role: 'radiogroup', 'aria-label': 'Effort' },
+            efforts.map(e => h('button', { type: 'button', class: M.effort === e ? 'on' : '', role: 'radio', 'aria-checked': String(M.effort === e), dataset: { effort: e }, onclick: () => pick({ effort: e }) }, cap1(e))))) : null,
+        M.note ? h('p', { class: 'muted small' }, String(M.note)) : null,
+        h('p', { class: 'muted small' }, `spandeck types ${name}'s own command into the pane, as you would, and only while it is idle.`));
+    });
+    box.body.parentNode.classList.add('sheet', 'chat-sheet');
   }
 
   // ---------------------------------------------------------- the message box
@@ -1026,6 +1282,8 @@ class Conv {
     this.sendBtn = h('button', { type: 'submit', class: 'primary chat-send' }, 'Send');
     // Esc, Tab, the arrows, Enter and Ctrl-C for the pane: one tap away, in
     // every pane's message box, and out of the way until asked for.
+    // The model in use and how hard it thinks, as the agent reports them.
+    this.modelBtn = h('button', { type: 'button', class: 'chat-model', hidden: true, 'aria-haspopup': 'dialog', onclick: (e) => { e.currentTarget.blur(); this.modelSheet(); } }, 'Model');
     this.keysBtn = h('button', { type: 'button', class: 'chat-keys-btn', title: 'Keys for the terminal: Esc, Tab, the arrows, Enter, Ctrl-C', 'aria-label': 'Keys for the terminal', 'aria-expanded': 'false',
       onclick: (e) => { e.currentTarget.blur(); this.keysOpen = !this.keysOpen; this.drawDock(); this.resized(); } }, 'Keys');
     // A message that was not sent: why, while its text stays in the box.
@@ -1083,7 +1341,7 @@ class Conv {
     this.composer = h('form', { class: 'chat-composer', onsubmit: (e) => { e.preventDefault(); this.working && !this.box.value.trim() ? this.stopTurn() : this.send(); } },
       this.keysEl, this.slash, this.sendSaid,
       h('div', { class: 'chat-row', onclick: (e) => { if (e.target === e.currentTarget || e.target.classList.contains('chat-tools')) this.box.focus(); } },
-        this.box, h('div', { class: 'chat-tools' }, plus, this.keysBtn, h('span', { class: 'grow' }), mic, this.sendBtn)));
+        this.box, h('div', { class: 'chat-tools' }, plus, this.keysBtn, this.modelBtn, h('span', { class: 'grow' }), mic, this.sendBtn)));
   }
 
   typed() {
@@ -1228,6 +1486,63 @@ export function initChat(e) {
       if (c.peekOpen && c.peekEl.isConnected && document.visibilityState === 'visible') c.peek();
     }
   }, 1000);
+}
+
+// What the conversation adds to its pane's menu.
+export function chatMenu(st, p) {
+  const c = convs.get(keyOf(st, p));
+  if (!c || !c.body.isConnected) return [];
+  const T = c.tasksNow(), cleared = Array.isArray(c.live?.cleared) ? c.live.cleared.length : 0;
+  return [
+    T.running.length || T.total ? { label: 'Background tasks', hint: T.running.length ? `${T.running.length} running` : `${T.total} finished`, action: () => c.tasksSheet() } : null,
+    cleared || c.showCleared ? { label: c.showCleared ? 'Hide cleared notes again' : 'Show cleared notes', hint: cleared ? String(cleared) : undefined, action: () => { c.showCleared = !c.showCleared; c.drawLog(); } } : null,
+    cleared ? { label: 'Bring cleared notes back', action: () => c.restoreNotes() } : null,
+    { label: 'About this screen', hint: 'layout numbers', action: () => aboutScreen(c) },
+  ].filter(Boolean);
+}
+
+// The numbers that say where the message box is and where the browser
+// says the screen ends, for when the two do not agree on a phone (the
+// owner's report of 17 Nov 2026: a gap under the message box with the
+// keyboard up). Shown, copied on a tap, and sent to the station's log
+// (`client.report`), where it is read with
+// spandeck rpc log.query '{"kind":"client.report"}'. Temporary.
+export function screenNumbers(c) {
+  const vv = window.visualViewport, r = (el) => { if (!el || !el.isConnected) return null; const b = el.getBoundingClientRect(); return [Math.round(b.top), Math.round(b.bottom), Math.round(b.height)]; };
+  const probe = h('div', { style: { position: 'fixed', visibility: 'hidden', paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)', paddingLeft: 'env(safe-area-inset-left)', paddingRight: 'env(safe-area-inset-right)' } });
+  document.body.append(probe);
+  const cs = getComputedStyle(probe), safe = [cs.paddingTop, cs.paddingRight, cs.paddingBottom, cs.paddingLeft].map(x => Math.round(parseFloat(x) || 0));
+  probe.remove();
+  const app = document.getElementById('app'), dock = c?.dock, card = c?.composer;
+  return {
+    what: 'layout-numbers', build: env.api.build,
+    inner: [window.innerWidth, window.innerHeight], client: [document.documentElement.clientWidth, document.documentElement.clientHeight], screen: [window.screen.width, window.screen.height], dpr: window.devicePixelRatio,
+    vv: vv ? { w: Math.round(vv.width), h: Math.round(vv.height * 10) / 10, top: Math.round(vv.offsetTop * 10) / 10, left: Math.round(vv.offsetLeft), page_top: Math.round(vv.pageTop), scale: vv.scale } : null,
+    scroll: [window.scrollX, window.scrollY], app: r(app), bar: r(c?.bar), log: r(c?.log), dock: r(dock), card: r(card), box: r(c?.box),
+    dock_pad_bottom: dock && dock.isConnected ? getComputedStyle(dock).paddingBottom : null,
+    under_card: vv && card && card.isConnected ? Math.round((vv.offsetTop + vv.height - card.getBoundingClientRect().bottom) * 10) / 10 : null,
+    safe, kbd: [app.classList.contains('kbd'), document.documentElement.classList.contains('kbd')],
+    focus: document.activeElement ? document.activeElement.tagName + '.' + String(document.activeElement.className).split(' ')[0] : null,
+    standalone: !!(navigator.standalone || window.matchMedia?.('(display-mode: standalone)').matches), secure: window.isSecureContext, ua: navigator.userAgent.slice(0, 160),
+  };
+}
+
+function aboutScreen(c) {
+  const out = h('pre', { class: 'chat-out about-out', tabIndex: 0 });
+  let n = null;
+  // Read while the keyboard is up too: the box below can be typed in, and
+  // the numbers are taken again each second.
+  const take = () => { n = screenNumbers(c); out.textContent = JSON.stringify(n, null, 1); };
+  const send = () => { copyText(JSON.stringify(n), 'Copied the numbers'); env.api.call('client.report', n).catch(() => {}); };
+  const timer = setInterval(() => { if (!out.isConnected) return clearInterval(timer); take(); }, 1000);
+  const box = dialog('About this screen', (close) => h('div', { class: 'about-screen' },
+    h('p', { class: 'muted small' }, 'Where the browser says the screen is, and where the message box is. "under_card" is the room between the message box and the bottom of what the browser says is in sight: it should be 0 with the keyboard up. Tap the numbers to copy them; they are also sent to this station\'s log.'),
+    h('input', { class: 'ask-other', placeholder: 'Tap here to bring the keyboard up, then tap the numbers', 'aria-label': 'A box to bring the keyboard up' }),
+    out,
+    h('div', { class: 'row end' }, h('button', { type: 'button', class: 'primary about-copy', onclick: send }, 'Copy and send'), h('button', { type: 'button', onclick: close }, 'Close'))));
+  out.addEventListener('click', send);
+  take();
+  return box;
 }
 
 // The conversation of a pane that is on the page in this draw. `where`:

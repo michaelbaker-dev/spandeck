@@ -683,3 +683,23 @@ impl Drop for RawInput {
         self.restore();
     }
 }
+
+// ------------------------------------------------------- who, and whose file
+
+/// The name of the user this process runs as, from the system's own list,
+/// never from the environment (a pane's program can set `USER`).
+pub fn user_name() -> Option<String> {
+    nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map(|u| u.name)
+}
+
+/// Is this a program of the system's: a file owned by root that nobody but
+/// root may write? Asked before something is run with an administrator's
+/// right, since an agent on this machine runs as the owner's user and could
+/// put a program of its own under a name that is looked for.
+pub fn system_program(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.uid() == 0 && m.mode() & 0o022 == 0)
+}

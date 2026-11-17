@@ -150,6 +150,20 @@ export class Api {
     this.lastReconnect = 0;
     // Which of the owner's Tailscale devices the station takes this one for.
     this.device = null;
+    // The station this page works through when it is not the one it was
+    // loaded from (failover.js): `{ station, url }`, the url a `ws:` or
+    // `wss:` address of another member of the fleet. Null: its own.
+    this.target = null;
+    // That station did not take this browser's token: it is not tried
+    // again by itself; whoever chose it chooses again.
+    this.refused = null;
+    // The build of the page's own station, when it is not this page's:
+    // `onBuild` decides what to do about it (app.js); with none, reload.
+    this.onBuild = null;
+    // This page's own build: the station that served it wrote it into
+    // the address of every script. Known so even to a page opened from
+    // the copy saved on the device while its station was off.
+    try { this.build = new URL(import.meta.url).searchParams.get('v') || undefined; } catch (e) { /* learned at sign-in */ }
 
     // The heartbeat. `awake`: milliseconds this page has been looked at and
     // running; every judgement is made on that clock, so that a tab in the
@@ -396,7 +410,7 @@ export class Api {
     this.settle = null;
     this._status();
     // An upgrade replaces the daemon in place: reconnect and carry on.
-    if (this.authError) return;
+    if (this.authError || this.refused) return;
     clearTimeout(this.retryTimer);
     this.retryTimer = setTimeout(() => { this.retryTimer = null; this.connect(); }, Math.max(retryIn(this.tries++), this.waitWhy ? 2000 : 0));
   }
@@ -410,7 +424,8 @@ export class Api {
     return new Promise((resolve) => {
       if (this.ws) return resolve(this.connected);
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${proto}//${location.host}/api/ws`);
+      const target = this.target;
+      const ws = new WebSocket(`${target ? target.url : `${proto}//${location.host}`}/api/ws`);
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
       (this.settle ||= []).push(resolve);
@@ -441,6 +456,14 @@ export class Api {
           clearTimeout(limit);
           if (!msg.auth.ok) {
             const why = msg.auth.message || 'not allowed';
+            // Another station that does not take this browser: said to
+            // whoever chose it, and this page is not signed out for it.
+            if (target && !msg.auth.again) {
+              this.refused = why;
+              this._emit('target.refused', { station: target.station, why });
+              this._status();
+              return;
+            }
             // `again`: nothing is wrong with this browser. Said, and tried again.
             if (msg.auth.again) this.waitWhy = why; else this.authError = why;
             this._status();
@@ -448,8 +471,17 @@ export class Api {
           }
           // The station was upgraded while this page was open: load the new
           // Control Deck, so a fix on the station reaches the page by itself.
-          if (this.build && msg.auth.build && msg.auth.build !== this.build) { location.reload(); return; }
-          this.build = msg.auth.build || this.build;
+          // Only the page's own station says what the page should be:
+          // another station may run another version, and the page asks
+          // nothing of it that its `caps` do not offer.
+          if (!target) {
+            if (this.build && msg.auth.build && msg.auth.build !== this.build) {
+              if (!this.onBuild) { location.reload(); return; }
+              this.onBuild(msg.auth.build);
+            }
+            this.build = msg.auth.build || this.build;
+          }
+          this.caps = Array.isArray(msg.auth.caps) ? msg.auth.caps.filter(c => typeof c === 'string') : [];
           this.authError = null;
           this.waitWhy = null;
           this.station = msg.auth.station;
@@ -542,6 +574,51 @@ export class Api {
 
   _reconnected() { this.reconnects += 1; this.lastReconnect = Date.now(); this._emit('connection.restored'); }
 
+  // Work through another station of the fleet (`{ station, url }`), or
+  // through this page's own again (null). The connection that is open is
+  // let go of: everything it carried is asked again of the new one, as
+  // after any reconnect. Only a browser's own token is taken there.
+  switchTo(target) {
+    this.target = target || null;
+    this.refused = null;
+    this.authError = null;
+    this.waitWhy = null;
+    this.tries = 0;
+    this.timeouts = 0;
+    this.rtts = [];
+    const ws = this.ws;
+    if (ws) { this._closed(ws); try { ws.close(); } catch (e) { /* gone already */ } }
+    clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    return this.connect();
+  }
+
+  // One call to another station on a connection of its own, made for it
+  // and closed after: for the one thing that must reach a station without
+  // passing through another (a password, `tailnet.operator`).
+  direct(url, method, params, within = 30000) {
+    return new Promise((resolve, reject) => {
+      let ws, over = false;
+      const end = (fn, v) => { if (over) return; over = true; clearTimeout(limit); try { ws.close(); } catch (e) { /* gone */ } fn(v); };
+      const limit = setTimeout(() => end(reject, Object.assign(new Error('no answer'), { code: 'no_answer' })), within);
+      try { ws = new WebSocket(url + '/api/ws'); } catch (e) { return end(reject, e); }
+      ws.onopen = () => ws.send(JSON.stringify({ auth: { token: takeToken(), client: this.client + '-d' } }));
+      ws.onmessage = (ev) => {
+        if (typeof ev.data !== 'string') return;
+        const msg = JSON.parse(ev.data);
+        if (msg.auth) {
+          if (!msg.auth.ok) return end(reject, Object.assign(new Error(msg.auth.message || 'not allowed'), { code: 'denied' }));
+          return ws.send(JSON.stringify({ id: 1, method, params }));
+        }
+        if (msg.id !== 1) return;
+        if (msg.error) end(reject, Object.assign(new Error(msg.error.message || 'error'), { code: msg.error.code }));
+        else end(resolve, msg.result);
+      };
+      ws.onerror = () => end(reject, Object.assign(new Error('could not connect'), { code: 'not_connected' }));
+      ws.onclose = () => end(reject, Object.assign(new Error('connection lost'), { code: 'connection_lost' }));
+    });
+  }
+
   _binary(buf) {
     if (buf.length < 5) return;
     const chan = new DataView(buf.buffer, buf.byteOffset + 1, 4).getUint32(0, true);
@@ -573,6 +650,9 @@ export class Api {
   // that the browser keeps it. The token goes in a header, as it never goes
   // in a URL.
   async file(path) {
+    // The page's own station is not the one answering: its files are not
+    // asked for (whoever wants one asks the working station another way).
+    if (this.target) throw Object.assign(new Error(`${path}: not from this station`), { status: 0 });
     const res = await fetch(path, { headers: { authorization: 'Bearer ' + (localStorage.getItem('spandeck.token') || '') } });
     if (!res.ok) throw Object.assign(new Error(`${path}: ${res.status}`), { status: res.status });
     return res.arrayBuffer();

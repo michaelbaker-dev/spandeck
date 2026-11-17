@@ -861,6 +861,8 @@ impl Daemon {
         v["version"] = json!(crate::daemon::VERSION);
         v["now_ms"] = json!(now_ms());
         v["started_ms"] = json!(self.started_ms);
+        // The deck over HTTPS, and the days its certificate has left.
+        v["https"] = self.https_view();
         v["restarts"] = self.restarts();
         // What the last restart in a day left: sessions started again,
         // ended, held back. And the switches in force on this station.
