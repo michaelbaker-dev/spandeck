@@ -3329,6 +3329,10 @@ function phoneLeft() {
   const text = JSON.stringify(keep);
   if (text !== beforeSaved) { beforeSaved = text; try { sessionStorage.setItem(FIT_BEFORE, text); } catch (e) { /* not kept, then */ } }
 }
+// (Kept again as the page is left: a page reloaded within a moment of fitting
+// a pane, before it was next drawn, kept nothing, and the pane stayed at the
+// phone's size. Seen as a test that failed now and then, 17 Nov 2026.)
+addEventListener('pagehide', () => { try { phoneLeft(); } catch (e) { /* the page is going */ } });
 // Where a pane is open, from who its station says has it: a window that
 // reaches it through another station is named for that station.
 function holderWords(st, p) {
