@@ -1053,9 +1053,10 @@ impl Daemon {
     /// A machine that cannot download the release (it has no curl, the
     /// release page does not answer it, or the download does not finish or
     /// does not match its checksum) asks this station for it and is sent it
-    /// in this same session (supply.rs). The session's standard input is
-    /// the script's file descriptor 3 until the install is over; the last
-    /// line ends with `exit`, so the shell reads nothing after its script.
+    /// in this same session (supply.rs). The script is not read by its
+    /// shell from the session's standard input (`supply::unix_boot_line`
+    /// starts it), which is the script's file descriptor 3 until the
+    /// install is over.
     fn add_script(&self, join: JoinBy, os: &str, send: Force) -> String {
         if os == "Windows" {
             return windows_script(
@@ -1741,12 +1742,21 @@ impl Daemon {
         let (feed, mut fed) = tokio::sync::mpsc::unbounded_channel::<Feed>();
         let (local, mut locals) = tokio::sync::mpsc::unbounded_channel::<Local>();
         let mut feed = (job.kind == "add").then_some(feed);
+        let mut unix_script_to_send = None::<String>;
         if let Some(mut stdin) = child.stdin.take() {
             let script = match job.kind {
                 "join" => self.join_script(join, &job.os),
                 "uninstall" => uninstall_script(job.erase, &job.os),
                 _ if windows => windows_framed(&self.add_script(join, &job.os, job.send)),
-                _ => self.add_script(join, &job.os, job.send),
+                // An install on a Mac or Linux machine: one line that
+                // takes the script and runs it. The script is sent when
+                // that line says it is ready for it.
+                _ => {
+                    let script = self.add_script(join, &job.os, job.send);
+                    let boot = supply::unix_boot_line(script.len());
+                    unix_script_to_send = Some(script);
+                    boot
+                }
             };
             let local = local.clone();
             tokio::spawn(async move {
@@ -1928,6 +1938,12 @@ impl Daemon {
                                 j.note = None;
                             }
                         });
+                    }
+                    // The line that takes the script is ready for it.
+                    ("script", _) => {
+                        if let (Some(script), Some(feed)) = (unix_script_to_send.take(), &feed) {
+                            let _ = feed.send(Feed::Line(script));
+                        }
                     }
                     // The machine cannot download the release and asks for
                     // it: `supply PLATFORM WHY`. Once, and only an install.
@@ -2757,10 +2773,13 @@ mod tests {
             if as_bash.get() {
                 std::os::unix::fs::symlink("/bin/bash", at("standin/sh")).unwrap();
             }
+            // The machine's own `sh`: on a Mac that is bash 3.2, which is
+            // where this hung when the script itself came on standard
+            // input (17 Nov 2026).
             let mut child = std::process::Command::new(if as_bash.get() {
                 at("standin/sh")
             } else {
-                "sh".into()
+                "/bin/sh".into()
             })
             .arg("-s")
             .env_clear()
@@ -2773,15 +2792,43 @@ mod tests {
             .stderr(std::fs::File::create(at("stderr")).unwrap())
             .spawn()
             .unwrap();
+            // It cannot hang: a shell that has not ended in a minute is
+            // ended, and the test fails with what it had said.
+            let (pid, over) = (child.id(), std::sync::Arc::new(AtomicBool::new(false)));
+            let (ended, late) = (over.clone(), std::sync::Arc::new(AtomicBool::new(false)));
+            let too_late = late.clone();
+            let watch = std::thread::spawn(move || {
+                let began = std::time::Instant::now();
+                while !ended.load(Ordering::SeqCst) {
+                    if began.elapsed() > Duration::from_secs(60) {
+                        too_late.store(true, Ordering::SeqCst);
+                        let _ = std::process::Command::new("kill")
+                            .args(["-9", &pid.to_string()])
+                            .status();
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            });
             let mut stdin = child.stdin.take();
+            // As the station does: the one line first, and the script when
+            // that line says it is ready to take it.
             stdin
                 .as_mut()
                 .unwrap()
-                .write_all(script.as_bytes())
+                .write_all(supply::unix_boot_line(script.len()).as_bytes())
                 .unwrap();
             let mut said = String::new();
             for line in std::io::BufReader::new(child.stdout.take().unwrap()).lines() {
                 let line = line.unwrap();
+                if line == "@spandeck script" {
+                    stdin
+                        .as_mut()
+                        .unwrap()
+                        .write_all(script.as_bytes())
+                        .unwrap();
+                    continue;
+                }
                 said.push_str(&line);
                 said.push('\n');
                 if line.starts_with("@spandeck supply ") {
@@ -2816,6 +2863,13 @@ mod tests {
                 }
             }
             let ok = child.wait().unwrap().success();
+            over.store(true, Ordering::SeqCst);
+            watch.join().unwrap();
+            assert!(
+                !late.load(Ordering::SeqCst),
+                "the shell had not ended after a minute and was ended. It had said:\n{said}{}",
+                std::fs::read_to_string(at("stderr")).unwrap_or_default()
+            );
             let left: Vec<String> = std::fs::read_dir(at("tmp"))
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().to_string())

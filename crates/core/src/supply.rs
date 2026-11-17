@@ -752,9 +752,9 @@ impl Daemon {
 /// `$supplied_version` its release and `$supplied_sum` its SHA-256; the
 /// folder it is in is deleted when the script ends, however it ends.
 ///
-/// The script that uses it must have `say` and `fail`, and must end the
-/// line that starts it with `exit`, so that the shell never reads what
-/// follows on its standard input as commands.
+/// The script that uses it must have `say` and `fail`, and must not be
+/// read by its shell from the session's standard input: it is started by
+/// `unix_boot_line`.
 pub fn unix_receive_lines() -> &'static str {
     r#"supplied_dir= supplied= supplied_version= supplied_sum=
 trap '[ -z "$supplied_dir" ] || rm -rf "$supplied_dir"' EXIT
@@ -769,7 +769,7 @@ spandeck_receive() {
   [ $# -eq 4 ] && [ "$1" = release ] || return 1
   case "$3" in '' | *[!0-9]*) return 1 ;; esac
   supplied_version=$2 supplied_sum=$4
-  supplied_dir=$(mktemp -d) || return 1
+  supplied_dir=$(mktemp -d "${TMPDIR:-/tmp}/spandeck-release.XXXXXX") || return 1
   supplied=$supplied_dir/release
   say ready
   head -c "$3" <&3 > "$supplied"
@@ -786,6 +786,27 @@ spandeck_receive() {
   fi
   echo "Received $3 bytes, and their SHA-256 matches."
 }"#
+}
+
+/// The one line a Mac or Linux machine's `sh -s` is given when the
+/// session's standard input must carry data after the script. It says
+/// `@spandeck script`, takes exactly `len` bytes (the script, which is
+/// sent only after it has said so, so that a shell that reads ahead has
+/// nothing to read ahead into) and runs them with `sh -c`. The script's
+/// shell then does not read its script from standard input at all, which
+/// is from its first byte the data's.
+///
+/// Why not simply the script on standard input, with the data behind it
+/// (as 0.4.11 was built, and as dash and bash 5 allow): the `sh` of macOS
+/// is bash 3.2, which corrupts its memory when the descriptor it reads its
+/// script from is duplicated (`3<&0`) and then read by `read`: it crashes
+/// inside `free` and spins in its own signal handler, for ever. Found on a
+/// real Mac on 17 Nov 2026; the test in add.rs was the hang.
+///
+/// A script that is cut short is a function without its end and its call:
+/// nothing of it runs.
+pub fn unix_boot_line(len: usize) -> String {
+    format!("printf '@spandeck script\\n'; s=$(head -c {len}) || exit 1; exec sh -c \"$s\"\n")
 }
 
 /// The first line a Windows machine is sent when the session's standard

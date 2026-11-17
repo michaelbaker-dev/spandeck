@@ -6064,6 +6064,7 @@ if [ "$pw" != "{RIGHT}" ]; then
   echo "$user@$host: Permission denied (publickey,password)." >&2
   exit 255
 fi
+IFS= read -r boot; case "$boot" in printf*) echo "@spandeck script" ;; esac
 while IFS= read -r line; do case "$line" in "main 3<&0"*) break ;; esac; done
 echo "@spandeck step install"
 echo "This machine could not reach the release page"
@@ -6545,7 +6546,8 @@ case "$host" in
   100.64.0.8) m=studio ;;
   100.64.0.9) m=mini ;;
   *)
-    while IFS= read -r line; do case "$line" in "main 3<&0"*) break ;; esac; done
+    IFS= read -r boot; case "$boot" in printf*) echo "@spandeck script" ;; esac
+while IFS= read -r line; do case "$line" in "main 3<&0"*) break ;; esac; done
     echo "@spandeck step install"
     echo "@spandeck supply ../../etc/passwd network"
     IFS= read -r answer; echo "first answer: $answer"
