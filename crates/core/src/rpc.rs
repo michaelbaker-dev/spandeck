@@ -1054,6 +1054,7 @@ impl Daemon {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
                 let text = s(&params, "text")?;
+                self.not_into_a_prompt(&id)?;
                 if caller.is_owner() {
                     self.release_by_typing(&id, by);
                     self.start_screen_owner_typed(&id);
@@ -1071,6 +1072,7 @@ impl Daemon {
                     return Err(Error::Denied("pasting into a pane is for the user".into()));
                 }
                 let text = s(&params, "text")?;
+                self.not_into_a_prompt(&id)?;
                 self.release_by_typing(&id, by);
                 self.start_screen_owner_typed(&id);
                 self.screen_sent(&id, text, true, &caller.who);

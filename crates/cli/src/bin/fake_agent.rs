@@ -55,6 +55,14 @@
 //!                                        another session file
 //!   {"wait_file": "name"}                wait until that file is in the folder
 //!   {"hooks": true}                      this program's hooks run from here on
+//!   {"model_screen": {"name": "Sonnet 5.5", "focus": "yes"|"no"}}
+//!       Claude Code's "Switch model?", drawn as the real program drew it on
+//!       17 Nov 2026 (agents/models.rs), under what is on the screen. It
+//!       waits: Enter takes the marked choice ("[fake] model switched to
+//!       Sonnet 5.5", and the line Claude Code prints for it in the session
+//!       file; or "[fake] model kept"), Esc goes back, the arrows move the
+//!       marker, and anything else typed is swallowed and said ("[fake]
+//!       the question swallowed: …"), as the real one swallowed a message.
 //!   {"effort": "high"}                   from here on its hooks say this effort
 //!                                        level, as Claude Code's do (also a word
 //!                                        of the script itself, for the start)
@@ -624,6 +632,8 @@ impl Agent {
             }
         } else if let Some(spec) = step.get("trust_screen") {
             self.trust_screen(spec);
+        } else if let Some(spec) = step.get("model_screen") {
+            self.model_screen(spec);
         } else if let Some(code) = step.get("exit").and_then(|s| s.as_i64()) {
             self.hook("SessionEnd", json!({"reason": "other"}));
             restore_terminal();
@@ -695,6 +705,65 @@ impl Agent {
     }
 
     /// A program's folder-trust screen (see the top of this file).
+    fn model_screen(&mut self, spec: &Value) {
+        let name = spec["name"].as_str().unwrap_or("Sonnet 5.5").to_string();
+        let mut on_yes = spec["focus"].as_str() != Some("no");
+        let draw = |on_yes: bool| {
+            let lines = spandeck_agents::models::switch_drawn(&name, on_yes);
+            let mut o = std::io::stdout();
+            // (Under what is on the screen: nothing is wiped.)
+            let _ = o.write_all(b"\r\n");
+            let _ = o.write_all(lines.join("\r\n").as_bytes());
+            let _ = o.flush();
+        };
+        draw(on_yes);
+        let mut swallowed = String::new();
+        let done = |agent: &mut Agent, switched: bool, swallowed: &str| {
+            out("");
+            if !swallowed.is_empty() {
+                out(&format!("[fake] the question swallowed: {swallowed}"));
+            }
+            if switched {
+                agent.append_transcript(&json!({"type": "user", "message": {"role": "user",
+                    "content": format!("<local-command-stdout>Set model to `{name}` and saved as your default for new sessions</local-command-stdout>")}}));
+                out(&format!("[fake] model switched to {name}"));
+            } else {
+                out("[fake] model kept");
+            }
+        };
+        loop {
+            let key = match self.input.recv() {
+                Ok(b) => b,
+                Err(_) => std::process::exit(0),
+            };
+            match key {
+                b'\r' | b'\n' => return done(self, on_yes, &swallowed),
+                0x1b => {
+                    // An arrow, the marks around a paste, or Esc alone.
+                    let wait = Duration::from_millis(50);
+                    match self.input.recv_timeout(wait) {
+                        Ok(b'[') => {
+                            let mut seq = vec![];
+                            while let Ok(b) = self.input.recv_timeout(wait) {
+                                seq.push(b);
+                                if b.is_ascii_alphabetic() || b == b'~' {
+                                    break;
+                                }
+                            }
+                            if seq == b"A" || seq == b"B" {
+                                on_yes = !on_yes;
+                                draw(on_yes);
+                            }
+                        }
+                        _ => return done(self, false, &swallowed),
+                    }
+                }
+                b if b >= 0x20 => swallowed.push(b as char),
+                _ => {}
+            }
+        }
+    }
+
     fn trust_screen(&mut self, spec: &Value) {
         use spandeck_agents::foldertrust::{drawn, Focus};
         let program = spec["as"].as_str().unwrap_or("claude");
@@ -878,6 +947,17 @@ fn main() {
         .unwrap_or(json!({"steps": []}));
     let resume = arg("--resume");
     let prompt = arg("--prompt");
+    // Started on a model or an effort of the pane's own, as Claude Code is
+    // with these flags: said, so a test can see it.
+    if let Some(model) = arg("--model") {
+        out(&format!(
+            "[fake] started on the model {model}{}",
+            if resume.is_some() { ", resuming" } else { "" }
+        ));
+    }
+    if let Some(level) = arg("--effort") {
+        out(&format!("[fake] started at the effort {level}"));
+    }
     let session = resume
         .clone()
         .unwrap_or_else(|| spandeck_core::paths::new_id("fake"));

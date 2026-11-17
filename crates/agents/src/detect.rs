@@ -38,6 +38,17 @@ pub const CLAUDE_RULES: &[Rule] = &[
         window: 16,
         reason: None,
     },
+    // "Switch model?" (seen with the real program on 17 Nov 2026, after
+    // `/model sonnet`): believed with hooks reporting, since no hook says
+    // it. Read exactly, with its model's name, the station says more
+    // (`models::switch_screen`; core, modelswitch.rs); this is for a
+    // screen that is that question in other words.
+    Rule {
+        state: AgentState::NeedsYou,
+        any: &["❯ 1. Yes, switch to "],
+        window: 6,
+        reason: Some("asks whether to switch model: answer in the terminal"),
+    },
     Rule {
         state: AgentState::Working,
         any: &["esc to interrupt", "ctrl+c to interrupt"],

@@ -172,6 +172,16 @@ pub struct PaneMeta {
     /// said. `None`: it has not said.
     #[serde(default)]
     pub effort: Option<String>,
+    /// A question of the program's own on its screen that spandeck knows
+    /// ("Switch model?": modelswitch.rs). `None` when there is none.
+    #[serde(default)]
+    pub prompt: Option<crate::modelswitch::Prompt>,
+    /// The flags the pane's program is started with for its model and
+    /// effort, when the owner chose them for this pane alone
+    /// (`pane.model` with `only_pane`): kept, so a later restart starts it
+    /// the same way.
+    #[serde(default)]
+    pub model_args: Vec<String>,
     /// The program the pane was asked to run instead of its agent's usual
     /// one (tests and custom launchers), so a restart uses it again. Only
     /// meaningful when `launcher_recorded`: older panes did not keep it.
@@ -333,6 +343,7 @@ impl PaneEntry {
             "session_id": m.session_id, "title": if m.title.is_empty() { info.title.clone() } else { m.title.clone() },
             "exit": m.exit, "exited": m.exit.is_some(), "paused": m.paused, "task": m.task,
             "parent_pane": m.parent_pane, "hooks_seen": m.hooks_seen, "muted": m.muted,
+            "prompt": m.prompt,
             "watch": m.watch, "slot": m.slot, "last_message": m.last_message,
             "cols": info.cols, "rows": info.rows, "controller": m.controller,
             "holders": self.holders.lock().unwrap().keys().collect::<Vec<_>>(),
@@ -369,6 +380,9 @@ pub struct SpawnOpts {
     pub prompt: Option<String>,
     pub slot: Option<String>,
     pub extra_args: Vec<String>,
+    /// The program's own flags for a model and an effort chosen for this
+    /// pane alone (kept on the pane's record).
+    pub model_args: Vec<String>,
     /// The New pane dialog's tick, "Trust this folder for <agent> if it
     /// asks", as the caller sent it. Read by `pane.spawn` for the owner
     /// only, and by nothing else (foldertrust.rs).
@@ -1105,6 +1119,7 @@ impl Daemon {
                 let mut extra = cfg.args.clone();
                 extra.extend(wiring);
                 extra.extend(opts.extra_args.iter().cloned());
+                extra.extend(opts.model_args.iter().cloned());
                 extra.extend(opts.args.iter().cloned());
                 if resume.is_none() && opts.resume_last {
                     resume = self.last_session(agent, &cwd).session.map(|s| s.id);
@@ -1334,6 +1349,8 @@ impl Daemon {
             controller: None,
             subagents: vec![],
             effort: None,
+            prompt: None,
+            model_args: opts.model_args.clone(),
             launcher: opts.program.clone(),
             launcher_recorded: true,
             resumed: resume.is_some(),
@@ -1667,6 +1684,8 @@ impl Daemon {
         let mut trust = self.folder_trust_look();
         // And its review of hooks (hookstrust.rs).
         trust.extend(self.hooks_trust_look());
+        // And Claude Code's "Switch model?" (modelswitch.rs).
+        trust.extend(self.model_switch_look());
         for p in self.list_panes() {
             let (agent, hooks_seen, exited, state, reason) = {
                 let m = p.meta.lock().unwrap();
@@ -1873,6 +1892,7 @@ impl Daemon {
                 role: meta.role.clone(),
                 task: meta.task.clone(),
                 parent_pane: meta.parent_pane.clone(),
+                model_args: meta.model_args.clone(),
                 resume: resume.clone(),
                 slot: meta.slot.clone(),
                 // The same rule for the program started again, and only
@@ -2566,6 +2586,7 @@ impl Daemon {
                 role: meta.role.clone(),
                 task: meta.task.clone(),
                 parent_pane: meta.parent_pane.clone(),
+                model_args: meta.model_args.clone(),
                 resume: self.resumable(&meta),
                 slot: meta.slot.clone(),
                 trust_choice: meta.trust_choice.clone(),

@@ -489,6 +489,21 @@ of an item of it and no watch. `not_found`: no such task, or it has no transcrip
 | Antigravity | picker (`/model`) | `/effort <level>` | antigravity.google/docs/cli |
 | OpenCode | picker (`/models`) | none | opencode.ai/docs/tui |
 
+### `live.prompt`: a question of the program's own
+
+`null`, or `{kind: "model_switch", name, on_yes, since_ms}`: Claude Code's "Switch model?" is
+on the pane's screen, read exactly (17 Nov 2026; `crates/core/src/modelswitch.rs`). `name` is
+the model it would switch to, as the program names it; `on_yes`: its marker is on "Yes", so
+Enter (`pane.input {data: "\r"}`) switches and Esc goes back. The pane's state is
+`needs_you` and its `needs_reason` begins `asks whether to switch model to`. The same
+`prompt` is in `pane.list` and `pane.get`. When the question follows `pane.model`'s own
+command the station answers it and no `prompt` is ever set.
+
+**While a question of the program's own is on a pane's screen** (this one, `trust.asks`,
+`hooks_trust.asks`), `pane.paste`, `pane.send_text`, `agents.command` and `pane.model` type
+nothing: the first two answer `invalid` ("not sent: … is asking … in this pane"), the others
+`sent: false` with `why`. Keep what was written and say why. `pane.input` is not refused.
+
 ## `pane.model`
 
 The owner's only (an agent, a station for itself and the read-only caller are refused).
@@ -500,7 +515,21 @@ The owner's only (an agent, a station for itself and the read-only caller are re
 ```
 
 The station types the program's own command into the pane, with Enter, as `agents.command`
-does and through it: only while the agent is not in the middle of a turn. `model` is one
+does and through it: only while the agent is not in the middle of a turn. Claude Code may
+then ask "Switch model?": following this command, the station answers it "Yes" once
+(`live.prompt`, above). `live.model.saves` says what the typed command changes beyond the
+pane (Claude Code saves it as the default for new sessions): say it before calling.
+
+`{pane, model | effort, only_pane: true}` types nothing: the pane's program is started again
+with its own flags (`live.model.only_pane.model` / `.effort` say whether it has them; Claude
+Code: `--model`, `--effort`) and resumes its conversation, as `pane.restart` does. Answered
+`{"ok": true, "restarted": true, "args": ["--model", "opus"]}`; `busy` in the middle of a
+turn; `invalid` for a pane with no saved conversation or a program without the flags. The
+flags stay with the pane (`only_pane.args`).
+
+`live.model.set`: the program's own name for a model its command has just set ("Sonnet
+5.5"), from what it printed, until its next reply names the model. Show it in place of
+`model` when present. `model` is one
 word (letters, digits and `. _ : / @ [ ] -`, 120 at most); `effort` is one of `efforts`.
 `invalid`: anything else, both at once, a shell, or a program that takes no such command
 (the message names its picker). Nothing says the program took it: `live.model` follows

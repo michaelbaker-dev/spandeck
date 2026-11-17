@@ -289,6 +289,7 @@ impl Daemon {
     pub(crate) fn start_screen_owner_typed(&self, pane: &str) {
         self.folder_trust.owner_typed(pane);
         self.hooks_trust.owner_typed(pane);
+        self.model_owner_typed(pane);
     }
 
     /// Set or clear what a pane says about the screen it waits at. `slot`:
