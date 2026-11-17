@@ -117,6 +117,9 @@ const NOT_FORWARDED: &[&str] = &[
     // The address at which a machine is signed in to Tailscale again is
     // for whoever is at that machine.
     "tailnet.signin",
+    // The password it carries is for the station it is given to, and is
+    // never passed from one station to another (https.rs).
+    "tailnet.operator",
 ];
 
 /// The owner's calls that only look, or only say what has been looked at,
@@ -1628,6 +1631,28 @@ impl Daemon {
             "tailnet.view" => self.tailnet_view(),
             "tailnet.report" => self.tailnet_report(),
             "tailnet.signin" => self.tailnet_signin(caller)?,
+            // Ask for the certificate again now (the owner has just
+            // switched HTTPS certificates on for the tailnet, say).
+            "https.status" => self.https_view(),
+            "https.refresh" => {
+                self.https.kick.notify_one();
+                self.https_view()
+            }
+            // Let this station's user ask Tailscale for the machine's
+            // certificate. The password leaves the request here and lives
+            // only until the one command has ended.
+            "tailnet.operator" => {
+                let password = match params.as_object_mut().and_then(|o| o.remove("password")) {
+                    Some(Value::String(text)) if !text.is_empty() => {
+                        Some(crate::https::Secret::new(text))
+                    }
+                    _ => None,
+                };
+                let (d, off, by) = (self.clone(), flag(&params, "off"), by.to_string());
+                tokio::task::spawn_blocking(move || d.tailnet_operator(password, off, &by))
+                    .await
+                    .map_err(|e| Error::Other(anyhow::anyhow!("{e}")))??
+            }
             "fleet.view" => self.fleet_view(),
             "fleet.refresh" => {
                 self.discover_peers().await;
@@ -2540,6 +2565,7 @@ mod tests {
             "fleet.remove",
             "fleet.uninstall",
             "fleet.add",
+            "tailnet.operator",
             "vault.call",
             "vault.connect",
             "setup.set",
@@ -2576,6 +2602,17 @@ mod tests {
         }
         assert!(allowed(Authority::Owner, "question.answer"));
         assert!(!not_forwarded("question.answer") && !reads("question.answer"));
+        // The one command run with an administrator's right (17 Nov 2026,
+        // https.rs): the owner's alone, never kept, and never passed from
+        // one station to another, since it carries a password.
+        for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
+            assert!(!allowed(who, "tailnet.operator"), "{who:?}");
+            assert!(!allowed(who, "https.refresh"), "{who:?}");
+            assert!(!allowed(who, "https.status"), "{who:?}");
+        }
+        assert!(allowed(Authority::Owner, "tailnet.operator"));
+        assert!(not_forwarded("tailnet.operator") && !reads("tailnet.operator"));
+        assert_eq!(class("tailnet.operator", &none), Class::Never);
         // The folder-trust choice (16 Nov 2026) is the owner's alone, by
         // the same rule: starting a pane with it, the one tap, the list
         // and the project's switch are on no agent's list, no station's

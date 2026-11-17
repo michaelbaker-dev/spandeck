@@ -95,6 +95,18 @@ jobs:
       # seconds.
       - name: The Inbox is one size of text, and nothing runs off its card (phone and computer)
         run: cargo test -p spandeck --test inbox -- --ignored
+      # HTTPS, the deck saved on the device, and carrying on through
+      # another station, in a real browser at a phone's size. The rules of
+      # the list and the choice as the plain functions they are; "Turn on
+      # secure access" with a stand-in for sudo; four stations of which the
+      # serving one is killed, over HTTP and over HTTPS (the bar, the
+      # stations by latency, nothing taken while writing, the fastest
+      # taken, the pane attached again, the draft kept, Go back); and the
+      # saved copy: opened with its station down, with every station down,
+      # a new build taken whole, and taken away by the switch. About two
+      # and a half minutes.
+      - name: A page carries on through another station; the deck saved on the device; HTTPS turned on from the deck
+        run: cargo test -p spandeck --test failover -- --ignored
   build:
     strategy:
       fail-fast: false

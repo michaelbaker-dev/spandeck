@@ -43,6 +43,9 @@ import { retryIn } from './api.js';
 let env = null;
 const convs = new Map();   // "station/pane id" -> Conv
 const drafts = new Map();  // what was being written, when its view is not on the page
+// How many message boxes hold something not sent, off the page (failover.js
+// says "Your draft is kept" when the page moves to another station).
+export const draftCount = () => drafts.size;
 const termBoxes = new Map(); // the terminal face's message box on a phone, per pane
 const titles = new Map();  // "station/pane id" -> the session's title, for the list
 const noTitles = new Map(); // station -> when to ask it for titles again

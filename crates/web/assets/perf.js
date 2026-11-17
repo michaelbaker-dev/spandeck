@@ -61,6 +61,20 @@ function cameBack(x) {
 }
 export const clockWords = (diff) => { const s = Math.round(Math.abs(diff) / 1000); return s >= 5400 ? `${Math.round(s / 3600)} h` : s >= 90 ? `${Math.round(s / 60)} min` : `${s} s`; };
 
+// The deck over HTTPS at a station, in a few words; and the whole of it.
+const HTTPS_STATE = { off: 'off', needs_operator: 'not on: needs your password once', not_enabled: 'not on: tailnet setting', no_tailscale: 'not on: Tailscale not answering', starting: 'being asked for', error: 'not on' };
+export function httpsWords(s) {
+  if (!s) return 'not said';
+  const days = num(s.days_left);
+  if (s.on) return days === null ? 'on' : days < 0 ? 'on · certificate run out' : `on · ${days} days left`;
+  return HTTPS_STATE[s.state] || 'not on';
+}
+export function httpsTitle(s) {
+  const why = typeof s.why === 'string' ? s.why.slice(0, 300) : '';
+  if (s.on) return `Served at https://${String(s.name || '').slice(0, 260)}:${num(s.port) ?? ''}. The certificate is Tailscale's, for this machine's name, and is renewed by itself.${why ? `\n${why}` : ''}`;
+  return `${why || 'Not served over HTTPS.'}\nEverything works over the plain address. The station's menu has "Secure access (HTTPS)…".`;
+}
+
 // A Tailscale key, in words: null when nothing is known of it.
 export function keyInfo(k, now = Date.now()) {
   if (!k || k.known === false) return null;
@@ -183,6 +197,10 @@ export function verdict(data, row) {
   const tn = r.tailnet || {};
   if (tn.read && tn.state && tn.state !== 'Running') return { level: 'bad', text: TS_STATE[tn.state] || `Tailscale: ${String(tn.state).slice(0, 24)}` };
   if (key && key.level !== 'ok' && (key.expired || key.left <= 14)) return { level: key.level, text: `Tailscale key ${key.text}` };
+  // The certificate of the secure deck is renewed by itself: said only
+  // when that has not happened with two weeks left.
+  const cert = num(r.https?.days_left);
+  if (r.https?.on && cert !== null && cert < 14) return { level: cert < 3 ? 'bad' : 'warn', text: cert < 0 ? 'the HTTPS certificate has run out' : `HTTPS certificate: ${cert} days left` };
   // A clock that differs from one other station's is that station's to
   // answer for, unless this one differs from most of those it has read.
   const read = (r.links || []).map(l => ({ l, c: l.clock })).filter(x => x.c);
@@ -237,6 +255,7 @@ function stationFacts(data, row) {
     f('Repaints', r ? `${num(r.terminal?.resyncs?.last_5m) ?? 0} (${num(r.terminal?.resyncs?.since_start) ?? 0} since start)` : na, 'A client that fell behind a pane and was sent the whole screen again'),
     f('Messages', r ? `there ${stat(r.messages?.received, '—')} · told ${stat(r.messages?.woken, '—')}` + ((r.messages?.waiting || []).length ? ` · ${r.messages.waiting.reduce((a, w) => a + (num(w.count) || 0), 0)} waiting` : '') : na,
       r ? statTitle(r.messages?.received, 'From sent here to stored at another station') + '\n' + statTitle(r.messages?.woken, 'From stored here to the agent being told') + (r.messages?.waiting || []).map(w => `\n${w.count} waiting for ${w.station}, the oldest for ${span(w.oldest_ms)}` + (num(w.failed_in_a_row) ? `; ${num(w.failed_in_a_row)} tries in a row not answered, the next in ${span(num(w.next_try_in_ms) || 0)}` : '')).join('') + (r.messages?.push === false ? '\nSent by the half-second pump only (relay_push is off)' : '') : ''),
+    f('Secure deck (HTTPS)', r ? httpsWords(r.https) : na, r && r.https ? httpsTitle(r.https) : 'A station from before does not say.'),
     f('Tailscale key', key ? key.text : r && r.tailnet && !r.tailnet.read ? 'not read here' : 'not known', key ? '' : 'A station reads its key when it finds stations through Tailscale (discovery).'),
   ], key };
 }

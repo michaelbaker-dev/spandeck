@@ -907,3 +907,19 @@ button.ask-opt.model-opt { align-items: center; } .model-opt .ask-label { flex: 
   .chat-bar .chat-ring { min-width: 36px; min-height: 36px; }
   .chat-note-x { width: 40px; height: 36px; } .chat-note-line { min-height: 36px; }
 }
+/* Carrying on through another station (failover.js): the stations that
+   answer, fastest first, in the bar that says the serving one is silent. */
+.fo-bar { align-items: flex-start; }
+.fo-list { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 6px; }
+.fo-row { padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); font-variant-numeric: tabular-nums; }
+.fo-row.off { color: var(--muted); border-style: dashed; background: none; }
+.fo-row.off b { font-weight: normal; }
+.fo-next { flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.via-bar { border-left-color: var(--blue); }
+.fo-none-list { display: flex; flex-direction: column; gap: 6px; margin: 14px 0; text-align: left; }
+.fo-none-row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
+.https-dialog p { overflow-wrap: anywhere; } .https-dialog input { width: 100%; }
+@media (max-width: 760px) {
+  .fo-row, .fo-next button, .via-bar button { min-height: 44px; }
+  .fo-list { flex-direction: column; } .fo-row { text-align: left; }
+}

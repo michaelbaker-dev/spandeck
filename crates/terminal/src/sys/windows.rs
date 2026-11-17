@@ -1463,3 +1463,15 @@ impl Drop for RawInput {
         self.restore();
     }
 }
+
+// ------------------------------------------------------- who, and whose file
+
+/// The name of the user this process runs as.
+pub fn user_name() -> Option<String> {
+    std::env::var("USERNAME").ok().filter(|u| !u.is_empty())
+}
+
+/// Nothing is run with an administrator's right on Windows (https.rs).
+pub fn system_program(_path: &Path) -> bool {
+    false
+}

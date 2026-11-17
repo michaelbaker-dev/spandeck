@@ -19,3 +19,10 @@ mime_guess.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
 base64.workspace = true
+tokio-rustls.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+tower.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true

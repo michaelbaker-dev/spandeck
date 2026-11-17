@@ -163,6 +163,9 @@ pub struct FleetState {
     dropped: Mutex<Vec<String>>,
     /// Where a station of this fleet can be, as of the last look.
     pub(crate) places: Mutex<Vec<String>>,
+    /// The name the local Tailscale client gives the owner's device at each
+    /// address, as of the last look (https.rs: whose deck an origin is).
+    pub(crate) names: Mutex<HashMap<String, String>>,
     /// Held while the roster is read, merged and written back.
     pub(crate) roster: Mutex<()>,
     /// Signs calls to other stations with the fleet key.
@@ -304,6 +307,7 @@ impl FleetState {
             me: Mutex::new(None),
             dropped: Mutex::new(vec![]),
             places: Mutex::new(vec![]),
+            names: Mutex::new(HashMap::new()),
             roster: Mutex::new(()),
             trust,
             station: cfg.station.clone(),
@@ -685,7 +689,7 @@ impl Transport for FleetState {
 
 /// Tailscale's command-line program: on PATH, else where its installer
 /// puts it (macOS: inside the app; Windows: `%ProgramFiles%\Tailscale`).
-fn tailscale_bin() -> Option<String> {
+pub(crate) fn tailscale_bin() -> Option<String> {
     let mut places = vec![
         "tailscale".to_string(),
         "/Applications/Tailscale.app/Contents/MacOS/Tailscale".to_string(),
@@ -864,6 +868,7 @@ impl Daemon {
         // is one of these (manage.rs, the roster).
         let mut places: Vec<String> = self.cfg.peers.clone();
         let mut online_at: HashMap<String, bool> = HashMap::new();
+        let mut names: HashMap<String, String> = HashMap::new();
         if self.cfg.discovery {
             // The local client is given four seconds: one that hangs holds
             // up neither the rounds that are due nor anything else.
@@ -916,6 +921,11 @@ impl Daemon {
                         .and_then(|a| a.first())
                         .and_then(|i| i.as_str())
                     {
+                        let dns = peer.get("DNSName").and_then(|d| d.as_str()).unwrap_or("");
+                        let dns = dns.trim_end_matches('.').to_lowercase();
+                        if !dns.is_empty() {
+                            names.insert(ip.to_string(), dns);
+                        }
                         let addr = format!("{ip}:{}", self.cfg.web_port);
                         places.push(addr.clone());
                         online_at.insert(addr.clone(), online);
@@ -946,6 +956,9 @@ impl Daemon {
             }
         }
         *self.fleet.places.lock().unwrap() = places;
+        if self.cfg.discovery && !names.is_empty() {
+            *self.fleet.names.lock().unwrap() = names;
+        }
         // A key this fleet stopped using is kept thirty days for the
         // stations still owed the new one: this drops what is older.
         if !self.trust.retired().is_empty() {
@@ -1218,6 +1231,7 @@ impl Daemon {
             .iter()
             .map(|p| json!({"name": p["name"], "open": p["open"]}))
             .collect::<Vec<_>>());
+        let names = self.fleet.names.lock().unwrap().clone();
         let peers: Vec<Value> = self
             .fleet
             .peers()
@@ -1229,6 +1243,17 @@ impl Daemon {
                 v["addr"] = json!(p.addr);
                 v["last_seen_ms"] = json!(p.last_seen_ms);
                 v["self"] = json!(false);
+                // Where its deck is over HTTPS is passed to a page only
+                // when this station's own Tailscale client gives that
+                // name for its address: a page that loses this station
+                // connects there and shows its token (https.rs).
+                let said = crate::https::brief(&p.info);
+                let host = p.addr.rsplit_once(':').map_or(p.addr.as_str(), |(h, _)| h);
+                let known = names.get(host).map(String::as_str);
+                if !said.is_null() && crate::https::deck_origins(&p.addr, &said, known).len() < 2 {
+                    v["https"] = json!({"on": false, "state": "unconfirmed", "port": said["port"],
+                        "why": "this station's own Tailscale does not give that name for its address"});
+                }
                 // A station that is off: the version it last had.
                 if v.get("version").is_none() {
                     v["version"] = json!(p.version);
