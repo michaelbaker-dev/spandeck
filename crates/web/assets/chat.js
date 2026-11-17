@@ -607,7 +607,20 @@ class Conv {
   }
 
   // A run of tool calls, folded into one line.
+  // (What a tool call made and no reply names is shown under the run: the
+  // real Antigravity, 17 Nov 2026, made a picture and stopped before it
+  // said where.)
   runEl(run) {
+    const el = this.runRows(run);
+    const said = new Set();
+    for (const x of this.items) if (x.kind !== 'tool' && Array.isArray(x.media)) for (const m of x.media) said.add(m && m.id);
+    const media = [];
+    for (const x of run) if (x.kind === 'tool' && Array.isArray(x.media)) for (const m of x.media) if (m && !said.has(m.id) && !media.some(k => k.id === m.id)) media.push(m);
+    if (!media.length) return el;
+    return h('div', { class: 'chat-run-made' }, el, this.madeEl({ media }));
+  }
+
+  runRows(run) {
     const tools = run.filter(x => x.kind !== 'thinking');
     const total = run.reduce((n, x) => n + (typeof x.duration_ms === 'number' ? x.duration_ms : 0), 0);
     if (!tools.length) return quiet('Thought' + (total ? ' ' + dur(total) : ''), 'thought');

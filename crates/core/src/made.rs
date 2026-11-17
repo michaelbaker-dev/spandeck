@@ -221,6 +221,14 @@ impl Daemon {
                 if found.iter().any(|f| f.path == m.path) {
                     continue;
                 }
+                // What the owner attached is the owner's, not something
+                // made: an agent that reads it names its path. (The real
+                // Antigravity, 17 Nov 2026.)
+                let own = self.paths.drops_dir();
+                let own = own.canonicalize().unwrap_or(own);
+                if Path::new(&m.path).starts_with(&own) {
+                    continue;
+                }
                 let hash = Sha256::digest(format!("{pane}\n{}", m.path).as_bytes());
                 m.id = hash.iter().take(10).map(|b| format!("{b:02x}")).collect();
                 found.push(m);
