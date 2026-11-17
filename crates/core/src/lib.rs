@@ -59,6 +59,7 @@ pub mod hooks;
 pub mod hookstrust;
 pub mod http;
 pub mod https;
+pub mod latest;
 pub mod links;
 pub mod look;
 pub mod loops;

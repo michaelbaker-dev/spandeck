@@ -263,6 +263,27 @@ mod release_calls {
     }
 }
 
+/// The owner, 17 Nov 2026, on updating agent programs: starting an update
+/// or an install, and making a station ask a release host, are the
+/// owner's alone (rule 7: an agent never administers a station). Reading
+/// how it went is on the read-only list, and is not an agent's.
+#[cfg(test)]
+mod agent_program_calls {
+    use super::*;
+
+    #[test]
+    fn only_the_owner_updates_installs_or_checks_agent_programs() {
+        for method in ["agents.update", "agents.install", "agents.check"] {
+            for authority in [Authority::Agent, Authority::ReadOnly, Authority::Peer] {
+                assert!(!allowed(authority, method), "{method}");
+            }
+            assert!(!reads(method), "{method}");
+        }
+        assert!(allowed(Authority::ReadOnly, "agents.status"));
+        assert!(!allowed(Authority::Agent, "agents.status"));
+    }
+}
+
 /// A method that acts from the station the owner is using and is never
 /// passed on to another one.
 pub fn not_forwarded(method: &str) -> bool {
@@ -337,6 +358,8 @@ const REPEATABLE: &[&str] = &[
     // And the one for spandeck's own hooks.
     "hookstrust.choice",
     "hookstrust.set",
+    // Asking a release host again asks the same question.
+    "agents.check",
 ];
 
 /// Changes that are done once by their request id, the answer kept for a
@@ -2002,6 +2025,23 @@ impl Daemon {
                 tokio::task::spawn_blocking(move || d.agents_status())
                     .await
                     .map_err(|e| invalid(e.to_string()))?
+            }
+            // Ask whether each agent program here is the newest published
+            // (latest.rs). The owner's alone, and on no other list: it makes
+            // this station call a release host, which no agent and no
+            // read-only caller may cause. It answers at once.
+            "agents.check" => {
+                let agent = match opt(&params, "agent") {
+                    Some(a) => Some(
+                        AgentKind::parse(a).ok_or_else(|| invalid(format!("unknown agent {a}")))?,
+                    ),
+                    None => None,
+                };
+                let again = params
+                    .get("again")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                self.agents_check(agent, again)
             }
             // Update one agent program, or all of them, on this station. The
             // caller names an agent; what is run comes from the catalogue or
