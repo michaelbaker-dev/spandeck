@@ -523,6 +523,46 @@ pub fn showing(agent: crate::AgentKind, lines: &[String]) -> bool {
     }
 }
 
+/// Is the bottom of the screen a program's ordinary wait for a message?
+/// `None`: this program's waiting screen is not known. From the real
+/// screens captured on 17 Nov 2026, empty and with words typed in:
+///
+/// - **Claude Code 2.1.326**: its message box is a row beginning `❯`
+///   between two rules, with its mode row under it. (What it draws under
+///   the box while a command is being typed is still its wait.)
+/// - **Codex 0.169.0**: a row beginning `› ` at the left edge, and under
+///   it at most its two status rows.
+///
+/// When a pane that has shown this once shows something else while it is
+/// not in a turn, the program is showing something of its own (the
+/// station, picker.rs). Antigravity and OpenCode are told by `showing`.
+pub fn waiting(agent: crate::AgentKind, lines: &[String]) -> Option<bool> {
+    use crate::AgentKind;
+    let rows: Vec<&String> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
+    let tail = &rows[rows.len().saturating_sub(14)..];
+    Some(match agent {
+        AgentKind::Claude => {
+            let rule =
+                |l: &&String| l.trim().chars().count() >= 20 && l.trim().chars().all(|c| c == '─');
+            // The bottom-most rule that closes a box whose first row
+            // begins with the program's mark.
+            (1..tail.len()).rev().any(|close| {
+                rule(&tail[close])
+                    && (0..close)
+                        .rev()
+                        .take(12)
+                        .find(|i| rule(&tail[*i]))
+                        .is_some_and(|open| open + 1 < close && tail[open + 1].starts_with('❯'))
+            })
+        }
+        AgentKind::Codex => tail
+            .iter()
+            .rposition(|l| l.starts_with("› ") || l.as_str() == "›")
+            .is_some_and(|at| tail.len() - at - 1 <= 3),
+        _ => return None,
+    })
+}
+
 fn class_of(said: &str) -> Class {
     let said = said.to_lowercase();
     if GRANTS.iter().any(|w| said.contains(w)) {
@@ -754,6 +794,42 @@ Keyboard: ↑/↓ Navigate  ←/→ Effort  enter Select  esc Go Back
                                   View all integrations ctrl+a  Favorite ctrl+f
 
 
+
+
+
+  ⊙ 1 MCP /mcps                                                                                                  2.3.0";
+    /// Claude Code 2.1.326 waiting for a message, and with words typed
+    /// in its box (the words are made up).
+    pub const CLAUDE_IDLE: &str = "● Nine herons, counted.
+
+────────────────────────────────────────────────────────────
+❯\u{a0}Try \"edit tally.py to…\"
+────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)";
+    pub const CLAUDE_DRAFT: &str = "────────────────────────────────────────────────────────────
+❯\u{a0}count the egrets too
+────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)";
+    /// Codex 0.169.0 waiting for a message, and with words typed in.
+    pub const CODEX_IDLE: &str = "  >_ OpenAI Codex (v0.169.0)
+     ~/marsh
+
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol high · ~/marsh
+  ← for agents · ? for shortcuts                                                              ⚠ 2 warnings · f2 to view";
+    pub const CODEX_DRAFT: &str = "› count the egrets too
+
+  GPT-6.1-Sol high · ~/marsh
+                                                                                              ⚠ 2 warnings · f2 to view";
+    /// OpenCode 2.3.0 waiting for a message.
+    pub const OPENCODE_IDLE: &str = "                       ┃
+                       ┃  Ask anything… \"Fix broken tests\"
+                       ┃
+                       ┃  Build · DeepSeek V4.1 Flash Free OpenCode · high
+                       ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+                       ~/marsh:main      shift+tab agents  ctrl+p commands
 
 
 
@@ -1023,6 +1099,43 @@ mod tests {
         );
         // Codex's own message box, its mark at the same edge: not a list.
         assert_eq!(read(&lines("  The nests are counted.\n  1. east\n  2. west\n\n› Ask Codex to do anything\n\n  gpt-6.1-sol · 97% left · ~/marsh")), None);
+    }
+
+    /// Run with the four real programs on 17 Nov 2026: each one's ordinary
+    /// wait for a message, empty and with words typed in, is nothing (an
+    /// idle Antigravity pane had been taken for one showing something,
+    /// and every message to it was held); and what is not that wait is
+    /// known not to be, for Claude Code and Codex too.
+    #[test]
+    fn every_programs_wait_for_a_message_is_nothing() {
+        use crate::AgentKind;
+        for (agent, screen) in [
+            (AgentKind::Claude, real::CLAUDE_IDLE),
+            (AgentKind::Claude, real::CLAUDE_DRAFT),
+            (AgentKind::Codex, real::CODEX_IDLE),
+            (AgentKind::Codex, real::CODEX_DRAFT),
+            (AgentKind::OpenCode, real::OPENCODE_IDLE),
+            (AgentKind::Antigravity, real::ANTIGRAVITY_IDLE),
+        ] {
+            assert_eq!(read(&lines(screen)), None, "{agent:?}\n{screen}");
+            assert!(!showing(agent, &lines(screen)), "{agent:?}\n{screen}");
+            if let Some(waits) = waiting(agent, &lines(screen)) {
+                assert!(waits, "{agent:?}\n{screen}");
+            }
+        }
+        // Its own lists and screens are not its wait.
+        for (agent, screen) in [
+            (AgentKind::Claude, real::MODEL),
+            (AgentKind::Claude, real::CONFIG),
+            (AgentKind::Claude, real::PERMISSIONS),
+            (AgentKind::Codex, "  Hooks\n\n  Event          Active/Installed\n  PreToolUse     2/2\n  Stop           1/1"),
+        ] {
+            assert_eq!(waiting(agent, &lines(screen)), Some(false), "{agent:?}\n{screen}");
+        }
+        assert_eq!(
+            waiting(AgentKind::OpenCode, &lines(real::OPENCODE_IDLE)),
+            None
+        );
     }
 
     /// The same report's other half: what is not such a list is not read

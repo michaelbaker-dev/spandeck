@@ -26,7 +26,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use spandeck_agents::picker::{read, showing, Class, Picker};
+use spandeck_agents::picker::{read, showing, waiting, Class, Picker};
 use spandeck_agents::AgentState;
 use spandeck_terminal::input::Item;
 
@@ -44,6 +44,10 @@ struct Watch {
     last: HashMap<String, Picker>,
     /// The state a pane was in before it was said to need the owner.
     before: HashMap<String, AgentState>,
+    /// A pane whose program has shown its ordinary wait for a message
+    /// since it was started (by when it was started): only then is the
+    /// absence of that wait something it shows.
+    armed: HashMap<String, u64>,
     /// A screen the owner said is no prompt ("Not a prompt: hide"): it is
     /// not said again while the screen is exactly that.
     hidden: HashMap<String, Picker>,
@@ -96,7 +100,28 @@ impl Daemon {
     ) -> Option<Picker> {
         let lines = p.term.lines();
         read(&lines).or_else(|| {
-            (state != AgentState::Working && showing(agent, &lines)).then(|| {
+            // Not in a turn, and known not to be its wait for a message:
+            // by what is known of its screens, or (Claude Code, Codex)
+            // because it has shown that wait since it started and does
+            // not now. In a turn: only a screen that has stood still for
+            // ten seconds, since a program at work keeps drawing (its
+            // timer, its spinner) and one that has stopped to ask does not.
+            let started = p.meta().proc_started_ms.unwrap_or(0);
+            let key = self.picker_key(&p.id);
+            let known = match waiting(agent, &lines) {
+                Some(true) => {
+                    watch().lock().unwrap().armed.insert(key, started);
+                    false
+                }
+                Some(false) => watch().lock().unwrap().armed.get(&key) == Some(&started),
+                None => false,
+            };
+            let still = now_ms().saturating_sub(p.term.last_output_ms()) >= 10_000;
+            let other = match state {
+                AgentState::Working => still && known,
+                _ => known || showing(agent, &lines),
+            };
+            other.then(|| {
                 let mut rows: Vec<String> = lines
                     .iter()
                     .map(|l| l.trim_end().chars().take(160).collect::<String>())

@@ -1014,3 +1014,9 @@ button.list-opt:last-child { border-bottom: none; } button.list-opt.on { backgro
    scrolls, and its buttons are reached by scrolling it. */
 html.kbd .chat-cards > .chat-card.held { overflow: auto; overscroll-behavior: contain; }
 html.kbd .chat-card.held > .ask-opts, html.kbd .chat-card.held > .ask-plan { flex: none; overflow: visible; }
+/* A held question's choices, as the rows of the window for a program's
+   list: one framed list, rows of 52 px, the chosen one filled. */
+.chat-card.held > .ask-opts { gap: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.chat-card.held button.ask-opt { min-height: 52px; padding: 8px 14px; border: none; border-bottom: 1px solid var(--line); border-radius: 0; background: none; align-items: center; }
+.chat-card.held button.ask-opt.on { background: var(--accent-bg); color: var(--on-accent); } .chat-card.held .ask-opt.on .muted { color: inherit; opacity: .85; }
+.chat-card.held .ask-opts > .ask-other { margin: 8px; width: auto; } .chat-card.held .ask-head { color: var(--muted); }

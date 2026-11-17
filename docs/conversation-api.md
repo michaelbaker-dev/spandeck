@@ -517,7 +517,9 @@ command the station answers it and no `prompt` is ever set.
 A `screen` is also what the pane says when nothing can be read and the program is known
 not to be at its ordinary wait for a message (Antigravity: something under its message box
 but its status row; OpenCode: a window whose title row ends with `esc`), while it is not in
-a turn and the screen is still: `picker.choices` is empty, `picker.footer` holds the
+a turn and the screen is still (and for Claude Code and Codex: the pane has shown its
+ordinary wait for a message since its program started, and shows something else in its
+place; in a turn, only after the screen has stood still for ten seconds): `picker.choices` is empty, `picker.footer` holds the
 screen's last rows (16 at most), and `name` is `its own screen`. `pane.pick {pane, hide:
 true}` hides what is shown now while the screen is exactly that.
 

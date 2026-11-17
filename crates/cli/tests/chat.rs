@@ -1354,6 +1354,42 @@ fn what_any_program_shows_is_said_whatever_it_is() {
     std::thread::sleep(std::time::Duration::from_millis(1300));
     assert!(s.pane(&odd)["prompt"].is_null(), "it stays hidden");
 
+    // Claude Code and Codex: once the pane has shown its ordinary wait
+    // for a message, a menu nobody has seen in its place is said too;
+    // the wait itself, empty or with words typed in, is nothing.
+    for (agent, wait, draft) in [
+        ("claude", real::CLAUDE_IDLE, real::CLAUDE_DRAFT),
+        ("codex", real::CODEX_IDLE, real::CODEX_DRAFT),
+    ] {
+        let menu = "\x1b[2J\x1b[H\n\n  ╔══════════════════════════╗\n  ║  Tide tables      F2     ║\n  ║  Moon phases      F3     ║\n  ╚══════════════════════════╝";
+        let id = pane(
+            &s,
+            agent,
+            &format!("{agent}-net"),
+            &dir,
+            json!({"no_hooks": true, "steps": [{"raw": format!("{}\r\n", wait.replace('\n', "\r\n"))}, {"sleep": 1500}, {"raw": format!("\x1b[2J\x1b[H{}\r\n", draft.replace('\n', "\r\n"))}],
+                "on_input": [{"picker": {"raw": menu.lines().collect::<Vec<_>>()}}]}),
+        );
+        s.wait_text(&id, "count the egrets too");
+        std::thread::sleep(std::time::Duration::from_millis(1300));
+        let p = s.pane(&id);
+        assert!(
+            p["prompt"].is_null() && p["state"] != json!("needs_you"),
+            "{agent}: {p}"
+        );
+        s.call("pane.input", json!({"pane": id, "data": "x\r"}));
+        let p = shown(&s, &id, "screen");
+        assert!(
+            p["prompt"]["picker"]["footer"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r.as_str().unwrap().contains("Moon phases")),
+            "{agent}: {p}"
+        );
+        held(&id);
+    }
+
     // Its ordinary wait for a message, with words typed in its box.
     let idle = draws("antigravity", "idle", real::ANTIGRAVITY_IDLE);
     s.wait_text(&idle, "count the egrets too");
