@@ -1021,6 +1021,10 @@ impl Daemon {
             // command into it, while it is idle: the owner's only, like
             // `agents.command`, which it goes through.
             "pane.model" => self.pane_model(s(&params, "pane")?, &params, by).await?,
+            // Choosing a row of a list the pane's program draws: the
+            // owner's only, by keys, read again before it is confirmed
+            // (picker.rs).
+            "pane.pick" => self.pane_pick(s(&params, "pane")?, &params, by).await?,
             "pane.conversation" | "pane.conversation.detail" | "pane.read" | "pane.notes.clear" => {
                 let pane = self.pane(s(&params, "pane")?)?.id.clone();
                 let d = self.clone();
@@ -2689,7 +2693,12 @@ mod tests {
         // clearing a note changes what the owner is shown. Both are the
         // owner's alone, like `agents.command`, and neither is done a
         // second time for a second try.
-        for m in ["pane.model", "pane.notes.clear", "agents.command"] {
+        for m in [
+            "pane.model",
+            "pane.notes.clear",
+            "agents.command",
+            "pane.pick",
+        ] {
             for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
                 assert!(!allowed(who, m), "{who:?} {m}");
             }

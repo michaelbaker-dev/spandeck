@@ -1,0 +1,324 @@
+//! A list a pane's program draws to choose from, on the station
+//! (DECISIONS.md, "No prompt on the terminal is invisible in Chat", 17 Nov
+//! 2026; the reader is `spandeck_agents::picker`).
+//!
+//! Twice a second each agent pane's screen is read. A list that stands
+//! (read the same at two looks) is put on the pane's record (`prompt`, in
+//! the pane list and in `live`) and the pane needs the owner, saying what
+//! it shows; when it is gone the pane is what it was. Two kinds:
+//!
+//! - `picker`: its structure is whole and it grants nothing. The deck
+//!   draws its rows, and a tap is `pane.pick`.
+//! - `screen`: it grants something (trust, a permission, a sign-in), or
+//!   nothing on it is marked. The deck shows the screen itself with keys,
+//!   and the owner decides in full view. Never a friendly row.
+//!
+//! **A choice is made as the folder-trust answer is** (`pane.pick`, the
+//! owner's only): the screen is read again and must still show that row
+//! with those words; the arrow keys that take the program's marker there
+//! are sent; the screen is read again, and the confirming key is pressed
+//! only when the marker is on the row with the same words. A list that
+//! changed, or a marker that is not there, stops it, and the answer says
+//! so. Keys, never pasted text; and no agent can call it.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+use serde_json::{json, Value};
+use spandeck_agents::picker::{read, Class, Picker};
+use spandeck_agents::AgentState;
+use spandeck_terminal::input::Item;
+
+use crate::daemon::{invalid, Daemon, PaneEntry, Result};
+use crate::modelswitch::Prompt;
+use crate::paths::now_ms;
+
+/// The words Claude Code's `/model` list has for its key that chooses for
+/// the session alone (captured from 2.1.326 on 17 Nov 2026).
+pub(crate) const SESSION_KEY_WORDS: &str = "s to use this session only";
+
+#[derive(Default)]
+struct Watch {
+    /// What was read at the last look, by pane.
+    last: HashMap<String, Picker>,
+    /// The state a pane was in before it was said to need the owner.
+    before: HashMap<String, AgentState>,
+}
+
+fn watch() -> &'static Mutex<Watch> {
+    static WATCH: OnceLock<Mutex<Watch>> = OnceLock::new();
+    WATCH.get_or_init(Default::default)
+}
+
+fn ours(reason: Option<&str>) -> bool {
+    reason.is_some_and(|r| {
+        r.starts_with("shows a list to choose from")
+            || r.starts_with("shows something in its terminal")
+    })
+}
+
+/// The deck's rows are offered only for a list whose structure is whole
+/// and that grants nothing.
+fn kind_of(p: &Picker) -> &'static str {
+    if p.exact && p.class == Class::Plain && !p.choices.is_empty() {
+        "picker"
+    } else {
+        "screen"
+    }
+}
+
+fn short(s: &str) -> String {
+    let s: String = s.chars().filter(|c| !c.is_control()).take(80).collect();
+    s.trim().to_string()
+}
+
+impl Daemon {
+    fn picker_key(&self, pane: &str) -> String {
+        format!("{}|{pane}", self.home.display())
+    }
+
+    /// One look at every agent pane's screen. `skip`: panes whose screen
+    /// another reader has already answered for (the folder-trust
+    /// question, the review of hooks, "Switch model?"). The panes it
+    /// speaks for.
+    pub(crate) fn picker_look(&self, skip: &std::collections::HashSet<String>) -> Vec<String> {
+        let mut showing = vec![];
+        for p in self.list_panes() {
+            let m = p.meta();
+            if m.exit.is_some() || !m.agent.is_agent() {
+                continue;
+            }
+            let key = self.picker_key(&p.id);
+            let had = m
+                .prompt
+                .as_ref()
+                .is_some_and(|x| x.kind == "picker" || x.kind == "screen");
+            let seen = if skip.contains(&p.id) {
+                None
+            } else {
+                read(&p.term.lines())
+            };
+            let Some(seen) = seen else {
+                let mut w = watch().lock().unwrap();
+                w.last.remove(&key);
+                let before = w.before.remove(&key);
+                drop(w);
+                if had {
+                    p.meta.lock().unwrap().prompt = None;
+                    if ours(m.needs_reason.as_deref()) && m.state == AgentState::NeedsYou {
+                        self.set_state(&p, before.unwrap_or(AgentState::Idle), None);
+                    } else {
+                        self.emit("pane.updated", Some(&p.id), m.project.as_deref(), json!({}));
+                    }
+                }
+                continue;
+            };
+            // It stands when it is read the same at two looks: a screen
+            // still being drawn is not said.
+            let stood = watch()
+                .lock()
+                .unwrap()
+                .last
+                .insert(key.clone(), seen.clone())
+                .as_ref()
+                == Some(&seen);
+            if !stood && !had {
+                continue;
+            }
+            showing.push(p.id.clone());
+            if !stood {
+                continue;
+            }
+            let kind = kind_of(&seen);
+            let title = short(if seen.title.is_empty() {
+                "its own screen"
+            } else {
+                &seen.title
+            });
+            let why = match kind {
+                "picker" => format!("shows a list to choose from: {title}"),
+                _ => format!("shows something in its terminal: {title}"),
+            };
+            let prompt = Prompt {
+                kind: kind.to_string(),
+                name: title,
+                on_yes: false,
+                since_ms: m
+                    .prompt
+                    .as_ref()
+                    .filter(|_| had)
+                    .map_or_else(now_ms, |x| x.since_ms),
+                session_key: seen.hint.contains(SESSION_KEY_WORDS),
+                picker: Some(seen),
+            };
+            if m.prompt.as_ref() == Some(&prompt) && m.needs_reason.as_deref() == Some(why.as_str())
+            {
+                continue;
+            }
+            if !had {
+                watch().lock().unwrap().before.insert(key, m.state);
+            }
+            p.meta.lock().unwrap().prompt = Some(prompt);
+            if !self.set_state(&p, AgentState::NeedsYou, Some(why)) {
+                self.emit("pane.updated", Some(&p.id), m.project.as_deref(), json!({}));
+            }
+        }
+        showing
+    }
+
+    /// Take the program's marker to the row with these words and press
+    /// `key` there, or stop. `Ok(None)`: done. `Ok(Some(why))`: stopped,
+    /// and nothing was confirmed.
+    pub(crate) async fn picker_choose(
+        &self,
+        p: &PaneEntry,
+        text: &str,
+        key: &[u8],
+    ) -> Result<Option<String>> {
+        let look = || read(&p.term.lines()).filter(|x| x.exact && x.class == Class::Plain);
+        let Some(now) = look() else {
+            return Ok(Some("no list to choose from is on its screen now".into()));
+        };
+        let at = |x: &Picker| x.choices.iter().position(|c| c.marked);
+        let rows: Vec<usize> = now
+            .choices
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.text == text)
+            .map(|(i, _)| i)
+            .collect();
+        let (Some(from), [to]) = (at(&now), rows.as_slice()) else {
+            return Ok(Some("the list changed: look again".into()));
+        };
+        let arrow: &[u8] = if *to > from { b"\x1b[B" } else { b"\x1b[A" };
+        for _ in 0..to.abs_diff(from) {
+            p.term.send(Item::keys(arrow))?;
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        // Read again: the marker is on the row with the same words, and
+        // the list is the one that was chosen from.
+        let mut there = false;
+        for _ in 0..15 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if let Some(x) = look() {
+                let same = x.title == now.title && x.choices.len() == now.choices.len();
+                there = same && at(&x).is_some_and(|i| x.choices[i].text == text);
+                if there {
+                    break;
+                }
+            }
+        }
+        if !there {
+            return Ok(Some("the list changed, or its marker did not reach that row: nothing was confirmed. Look again".into()));
+        }
+        p.term.send(Item::keys(key))?;
+        Ok(None)
+    }
+
+    /// `pane.pick {pane, text, key?}`: the owner chooses a row of the list
+    /// on a pane's screen. `key`: `enter` (the default), `space` (tick it,
+    /// where several may be ticked), or `session` (Claude Code's `/model`:
+    /// "s to use this session only", only when its list says so).
+    pub async fn pane_pick(&self, pane: &str, params: &Value, by: &str) -> Result<Value> {
+        let p = self.pane(pane)?;
+        let text = params
+            .get("text")
+            .and_then(|t| t.as_str())
+            .filter(|t| !t.is_empty() && t.len() <= 400)
+            .ok_or_else(|| invalid("missing parameter: text"))?;
+        let shown = read(&p.term.lines());
+        let key: &[u8] = match params
+            .get("key")
+            .and_then(|k| k.as_str())
+            .unwrap_or("enter")
+        {
+            "enter" => b"\r",
+            "space" if shown.as_ref().is_some_and(|x| x.multi) => b" ",
+            "session"
+                if shown
+                    .as_ref()
+                    .is_some_and(|x| x.hint.contains(SESSION_KEY_WORDS)) =>
+            {
+                b"s"
+            }
+            other => return Err(invalid(format!("this list has no key \"{other}\""))),
+        };
+        self.start_screen_owner_typed(&p.id);
+        let stopped = self.picker_choose(&p, text, key).await?;
+        let m = p.meta();
+        self.record(
+            "pane.pick",
+            Some(&p.id),
+            m.project.as_deref(),
+            None,
+            Some(by),
+            json!({"list": shown.map(|x| short(&x.title)), "confirmed": stopped.is_none()}),
+        );
+        Ok(match stopped {
+            None => json!({"ok": true, "picked": true}),
+            Some(why) => json!({"ok": false, "picked": false, "why": why}),
+        })
+    }
+
+    /// Choose a model for the session alone through Claude Code's own
+    /// `/model` list: its command is typed, its list is read, the marker
+    /// is taken to the model's row, and `s` is pressed ("s to use this
+    /// session only"). Nothing of the owner's defaults is written, and
+    /// nothing is started again.
+    pub(crate) async fn model_for_session(
+        &self,
+        p: &PaneEntry,
+        command: &str,
+        model: &str,
+        by: &str,
+    ) -> Result<Value> {
+        let done = self
+            .agents_command(command, Some(&p.id), None, false, false, by)
+            .await?;
+        if let Some(why) = done["stations"][0]["skipped"][0]["why"].as_str() {
+            return Ok(
+                json!({"ok": false, "sent": false, "command": command, "why": why, "busy": why == "in the middle of a turn"}),
+            );
+        }
+        // Its list, once it stands, and only the one that says its key.
+        let mut list = None;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            list = read(&p.term.lines()).filter(|x| x.exact && x.hint.contains(SESSION_KEY_WORDS));
+            if list.is_some() {
+                break;
+            }
+        }
+        let Some(list) = list else {
+            return Ok(json!({"ok": false, "sent": true, "command": command,
+                "why": "its list of models did not appear as expected: look at its terminal"}));
+        };
+        // The row for the model: its words are the name, or begin with it
+        // ("opus" is "Opus 5.5"; "default" is "Default (recommended)").
+        let want = model.to_lowercase();
+        let rows: Vec<&str> = list
+            .choices
+            .iter()
+            .filter(|c| !c.submenu)
+            .map(|c| c.text.as_str())
+            .filter(|t| {
+                let t = t.to_lowercase();
+                t == want || t.split([' ', '(']).next() == Some(want.as_str())
+            })
+            .collect();
+        let [row] = rows.as_slice() else {
+            let _ = p.term.send(Item::keys(b"\x1b"));
+            return Ok(
+                json!({"ok": false, "sent": true, "closed": true, "command": command,
+                "why": format!("\"{model}\" is not one row of its list (it may be under More models): the list was closed and nothing was changed")}),
+            );
+        };
+        match self.picker_choose(p, row, b"s").await? {
+            None => Ok(
+                json!({"ok": true, "sent": true, "session_only": true, "picked": row, "command": command}),
+            ),
+            Some(why) => Ok(json!({"ok": false, "sent": true, "command": command, "why": why})),
+        }
+    }
+}

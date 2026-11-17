@@ -60,7 +60,7 @@ const SCREEN_KEYS = [['Esc', '\x1b'], ['Tab', '\t'], ['↑', '\x1b[A'], ['↓', 
 const SCREEN_KEY_SAYS = { '↑': 'Up', '↓': 'Down', '←': 'Left', '→': 'Right', '⏎': 'Enter', '^C': 'Control C' };
 // Lines of a printed block shown before "Show earlier lines".
 const SCREEN_LINES = 30;
-const WAIT_KEYS = [['1', '1'], ['2', '2'], ['3', '3'], ['Enter', '\r'], ['Esc', '\x1b'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['←', '\x1b[D'], ['→', '\x1b[C']];
+const WAIT_KEYS = [['1', '1'], ['2', '2'], ['3', '3'], ['Enter', '\r'], ['Esc', '\x1b'], ['Tab', '\t'], ['Space', ' '], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['←', '\x1b[D'], ['→', '\x1b[C']];
 const KEY_SAYS = { '↑': 'Up', '↓': 'Down', '←': 'Left', '→': 'Right' };
 // Text commands an agent takes as a message (not its terminal-only pickers).
 const SLASH = { claude: [['/compact', 'make room: summarise the conversation so far'], ['/clear', 'start a new conversation'], ['/context', 'what is filling the context'], ['/usage', 'how much of the plan is used'], ['/model ', 'change the model'], ['/effort ', 'how hard it thinks']] };
@@ -868,11 +868,19 @@ class Conv {
     const waiting = this.available === true ? this.items.filter(x => (x.kind === 'question' || x.kind === 'plan') && x.status === 'waiting'
       && !held.some(q => q.item === x.id || (q.item === null && q.kind === x.kind))) : [];
     const asked = waiting.filter(settled);
-    this.askSoon = waiting.length > asked.length;
+    this.askSoon = waiting.length > asked.length || !!this.sentSlash;
     // The program asks whether to switch its model (the station read its
     // screen exactly): a card of its own, answered with the keys it takes.
     const switching = !exited && L.prompt && L.prompt.kind === 'model_switch' ? L.prompt : null;
-    const blocked = !switching && !exited && this.available === true && !approvals.length && !asked.length && !held.length && (L.state === 'needs_you' || L.state === 'error');
+    // A list the program draws to choose from, read from its screen by
+    // the station: its rows, to tap. (One that grants something, or with
+    // nothing marked, is `screen`: the terminal's own rows and the keys,
+    // under "Waiting in the terminal", as for any pane that waits there.)
+    // A command of the program's own was sent from here a moment ago:
+    // what it opened in the terminal, if anything, is shown, since
+    // nothing of it may ever be written to the conversation.
+    const slash = this.sentSlash && !exited && !working && !switching && !L.prompt && performance.now() < this.sentSlash.until && !this.items.slice(this.sentSlash.n).some(x => x.kind !== 'user') ? this.sentSlash : (this.sentSlash = null);
+    const blocked = !switching && !(L.prompt && (L.prompt.kind === 'picker' || L.prompt.kind === 'screen')) && !exited && this.available === true && !approvals.length && !asked.length && !held.length && (L.state === 'needs_you' || L.state === 'error');
     // A banner that waits in the terminal shows the terminal's last lines.
     // (Made from the screen, the conversation already ends with them.)
     if (blocked && !this.wasBlocked && this.source !== 'screen') this.peekOpen = true;
@@ -896,7 +904,7 @@ class Conv {
     const tasks = this.tasksNow();
     if (tasks.running.length) status.push(this.node(cache, used, 'subs', tasks.running.length, () => h('button', { type: 'button', class: 'chat-tasks', 'aria-haspopup': 'dialog', onclick: () => this.tasksSheet() }, plural(tasks.running.length, 'running task'))));
     if (this.tasksBox) this.tasksBox();
-    if (this.peekOpen && (working || blocked)) { status.push(this.peekEl); if (!this.peeked) this.peek(); } else this.peeked = false;
+    if ((this.peekOpen && (working || blocked)) || slash) { status.push(this.peekEl); if (!this.peeked || slash) this.peek(); } else this.peeked = false;
     sync(this.acts, status);
 
     const cards = [];
@@ -926,6 +934,22 @@ class Conv {
     if (trustAnsweredWords(trustP)) cards.push(this.node(cache, used, 'trusted', '', () => quiet(trustAnsweredWords(trustP) + '. It is in the ship\'s log.')));
     if (blocked && !trustAsks) cards.push(this.node(cache, used, 'wait', `${L.state}|${L.needs_reason}`, () => h('div', { class: 'chat-card wait' + (L.state === 'error' ? ' err' : '') },
       h('b', {}, (L.state === 'error' ? 'Stopped on an error: ' : 'Waiting in the terminal: ') + (L.needs_reason || 'it needs you')),
+      h('div', { class: 'wait-keys', role: 'group', 'aria-label': 'Keys for the terminal' },
+        WAIT_KEYS.map(([label, bytes]) => h('button', { type: 'button', class: 'key', 'aria-label': KEY_SAYS[label] || label, onclick: () => this.key1(bytes) }, label)),
+        h('button', { type: 'button', class: 'primary', onclick: () => setFace(this.st, p, 'terminal') }, 'Open terminal')))));
+    // The program shows a list, or something else of its own, with key
+    // names under it: a window over the conversation, which opens by
+    // itself and goes when the program's own goes; and a line here, for
+    // the record and to open it again.
+    const showing = !exited && L.prompt && (L.prompt.kind === 'picker' || L.prompt.kind === 'screen') && L.prompt.picker ? L.prompt : null;
+    this.promptWindow(showing);
+    if (showing) cards.push(this.node(cache, used, 'list', `${showing.kind}|${showing.name}`, () => h('div', { class: 'chat-card wait list-line' },
+      h('b', {}, `${p.agent_name || 'The program'} shows ${showing.kind === 'picker' ? 'a list to choose from' : 'something in its terminal'}: ${String(showing.name || '')}`),
+      h('div', { class: 'row' }, h('button', { type: 'button', class: 'primary list-open', onclick: () => { this.listShut = null; this.drawDock(); } }, 'Show it'),
+        h('button', { type: 'button', onclick: () => this.key1('\x1b') }, 'Cancel (Esc)'), h('button', { type: 'button', onclick: () => setFace(this.st, p, 'terminal') }, 'Open terminal')))));
+    if (slash) cards.push(this.node(cache, used, 'slash', slash.text, () => h('div', { class: 'chat-card wait slash-sent' },
+      h('b', {}, `You sent ${slash.text}`),
+      h('div', { class: 'muted small' }, `What ${p.agent_name || 'the program'} shows for it is in its terminal: its last rows are above, and these keys go to it. A list to choose from appears here as a card of its own.`),
       h('div', { class: 'wait-keys', role: 'group', 'aria-label': 'Keys for the terminal' },
         WAIT_KEYS.map(([label, bytes]) => h('button', { type: 'button', class: 'key', 'aria-label': KEY_SAYS[label] || label, onclick: () => this.key1(bytes) }, label)),
         h('button', { type: 'button', class: 'primary', onclick: () => setFace(this.st, p, 'terminal') }, 'Open terminal')))));
@@ -1092,6 +1116,146 @@ class Conv {
         h('button', { type: 'button', class: 'primary ask-approve', disabled: s.busy, onclick: () => this.answerHeld(q, s, { approve: true }, 'Plan approved') }, s.busy ? 'Sent…' : 'Approve'),
         h('button', { type: 'button', class: 'ask-keep', disabled: s.busy, onclick: () => this.answerHeld(q, s, { approve: false, text: s.note.trim() || undefined }, 'Sent back: it keeps planning') }, 'Keep planning')),
       this.heldFoot(q, s));
+  }
+
+  // A list the pane's program draws to choose from. A tap is `pane.pick`:
+  // the station takes the program's marker to that row with the arrow
+  // keys, reads the screen again, and confirms only when the marker is on
+  // the row with the same words. What is drawn is text from a screen.
+  // The window for what a pane's program shows on its own screen: a
+  // sheet on a phone, a dialog on a computer, the same for every agent.
+  // It opens by itself, follows the program's screen at every look, and
+  // goes when the program's own goes. Closed by the owner, it stays
+  // closed for that list (the line above the message box opens it again).
+  promptWindow(P) {
+    const sig = P ? `${P.kind}|${P.since_ms}` : '';
+    if (!P || !this.body.isConnected || this.listShut === sig) {
+      if (this.listBox) { const b = this.listBox; this.listBox = null; b.quiet = true; b.close(); }
+      if (!P) { this.listShut = null; this.picking = null; this.pickSaid = ''; }
+      return;
+    }
+    if (!this.listBox) {
+      const box = dialog(String(P.name || 'In its terminal'), () => h('div', { class: 'list-window' }), { onClose: () => { if (!box.quiet) this.listShut = this.listSig; this.listBox = null; } });
+      box.body.parentNode.classList.add('sheet', 'chat-sheet', 'list-sheet');
+      box.body.parentNode.prepend(h('div', { class: 'sheet-grab', 'aria-hidden': 'true' }));
+      // On a computer the keys work in the window as in the terminal:
+      // they are sent to the program, and the window follows its marker.
+      box.body.parentNode.addEventListener('keydown', (e) => {
+        if (e.target.matches('input') || e.metaKey || e.ctrlKey || e.altKey) return;
+        const map = { ArrowUp: '\x1b[A', ArrowDown: '\x1b[B', ArrowLeft: '\x1b[D', ArrowRight: '\x1b[C', Home: '\x1b[H', End: '\x1b[F', Enter: '\r', Tab: '\t', ' ': ' ' };
+        const bytes = map[e.key] || (/^[0-9a-zA-Z]$/.test(e.key) && e.target === box.body.parentNode ? e.key : '');
+        if (!bytes) return;
+        e.preventDefault(); e.stopPropagation();
+        this.key1(bytes);
+      });
+      box.body.parentNode.tabIndex = -1;
+      this.listBox = box;
+    }
+    this.listSig = sig;
+    const body = this.listBox.body, top = body.scrollTop;
+    const state = JSON.stringify([P.picker, P.kind, P.session_key, this.pickMode, this.pickSaid, this.picking]);
+    if (state === this.listDrawn && body.firstChild) return;
+    this.listDrawn = state;
+    const had = document.activeElement?.classList?.contains('list-filter') ? document.activeElement.value : null;
+    body.replaceChildren(P.kind === 'picker' && !this.pickSaid ? this.listEl(P) : this.screenEl(P));
+    body.scrollTop = top;
+    this.listBox.body.parentNode.querySelector('h2').textContent = String(P.picker.tabs?.length ? P.picker.tabs[0] : P.name || 'In its terminal');
+    if (had !== null) { const f = body.querySelector('.list-filter'); if (f) { f.value = had; f.focus(); } }
+    // More of a long list is brought by scrolling to its end: the
+    // program's own list is scrolled underneath.
+    body.onscroll = () => {
+      if (!P.picker.more_below || body.scrollHeight - body.scrollTop - body.clientHeight > 40 || performance.now() < (this.listMoreAt || 0)) return;
+      this.listMoreAt = performance.now() + 700;
+      this.key1('\x1b[B'.repeat(4));
+    };
+  }
+
+  // What the program shows, as it shows it, with the keys: for a screen
+  // that grants something (trust, a permission, a sign-in), one with
+  // nothing marked, and a list whose tap could not be carried out. The
+  // owner decides with the whole of it in view.
+  screenEl(P) {
+    const k = P.picker, name = this.p.agent_name || 'The program';
+    const rows = h('pre', { class: 'chat-peek list-screen', tabIndex: 0, 'aria-label': 'Its terminal now' }, 'Reading its terminal…');
+    const read = () => env.api.on(this.st, 'pane.text', { pane: this.p.id }).then((r) => {
+      const lines = r.lines.map(l => String(l).replace(/\s+$/, ''));
+      while (lines.length && !lines[lines.length - 1]) lines.pop();
+      rows.textContent = lines.slice(-24).join('\n');
+    }).catch((e) => { rows.textContent = 'Its terminal could not be read: ' + e.message; });
+    read();
+    const timer = setInterval(() => (rows.isConnected ? read() : clearInterval(timer)), 1000);
+    const why = this.pickSaid ? this.pickSaid + ' Its screen is below: finish there with the keys.'
+      : k.class === 'grants' ? `${name} asks for something only you should grant. It is shown as it is, and answered with its own keys: nothing here chooses for you.`
+        : `${name} is showing this in its terminal. Nothing on it is marked as a choice, so it is shown as it is, with its keys.`;
+    return h('div', { class: 'list-window screen' },
+      h('p', { class: this.pickSaid ? 'warn-text list-said' : 'muted small', role: this.pickSaid ? 'alert' : 'note' }, why),
+      rows,
+      h('div', { class: 'wait-keys', role: 'group', 'aria-label': 'Keys for the terminal' },
+        WAIT_KEYS.map(([label, bytes]) => h('button', { type: 'button', class: 'key', 'aria-label': KEY_SAYS[label] || label, onclick: () => this.key1(bytes) }, label))),
+      h('div', { class: 'row sheet-foot' },
+        this.pickSaid ? h('button', { type: 'button', class: 'list-again', onclick: () => { this.pickSaid = ''; this.drawDock(); } }, 'Show the list again') : null,
+        h('button', { type: 'button', class: 'primary', onclick: () => setFace(this.st, this.p, 'terminal') }, 'Open terminal')));
+  }
+
+  // A list the pane's program draws to choose from. A tap is `pane.pick`:
+  // the station takes the program's marker to that row with the arrow
+  // keys, reads the screen again, and confirms only when the marker is on
+  // the row with the same words. What is drawn is text from a screen.
+  listEl(P) {
+    const k = P.picker, name = this.p.agent_name || 'The program', busy = !!this.picking;
+    const pick = (c, key) => {
+      if (this.picking) return;
+      this.picking = c.text;
+      this.drawDock();
+      env.api.on(this.st, 'pane.pick', { pane: this.p.id, text: c.text, key }).then((r) => {
+        this.picking = null;
+        if (r && r.picked) toast(key === 'space' ? `Ticked ${c.text}` : `Chose ${c.text}`);
+        else this.pickSaid = `Not chosen: ${r?.why || 'the list changed'}.`;
+        this.drawDock();
+      }).catch((e) => { this.picking = null; this.pickSaid = `Not chosen: ${e.message}`; this.drawDock(); });
+    };
+    const marked = k.choices.find(c => c.marked);
+    const field = h('input', { class: 'ask-other list-filter', placeholder: k.free_text || 'Type to filter', 'aria-label': 'Type into its filter', autocapitalize: 'off', autocorrect: 'off', spellcheck: false, enterkeyhint: 'search' });
+    // Typed through to the program as keys, a letter at a time (never as
+    // a message); the list follows as the program draws it again.
+    let typed = '';
+    field.addEventListener('input', () => {
+      const v = field.value.replace(/[\x00-\x1f\x7f]/g, '');
+      let same = 0;
+      while (same < typed.length && same < v.length && typed[same] === v[same]) same += 1;
+      const bytes = '\x7f'.repeat(typed.length - same) + v.slice(same);
+      typed = v;
+      if (bytes) this.key1(bytes);
+    });
+    // A second column that is a setting's value stands at the right.
+    const value = (c) => c.detail && c.detail.length <= 24 && !/[.!?]$/.test(c.detail) && k.choices.filter(x => x.detail && x.detail.length <= 24).length * 2 >= k.choices.length;
+    const effort = (Array.isArray(k.footer) ? k.footer : []).find(f => f.includes('←/→'));
+    return h('div', { class: 'list-window' },
+      k.tabs?.length ? h('div', { class: 'chat-switch list-tabs', role: 'tablist', 'aria-label': `${name}'s tabs` }, k.tabs.map((t, i) => h('span', { class: 'list-tab' + (i === 0 ? ' on' : ''), role: 'tab' }, t))) : null,
+      k.about ? h('p', { class: 'muted small' }, String(k.about)) : null,
+      k.free_text !== null && k.free_text !== undefined ? field : null,
+      k.more_above ? h('button', { type: 'button', class: 'mini list-more', onclick: () => this.key1('\x1b[A'.repeat(4)) }, '↑ earlier rows') : null,
+      h('div', { class: 'list-rows', role: 'listbox', 'aria-label': String(k.title || 'Choices') },
+        k.choices.map(c => h('button', { type: 'button', class: 'list-opt' + (c.marked ? ' on' : '') + (this.picking === c.text ? ' busy' : ''), role: 'option', 'aria-selected': String(!!c.marked), disabled: busy, dataset: { text: String(c.text) },
+          onclick: () => pick(c, k.multi ? 'space' : P.session_key && this.pickMode !== 'default' ? 'session' : 'enter') },
+          k.multi ? h('span', { class: 'ask-mark box', 'aria-hidden': 'true' }, c.checked ? '✓' : '') : null,
+          h('span', { class: 'list-name' }, h('b', {}, (typeof c.number === 'number' ? c.number + '. ' : '') + String(c.text)),
+            this.picking === c.text ? h('span', { class: 'muted' }, 'choosing…') : c.detail && !value(c) ? h('span', { class: 'muted' }, String(c.detail)) : null),
+          value(c) ? h('span', { class: 'list-value' + (c.detail === 'on' ? ' is-on' : c.detail === 'off' ? ' is-off' : '') }, String(c.detail)) : null,
+          c.current ? h('span', { class: 'model-tick', title: 'In use now', 'aria-label': 'in use now' }, '✓') : null,
+          c.submenu ? h('span', { class: 'chev', 'aria-hidden': 'true' }, '›') : null))),
+      k.more_below ? h('button', { type: 'button', class: 'mini list-more', onclick: () => this.key1('\x1b[B'.repeat(4)) }, '↓ more rows') : null,
+      effort ? h('div', { class: 'list-effort' }, h('button', { type: 'button', class: 'key', 'aria-label': 'Less', onclick: () => this.key1('\x1b[D') }, '◀'), h('span', {}, effort.replace(/\s*←\/→ to adjust/, '')), h('button', { type: 'button', class: 'key', 'aria-label': 'More', onclick: () => this.key1('\x1b[C') }, '▶')) : null,
+      (Array.isArray(k.footer) ? k.footer : []).filter(f => f !== effort).map(f => h('p', { class: 'muted small' }, String(f))),
+      // What the program's own key names offer, where the adapter knows
+      // them, for the row its marker is on.
+      h('div', { class: 'row sheet-foot list-foot' },
+        P.session_key && marked ? h('button', { type: 'button', class: 'primary list-session', disabled: busy, onclick: () => pick(marked, 'session') }, 'This session only') : null,
+        P.session_key && marked ? h('button', { type: 'button', class: 'list-default', disabled: busy, onclick: () => pick(marked, 'enter') }, 'Set as default') : null,
+        k.multi ? h('button', { type: 'button', class: 'primary list-done', disabled: busy, onclick: () => this.key1('\r') }, 'Done') : null,
+        h('button', { type: 'button', class: 'list-cancel', disabled: busy, onclick: () => this.key1('\x1b') }, k.choices.some(c => c.submenu) || !P.session_key ? 'Cancel' : 'Cancel')),
+      P.session_key ? h('p', { class: 'muted small' }, `A tap on a row chooses it for this session only. "Set as default" is ${name}'s Enter: it keeps the marked row as the default for new sessions.`) : null,
+      h('p', { class: 'muted small list-hint' }, `${name}'s own keys: ${String(k.hint || '')}`));
   }
 
   approvalEl(a) {
@@ -1273,6 +1437,8 @@ class Conv {
     const said = (text, bad) => { this.modelLast = { text, bad: !!bad }; toast(text, bad ? 'error' : 'info'); this.modelState(); };
     return env.api.on(this.st, 'pane.model', { pane: this.p.id, ...params }).then((r) => {
       if (r && r.restarted) said(`${this.p.name} was started again on ${what}, for this pane alone, and resumes its conversation.`);
+      else if (r && r.session_only) said(`${this.p.name} is on ${r.picked} for this session only. The chip follows what it reports.`);
+      else if (r && r.sent && r.why) said(`Not changed to ${what}: ${r.why}.`, true);
       else if (r && r.sent) said(`Sent ${r.command} to ${this.p.name}. The chip follows what it reports.`);
       else if (r && r.busy && !late) { this.modelQueued = params; said(`${this.p.name} is in the middle of a turn: ${what} will be sent when this turn ends, while this page stays open.`); }
       else said(`Not changed to ${what}: ${this.p.name} is ${r?.why || 'not ready'}.`, true);
@@ -1300,7 +1466,9 @@ class Conv {
         body.replaceChildren(h('div', { class: 'model-sheet model-confirm' },
           h('b', { class: 'ask-q' }, params.model ? `Switch ${this.p.name} to ${value}?` : `Set ${this.p.name}'s effort to ${value}?`),
           M.saves ? h('p', { class: 'model-saves' }, String(M.saves)) : null,
-          h('button', { type: 'button', class: 'primary model-go', onclick: () => go(params) }, M.saves ? 'Switch, and keep it as the default' : 'Switch'),
+          M.only_session && params.model ? h('button', { type: 'button', class: 'primary model-session', onclick: () => go({ ...params, session_only: true }) }, 'For this session only') : null,
+          M.only_session && params.model ? h('p', { class: 'muted small' }, `${name}'s own list of models is opened, its marker is taken to ${value} and its key for "this session only" is pressed. No default changes and nothing is started again.`) : null,
+          h('button', { type: 'button', class: (M.only_session && params.model ? '' : 'primary ') + 'model-go', onclick: () => go(params) }, M.saves ? 'Switch, and keep it as the default' : 'Switch'),
           only[what] ? h('button', { type: 'button', class: 'model-only', onclick: () => go({ ...params, only_pane: true }) }, 'Only this pane: start it again and resume') : null,
           only[what] ? h('p', { class: 'muted small' }, `"Only this pane" types nothing and changes no default: ${name} is started again on ${value} and picks its conversation up where it was. What it left running in the background stops, and it must be idle.`) : null,
           h('button', { type: 'button', class: 'model-back', onclick: close }, 'Cancel')));
@@ -1446,6 +1614,10 @@ class Conv {
   async send() {
     const text = this.box.value.trim();
     if (!text || this.sending) return;
+    // `/model` alone opens the program's own list. The sheet here does
+    // the same and says what each way changes: it is offered in its
+    // place (the program's list, when it is up, is still its card).
+    if (text === '/model' && this.live?.model && !this.modelBtn.hidden && !(this.live.prompt)) { this.box.value = ''; this.typed(); return this.modelSheet(); }
     this.sending = true;
     this.sendSaid.hidden = true;
     this.sendBtn.disabled = true;
@@ -1454,6 +1626,9 @@ class Conv {
     let failed = null;
     try {
       await sendAct(env.api, this.st, 'pane.paste', { pane: this.p.id, text, enter: true });
+      // A command of the program's own: what it draws for it is in no
+      // conversation, so the terminal's last rows are shown for a while.
+      if (/^\/[a-z-]+/i.test(text) && this.p.agent !== 'shell') this.sentSlash = { text: text.split(/\s/)[0], n: this.items.length, until: performance.now() + 20000 };
       this.box.value = '';
       this.stuck = true;
       this.placed();
@@ -1498,6 +1673,8 @@ class Conv {
 
   dispose() {
     this.disposed = true;
+    // (Its window for what the program shows goes with it.)
+    if (this.listBox) { const b = this.listBox; this.listBox = null; b.quiet = true; b.close(); }
     if (this.sized) this.sized.disconnect();
     clearTimeout(this.retry);
     this.unwatch();

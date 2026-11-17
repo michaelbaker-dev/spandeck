@@ -63,6 +63,19 @@
 //!       file; or "[fake] model kept"), Esc goes back, the arrows move the
 //!       marker, and anything else typed is swallowed and said ("[fake]
 //!       the question swallowed: …"), as the real one swallowed a message.
+//!   {"picker": {"title": "Select model", "choices": ["Opus 5.5", ["Haiku 5.5", "Fastest"]],
+//!               "marked": 0, "multi": false, "window": 10, "hint": "…",
+//!               "change_after": 2, "raw": ["rows drawn as they are"]}}
+//!       a list to choose from, drawn in the layout of Claude Code's own
+//!       (agents/picker.rs). It waits: the arrows move its marker (and the
+//!       window on a longer list), Space ticks where several may be
+//!       chosen, Enter takes it ("[fake] picked: Haiku 5.5"), `s` takes
+//!       it for the session when its key names say so ("[fake] picked for
+//!       this session: …"), Esc closes it ("[fake] list closed"), and
+//!       anything else typed is swallowed and said. `change_after`: after
+//!       that many moves the list is another list (its rows turned
+//!       round), as one that changes under a tap. `raw`: these rows are
+//!       drawn instead, and only Esc and Enter end it.
 //!   {"effort": "high"}                   from here on its hooks say this effort
 //!                                        level, as Claude Code's do (also a word
 //!                                        of the script itself, for the start)
@@ -634,6 +647,8 @@ impl Agent {
             self.trust_screen(spec);
         } else if let Some(spec) = step.get("model_screen") {
             self.model_screen(spec);
+        } else if let Some(spec) = step.get("picker") {
+            self.picker(spec);
         } else if let Some(code) = step.get("exit").and_then(|s| s.as_i64()) {
             self.hook("SessionEnd", json!({"reason": "other"}));
             restore_terminal();
@@ -705,6 +720,129 @@ impl Agent {
     }
 
     /// A program's folder-trust screen (see the top of this file).
+    fn picker(&mut self, spec: &Value) {
+        let title = spec["title"].as_str().unwrap_or("Choose").to_string();
+        let multi = spec["multi"].as_bool().unwrap_or(false);
+        let mut choices: Vec<(String, String, Option<bool>)> = spec["choices"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|c| match c {
+                        Value::String(s) => (s.clone(), String::new(), multi.then_some(false)),
+                        other => (
+                            other[0].as_str().unwrap_or("").to_string(),
+                            other[1].as_str().unwrap_or("").to_string(),
+                            multi.then_some(false),
+                        ),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let hint = spec["hint"]
+            .as_str()
+            .unwrap_or("Enter to confirm · Esc to cancel")
+            .to_string();
+        let window = spec["window"].as_u64().unwrap_or(20) as usize;
+        let change_after = spec["change_after"].as_u64();
+        let raw: Option<Vec<String>> = spec["raw"].as_array().map(|a| {
+            a.iter()
+                .filter_map(|l| l.as_str().map(String::from))
+                .collect()
+        });
+        let mut marked = spec["marked"].as_u64().unwrap_or(0) as usize;
+        let (mut top, mut moves, mut swallowed) = (0usize, 0u64, String::new());
+        loop {
+            if marked < top {
+                top = marked;
+            } else if marked >= top + window {
+                top = marked + 1 - window;
+            }
+            let lines = match &raw {
+                Some(rows) => rows.clone(),
+                None => {
+                    spandeck_agents::picker::drawn(&title, &choices, marked, top, window, &hint)
+                }
+            };
+            let mut o = std::io::stdout();
+            let _ = o.write_all(b"\r\n");
+            let _ = o.write_all(lines.join("\r\n").as_bytes());
+            let _ = o.flush();
+            let key = match self.input.recv() {
+                Ok(b) => b,
+                Err(_) => std::process::exit(0),
+            };
+            let said = |agent: &mut Agent, what: String, swallowed: &str| {
+                let _ = agent;
+                out("");
+                if !swallowed.is_empty() {
+                    out(&format!("[fake] the list swallowed: {swallowed}"));
+                }
+                out(&what);
+            };
+            let picked = |choices: &[(String, String, Option<bool>)], marked: usize| match multi {
+                true => choices
+                    .iter()
+                    .filter(|c| c.2 == Some(true))
+                    .map(|c| c.0.clone())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                false => choices.get(marked).map(|c| c.0.clone()).unwrap_or_default(),
+            };
+            match key {
+                b'\r' | b'\n' => {
+                    return said(
+                        self,
+                        format!("[fake] picked: {}", picked(&choices, marked)),
+                        &swallowed,
+                    )
+                }
+                b's' if hint.contains("s to use this session only") && raw.is_none() => {
+                    return said(
+                        self,
+                        format!(
+                            "[fake] picked for this session: {}",
+                            picked(&choices, marked)
+                        ),
+                        &swallowed,
+                    )
+                }
+                b' ' if multi => {
+                    if let Some(c) = choices.get_mut(marked) {
+                        c.2 = Some(c.2 != Some(true));
+                    }
+                }
+                0x1b => {
+                    let wait = Duration::from_millis(50);
+                    match self.input.recv_timeout(wait) {
+                        Ok(b'[') => {
+                            let mut seq = vec![];
+                            while let Ok(b) = self.input.recv_timeout(wait) {
+                                seq.push(b);
+                                if b.is_ascii_alphabetic() || b == b'~' {
+                                    break;
+                                }
+                            }
+                            if raw.is_none() && (seq == b"A" || seq == b"B") {
+                                moves += 1;
+                                marked = if seq == b"A" {
+                                    marked.saturating_sub(1)
+                                } else {
+                                    (marked + 1).min(choices.len().saturating_sub(1))
+                                };
+                                if change_after == Some(moves) {
+                                    choices.rotate_left(1);
+                                }
+                            }
+                        }
+                        _ => return said(self, "[fake] list closed".to_string(), &swallowed),
+                    }
+                }
+                b if b >= 0x20 => swallowed.push(b as char),
+                _ => {}
+            }
+        }
+    }
+
     fn model_screen(&mut self, spec: &Value) {
         let name = spec["name"].as_str().unwrap_or("Sonnet 5.5").to_string();
         let mut on_yes = spec["focus"].as_str() != Some("no");

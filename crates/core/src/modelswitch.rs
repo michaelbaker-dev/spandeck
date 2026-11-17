@@ -41,13 +41,22 @@ const OURS_MS: u64 = 8_000;
 /// record says it (`prompt` in the pane list and in `live`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Prompt {
-    /// `model_switch`.
+    /// `model_switch`; or, for a list the program draws to choose from
+    /// (picker.rs), `picker` (its rows are offered) or `screen` (the
+    /// screen itself is shown, with keys).
     pub kind: String,
-    /// The model it would switch to, as the program names it.
+    /// The model it would switch to, as the program names it; for a
+    /// list, its title.
     pub name: String,
     /// Its marker is on "Yes": Enter switches, Esc goes back.
     pub on_yes: bool,
     pub since_ms: u64,
+    /// A list's key names say `s` chooses for the session alone.
+    #[serde(default)]
+    pub session_key: bool,
+    /// The list, as read from the screen.
+    #[serde(default)]
+    pub picker: Option<spandeck_agents::picker::Picker>,
 }
 
 /// spandeck typed a model command into a pane.
@@ -108,8 +117,17 @@ impl Daemon {
         if m.exit.is_some() {
             return None;
         }
-        if switch_screen(m.agent, &p.term.lines()).is_some() || m.prompt.is_some() {
+        let lines = p.term.lines();
+        let model = m.prompt.as_ref().is_some_and(|x| x.kind == "model_switch");
+        if switch_screen(m.agent, &lines).is_some() || model {
             return Some("Switch model?");
+        }
+        // A list to choose from, or something shown with key names under
+        // it (picker.rs): read now, and as the pane's record has it.
+        if m.prompt.is_some()
+            || (m.agent.is_agent() && spandeck_agents::picker::read(&lines).is_some())
+        {
+            return Some("you to choose from what it shows");
         }
         if m.trust_asks.is_some() {
             return Some("whether to trust this folder");
@@ -154,7 +172,7 @@ impl Daemon {
                 drop(w);
                 // The question is gone: the pane is what it was, unless a
                 // hook has said something since.
-                if m.prompt.is_some() {
+                if m.prompt.as_ref().is_some_and(|x| x.kind == "model_switch") {
                     let ours = m
                         .needs_reason
                         .as_deref()
@@ -210,16 +228,22 @@ impl Daemon {
                 _ => {
                     watch().lock().unwrap().typed.remove(&key);
                     let prompt = Prompt {
+                        session_key: false,
+                        picker: None,
                         kind: "model_switch".into(),
                         name: sw.name.clone(),
                         on_yes: sw.on_yes,
-                        since_ms: m.prompt.as_ref().map_or(now, |p| p.since_ms),
+                        since_ms: m
+                            .prompt
+                            .as_ref()
+                            .filter(|x| x.kind == "model_switch")
+                            .map_or(now, |p| p.since_ms),
                     };
                     let why = reason(&sw.name);
                     let said = m.prompt.as_ref() == Some(&prompt)
                         && m.needs_reason.as_deref() == Some(why.as_str());
                     if !said {
-                        if m.prompt.is_none() {
+                        if !m.prompt.as_ref().is_some_and(|x| x.kind == "model_switch") {
                             watch().lock().unwrap().before.insert(key, m.state);
                         }
                         p.meta.lock().unwrap().prompt = Some(prompt);

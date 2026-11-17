@@ -22,6 +22,7 @@ pub mod hookstrust;
 pub mod install;
 pub mod models;
 pub mod opencode;
+pub mod picker;
 pub mod sessions;
 
 use serde::{Deserialize, Serialize};

@@ -70,6 +70,7 @@ pub mod notify;
 pub mod orders;
 pub mod paths;
 pub mod perf;
+pub mod picker;
 pub mod prefs;
 pub mod prices;
 pub mod project;

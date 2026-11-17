@@ -941,3 +941,25 @@ button.ask-opt.model-opt { align-items: center; } .model-opt .ask-label { flex: 
    after a change that was not made. */
 .chat-row .chat-tools button.chat-model.unconfirmed { border-style: dashed; color: var(--text); } .chat-row .chat-tools button.chat-model.failed { border-color: var(--red); }
 .model-now.unconfirmed { color: var(--text); }
+/* A list the pane's program draws to choose from, as a card. */
+.list-card .ask-opts { max-height: 40dvh; overflow: auto; } button.ask-opt.list-opt { min-height: 44px; padding: 6px 10px; } .list-opt .ask-mark { border: none; color: var(--blue); } .list-opt .ask-mark.box { border: 1px solid var(--muted); }
+.list-mode { align-self: flex-start; } .list-mode button { min-height: 36px; } .list-more { align-self: flex-start; background: none; } .chat-cards:has(.list-card) { max-height: 70dvh; }
+/* The window for what a pane's program shows on its own screen. */
+.list-window { display: flex; flex-direction: column; gap: 10px; } .list-window p { margin: 0; }
+.sheet-grab { display: none; } .list-rows { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--panel); }
+button.list-opt { width: 100%; min-height: 52px; padding: 8px 14px; border: none; border-bottom: 1px solid var(--line); border-radius: 0; background: none; justify-content: flex-start; align-items: center; text-align: left; gap: 10px; white-space: normal; }
+button.list-opt:last-child { border-bottom: none; } button.list-opt.on { background: var(--accent-bg); color: var(--on-accent); } button.list-opt.busy { opacity: .7; }
+.list-name { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 1px; overflow-wrap: anywhere; } .list-name .muted { font-size: calc(13px * var(--ui-scale)); } .list-opt.on .muted { color: inherit; opacity: .85; }
+.list-value { flex: none; color: var(--muted); font-size: calc(13.5px * var(--ui-scale)); padding: 2px 9px; border: 1px solid var(--line); border-radius: 11px; } .list-value.is-on { color: var(--green); border-color: var(--green); } .list-opt.on .list-value { color: inherit; border-color: currentColor; }
+.list-opt .model-tick { color: var(--green); } .list-opt.on .model-tick { color: inherit; }
+.list-tabs { align-self: stretch; overflow-x: auto; } .list-tab { flex: 1 0 auto; padding: 7px 12px; text-align: center; color: var(--muted); font-size: calc(13px * var(--ui-scale)); } .list-tab.on { background: var(--accent-bg); color: var(--on-accent); }
+.list-effort { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 12px; padding: 6px 8px; } .list-effort .key { min-width: 44px; min-height: 40px; justify-content: center; }
+.list-foot { gap: 8px; flex-wrap: wrap; } .list-foot button { min-height: 46px; flex: 1 1 auto; justify-content: center; }
+.list-screen { max-height: 46dvh; white-space: pre; overflow: auto; } .list-window.screen .wait-keys .key { flex: 1 1 0; }
+.list-line .row { gap: 8px; flex-wrap: wrap; } .list-line button { min-height: 40px; }
+@media (max-width: 760px) {
+  /* A phone: a sheet from the bottom, as tall as it needs, with a grabber. */
+  .backdrop:has(> .dialog.list-sheet) { place-items: end stretch; padding: 0; }
+  .dialog.list-sheet, html.kbd .dialog.list-sheet { height: auto; max-height: calc(var(--room) - 28px); border-radius: 18px 18px 0 0; border-top: 1px solid var(--line); }
+  .list-sheet .sheet-grab { display: block; width: 38px; height: 4px; border-radius: 2px; background: var(--line); margin: 8px auto 0; }
+}
