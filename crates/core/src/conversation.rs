@@ -294,6 +294,7 @@ impl Daemon {
         self.db.put(crate::db::Op::KvDel {
             k: cleared_key(pane),
         });
+        self.attach_forget(pane);
     }
 
     /// The notes of a pane's conversation the owner cleared: ids of items
@@ -996,6 +997,7 @@ impl Daemon {
         out["session"] = json!(session);
         out["reset"] = json!(reset);
         out["live"] = self.conversation_live(&p, Some(&session));
+        self.attach_decorate(&p.id, &mut out);
         Ok(out)
     }
 

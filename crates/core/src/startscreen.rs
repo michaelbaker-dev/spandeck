@@ -290,6 +290,7 @@ impl Daemon {
         self.folder_trust.owner_typed(pane);
         self.hooks_trust.owner_typed(pane);
         self.model_owner_typed(pane);
+        self.picker_owner_typed(pane);
     }
 
     /// Set or clear what a pane says about the screen it waits at. `slot`:

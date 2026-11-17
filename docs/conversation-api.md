@@ -690,6 +690,30 @@ spandeck and did not approve it: keep planning, and do not start the work. The o
 `station.flags`; 0: never held). Never past the hook's own timeout less 5 seconds: the entry
 spandeck installs gives it an hour.
 
+## Files with a message: `pane.attach.put`, `pane.attach.get`, `pane.attach.remove`
+
+The owner's only (17 Nov 2026; `crates/core/src/attach.rs`). For a pane on another station:
+`peer.call`, as every pane call.
+
+```
+pane.attach.put {pane, name, data_b64, last?}            the first piece  →  {id, name, size, image, whole}
+pane.attach.put {pane, id, data_b64, last?}              the next ones
+pane.attach.remove {pane, id}                            one that was not sent
+pane.attach.get {pane, id, offset?}                      →  {id, name, size, image, data_b64, next}
+pane.paste {pane, text, enter: true, files: [id, …]}     the message, with its files
+```
+
+- A piece is at most 256 KB of bytes (send them one after another); a file 64 MB; ten files
+  with a message; `last: true` closes a file. `name` is the device's: shown as text, never
+  used as a path. `image`: its name ends as a picture's does.
+- `pane.paste` with `files` types one message: `text`, then for each file a line
+  `Attached file: <path on the pane's station>`. `text` may be empty. `invalid` when a file
+  is not whole or not there: nothing is typed.
+- A `user` item whose message went with files has `attachments: [{id, name, size, image}]`,
+  and its `text` is the owner's words without those lines. Fetch a picture with
+  `pane.attach.get`, piece by piece (`next` is the next `offset`, or `null`).
+- Kept under the station's state for the pane (200 files), removed when the pane is closed.
+
 ## `pane.conversation.detail`
 
 ```

@@ -1020,3 +1020,24 @@ html.kbd .chat-card.held > .ask-opts, html.kbd .chat-card.held > .ask-plan { fle
 .chat-card.held button.ask-opt { min-height: 52px; padding: 8px 14px; border: none; border-bottom: 1px solid var(--line); border-radius: 0; background: none; align-items: center; }
 .chat-card.held button.ask-opt.on { background: var(--accent-bg); color: var(--on-accent); } .chat-card.held .ask-opt.on .muted { color: inherit; opacity: .85; }
 .chat-card.held .ask-opts > .ask-other { margin: 8px; width: auto; } .chat-card.held .ask-head { color: var(--muted); }
+/* A photo or a document with a message (17 Nov 2026). In the message
+   box: a row of chips above what is written. Pictures 64 px, rounded,
+   the x in the corner; a document a tile with its kind, name and size. */
+.chat-atts { display: flex; gap: 8px; padding: 6px 4px 2px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; flex: none; }
+.chat-atts[hidden] { display: none; }
+.att-chip { position: relative; flex: none; display: flex; align-items: center; gap: 8px; height: 64px; max-width: 220px; padding: 0 30px 0 8px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel2); cursor: default; }
+.att-chip.pic { width: 64px; padding: 0; overflow: hidden; } .att-chip .att-thumb { width: 64px; height: 64px; object-fit: cover; display: block; }
+.att-kind { flex: none; width: 40px; height: 40px; border-radius: 10px; background: var(--accent-bg); color: var(--on-accent); display: inline-flex; align-items: center; justify-content: center; font: 700 10.5px var(--mono-font); letter-spacing: .02em; }
+.att-what { min-width: 0; display: flex; flex-direction: column; line-height: 1.25; } .att-what b { font-weight: 600; font-size: calc(13px * var(--ui-scale)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .att-what .muted { font-size: calc(12px * var(--ui-scale)); }
+.chat-row .att-chip button.att-x, .att-chip .att-x { position: absolute; top: 3px; right: 3px; width: 22px; height: 22px; min-width: 0; min-height: 0; padding: 0; border-radius: 50%; border: none; background: rgba(0,0,0,.62); color: #fff; font-size: 14px; line-height: 1; justify-content: center; }
+.att-chip.up .att-thumb, .att-chip.failed .att-thumb { opacity: .45; } .att-chip.failed { border-color: var(--red); }
+.att-bar { position: absolute; left: 6px; right: 6px; bottom: 5px; height: 3px; border-radius: 2px; background: rgba(127,127,127,.35); overflow: hidden; } .att-bar i { display: block; height: 100%; background: var(--blue); }
+.chat-row .att-chip button.att-retry, .att-retry { position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); min-height: 0; min-width: 0; height: 22px; padding: 0 8px; border-radius: 11px; font-size: 11px; background: var(--red-bg); border-color: var(--red-line); color: var(--on-accent); }
+.att-chip:not(.pic) .att-retry { position: static; transform: none; flex: none; }
+/* In the conversation: what went with a message of the owner's. */
+.chat-attached { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 100%; }
+.att-pic { padding: 0; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; width: 112px; height: 112px; background: var(--panel2); justify-content: center; } .att-pic .att-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+.att-tile { display: flex; align-items: center; gap: 8px; height: 56px; max-width: 240px; padding: 0 12px 0 8px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel2); }
+.att-view { display: flex; flex-direction: column; gap: 8px; align-items: center; } .att-large { max-width: 100%; max-height: 72dvh; border-radius: 10px; }
+/* A file held over the conversation: where it lands. */
+.chat-body.dropping::after { content: 'Drop to attach to your message'; position: absolute; inset: 8px; z-index: 5; display: flex; align-items: center; justify-content: center; border: 2px dashed var(--blue); border-radius: 16px; background: color-mix(in srgb, var(--bg) 82%, var(--blue)); color: var(--text); font-weight: 600; pointer-events: none; }

@@ -1322,7 +1322,16 @@ fn what_any_program_shows_is_said_whatever_it_is() {
     // A menu nobody has seen, under Antigravity's message box: nothing of
     // it is recognised, and it is said all the same.
     let unknown = "────────────────────────────────────────────────────────────\n>\n────────────────────────────────────────────────────────────\n\n  ╔══════════════════════════╗\n  ║  Tide tables      F2     ║\n  ║  Moon phases      F3     ║\n  ╚══════════════════════════╝\n\n                                                                                                Gemini 4 Carbon · medium";
-    let odd = draws("antigravity", "odd", unknown);
+    // (Drawn by the program itself, not after something the owner sent:
+    // for twenty seconds after that an Antigravity pane is beginning its
+    // turn, and nothing is said of it.)
+    let odd = pane(
+        &s,
+        "antigravity",
+        "odd",
+        &dir,
+        json!({"no_hooks": true, "steps": [{"picker": {"raw": unknown.lines().collect::<Vec<_>>()}}]}),
+    );
     let p = shown(&s, &odd, "screen");
     assert!(
         p["prompt"]["picker"]["footer"]
@@ -1399,6 +1408,194 @@ fn what_any_program_shows_is_said_whatever_it_is() {
         p["prompt"].is_null() && p["state"] != json!("needs_you"),
         "{p}"
     );
+}
+
+/// A 1×1 PNG.
+const DOT_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+/// The owner, 17 Nov 2026: "In the chat I want to add a photo or document
+/// to the agent just like Claude or open ai". Until then the "+" typed a
+/// file's path into the program at once.
+///
+/// A file is put at the pane's station in pieces and nothing is typed; it
+/// is kept under a safe name, for the owner's account alone, and read back
+/// only by its pane and its id. Sent, it goes as one message: the words,
+/// and a line with where the file is. The conversation gives the message
+/// its words and what was attached, not the line. A file that is not
+/// there is never named in a message. No agent can put, read or remove
+/// one, and the files go with the pane.
+#[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
+fn a_file_goes_with_a_message_and_is_the_owners() {
+    use base64::Engine;
+    let s = Station::start("alpha");
+    let dir = folder(&s, "mere");
+    let lead = pane(
+        &s,
+        "fake",
+        "lead",
+        &dir,
+        json!({"steps": [{"prompt": "x"}, {"turn_end": "ok"}]}),
+    );
+    let other = pane(
+        &s,
+        "fake",
+        "other",
+        &dir,
+        json!({"steps": [{"prompt": "x"}, {"turn_end": "ok"}]}),
+    );
+    s.wait_state(&lead, "done");
+    // In two pieces, under a name a device might give.
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(DOT_PNG)
+        .unwrap();
+    let (first, rest) = bytes.split_at(20);
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let put = s.call(
+        "pane.attach.put",
+        json!({"pane": lead, "name": "../heron count (1).PNG", "data_b64": b64(first)}),
+    );
+    let id = put["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        (&put["whole"], &put["image"], &put["name"]),
+        (&json!(false), &json!(true), &json!("..heron count (1).PNG")),
+        "{put}"
+    );
+    // Not whole yet: it cannot be sent or read.
+    let early = s
+        .try_call(
+            "pane.paste",
+            json!({"pane": lead, "text": "look", "enter": true, "files": [id]}),
+        )
+        .unwrap_err();
+    assert_eq!(early.code, "invalid", "{early}");
+    let done = s.call(
+        "pane.attach.put",
+        json!({"pane": lead, "name": "x", "id": id, "data_b64": b64(rest), "last": true}),
+    );
+    assert_eq!(
+        (&done["whole"], done["size"].as_u64()),
+        (&json!(true), Some(bytes.len() as u64)),
+        "{done}"
+    );
+    assert!(
+        !s.text(&lead).contains("heron") && !s.text(&lead).contains("look"),
+        "nothing is typed before it is sent"
+    );
+    // On disk: in the pane's own folder, a safe name, the owner's alone.
+    let kept = s.root.join("state/drops").join(&lead).join("attached");
+    let files: Vec<_> = std::fs::read_dir(&kept).unwrap().flatten().collect();
+    assert_eq!(files.len(), 1);
+    let on_disk = files[0].file_name().to_string_lossy().to_string();
+    assert!(
+        on_disk.ends_with("-_heron_count__1_.PNG") && !on_disk.contains('/'),
+        "{on_disk}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            files[0].metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    // Read back by its pane and id; not by another pane's, not by a path.
+    let got = s.call("pane.attach.get", json!({"pane": lead, "id": id}));
+    assert_eq!(
+        (got["data_b64"].as_str(), &got["next"]),
+        (Some(DOT_PNG), &Value::Null),
+        "{got}"
+    );
+    for (pane_id, file) in [
+        (&other, id.as_str()),
+        (&lead, "../../config.toml"),
+        (&lead, on_disk.as_str()),
+    ] {
+        let e = s
+            .try_call("pane.attach.get", json!({"pane": pane_id, "id": file}))
+            .unwrap_err();
+        assert!(e.code == "not_found" || e.code == "invalid", "{file}: {e}");
+    }
+    // No agent puts, reads, removes, or sends one.
+    for (method, params) in [
+        (
+            "pane.attach.put",
+            json!({"pane": lead, "name": "x.txt", "data_b64": "eA==", "last": true}),
+        ),
+        ("pane.attach.get", json!({"pane": lead, "id": id})),
+        ("pane.attach.remove", json!({"pane": lead, "id": id})),
+        (
+            "pane.paste",
+            json!({"pane": lead, "text": "x", "files": [id]}),
+        ),
+    ] {
+        assert_eq!(
+            s.call_as_pane(&lead, method, params).unwrap_err().code,
+            "denied",
+            "{method}"
+        );
+    }
+    // A file that was taken away is never named in a message.
+    let gone = s.call(
+        "pane.attach.put",
+        json!({"pane": lead, "name": "notes.txt", "data_b64": "bm90ZXM=", "last": true}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.call("pane.attach.remove", json!({"pane": lead, "id": gone}));
+    let refused = s
+        .try_call(
+            "pane.paste",
+            json!({"pane": lead, "text": "see the notes", "enter": true, "files": [id, gone]}),
+        )
+        .unwrap_err();
+    assert!(
+        refused.code == "invalid" && refused.message.contains("not on the station"),
+        "{refused}"
+    );
+    assert!(
+        !s.text(&lead).contains("see the notes"),
+        "nothing of it was typed"
+    );
+
+    // Sent: one message, the words and the file's line.
+    s.call(
+        "pane.paste",
+        json!({"pane": lead, "text": "count these herons", "enter": true, "files": [id]}),
+    );
+    // (The whole path is in the message; the terminal wraps it.)
+    s.wait_text(&lead, "[fake] got: count these herons Attached file: ");
+    let typed = s.text(&lead).replace('\n', "");
+    assert!(
+        typed.contains(&format!("Attached file: {}", kept.join(&on_disk).display())),
+        "{typed}"
+    );
+    // In the conversation: the words, and what was attached; not the line.
+    let item = wait_for("the message in the conversation", 10, || {
+        conversation(&s, &lead, true)["items"]
+            .as_array()
+            .and_then(|i| {
+                i.iter()
+                    .find(|x| x["kind"] == json!("user") && x["attachments"].is_array())
+                    .cloned()
+            })
+    });
+    assert_eq!(
+        (&item["text"], &item["attachments"]),
+        (
+            &json!("count these herons"),
+            &json!([{"id": id, "name": "..heron count (1).PNG", "size": bytes.len(), "image": true}])
+        ),
+        "{item}"
+    );
+    // A message with no file is as it always was.
+    send(&s, &lead, "and the egrets");
+    // The files go with the pane.
+    s.call("pane.close", json!({"pane": lead}));
+    wait_for("the pane's files gone", 10, || {
+        (!kept.exists()).then_some(())
+    });
 }
 
 /// OpenCode's database in a station's throwaway home, with the two tables
@@ -3369,6 +3566,154 @@ mod in_a_browser {
         s.wait_text(&pane_id, "went on again");
         page.wait("no card", &format!("!{card}"));
         assert_eq!(s.text(&pane_id).matches("chose not to answer").count(), 2);
+    }
+
+    /// The owner, 17 Nov 2026: "In the chat I want to add a photo or
+    /// document to the agent just like Claude or open ai".
+    ///
+    /// At a phone's size: a picture pasted into the message box and a
+    /// document dropped on the conversation wait as chips above what is
+    /// written, and nothing is typed; one is removed; Send sends one
+    /// message with the words and the one file; the bubble shows the
+    /// picture, also after a reload; a message of files alone goes; and
+    /// with chips and the keyboard up the message box is not pushed away.
+    /// On a computer the same, with the place to drop shown.
+    #[test]
+    #[ignore = "merge tier: a browser"]
+    fn a_photo_or_a_document_waits_in_the_message_box_and_goes_with_the_message() {
+        let s = Station::start("alpha");
+        let dir = folder(&s, "mere");
+        let lead = pane(
+            &s,
+            "fake",
+            "lead",
+            &dir,
+            json!({"steps": [{"prompt": "x"}, {"turn_end": "ok"}]}),
+        );
+        s.wait_state(&lead, "done");
+        let page = Page::open(&s, 390, 844);
+        page.phone_screen();
+        page.goto(&format!("#/s/alpha/p/{lead}"));
+        page.wait(
+            "the chat",
+            "!!document.querySelector('.phone-chat .chat-box')",
+        );
+        // A picture pasted, and a document dropped: as a device gives them.
+        let give = |how: &str, name: &str, kind: &str, b64: &str| {
+            format!("(() => {{ const bytes = Uint8Array.from(atob('{b64}'), c => c.charCodeAt(0)); const dt = new DataTransfer(); dt.items.add(new File([bytes], '{name}', {{ type: '{kind}' }})); \
+                const root = document.querySelector('.phone-chat, .chat-pane'); \
+                if ('{how}' === 'paste') root.querySelector('.chat-box').dispatchEvent(new ClipboardEvent('paste', {{ clipboardData: dt, bubbles: true, cancelable: true }})); \
+                else {{ const b = root.querySelector('.chat-body'); b.dispatchEvent(new DragEvent('dragover', {{ dataTransfer: dt, bubbles: true, cancelable: true }})); window.__dropping = b.classList.contains('dropping'); b.dispatchEvent(new DragEvent('drop', {{ dataTransfer: dt, bubbles: true, cancelable: true }})); }} return true; }})()")
+        };
+        page.js(&give("paste", "heron.png", "image/png", DOT_PNG));
+        page.js(&give(
+            "drop",
+            "survey notes.txt",
+            "text/plain",
+            "bmluZSBoZXJvbnM=",
+        ));
+        page.js(&give("drop", "tally.csv", "text/csv", "YSxiCjEsMg=="));
+        let chips = page.wait("three chips, arrived", "(r => r && r.querySelectorAll('.att-chip.done').length === 3 && [[...r.querySelectorAll('.att-chip')].map(c => [c.dataset.name, c.classList.contains('pic'), !!c.querySelector('img.att-thumb'), c.querySelector('.att-what')?.innerText.replace(/\\s+/g, ' ') || '', Math.round(c.getBoundingClientRect().height)]), window.__dropping, document.querySelector('.phone-chat .chat-send').disabled, r.nextSibling.className])(document.querySelector('.phone-chat .chat-atts'))");
+        assert_eq!(
+            chips[0],
+            json!([
+                ["heron.png", true, true, "", 64],
+                [
+                    "survey notes.txt",
+                    false,
+                    false,
+                    "survey notes.txt 11 B",
+                    64
+                ],
+                ["tally.csv", false, false, "tally.csv 7 B", 64]
+            ]),
+            "{chips}"
+        );
+        assert_eq!(
+            (&chips[1], &chips[2], &chips[3]),
+            (&json!(true), &json!(false), &json!("chat-box")),
+            "{chips}"
+        );
+        assert!(
+            !s.text(&lead).contains("Attached file"),
+            "nothing is typed before Send"
+        );
+        page.js("(b => { b.value = 'count these herons'; b.dispatchEvent(new Event('input')); return true; })(document.querySelector('.phone-chat .chat-box'))");
+        shoot(&page, "attach-composer-chips");
+        // With the keyboard up: the message box, chips and all, in sight.
+        keyboard(&page, 480, 150);
+        let up = page.js(PLACE);
+        assert_eq!(
+            (&up["row"]["bottom"], &up["bar"]["top"]),
+            (&json!(630), &json!(150)),
+            "{up}"
+        );
+        assert_eq!(page.js("(r => { const b = r.getBoundingClientRect(); return b.top >= 150 && b.bottom <= 630; })(document.querySelector('.phone-chat .chat-atts'))"), json!(true));
+        shoot(&page, "attach-keyboard-up");
+        keyboard(&page, 844, 0);
+        // One is taken off; the rest goes with the words, as one message.
+        page.js("[...document.querySelectorAll('.phone-chat .att-chip')].find(c => c.dataset.name === 'tally.csv').querySelector('.att-x').click()");
+        page.wait(
+            "two chips",
+            "document.querySelectorAll('.phone-chat .att-chip').length === 2",
+        );
+        page.js("document.querySelector('.phone-chat .chat-send').click()");
+        s.wait_text(&lead, "[fake] got: count these herons Attached file: ");
+        wait_for("the whole message typed", 10, || {
+            s.text(&lead)
+                .replace('\n', "")
+                .contains("-survey_notes.txt")
+                .then_some(())
+        });
+        // (The terminal wraps the paths: read without its line ends.)
+        let typed = s.text(&lead).replace('\n', "");
+        let line = &typed[typed.find("[fake] got: count these herons").unwrap()..];
+        assert!(
+            line.matches("Attached file: ").count() == 2
+                && line.contains("-heron.png")
+                && line.contains("-survey_notes.txt")
+                && !line.contains("tally"),
+            "{line}"
+        );
+        assert_eq!(typed.matches("[fake] got:").count(), 1, "one message");
+        // The bubble: the picture and the document, and the words alone.
+        let bubble = "(u => u && u.querySelector('.att-pic img') && u.querySelector('.att-pic img').naturalWidth === 1 && [u.querySelector('.chat-bubble').innerText, u.querySelector('.att-tile').innerText.replace(/\\s+/g, ' '), u.querySelectorAll('.att-pic').length, document.querySelectorAll('.phone-chat .att-chip, .chat-pane .att-chip').length])([...document.querySelectorAll('.chat-user')].find(u => u.querySelector('.chat-attached')))";
+        let shown = page.wait("the message with what was attached", bubble);
+        assert_eq!(
+            shown,
+            json!(["count these herons", "TXT survey notes.txt 11 B", 1, 0])
+        );
+        shoot(&page, "attach-bubble");
+        page.js("document.querySelector('.chat-user .att-pic').click()");
+        page.wait(
+            "it large",
+            "(i => i && i.naturalWidth === 1)(document.querySelector('.dialog .att-large'))",
+        );
+        page.js("document.querySelector('.dialog .icon-btn').click()");
+        // After a reload, from the station.
+        page.js("(location.reload(), true)");
+        assert_eq!(page.wait("the same after a reload", bubble), shown);
+        // Files alone are a message too.
+        s.wait_state(&lead, "done");
+        page.js(&give("paste", "egret.png", "image/png", DOT_PNG));
+        page.wait(
+            "the chip",
+            "document.querySelectorAll('.phone-chat .att-chip.done').length === 1",
+        );
+        page.js("document.querySelector('.phone-chat .chat-send').click()");
+        wait_for("a message of a file alone", 10, || {
+            let typed = s.text(&lead).replace('\n', "");
+            (typed.contains("[fake] got: Attached file: ") && typed.contains("-egret.png"))
+                .then_some(())
+        });
+
+        // A computer: the same component.
+        let wide = Page::open(&s, 1300, 900);
+        wide.goto(&format!("#/s/alpha/p/{lead}"));
+        wide.wait("the pane", "!!document.querySelector('.chat-pane .chat-box') && document.querySelectorAll('.chat-pane .chat-attached').length === 2");
+        wide.js(&give("drop", "plan.pdf", "application/pdf", "JVBERi0="));
+        wide.wait("the chip on a computer", "(c => c && c.querySelector('.att-kind').innerText === 'PDF')(document.querySelector('.chat-pane .att-chip.done'))");
+        shoot(&wide, "attach-desktop");
     }
 
     /// Pictures of each kind of pane's Chat, for a human to lay side by

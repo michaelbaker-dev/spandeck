@@ -44,6 +44,16 @@ import { retryIn } from './api.js';
 let env = null;
 const convs = new Map();   // "station/pane id" -> Conv
 const drafts = new Map();  // what was being written, when its view is not on the page
+const draftFiles = new Map(); // and the files waiting to go with it (gone on a reload)
+// A photo or a document goes with a message (DECISIONS.md, 17 Nov 2026).
+const FILE_MAX = 64 * 1024 * 1024, FILES_MAX = 10, PIECE = 180 * 1024;
+const fileSize = (n) => (n < 1024 ? n + ' B' : n < 1048576 ? Math.round(n / 1024) + ' KB' : (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB');
+const isImage = (name, type) => /^image\//.test(type || '') || /\.(png|jpe?g|gif|webp|heic|heif|bmp)$/i.test(name || '');
+const b64 = (bytes) => { let bin = ''; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(bin); };
+// A file's kind, for its tile: the end of its name, in capitals.
+const fileKind = (name) => { const m = /\.([a-z0-9]{1,5})$/i.exec(name || ''); return m ? m[1].toUpperCase() : 'FILE'; };
+// Pictures attached to messages, fetched from the station once: "station/pane/id" -> a promise of an object URL.
+const pictures = new Map();
 // How many message boxes hold something not sent, off the page (failover.js
 // says "Your draft is kept" when the page moves to another station).
 export const draftCount = () => drafts.size;
@@ -238,6 +248,10 @@ class Conv {
     this.buildComposer();
     this.dock = h('div', { class: 'chat-dock' }, this.acts, this.cards, this.composer);
     this.body = h('div', { class: 'chat-body' }, this.log, this.said, this.dock);
+    this.dropInit();
+    // (Files that were waiting with a draft are drawn again by this view.)
+    for (const a of this.files) { a.el = null; a.sig = ''; }
+    this.drawFiles();
     this.draw();
   }
 
@@ -756,7 +770,8 @@ class Conv {
       const label = it.origin in from ? from[it.origin] : String(it.origin || '');
       return h('div', { class: 'chat-user' + (mine ? '' : ' other') },
         label ? h('div', { class: 'chat-from' }, label) : null,
-        h('div', { class: 'chat-bubble' }, text, it.images ? h('div', { class: 'chat-from' }, plural(Number(it.images) || 0, 'picture') + ' attached') : null), rest,
+        Array.isArray(it.attachments) && it.attachments.length ? this.attachedEl(it.attachments) : null,
+        text || !(Array.isArray(it.attachments) && it.attachments.length) ? h('div', { class: 'chat-bubble' }, text, it.images && !(Array.isArray(it.attachments) && it.attachments.length) ? h('div', { class: 'chat-from' }, plural(Number(it.images) || 0, 'picture') + ' attached') : null) : null, rest,
         text ? h('div', { class: 'chat-acts mine' }, h('button', { type: 'button', class: 'chat-act act-copy', title: 'Copy', onclick: () => copyText(text, 'Copied') }, 'Copy')) : null);
     }
     // What the pane printed, from its terminal. An agent's comes as parts:
@@ -1272,6 +1287,120 @@ class Conv {
       h('p', { class: 'muted small list-hint' }, `${name}'s own keys: ${String(k.hint || '')}`));
   }
 
+  // ---- a photo or a document with a message ----
+
+  // A picture that was attached, from the station that holds it: asked for
+  // by its pane and its id, in pieces, and kept for the page's life.
+  picture(id) {
+    const key = `${this.key}/${id}`;
+    if (!pictures.has(key)) {
+      pictures.set(key, (async () => {
+        const parts = [];
+        let offset = 0, name = '';
+        while (offset !== null && offset !== undefined) {
+          const r = await env.api.on(this.st, 'pane.attach.get', { pane: this.p.id, id, offset });
+          parts.push(Uint8Array.from(atob(r.data_b64 || ''), c => c.charCodeAt(0)));
+          name = r.name || name;
+          offset = r.next;
+        }
+        const ext = (/\.([a-z0-9]+)$/i.exec(name) || [])[1] || 'png';
+        return URL.createObjectURL(new Blob(parts, { type: 'image/' + ({ jpg: 'jpeg', heif: 'heic' }[ext.toLowerCase()] || ext.toLowerCase()) }));
+      })().catch((e) => { pictures.delete(key); throw e; }));
+    }
+    return pictures.get(key);
+  }
+
+  // What went with a message of the owner's: pictures small, a tap shows
+  // one large; documents as tiles with their name and size. Names are
+  // text; a picture is drawn from bytes the station gave, never from a
+  // path or an address in the message.
+  attachedEl(files) {
+    return h('div', { class: 'chat-attached' }, files.filter(f => f && typeof f.id === 'string').map((f) => {
+      const name = String(f.name || 'file'), size = fileSize(Number(f.size) || 0);
+      if (!f.image) return h('div', { class: 'att-tile', title: `${name} · ${size}`, dataset: { file: f.id } }, h('span', { class: 'att-kind', 'aria-hidden': 'true' }, fileKind(name)), h('span', { class: 'att-what' }, h('b', {}, name), h('span', { class: 'muted' }, size)));
+      const img = h('img', { class: 'att-thumb', alt: name, loading: 'lazy' });
+      const btn = h('button', { type: 'button', class: 'att-pic', title: `${name} · ${size}`, 'aria-label': `Picture ${name}, ${size}: show it large`, dataset: { file: f.id },
+        onclick: () => { const big = h('img', { class: 'att-large', alt: name }); big.src = img.src; const box = dialog(name, () => h('div', { class: 'att-view' }, big, h('p', { class: 'muted small' }, `${size} · kept on ${this.st}`))); box.body.parentNode.classList.add('sheet', 'chat-sheet'); } }, img);
+      this.picture(f.id).then((url) => { img.src = url; }).catch(() => { btn.replaceChildren(h('span', { class: 'att-kind' }, fileKind(name))); btn.title = `${name}: it could not be fetched from ${this.st}`; });
+      return btn;
+    }));
+  }
+
+  // The files waiting to go with the message: a row of chips above what
+  // is written. A picture is shown from the device's own copy.
+  drawFiles() {
+    const now = convs.get(this.key);
+    if (now && now !== this) return now.drawFiles();
+    const row = this.filesEl;
+    row.hidden = !this.files.length;
+    sync(row, this.files.map((a) => {
+      const sig = `${a.state}|${Math.round((a.sent / Math.max(a.size, 1)) * 20)}|${a.why || ''}`;
+      if (a.el && a.sig === sig) return a.el;
+      a.sig = sig;
+      const says = a.state === 'up' ? `Sending to ${this.st}… ${Math.round((a.sent / Math.max(a.size, 1)) * 100)}%` : a.state === 'failed' ? `Not sent to ${this.st}: ${a.why || 'it failed'}` : `${a.name} · ${fileSize(a.size)}`;
+      a.el = h('div', { class: `att-chip ${a.state}` + (a.image ? ' pic' : ''), title: says, dataset: { name: a.name } },
+        a.image && a.url ? h('img', { class: 'att-thumb', src: a.url, alt: a.name }) : h('span', { class: 'att-kind', 'aria-hidden': 'true' }, fileKind(a.name)),
+        a.image ? null : h('span', { class: 'att-what' }, h('b', {}, a.name), h('span', { class: 'muted' }, a.state === 'failed' ? 'not sent' : a.state === 'up' ? `${Math.round((a.sent / Math.max(a.size, 1)) * 100)}%` : fileSize(a.size))),
+        a.state === 'up' ? h('span', { class: 'att-bar', 'aria-hidden': 'true' }, h('i', { style: { width: Math.round((a.sent / Math.max(a.size, 1)) * 100) + '%' } })) : null,
+        a.state === 'failed' ? h('button', { type: 'button', class: 'att-retry', title: says, 'aria-label': `Try ${a.name} again`, onclick: () => this.sendFile(a) }, 'Retry') : null,
+        h('button', { type: 'button', class: 'att-x', 'aria-label': `Remove ${a.name}`, title: 'Remove', onclick: () => this.dropFile(a) }, '×'),
+        h('span', { class: 'sr-only', role: 'status' }, says));
+      return a.el;
+    }));
+    this.sendState();
+    this.resized();
+  }
+
+  // Add files to the message: from the "+", pasted, or dropped. Each is
+  // sent to the pane's station at once, in pieces, and waits there.
+  addFiles(list) {
+    for (const file of list) {
+      if (this.files.length >= FILES_MAX) { toast(`At most ${FILES_MAX} files go with one message.`, 'error'); break; }
+      if (file.size > FILE_MAX) { toast(`${file.name} is larger than 64 MB.`, 'error'); continue; }
+      const name = file.name || (isImage('', file.type) ? `picture.${(file.type.split('/')[1] || 'png').replace('jpeg', 'jpg')}` : 'file');
+      const a = { file, name, size: file.size, image: isImage(name, file.type), url: null, state: 'up', sent: 0, id: null };
+      if (a.image) { try { a.url = URL.createObjectURL(file); } catch (e) { a.url = null; } }
+      this.files.push(a);
+      this.sendFile(a);
+    }
+    this.drawFiles();
+  }
+
+  // One file to the station, a piece at a time: no single call is large,
+  // so a key typed or an answer given meanwhile is not kept waiting.
+  async sendFile(a) {
+    const run = (a.run = (a.run || 0) + 1);
+    a.state = 'up'; a.sent = 0; a.id = null; a.why = '';
+    this.drawFiles();
+    try {
+      let offset = 0;
+      do {
+        const piece = new Uint8Array(await a.file.slice(offset, offset + PIECE).arrayBuffer());
+        const last = offset + piece.length >= a.size;
+        const r = await env.api.on(this.st, 'pane.attach.put', { pane: this.p.id, name: a.name, id: a.id || undefined, data_b64: b64(piece), last });
+        if (a.run !== run || !this.files.includes(a)) { env.api.on(this.st, 'pane.attach.remove', { pane: this.p.id, id: r.id }).catch(() => {}); return; }
+        a.id = r.id;
+        offset += piece.length;
+        a.sent = offset;
+        this.drawFiles();
+      } while (offset < a.size);
+      a.state = 'done';
+    } catch (e) {
+      if (a.run !== run) return;
+      a.state = 'failed';
+      a.why = /method/i.test(e.message || '') && e.code === 'not_found' ? `${this.st} runs a spandeck from before files could go with a message` : e.message;
+    }
+    this.drawFiles();
+  }
+
+  dropFile(a) {
+    this.files.splice(this.files.indexOf(a), 1);
+    a.run = (a.run || 0) + 1;
+    if (a.id) env.api.on(this.st, 'pane.attach.remove', { pane: this.p.id, id: a.id }).catch(() => {});
+    if (a.url) URL.revokeObjectURL(a.url);
+    this.drawFiles();
+  }
+
   approvalEl(a) {
     const reason = h('input', { placeholder: 'reason (optional)', 'aria-label': 'Reason' });
     const answer = (allow) => env.rpc(this.st, 'approval.answer', { id: a.approval, allow, reason: reason.value || undefined }).then(() => toast(allow ? 'Allowed' : 'Denied'));
@@ -1559,27 +1688,44 @@ class Conv {
     const mic = this.mic.button;
     this.stopTalking = () => this.mic.stop();
 
+    // The files that wait with the message, and the ways in beside "+":
+    // pasted into the box, or dropped on the conversation.
+    this.files = draftFiles.get(this.key) || [];
+    draftFiles.set(this.key, this.files);
+    this.filesEl = h('div', { class: 'chat-atts', role: 'list', 'aria-label': 'Attached to this message', hidden: true });
+    this.box.addEventListener('paste', (e) => {
+      const files = [...(e.clipboardData?.files || [])];
+      if (!files.length) return;
+      e.preventDefault();
+      this.addFiles(files);
+    });
+    const over = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+    this.dropInit = () => {
+    this.body.addEventListener('dragover', (e) => { if (over(e)) { e.preventDefault(); this.body.classList.add('dropping'); } });
+    this.body.addEventListener('dragleave', (e) => { if (!this.body.contains(e.relatedTarget)) this.body.classList.remove('dropping'); });
+    this.body.addEventListener('drop', (e) => { if (!over(e)) return; e.preventDefault(); this.body.classList.remove('dropping'); this.addFiles([...e.dataTransfer.files]); });
+    };
     const plus = h('button', { type: 'button', class: 'chat-plus', title: 'Attach a photo or a file', 'aria-label': 'Attach a photo or a file', 'aria-haspopup': 'menu' }, '+');
     plus.onclick = () => {
       const b = plus.getBoundingClientRect();
       const pick = (camera) => {
         const inp = h('input', { type: 'file', class: 'copy-buffer', tabIndex: -1, 'aria-hidden': 'true' });
         if (camera) { inp.accept = 'image/*'; inp.setAttribute('capture', 'environment'); } else inp.multiple = true;
-        inp.addEventListener('change', () => { [...(inp.files || [])].forEach(f => this.upload(f)); inp.remove(); });
+        inp.addEventListener('change', () => { this.addFiles([...(inp.files || [])]); inp.remove(); });
         document.getElementById('overlays').append(inp);
         inp.click();
       };
       showMenu(b.left, b.top - 120, [{ title: `Send to ${p.name}` },
         { label: 'A photo or a file…', action: () => pick(false) },
         { label: 'Take a photo', action: () => pick(true) },
-        { note: `It is saved on ${this.st} and its path is typed for the agent.` }]);
+        { note: `It waits with your message and goes when you send it. Up to ${FILES_MAX} files, 64 MB each, kept on ${this.st}.` }]);
     };
     // One card: what is written above, and under it what can be added on
     // the left and how it is sent on the right. The same in every pane.
-    this.composer = h('form', { class: 'chat-composer', onsubmit: (e) => { e.preventDefault(); this.working && !this.box.value.trim() ? this.stopTurn() : this.send(); } },
+    this.composer = h('form', { class: 'chat-composer', onsubmit: (e) => { e.preventDefault(); this.working && !this.box.value.trim() && !this.files.length ? this.stopTurn() : this.send(); } },
       this.keysEl, this.slash, this.sendSaid, this.mic.said,
       h('div', { class: 'chat-row', onclick: (e) => { if (e.target === e.currentTarget || e.target.classList.contains('chat-tools')) this.box.focus(); } },
-        this.box, h('div', { class: 'chat-tools' }, plus, this.keysBtn, this.modelBtn, h('span', { class: 'grow' }), mic, this.sendBtn)));
+        this.filesEl, this.box, h('div', { class: 'chat-tools' }, plus, this.keysBtn, this.modelBtn, h('span', { class: 'grow' }), mic, this.sendBtn)));
   }
 
   typed() {
@@ -1602,7 +1748,10 @@ class Conv {
 
   // While the agent works and nothing is written, the button stops the turn.
   sendState() {
-    const stop = !!this.working && !this.box.value.trim();
+    const stop = !!this.working && !this.box.value.trim() && !this.files.length;
+    // (A message waits for its files: Send is off while one is on its way.)
+    const busy = this.files.some(a => a.state === 'up');
+    if (!this.sending) { this.sendBtn.disabled = busy; this.sendBtn.title = busy ? 'A file is still on its way to the station' : stop ? 'Stop this turn. The agent stays.' : 'Send'; }
     if (this.sendBtn.dataset.stop === String(stop)) return;
     this.sendBtn.dataset.stop = String(stop);
     this.sendBtn.textContent = stop ? 'Stop' : 'Send';
@@ -1616,7 +1765,13 @@ class Conv {
   // not known to be: what was written stays in the box, which says why.
   async send() {
     const text = this.box.value.trim();
-    if (!text || this.sending) return;
+    // What goes with it: the files that arrived. One that failed is said,
+    // and never leaves anything of itself in the message.
+    if (this.files.some(a => a.state === 'up')) return;
+    const failed0 = this.files.filter(a => a.state === 'failed');
+    if (failed0.length) { this.sendSaid.textContent = `${failed0[0].name} did not reach ${this.st}: try it again or remove it, then send.`; this.sendSaid.hidden = false; return; }
+    const files = this.files.filter(a => a.state === 'done' && a.id);
+    if ((!text && !files.length) || this.sending) return;
     // `/model` alone opens the program's own list. The sheet here does
     // the same and says what each way changes: it is offered in its
     // place (the program's list, when it is up, is still its card).
@@ -1628,7 +1783,10 @@ class Conv {
     this.sendBtn.textContent = 'Sending…';
     let failed = null;
     try {
-      await sendAct(env.api, this.st, 'pane.paste', { pane: this.p.id, text, enter: true });
+      await sendAct(env.api, this.st, 'pane.paste', { pane: this.p.id, text, enter: true, ...(files.length ? { files: files.map(a => a.id) } : {}) });
+      for (const a of files) if (a.url) URL.revokeObjectURL(a.url);
+      this.files.length = 0;
+      this.drawFiles();
       // A command of the program's own: what it draws for it is in no
       // conversation, so the terminal's last rows are shown for a while.
       if (/^\/[a-z-]+/i.test(text) && this.p.agent !== 'shell') this.sentSlash = { text: text.split(/\s/)[0], n: this.items.length, until: performance.now() + 20000 };

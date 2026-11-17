@@ -1066,6 +1066,23 @@ impl Daemon {
             // command into it, while it is idle: the owner's only, like
             // `agents.command`, which it goes through.
             "pane.model" => self.pane_model(s(&params, "pane")?, &params, by).await?,
+            // A photo or a document for a message (attach.rs): kept at
+            // the pane's station, read back by its id. The owner's only.
+            "pane.attach.put" | "pane.attach.get" | "pane.attach.remove" => {
+                let pane = self.pane(s(&params, "pane")?)?.id.clone();
+                let d = self.clone();
+                let method = method.to_string();
+                tokio::task::spawn_blocking(move || match method.as_str() {
+                    "pane.attach.put" => d.attach_put(&pane, &params),
+                    "pane.attach.get" => d.attach_get(&pane, &params),
+                    _ => d.attach_remove(
+                        &pane,
+                        params.get("id").and_then(|i| i.as_str()).unwrap_or(""),
+                    ),
+                })
+                .await
+                .map_err(|e| invalid(e.to_string()))??
+            }
             // Choosing a row of a list the pane's program draws: the
             // owner's only, by keys, read again before it is confirmed
             // (picker.rs).
@@ -1122,6 +1139,26 @@ impl Daemon {
                 }
                 let text = s(&params, "text")?;
                 self.not_into_a_prompt(&id)?;
+                // Files that go with the message (attach.rs): one message,
+                // the owner's words and a line for each file. Nothing of
+                // it is typed when a file is not there to send.
+                let files: Vec<String> = params
+                    .get("files")
+                    .and_then(|f| f.as_array())
+                    .map(|f| {
+                        f.iter()
+                            .filter_map(|i| i.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let with_files;
+                let text = match files.is_empty() {
+                    true => text,
+                    false => {
+                        with_files = self.attach_message(&id, text, &files)?;
+                        with_files.as_str()
+                    }
+                };
                 self.release_by_typing(&id, by);
                 self.start_screen_owner_typed(&id);
                 self.screen_sent(&id, text, true, &caller.who);
@@ -2761,6 +2798,11 @@ mod tests {
             "pane.notes.clear",
             "agents.command",
             "pane.pick",
+            // A photo or a document for a message (17 Nov 2026): put,
+            // read back and taken away by the owner alone.
+            "pane.attach.put",
+            "pane.attach.get",
+            "pane.attach.remove",
         ] {
             for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
                 assert!(!allowed(who, m), "{who:?} {m}");

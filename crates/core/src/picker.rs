@@ -48,6 +48,8 @@ struct Watch {
     /// since it was started (by when it was started): only then is the
     /// absence of that wait something it shows.
     armed: HashMap<String, u64>,
+    /// When the owner last sent the pane something.
+    typed: HashMap<String, u64>,
     /// A screen the owner said is no prompt ("Not a prompt: hide"): it is
     /// not said again while the screen is exactly that.
     hidden: HashMap<String, Picker>,
@@ -85,6 +87,15 @@ impl Daemon {
         format!("{}|{pane}", self.home.display())
     }
 
+    /// The owner sent the pane something, now.
+    pub(crate) fn picker_owner_typed(&self, pane: &str) {
+        watch()
+            .lock()
+            .unwrap()
+            .typed
+            .insert(self.picker_key(pane), now_ms());
+    }
+
     /// What a pane's program shows now: a list read from its screen, or
     /// (the net under it, which needs nothing to be recognised) the
     /// screen itself when the program is not in a turn and what is at the
@@ -117,9 +128,26 @@ impl Daemon {
                 None => false,
             };
             let still = now_ms().saturating_sub(p.term.last_output_ms()) >= 10_000;
+            // (Found with the real Antigravity 1.5.10: for some eight
+            // seconds after a message was sent to it, it was beginning its
+            // turn, with rows under its box and its state not yet "working",
+            // and the pane read as showing something. Nothing unread is
+            // said of an Antigravity pane in the twenty seconds after the owner
+            // sent it something, nor of any pane whose screen is still being
+            // drawn.)
+            let sent = watch()
+                .lock()
+                .unwrap()
+                .typed
+                .get(&self.picker_key(&p.id))
+                .copied()
+                .unwrap_or(0);
+            let settled = now_ms().saturating_sub(p.term.last_output_ms()) >= 1_500
+                && (agent != spandeck_agents::AgentKind::Antigravity
+                    || now_ms().saturating_sub(sent) >= 20_000);
             let other = match state {
                 AgentState::Working => still && known,
-                _ => known || showing(agent, &lines),
+                _ => settled && (known || showing(agent, &lines)),
             };
             other.then(|| {
                 let mut rows: Vec<String> = lines

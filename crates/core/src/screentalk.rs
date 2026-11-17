@@ -521,6 +521,7 @@ impl Daemon {
         out["not_understood_kinds"] = json!([]);
         out["older_dropped"] = json!(dropped);
         out["live"] = self.conversation_live(p, None);
+        self.attach_decorate(&p.id, &mut out);
         Ok(out)
     }
 

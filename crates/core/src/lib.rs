@@ -41,6 +41,7 @@
 pub mod add;
 pub mod agents;
 pub mod approvals;
+pub mod attach;
 pub mod beat;
 pub mod client;
 pub mod conversation;
