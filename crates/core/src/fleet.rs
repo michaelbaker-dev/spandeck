@@ -1231,6 +1231,7 @@ impl Daemon {
             .iter()
             .map(|p| json!({"name": p["name"], "open": p["open"]}))
             .collect::<Vec<_>>());
+        let names = self.fleet.names.lock().unwrap().clone();
         let peers: Vec<Value> = self
             .fleet
             .peers()
@@ -1242,6 +1243,17 @@ impl Daemon {
                 v["addr"] = json!(p.addr);
                 v["last_seen_ms"] = json!(p.last_seen_ms);
                 v["self"] = json!(false);
+                // Where its deck is over HTTPS is passed to a page only
+                // when this station's own Tailscale client gives that
+                // name for its address: a page that loses this station
+                // connects there and shows its token (https.rs).
+                let said = crate::https::brief(&p.info);
+                let host = p.addr.rsplit_once(':').map_or(p.addr.as_str(), |(h, _)| h);
+                let known = names.get(host).map(String::as_str);
+                if !said.is_null() && crate::https::deck_origins(&p.addr, &said, known).len() < 2 {
+                    v["https"] = json!({"on": false, "state": "unconfirmed", "port": said["port"],
+                        "why": "this station's own Tailscale does not give that name for its address"});
+                }
                 // A station that is off: the version it last had.
                 if v.get("version").is_none() {
                     v["version"] = json!(p.version);
