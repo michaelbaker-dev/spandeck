@@ -485,10 +485,29 @@ pub fn showing(agent: crate::AgentKind, lines: &[String]) -> bool {
                     && rule(&lines[i - 1])
                     && lines.get(i + 1).is_some_and(rule)
             });
+            // The row straight under the box is the program's own: its
+            // status at the right, and when it waits, a hint at the left on
+            // the same row ("? for shortcuts", "esc to cancel"). Found with
+            // the real 1.5.10, 17 Nov 2026: an idle pane was taken for one
+            // showing something, and messages to it were held.
+            let own_row = |l: &String| {
+                status_row(l) || {
+                    let t = l.trim_end();
+                    let gap = t.find("          ");
+                    gap.is_some_and(|g| {
+                        let (left, right) = (t[..g].trim(), t[g..].trim());
+                        !left.is_empty()
+                            && left.chars().count() <= 32
+                            && !right.is_empty()
+                            && right.chars().count() <= 40
+                            && !right.contains("     ")
+                    })
+                }
+            };
             match boxed {
-                Some(i) => lines[i + 2..=end]
-                    .iter()
-                    .any(|l| !clean(l).is_empty() && !status_row(l)),
+                Some(i) => lines[i + 2..=end].iter().enumerate().any(|(n, l)| {
+                    !clean(l).is_empty() && !(n == 0 && own_row(l)) && !status_row(l)
+                }),
                 None => false,
             }
         }
@@ -759,6 +778,38 @@ Keyboard: ↑/↓ Navigate  ←/→ Effort  enter Select  esc Go Back
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real Antigravity 1.5.10, idle (17 Nov 2026): under its box is one
+    /// row, a hint at the left and its status at the right. That is the
+    /// program waiting for a message, and nothing it shows.
+    #[test]
+    fn antigravity_waiting_for_a_message_shows_nothing() {
+        let rule = "\u{2500}".repeat(120);
+        let screen = |under: &str| -> Vec<String> {
+            vec![
+                " \u{2503} Auto is now the default agent mode".to_string(),
+                " \u{2503} esc to dismiss".to_string(),
+                rule.clone(),
+                ">".to_string(),
+                rule.clone(),
+                under.to_string(),
+            ]
+        };
+        let idle = format!(
+            "? for shortcuts{}Gemini 4 Carbon \u{b7} medium",
+            " ".repeat(81)
+        );
+        assert!(!showing(crate::AgentKind::Antigravity, &screen(&idle)));
+        let working = format!(
+            "esc to cancel{}Gemini 4 Carbon \u{b7} medium",
+            " ".repeat(83)
+        );
+        assert!(!showing(crate::AgentKind::Antigravity, &screen(&working)));
+        // Something else under the box is still something it shows.
+        let mut menu = screen("  Allow calling this tool?");
+        menu.push("  > Yes".to_string());
+        assert!(showing(crate::AgentKind::Antigravity, &menu));
+    }
 
     fn lines(text: &str) -> Vec<String> {
         text.lines().map(String::from).collect()
