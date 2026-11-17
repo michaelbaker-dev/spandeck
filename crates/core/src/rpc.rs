@@ -59,6 +59,11 @@ const PEER_METHODS: &[&str] = &[
     "deck.push",
     "look.push",
     "look.font.fetch",
+    // A release for a station of the fleet that cannot download one. On
+    // no other list: only a station asks, for itself.
+    "release.offer",
+    "release.prepare",
+    "release.chunk",
     "station.info",
     "relay.accept",
     "stop.apply",
@@ -233,6 +238,25 @@ pub fn allowed(authority: Authority, method: &str) -> bool {
         Authority::Agent => AGENT_METHODS.contains(&method),
         Authority::Peer => PEER_METHODS.contains(&method),
         Authority::ReadOnly => READ_METHODS.contains(&method),
+    }
+}
+
+/// The owner's decision of 17 Nov 2026 (a station that cannot download is
+/// supplied its release by the fleet) rests on these calls being a
+/// station's alone: no agent and no read-only caller may ask for a release
+/// or be handed one.
+#[cfg(test)]
+mod release_calls {
+    use super::*;
+
+    #[test]
+    fn only_a_station_of_the_fleet_may_ask_for_a_release() {
+        for method in ["release.offer", "release.prepare", "release.chunk"] {
+            assert!(allowed(Authority::Peer, method), "{method}");
+            assert!(!allowed(Authority::Agent, method), "{method}");
+            assert!(!allowed(Authority::ReadOnly, method), "{method}");
+            assert!(!reads(method), "{method}");
+        }
     }
 }
 
@@ -1880,6 +1904,31 @@ impl Daemon {
             }
             "look.font.remove" => self.look_font_remove(s(&params, "id")?, by)?,
             "look.font.fetch" => self.look_font_fetch(s(&params, "id")?)?,
+            // ---------------------------------- a release for a fleet-mate
+            "release.offer" => {
+                crate::supply_fleet::peers_only(caller)?;
+                self.release_offer(opt(&params, "tag"), s(&params, "target")?)
+                    .await
+            }
+            "release.prepare" => {
+                crate::supply_fleet::peers_only(caller)?;
+                self.release_prepare(
+                    s(&params, "tag")?,
+                    s(&params, "target")?,
+                    flag(&params, "own"),
+                )
+                .await?
+            }
+            "release.chunk" => {
+                crate::supply_fleet::peers_only(caller)?;
+                self.release_chunk(
+                    s(&params, "tag")?,
+                    s(&params, "target")?,
+                    s(&params, "sha256")?,
+                    params["offset"].as_u64().unwrap_or(0),
+                    params["len"].as_u64().unwrap_or(0),
+                )?
+            }
             // ------------------------------------------- owner preferences
             // Small choices that follow the owner to every station. The
             // owner's alone; a station has only the call that offers its copy.

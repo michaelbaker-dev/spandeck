@@ -395,51 +395,100 @@ impl Daemon {
     /// Update this station to a published release: download it, check it
     /// against its published SHA-256, and upgrade in place with every
     /// terminal kept. An upgrade that fails its health check is undone.
+    ///
+    /// When the release cannot be had from the release host here (it does
+    /// not answer, or the download breaks off), the stations of the fleet
+    /// are asked for it (the owner's decision of 17 Nov 2026,
+    /// supply_fleet.rs). That goes on after this call has answered: the
+    /// answer says so, and a notice says how it went.
     pub async fn station_update(&self, version: Option<&str>, by: &str) -> Result<Value> {
         let target = release_target()
             .ok_or_else(|| invalid("there are no releases for this kind of machine"))?;
         // The release host and the check against the published SHA-256 are
         // the ones a release sent to another machine goes through (supply.rs).
         use crate::supply::{Fetch, ReleaseHost};
-        let told = |e: Fetch| match e {
-            Fetch::Unreachable(why) => invalid(why),
-            Fetch::Http(url, code) => invalid(format!("{url}: HTTP {code}")),
-            Fetch::Checksum => {
-                invalid("the download does not match its published checksum; nothing was changed")
-            }
-        };
-        let host = ReleaseHost::new(self.cfg.update.url.as_deref(), Duration::from_secs(300))
-            .map_err(invalid)?;
-        let tag = match version {
-            Some(v) => v.to_string(),
-            None => host.latest().await.map_err(told)?,
-        };
-        if !crate::supply::valid_tag(&tag) {
+        if let Some(tag) = version.filter(|t| !crate::supply::valid_tag(t)) {
             return Err(invalid(format!("{tag:?} is not a release name")));
         }
-        if tag.trim_start_matches('v') == VERSION && version.is_none() {
-            return Ok(json!({"ok": true, "current": true, "version": VERSION,
-                "note": "This station already runs the latest release."}));
+        let url = self.cfg.update.url.as_deref();
+        // Asked first with three seconds to answer, so that a station that
+        // cannot reach it says so to whoever asked (another station waits
+        // five seconds for this call) instead of going quiet.
+        let probe = ReleaseHost::new(url, Duration::from_secs(3)).map_err(invalid)?;
+        let host = ReleaseHost::new(url, Duration::from_secs(300)).map_err(invalid)?;
+        let direct = match probe.latest().await {
+            Ok(latest) => {
+                let tag = version.map(String::from).unwrap_or(latest);
+                if tag.trim_start_matches('v') == VERSION && version.is_none() {
+                    return Ok(json!({"ok": true, "current": true, "version": VERSION,
+                        "note": "This station already runs the latest release."}));
+                }
+                match host.verified(&tag, &target).await {
+                    Ok((archive, _sum)) => Ok((tag, archive)),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        };
+        match direct {
+            Ok((tag, archive)) => {
+                let dir = self.release_dir(&tag)?;
+                let file = dir.join(format!("release.{}", crate::supply::archive_ext(&target)));
+                std::fs::write(&file, &archive)?;
+                self.install_release(&tag, &target, &file, by).await
+            }
+            Err(Fetch::Checksum) => Err(invalid(
+                "the download does not match its published checksum; nothing was changed",
+            )),
+            // The release host answers and has no such file: no station
+            // of the fleet would find it there either.
+            Err(Fetch::Http(url, 404)) => Err(invalid(format!("{url}: HTTP 404"))),
+            Err(e) => {
+                let why = match e {
+                    Fetch::Unreachable(why) => why,
+                    Fetch::Http(url, code) => format!("{url}: HTTP {code}"),
+                    Fetch::Checksum => String::new(),
+                };
+                tracing::info!(%why, "the release could not be had from the release host; asking the fleet");
+                self.update_through_fleet(version.map(String::from), target, probe.words(), by)
+            }
         }
+    }
+
+    /// Where a release is unpacked: emptied first.
+    fn release_dir(&self, tag: &str) -> Result<PathBuf> {
+        let dir: PathBuf = self.paths.state_dir.join("releases").join(tag);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    /// Unpack a release archive that has been checked and upgrade to it in
+    /// place. The archive must hold `spandeck-<tag>-<target>/`: one that
+    /// was made for another version or another kind of machine is refused
+    /// here, wherever it came from.
+    async fn install_release(
+        &self,
+        tag: &str,
+        target: &str,
+        archive: &Path,
+        by: &str,
+    ) -> Result<Value> {
         let name = format!("spandeck-{tag}-{target}");
         // A Windows release is a .zip holding spandeck.exe.
         let windows = spandeck_terminal::sys::WINDOWS;
-        let (ext, program) = if windows {
-            ("zip", "spandeck.exe")
-        } else {
-            ("tar.gz", "spandeck")
+        let program = if windows { "spandeck.exe" } else { "spandeck" };
+        let dir = match archive.parent() {
+            Some(dir) if dir.starts_with(self.paths.state_dir.join("releases")) => {
+                dir.to_path_buf()
+            }
+            _ => self.release_dir(tag)?,
         };
-        let (archive, _sum) = host.verified(&tag, &target).await.map_err(told)?;
-        let dir: PathBuf = self.paths.state_dir.join("releases").join(&tag);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir)?;
-        let file = dir.join(format!("release.{ext}"));
-        std::fs::write(&file, &archive)?;
         // The tar that Windows ships (bsdtar) reads .zip as well; it works
         // the kind out by itself, so it is not told gzip there.
         let unpack = tokio::process::Command::new("tar")
             .arg(if windows { "-xf" } else { "-xzf" })
-            .arg(&file)
+            .arg(archive)
             .arg("-C")
             .arg(&dir)
             .output()
@@ -451,13 +500,131 @@ impl Daemon {
                 "the release could not be unpacked; nothing was changed",
             ));
         }
-        let _ = std::fs::remove_file(&file);
+        if archive.starts_with(&dir) {
+            let _ = std::fs::remove_file(archive);
+        }
         // After it proves healthy, the new binary also replaces the one this
         // station starts from, so a reboot does not bring the old one back.
         let install_to: Option<&Path> = self.cfg.update.in_place.then_some(self.exe.as_path());
         let mut out = self.upgrade(&binary, by, install_to)?;
         out["release"] = json!(tag);
         Ok(out)
+    }
+
+    /// The update goes on through the fleet, after this has answered.
+    /// `host`: the release host in the owner's words ("GitHub").
+    fn update_through_fleet(
+        &self,
+        version: Option<String>,
+        target: String,
+        host: String,
+        by: &str,
+    ) -> Result<Value> {
+        use std::sync::atomic::Ordering;
+        let station = self.station.clone();
+        // Said before anything is begun: there is nobody to ask.
+        if let Err(none) = self.supplier_names() {
+            return Err(invalid(format!(
+                "{station} cannot reach {host} to download the release, and {none}. Update it when it can reach {host}, or copy a release archive to it and run `spandeck upgrade <the spandeck program in it>`."
+            )));
+        }
+        if self.held.updating.swap(true, Ordering::SeqCst) {
+            return Err(invalid(format!(
+                "{station} is already getting a release from the fleet: its notice says how far it is"
+            )));
+        }
+        let begun = format!(
+            "{station} cannot reach {host}: asking the stations of your fleet for the release…"
+        );
+        let notice = self.notify_quiet("station.update", &begun, "");
+        self.record(
+            "station.update",
+            None,
+            None,
+            None,
+            Some(by),
+            json!({"outcome": "asking the fleet", "version": version}),
+        );
+        let (me, by) = (self.clone(), by.to_string());
+        tokio::spawn(async move {
+            let prefix = format!("{} cannot reach {host}: ", me.station);
+            let said = |words: String| {
+                let line = format!("{prefix}{words}");
+                me.notify_rewrite(&notice, "station.update", &line, "");
+                me.emit("station.update.progress", None, None, json!({"text": line}));
+            };
+            let got = me
+                .release_from_fleet(version.as_deref(), &target, true, version.is_some(), &said)
+                .await;
+            let ended = match got {
+                Ok(supplied) => {
+                    let from = supplied.via.clone().unwrap_or_default();
+                    let own = supplied.source == crate::supply::Source::FleetOwnCopy;
+                    me.db.kv_set(
+                        "release.supplied",
+                        &json!({"by": from, "tag": supplied.tag, "at_ms": now_ms(), "own": own})
+                            .to_string(),
+                    );
+                    me.record(
+                        "station.update",
+                        None,
+                        None,
+                        None,
+                        Some(&by),
+                        json!({"outcome": "got the release from the fleet", "from": from,
+                            "release": supplied.tag, "platform": supplied.target,
+                            "sha256": supplied.sha256, "bytes": supplied.size,
+                            "what": if own { "that station's own program" } else { "the published release, checked by that station against its published SHA-256" }}),
+                    );
+                    let what = if own {
+                        format!("{from}'s own copy, {}", supplied.tag)
+                    } else {
+                        supplied.tag.clone()
+                    };
+                    match me
+                        .install_release(&supplied.tag, &target, &supplied.path, &by)
+                        .await
+                    {
+                        Ok(_) => Ok(format!(
+                            "{prefix}got {what} from {from} ({}) and is updating to it. Terminals stay open, and a version that does not start properly is undone.",
+                            crate::supply::size_words(supplied.size)
+                        )),
+                        Err(e) => Err(format!(
+                            "{prefix}got {what} from {from}, and it was not installed: {e}"
+                        )),
+                    }
+                }
+                Err(crate::supply_fleet::NoFleet::Current { tag }) => Ok(format!(
+                    "{prefix}the newest release the stations of your fleet can get is {tag}, which {} already runs.",
+                    me.station
+                )),
+                Err(none) => Err(format!(
+                    "{prefix}it was not updated, because {}.",
+                    none.words()
+                )),
+            };
+            me.held.updating.store(false, Ordering::SeqCst);
+            let (line, outcome) = match &ended {
+                Ok(line) => (line, "done"),
+                Err(line) => (line, "failed"),
+            };
+            me.notify_rewrite(&notice, "station.update", line, "");
+            me.emit(
+                "station.update.progress",
+                None,
+                None,
+                json!({"text": line, "ended": outcome}),
+            );
+            me.record(
+                "station.update",
+                None,
+                None,
+                None,
+                Some(&by),
+                json!({"outcome": outcome, "text": line}),
+            );
+        });
+        Ok(json!({"ok": true, "fleet": true, "from": VERSION, "note": begun}))
     }
 }
 

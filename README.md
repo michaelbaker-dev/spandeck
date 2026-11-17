@@ -116,6 +116,12 @@ From the Control Deck, right-click a station (or use the commands on any station
 | End every pane on a station | Close all panes here… | `spandeck pane close --all [--station NAME]` |
 | Take a station out of the fleet | Remove this station from the fleet… | `spandeck fleet --remove NAME [--stop]` |
 
+A station that cannot reach GitHub is still updated: it asks the stations of your fleet,
+takes the release from the closest one that has it or can download it (checked against
+its published checksum there, and against that checksum again on arrival), and upgrades
+as usual. A notice says where it came from. `spandeck doctor` on such a station says its
+updates come through the fleet and which station supplied the last one.
+
 - **Update** downloads the release on that station, checks it against its published
   SHA-256, and swaps it in. If the new version does not start properly, the station
   goes back to the old one. It then replaces the installed binary, so a reboot starts
@@ -211,8 +217,8 @@ there.
    as it runs. spandeck is then started there, now and at login. A machine that cannot
    reach GitHub is sent the release by the station, over the same SSH connection: the
    station downloads the release for that kind of machine and checks it, or, if it cannot
-   reach GitHub either and is the same kind of machine, sends its own copy. The dialog
-   says which.
+   reach GitHub either, gets it from a station of your fleet that can, or, if none can
+   and it is the same kind of machine, sends its own copy. The dialog says which.
 5. The new station asks to join, and the tile shows its code with **Approve** and
    **Refuse**. Approve it, and the tile becomes the new station.
 

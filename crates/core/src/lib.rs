@@ -87,6 +87,7 @@ pub mod snapshot;
 pub mod startscreen;
 pub mod stops;
 pub mod supply;
+pub mod supply_fleet;
 pub mod sync;
 pub mod tailnet;
 pub mod tasks;

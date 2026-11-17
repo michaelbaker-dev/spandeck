@@ -71,6 +71,12 @@ jobs:
         run: |
           cargo test -p spandeck --test phase5 a_machine_that_cannot_download_is_sent -- --ignored
           cargo test -p spandeck --test phase5 add_a_machine_on_a_phone -- --ignored
+      # A station that cannot reach the release host takes another
+      # station's own running program (tens of megabytes) and upgrades to
+      # it, while calls between the two are timed: none may be held up by
+      # the transfer. About fifteen seconds.
+      - name: A release supplied by the fleet (a station's own copy; calls are not held up meanwhile)
+        run: cargo test -p spandeck --test supply -- --ignored --nocapture
       # Chat for every pane, in a real browser at a phone's width and a
       # computer's: a layout of a Codex whose hooks never ran and a shell,
       # each with Chat and Terminal. And one chat for every pane: a Claude

@@ -440,6 +440,34 @@ days, not hours.
   - On the new machine the archive is written to a temporary folder of that user's,
     checked, and deleted; a transfer that is cut short or altered installs nothing.
   - The Windows side of this has not been run on a real machine (DECISIONS.md).
+- A station that cannot reach the release host is supplied its update by a station of
+  its fleet that can (17 Nov 2026), and a station adding a machine may get another
+  kind's release the same way.
+  - **Whom it believes.** The station being updated cannot check the release host
+    itself, so it believes a station of its fleet that says "this is the SHA-256 I
+    checked against the published one". That is no new power: every station of a fleet
+    holds the same key and can already act as you on every other. A station of your
+    fleet that has been taken over could already run anything on the others; it can now
+    also hand one of them a bad program when that one asks for an update.
+  - **What it checks anyway.** That the bytes have the SHA-256 that was offered; that
+    what it is given is the version and kind of machine it asked for; that it is not
+    older than what it runs, unless you named that version; and, when more than one
+    station holds or can fetch the release, that they all give the same SHA-256, or
+    nothing is installed. So one station with a spoiled or swapped copy is found out
+    wherever a second one can supply the same release; a fleet of two has no second.
+  - **What a station hands on.** Only an archive it checked against its published
+    SHA-256 (a station that was itself supplied keeps no copy to hand on), from the
+    release host in the code or in its own config. The exception is when no station can
+    reach the release host at all: then a station of the same kind sends its own running
+    program, and the notice says it is that station's own copy. That copy is trusted as
+    far as that station is.
+  - **Who may ask.** Only a station of the fleet, with a call signed with the fleet's
+    key. No agent and no read-only caller has these calls, the owner's own connection is
+    refused them, and a browser cannot reach them. Asking makes a station download a
+    release from its own release host and nothing else; it names one of five platforms
+    and a version, never an address or a file.
+  - It is the station that updates that asks. Nothing lets one station push a program
+    onto another.
 - An update is checked against the SHA-256 published beside it. That catches a damaged
   or swapped download, not a release that was malicious when published.
 - No sandbox. An agent runs with your user's permissions; spandeck observes and can

@@ -63,6 +63,11 @@ impl Daemon {
         self.notify_as(kind, None, None, title, body, true)
     }
 
+    /// The same, for a notice that is progress: it is not sent to the phone.
+    pub(crate) fn notify_quiet(&self, kind: &str, title: &str, body: &str) -> String {
+        self.notify_as(kind, None, None, title, body, false)
+    }
+
     /// Replace the words of a notice already raised, and show it as unread
     /// again. It is not pushed a second time. False when it is no longer
     /// in the inbox.

@@ -1203,6 +1203,12 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                         "already on the latest release ({})",
                         v["version"].as_str().unwrap_or("")
                     )
+                } else if v["fleet"] == json!(true) {
+                    // It cannot download: it asks the fleet, and goes on by itself.
+                    format!(
+                        "{} It updates by itself when it has it; a notice in the Control Deck says how it went.",
+                        v["note"].as_str().unwrap_or("")
+                    )
                 } else {
                     format!(
                         "updating {} -> {}; the download matched its checksum. Terminals stay open, and a version that does not start properly is undone.",

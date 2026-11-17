@@ -6385,7 +6385,7 @@ exit 1
     assert_eq!(
         page.js("[document.querySelector('.dialog .add-problem').innerText, !!document.querySelector('.dialog .add-worked'), !!document.querySelector('.dialog .add-note')]"),
         json!([
-            format!("kestrel cannot reach 127.0.0.1:{p}, and neither can alpha to fetch the macOS (Apple silicon) build. Add it from a station that is the same kind of machine, or one that can reach 127.0.0.1:{p}: any station of your fleet can add a machine. No station of your fleet is known to be the same kind of machine as kestrel (macOS (Apple silicon)).", p = releases.port),
+            format!("kestrel cannot reach 127.0.0.1:{p}, and neither can alpha to fetch the macOS (Apple silicon) build; no other station of your fleet is answering now. Add it when a station of your fleet can reach 127.0.0.1:{p} (any of them then supplies it), or from a station that is the same kind of machine, which sends its own copy. No station of your fleet is known to be the same kind of machine as kestrel (macOS (Apple silicon)).", p = releases.port),
             false,
             false
         ])
@@ -6709,7 +6709,7 @@ exec env -i PATH={dir}/remote-bin:/usr/bin:/bin HOME={dir}/$m/home TMPDIR={dir}/
             &json!("failed"),
             &json!("no_release"),
             &json!(format!(
-                "studio cannot reach {host}, and neither can alpha to fetch the macOS (Apple silicon) build. Add it from a station that is the same kind of machine, or one that can reach {host}: any station of your fleet can add a machine. No station of your fleet is known to be the same kind of machine as studio (macOS (Apple silicon))."
+                "studio cannot reach {host}, and neither can alpha to fetch the macOS (Apple silicon) build; no other station of your fleet is answering now. Add it when a station of your fleet can reach {host} (any of them then supplies it), or from a station that is the same kind of machine, which sends its own copy. No station of your fleet is known to be the same kind of machine as studio (macOS (Apple silicon))."
             ))
         ),
         "{v}"

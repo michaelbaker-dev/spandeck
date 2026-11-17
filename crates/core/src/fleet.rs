@@ -155,6 +155,10 @@ pub enum Remote {
 
 pub struct FleetState {
     pub http: reqwest::Client,
+    /// For one large thing at a time (a release, in pieces): connections
+    /// of its own, so that nothing else said between two stations waits
+    /// behind it on a connection, and a time limit given with each call.
+    bulk: reqwest::Client,
     peers: Mutex<BTreeMap<String, Peer>>,
     whois: Mutex<HashMap<IpAddr, (u64, Remote)>>,
     me: Mutex<Option<(u64, Option<TailnetSelf>)>>,
@@ -297,8 +301,13 @@ impl FleetState {
             .connect_timeout(Duration::from_millis(1500))
             .build()
             .unwrap_or_default();
+        let bulk = crate::http::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .build()
+            .unwrap_or_default();
         FleetState {
             http,
+            bulk,
             peers: Mutex::new(BTreeMap::new()),
             whois: Mutex::new(HashMap::new()),
             me: Mutex::new(None),
@@ -583,6 +592,33 @@ impl FleetState {
             .await
     }
 
+    /// A signed call that may take long or carry a piece of a file: made
+    /// on connections of its own, with the time it may take. It is not
+    /// counted among the link's calls (the Performance page's round trips
+    /// are of ordinary calls), and its failing does not mark the station
+    /// as silent: the ordinary calls say that.
+    pub async fn call_bulk(
+        &self,
+        station: &str,
+        method: &str,
+        params: Value,
+        limit: Duration,
+    ) -> std::result::Result<Value, String> {
+        let peer = self
+            .peer(station)
+            .ok_or_else(|| format!("station {station} is not in the fleet"))?;
+        self.post_on(
+            &self.bulk,
+            Some(limit),
+            &peer.addr,
+            method,
+            params,
+            Some(self.trust.key()),
+        )
+        .await
+        .map_err(|(_, why)| why)
+    }
+
     async fn post(
         &self,
         addr: &str,
@@ -602,13 +638,30 @@ impl FleetState {
         params: Value,
         key: Option<Vec<u8>>,
     ) -> std::result::Result<Value, (Sent, String)> {
+        self.post_on(&self.http, None, addr, method, params, key)
+            .await
+    }
+
+    /// `limit`: the call is a bulk one (see `call_bulk`).
+    async fn post_on(
+        &self,
+        http: &reqwest::Client,
+        limit: Option<Duration>,
+        addr: &str,
+        method: &str,
+        params: Value,
+        key: Option<Vec<u8>>,
+    ) -> std::result::Result<Value, (Sent, String)> {
+        let counted = limit.is_none();
         let body =
             json!({"method": method, "params": params, "from": self.station, "protocol": PROTOCOL})
                 .to_string()
                 .into_bytes();
-        let mut req = self
-            .http
-            .post(format!("http://{addr}/api/peer/rpc"))
+        let mut req = http.post(format!("http://{addr}/api/peer/rpc"));
+        if let Some(limit) = limit {
+            req = req.timeout(limit);
+        }
+        let mut req = req
             .header("x-spandeck-station", &self.station)
             .header("content-type", "application/json");
         if let Some(key) = key {
@@ -629,8 +682,10 @@ impl FleetState {
             } else {
                 "no answer"
             };
-            self.perf.link_call(addr, began.elapsed(), Some(why));
-            self.note_answer(addr, false);
+            if counted {
+                self.perf.link_call(addr, began.elapsed(), Some(why));
+                self.note_answer(addr, false);
+            }
             // No connection was made: nothing was sent.
             let sent = match e.is_connect() {
                 true => Sent::No,
@@ -638,11 +693,15 @@ impl FleetState {
             };
             (sent, NoAnswer::of(&e).words().to_string())
         })?;
-        self.note_answer(addr, true);
+        if counted {
+            self.note_answer(addr, true);
+        }
         let status = resp.status();
         let body: Value = resp.json().await.map_err(|e| {
-            self.perf
-                .link_call(addr, began.elapsed(), Some("bad reply"));
+            if counted {
+                self.perf
+                    .link_call(addr, began.elapsed(), Some("bad reply"));
+            }
             (Sent::Maybe, format!("bad reply: {e}"))
         })?;
         let refused = match body.pointer("/error/code").and_then(|c| c.as_str()) {
@@ -650,7 +709,9 @@ impl FleetState {
             _ if status == reqwest::StatusCode::UNAUTHORIZED => Some("refused"),
             _ => None,
         };
-        self.perf.link_call(addr, began.elapsed(), refused);
+        if counted {
+            self.perf.link_call(addr, began.elapsed(), refused);
+        }
         if let Some(err) = body.get("error") {
             return Err((
                 Sent::Answered,

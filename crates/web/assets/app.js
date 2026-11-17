@@ -1425,7 +1425,7 @@ function versionBar() {
   if (key === versionKey) return versionBox;
   const me = behind.find(s => s.self), can = behind.filter(s => s.state === 'online'), names = (list) => list.map(s => `${s.station} (${s.version})`).join(', ');
   const on = all.filter(s => s.version === newest).map(s => s.station).join(', ');
-  const update = () => Promise.all(can.map(s => api.on(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`)).catch(e => toast(`${s.station}: ${e.message}`, 'error')))).then(() => refreshSoon(1500));
+  const update = () => Promise.all(can.map(s => api.on(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : r.fleet ? r.note : `${s.station} is updating to ${r.release}`)).catch(e => toast(`${s.station}: ${e.message}`, 'error')))).then(() => refreshSoon(1500));
   versionKey = key;
   versionBox = h('div', { class: 'vault-prompt version-bar', role: 'region', 'aria-label': 'Stations on different versions' },
     h('div', { class: 'grow' },
@@ -1796,7 +1796,7 @@ function stationMenu(e, s) {
     stationKey(s.station) && { label: `Tailscale key: ${stationKey(s.station).text}…`, action: () => keyDialog(keyName(s.station), stationKey(s.station), stationMore(s.station)) },
     s.state === 'not_linked' && { label: `Add ${s.station} to this fleet…`, action: () => addMachineDialog({ station: s.station, kind: 'join' }) },
     up && { label: 'Restart spandeck here (keeps terminals)', action: () => confirmBox(`Restart spandeck on ${s.station}?`, 'Every terminal and agent keeps running. If it does not come back healthy, the restart is undone.', 'Restart', () => rpc(s.station, 'station.restart', {}).then(() => toast(`${s.station} is restarting`))) },
-    up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : `${s.station} is updating to ${r.release}`))) },
+    up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : r.fleet ? r.note : `${s.station} is updating to ${r.release}`))) },
     // A station that is on, and refused for its clock or its Tailscale key,
     // is not helped by waking or starting it.
     awayWhy(s) && { note: awayWhy(s) },

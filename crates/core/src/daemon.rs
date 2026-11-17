@@ -488,6 +488,8 @@ pub struct Inner {
     pub(crate) prices: crate::prices::PricesState,
     /// A machine being added to the fleet from the Control Deck.
     pub(crate) adding: crate::add::AddState,
+    /// A release being supplied to, or taken from, another station.
+    pub(crate) held: Arc<crate::supply_fleet::Held>,
     /// Told when the owner asked for this station to be stopped (when it
     /// was removed from the fleet with "also stop spandeck there").
     pub quit: tokio::sync::Notify,
@@ -647,6 +649,7 @@ impl Daemon {
             agents: Default::default(),
             prices: Default::default(),
             adding: Default::default(),
+            held: Default::default(),
             quit: tokio::sync::Notify::new(),
         }));
         daemon.prices_load();
@@ -2873,6 +2876,9 @@ impl Daemon {
         if self.flag_on(crate::stops::CAP, true) {
             caps.push(crate::stops::CAP);
         }
+        // It supplies a release to a station of its fleet that cannot
+        // download one (supply_fleet.rs).
+        caps.push(crate::supply_fleet::CAP);
         // Request ids are kept: a change may be tried again by its id.
         if self.flag_on(crate::rids::FLAG, true) {
             caps.push(crate::rids::CAP);

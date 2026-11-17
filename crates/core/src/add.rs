@@ -1834,7 +1834,9 @@ impl Daemon {
                                         Source::Published => "the release host, checked against its published SHA-256",
                                         Source::Kept => "a download kept from before, checked then against its published SHA-256",
                                         Source::OwnCopy => "this station's own program",
-                                    }}),
+                                        Source::Fleet => "another station of the fleet, which checked it against its published SHA-256",
+                                        Source::FleetOwnCopy => "another station's own program",
+                                    }, "via": supplied.via}),
                             );
                             if !self.add_line(id, &note) {
                                 return Err("cancelled");
@@ -2151,6 +2153,18 @@ fn sending_words(name: &str, station: &str, host: &str, why: &str, supplied: &Su
             "{begin}, and {station} has no release from {host} to send: sending this station's own copy, {} ({size})…",
             tag.trim_start_matches('v')
         ),
+        // Got from a station of the fleet that could fetch it.
+        Source::Fleet | Source::FleetOwnCopy => {
+            let via = supplied.via.as_deref().unwrap_or("another station");
+            let neither = if why == "network" {
+                format!("and neither can {station}")
+            } else {
+                format!("and {station} cannot reach {host}")
+            };
+            format!(
+                "{begin}, {neither}: sending the release {via} fetched and checked, {tag}, from {station} over SSH ({size})…"
+            )
+        }
     }
 }
 
@@ -2208,7 +2222,7 @@ impl Daemon {
                 "own_copy",
                 format!("{}, and {station} could not put its own copy of spandeck together to send: {e}", why_words(name, host, why)),
             ),
-            NoSupply::NoSource { reached, .. } => {
+            NoSupply::NoSource { reached, fleet, .. } => {
                 let mut same: Vec<String> = self
                     .fleet_members()
                     .into_iter()
@@ -2223,7 +2237,7 @@ impl Daemon {
                 same.sort();
                 (
                     "no_release",
-                    no_source_words(name, station, host, why, target, *reached, &same),
+                    no_source_words(name, station, host, why, target, *reached, fleet, &same),
                 )
             }
         }
@@ -2231,8 +2245,10 @@ impl Daemon {
 }
 
 /// The dialog's words when neither the machine nor this station can get
-/// the release, and this station is another kind of machine: both facts,
-/// what to do, and the stations of the fleet that are the same kind.
+/// the release, no station of the fleet could supply it (`fleet` says what
+/// asking them came to), and this station is another kind of machine: the
+/// facts, what to do, and the stations of the fleet that are the same kind.
+#[allow(clippy::too_many_arguments)]
 fn no_source_words(
     name: &str,
     station: &str,
@@ -2240,8 +2256,14 @@ fn no_source_words(
     why: &str,
     target: &str,
     reached: bool,
+    fleet: &str,
     same: &[String],
 ) -> String {
+    let fleet = if fleet.is_empty() {
+        String::new()
+    } else {
+        format!("; {fleet}")
+    };
     let platform = supply::platform_words(target);
     let same = if same.is_empty() {
         format!("No station of your fleet is known to be the same kind of machine as {name} ({platform}).")
@@ -2262,7 +2284,7 @@ fn no_source_words(
         format!("and {station} cannot reach {host} to fetch the {platform} build")
     };
     format!(
-        "{}, {neither}. Add it from a station that is the same kind of machine, or one that can reach {host}: any station of your fleet can add a machine. {same}",
+        "{}, {neither}{fleet}. Add it when a station of your fleet can reach {host} (any of them then supplies it), or from a station that is the same kind of machine, which sends its own copy. {same}",
         why_words(name, host, why)
     )
 }
@@ -2941,9 +2963,17 @@ mod tests {
                 "network",
                 "aarch64-apple-darwin",
                 false,
+                "none of the stations asked (m4, studio) has it or can reach the release host",
                 &["m4".to_string(), "studio".to_string()]
             ),
-            "monitoring cannot reach GitHub, and neither can spark2 to fetch the macOS (Apple silicon) build. Add it from a station that is the same kind of machine, or one that can reach GitHub: any station of your fleet can add a machine. The same kind of machine as monitoring (macOS (Apple silicon)) in your fleet: m4, studio."
+            "monitoring cannot reach GitHub, and neither can spark2 to fetch the macOS (Apple silicon) build; none of the stations asked (m4, studio) has it or can reach the release host. Add it when a station of your fleet can reach GitHub (any of them then supplies it), or from a station that is the same kind of machine, which sends its own copy. The same kind of machine as monitoring (macOS (Apple silicon)) in your fleet: m4, studio."
+        );
+        // Another station of the fleet could fetch it: it is sent on.
+        let mut via = of(Source::Fleet);
+        via.via = Some("m4".into());
+        assert_eq!(
+            sending_words("monitoring", "spark2", "GitHub", "network", &via),
+            "monitoring cannot reach GitHub, and neither can spark2: sending the release m4 fetched and checked, v0.4.11, from spark2 over SSH (18 MB)…"
         );
         // Which stations are the same kind: from what each says of itself.
         assert_eq!(

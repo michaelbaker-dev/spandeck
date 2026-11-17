@@ -118,6 +118,24 @@ pub fn older(a: &str, b: &str) -> bool {
     }
 }
 
+/// A day as it is said: "17 Nov 2026" (UTC).
+pub fn date_words(ms: u64) -> String {
+    // Days since 1970 to a civil date (Howard Hinnant's algorithm).
+    let z = (ms / 86_400_000) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    const NAMES: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!("{day} {} {year}", NAMES[(month - 1) as usize])
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -240,6 +258,11 @@ pub enum Source {
     Kept,
     /// An archive of the program this station runs.
     OwnCopy,
+    /// Got from another station of the fleet (`Supplied::via`), which
+    /// checked it against its published SHA-256.
+    Fleet,
+    /// Another station's own running program, got from it.
+    FleetOwnCopy,
 }
 
 /// A release archive ready to be sent.
@@ -252,8 +275,10 @@ pub struct Supplied {
     pub size: u64,
     pub sha256: String,
     pub source: Source,
+    /// The station of the fleet it was got from, if it was.
+    pub via: Option<String>,
     /// Made for this one sending, and deleted after it.
-    temporary: Option<PathBuf>,
+    pub(crate) temporary: Option<PathBuf>,
 }
 
 impl Supplied {
@@ -272,6 +297,7 @@ impl Supplied {
             size: bytes.len() as u64,
             sha256: sha256_hex(&bytes),
             source,
+            via: None,
             temporary: None,
         })
     }
@@ -298,7 +324,12 @@ pub enum NoSupply {
     /// station's version), nothing is held from before, and the machine is
     /// a different kind from this one, so this station's own copy would
     /// not run there.
-    NoSource { reached: bool, why: String },
+    NoSource {
+        reached: bool,
+        why: String,
+        /// What asking the other stations of the fleet came to.
+        fleet: String,
+    },
     /// This station's own files could not be put together.
     OwnCopy(String),
 }
@@ -315,7 +346,7 @@ pub enum Force {
 }
 
 impl Daemon {
-    fn supply_dir(&self) -> PathBuf {
+    pub(crate) fn supply_dir(&self) -> PathBuf {
         self.paths.state_dir.join("supply")
     }
 
@@ -325,7 +356,45 @@ impl Daemon {
     /// the newest release, as the release host says. It is never older than
     /// what this station runs: a release host that names an older one as
     /// its newest is asked for this station's version instead.
+    ///
+    /// When this station cannot get it (the release host does not answer
+    /// it and nothing is kept), a station of the fleet that can is asked
+    /// for it (supply_fleet.rs) before this station's own copy is used.
     pub async fn release_for(
+        &self,
+        target: &str,
+        force: Force,
+    ) -> std::result::Result<Supplied, NoSupply> {
+        let (reached, why) = match self.release_here(target, force).await {
+            Ok(supplied) => return Ok(supplied),
+            Err(NoSupply::NoSource { reached, why, .. }) => (reached, why),
+            Err(other) => return Err(other),
+        };
+        // Another station of the fleet that has it or can fetch it: only
+        // what one of them checked against its published SHA-256.
+        let fleet = match force {
+            Force::OwnCopy => "its own copy was asked for".to_string(),
+            _ => match self
+                .release_from_fleet(None, target, false, false, |_| {})
+                .await
+            {
+                Ok(supplied) => return Ok(supplied),
+                Err(none) => none.words(),
+            },
+        };
+        if release_target().as_deref() == Some(target) {
+            return self.own_copy(target).await.map_err(NoSupply::OwnCopy);
+        }
+        Err(NoSupply::NoSource {
+            reached,
+            why,
+            fleet,
+        })
+    }
+
+    /// The same, from what this station can get by itself: the release
+    /// host, or a kept copy. `NoSource` when neither.
+    pub(crate) async fn release_here(
         &self,
         target: &str,
         force: Force,
@@ -337,6 +406,7 @@ impl Daemon {
             .map_err(|e| NoSupply::NoSource {
                 reached: false,
                 why: e,
+                fleet: String::new(),
             })?;
         let mut reached = false;
         let mut why = String::new();
@@ -375,17 +445,18 @@ impl Daemon {
                 return Ok(kept);
             }
         }
-        if release_target().as_deref() == Some(target) {
-            return self.own_copy(target).await.map_err(NoSupply::OwnCopy);
-        }
-        Err(NoSupply::NoSource { reached, why })
+        Err(NoSupply::NoSource {
+            reached,
+            why,
+            fleet: String::new(),
+        })
     }
 
     /// The published archive of `tag` for `target`: the cache's copy when
     /// it still matches the SHA-256 the release host publishes, else a
     /// download checked against it. A copy that no longer matches is thrown
     /// away and replaced.
-    async fn published(
+    pub(crate) async fn published(
         &self,
         host: &ReleaseHost,
         tag: &str,
@@ -405,6 +476,7 @@ impl Daemon {
                     path,
                     sha256: want,
                     source: Source::Published,
+                    via: None,
                     temporary: None,
                 });
             }
@@ -429,6 +501,7 @@ impl Daemon {
             path,
             sha256: sum,
             source: Source::Published,
+            via: None,
             temporary: None,
         })
     }
@@ -461,13 +534,43 @@ impl Daemon {
         }
     }
 
+    /// Folders made for one sending or one taking (`own-…`, `in-…`) that
+    /// outlived it (the station ended under it): gone after an hour.
+    pub(crate) fn prune_leftovers(&self) {
+        for e in std::fs::read_dir(self.supply_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = e.file_name().to_string_lossy().to_string();
+            let old = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|at| at.elapsed().ok())
+                .is_some_and(|age| age > Duration::from_secs(3600));
+            if old && (name.starts_with("own-") || name.starts_with("in-")) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+
     /// The newest held archive for `target` that is not older than this
     /// station and still matches the SHA-256 it was checked against when it
     /// was downloaded.
-    fn kept(&self, target: &str) -> Option<Supplied> {
+    pub(crate) fn kept(&self, target: &str) -> Option<Supplied> {
+        self.kept_of(target, None)
+    }
+
+    /// The same, for one version when `only` names it (then also an older
+    /// one than this station: the owner may ask for a version by name).
+    pub(crate) fn kept_of(&self, target: &str, only: Option<&str>) -> Option<Supplied> {
         for tag in self.kept_versions() {
-            if older(&tag, VERSION) {
-                break;
+            match only {
+                Some(only) if only != tag => continue,
+                Some(_) => {}
+                None if older(&tag, VERSION) => break,
+                None => {}
             }
             let dir = self.supply_dir().join(&tag);
             let path = dir.join(format!("{target}.{}", archive_ext(target)));
@@ -486,6 +589,7 @@ impl Daemon {
                     path,
                     sha256: want,
                     source: Source::Kept,
+                    via: None,
                     temporary: None,
                 });
             }
@@ -497,7 +601,7 @@ impl Daemon {
     /// is, so that the install script makes of it what it makes of one:
     /// `spandeck` and `sd` (on Windows also `spandeckd.exe` and the pane
     /// host). Only for a machine of this station's own platform.
-    async fn own_copy(&self, target: &str) -> std::result::Result<Supplied, String> {
+    pub(crate) async fn own_copy(&self, target: &str) -> std::result::Result<Supplied, String> {
         let windows = spandeck_terminal::sys::WINDOWS;
         let tag = format!("v{VERSION}");
         let name = format!("spandeck-{tag}-{target}");
@@ -575,8 +679,41 @@ impl Daemon {
             sha256: sha256_hex(&bytes),
             path: file,
             source: Source::OwnCopy,
+            via: None,
             temporary: Some(work),
         })
+    }
+
+    /// What `spandeck doctor` says on a station that cannot reach its
+    /// release host: its updates come through the fleet, who supplied the
+    /// last one and when, or what to do when no station can.
+    fn through_the_fleet_words(&self, host: &str) -> String {
+        let begin = format!("this station cannot reach the release host ({host})");
+        let last = self
+            .db
+            .kv_get("release.supplied")
+            .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok())
+            .and_then(|v| {
+                Some(format!(
+                    "last supplied by {} on {}: {}{}",
+                    v["by"].as_str()?,
+                    date_words(v["at_ms"].as_u64()?),
+                    v["tag"].as_str()?,
+                    if v["own"] == serde_json::json!(true) {
+                        ", that station's own copy"
+                    } else {
+                        ""
+                    }
+                ))
+            });
+        match (self.supplier_names(), last) {
+            (Ok(_), Some(last)) => format!("{begin}; updates come through the fleet ({last}): `spandeck update` asks its stations"),
+            (Ok(can), None) => format!("{begin}; updates come through the fleet: `spandeck update` asks its stations ({} can supply a release; none has been needed yet)", can.join(", ")),
+            (Err(none), last) => format!(
+                "{begin}, and {none}{}. Until one can: copy a release archive here and run `spandeck upgrade <the spandeck program in it>`, or from another station's Control Deck uninstall spandeck here (history and settings are kept; panes are closed) and add it again, which sends the release over SSH",
+                last.map(|l| format!(" ({l})")).unwrap_or_default()
+            ),
+        }
     }
 
     /// `spandeck doctor`: whether this station can download a release.
@@ -591,12 +728,11 @@ impl Daemon {
         let (ok, detail) = match host.latest().await {
             Ok(tag) => (
                 true,
-                format!("{words} answers (newest release: {tag}): `spandeck update` downloads here"),
+                format!(
+                    "{words} answers (newest release: {tag}): `spandeck update` downloads here"
+                ),
             ),
-            Err(_) => (
-                false,
-                format!("this station cannot reach the release host ({words}), so `spandeck update` cannot download here. A release reaches it through the fleet: from another station's Control Deck, uninstall spandeck on this one (its history and settings are kept; its panes are closed) and add it again, and the release is sent over SSH. Or copy a release archive here and run `spandeck upgrade <the spandeck program in it>`"),
-            ),
+            Err(_) => (false, self.through_the_fleet_words(&words)),
         };
         serde_json::json!({"name": "release host", "ok": ok, "required": false, "detail": detail})
     }
@@ -793,6 +929,9 @@ mod tests {
             assert!(!older(b, a), "{b} > {a}");
         }
         assert!(!older("v0.4.10", "0.4.10"));
+        // The day `spandeck doctor` names for the last release supplied.
+        assert_eq!(date_words(1_794_873_600_000), "17 Nov 2026");
+        assert_eq!(date_words(951_782_400_000), "29 Feb 2000");
     }
 
     /// The same decision, for a Windows machine: PowerShell reads its
