@@ -277,6 +277,9 @@ pub struct Job {
     pub task_id: Option<String>,
 }
 
+/// What a program printed, and the session line it is on.
+pub type Said = (u64, String);
+
 /// How many tasks of a session are kept: the finished ones go first.
 pub const JOBS_MAX: usize = 200;
 
@@ -1293,6 +1296,32 @@ fn abandon(item: &mut Item) {
     });
 }
 
+/// What Claude Code prints when a command of its own sets the model or the
+/// effort, as the real program wrote it on 17 Nov 2026: "Set model to
+/// `Sonnet 5.5` and saved as your default for new sessions", and "Set
+/// effort level to low (saved as your default for new sessions): ...".
+/// The record has these words and no field for either (none is in a
+/// fixture), so the words are what is read, and only at the beginning of
+/// what the command printed: `(model, effort)`. Other words give nothing,
+/// and the model is then known with the agent's next reply, as before.
+pub fn said_set(printed: &str) -> (Option<String>, Option<String>) {
+    let printed = printed.trim_start();
+    let model = printed
+        .strip_prefix("Set model to ")
+        .map(|rest| match rest.strip_prefix('`') {
+            Some(quoted) => quoted.split('`').next().unwrap_or(""),
+            None => rest.split(" and ").next().unwrap_or(""),
+        })
+        .map(|name| one_line(name, 60))
+        .filter(|name| !name.is_empty());
+    let effort = printed
+        .strip_prefix("Set effort level to ")
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_alphanumeric()).next())
+        .filter(|level| !level.is_empty() && level.len() <= 16)
+        .map(String::from);
+    (model, effort)
+}
+
 /// A sub-agent's own transcript as items, oldest first: the lines of the
 /// file Claude Code keeps beside the session
 /// (`<session>/subagents/agent-<id>.jsonl`), each call settled by its
@@ -1618,6 +1647,10 @@ struct Conv {
     open: Vec<Open>,
     /// What the agent started and left running, and its sub-agents.
     jobs: Vec<Job>,
+    /// What the program last printed for a model command of its own, and
+    /// for an effort command: the line, and the name it gave.
+    set_model: Option<(u64, String)>,
+    set_effort: Option<(u64, String)>,
     title: Option<String>,
     unknown: u64,
     unknown_kinds: Vec<(String, u64)>,
@@ -1635,6 +1668,8 @@ impl Conv {
             closes: vec![],
             open: vec![],
             jobs: vec![],
+            set_model: None,
+            set_effort: None,
             title: None,
             unknown: 0,
             unknown_kinds: vec![],
@@ -1695,6 +1730,15 @@ impl Conv {
             }
         }
         for item in p.items {
+            if item.what == Some("command_output") {
+                let (model, effort) = said_set(item.text.as_deref().unwrap_or(""));
+                if let Some(model) = model {
+                    self.set_model = Some((line, model));
+                }
+                if let Some(effort) = effort {
+                    self.set_effort = Some((line, effort));
+                }
+            }
             if item.is_boundary() {
                 // A sub-agent that was being waited for when the turn ended
                 // never returned. One in the background goes on.
@@ -2049,6 +2093,19 @@ impl crate::Archive {
         }
     }
 
+    /// What the program itself last printed when its model, and its
+    /// effort, were set by a command (`said_set`), each with the session
+    /// line it is on: `(model, effort)`.
+    pub fn conversation_set(&self, session: &str) -> (Option<Said>, Option<Said>) {
+        match self.conv(session) {
+            Some(conv) => {
+                let c = conv.lock().unwrap();
+                (c.set_model.clone(), c.set_effort.clone())
+            }
+            None => (None, None),
+        }
+    }
+
     /// The session's title, when its file has one.
     pub fn conversation_title(&self, session: &str) -> Option<String> {
         self.conv(session)?.lock().unwrap().title.clone()
@@ -2163,6 +2220,43 @@ mod tests {
             .iter()
             .map(|i| i.what.unwrap_or(i.kind))
             .collect::<Vec<_>>()
+    }
+
+    /// Found with the real Claude Code on 17 Nov 2026: after `/model
+    /// sonnet` the chip still named the old model until the next reply.
+    /// What the program printed for its own command is read, in the words
+    /// it printed then.
+    #[test]
+    fn what_the_program_printed_for_its_model_command_is_read() {
+        assert_eq!(
+            said_set("Set model to `Sonnet 5.5` and saved as your default for new sessions"),
+            (Some("Sonnet 5.5".into()), None)
+        );
+        assert_eq!(
+            said_set("Set model to opus and saved"),
+            (Some("opus".into()), None)
+        );
+        assert_eq!(
+            said_set("Set effort level to low (saved as your default for new sessions): Quick, straightforward implementation w/ minimal overhead"),
+            (None, Some("low".into()))
+        );
+        assert_eq!(said_set("The model was set to Sonnet"), (None, None));
+        assert_eq!(said_set("I Set model to `x`"), (None, None));
+        let (a, dir) = following("claude", CLAUDE, usize::MAX);
+        assert_eq!(a.conversation_set("s1"), (None, None));
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("session.jsonl"))
+            .unwrap();
+        writeln!(f, "{}", json!({"type": "user", "isSidechain": false, "message": {"role": "user",
+            "content": "<local-command-stdout>Set model to `Sonnet 5.5` and saved as your default for new sessions</local-command-stdout>"}})).unwrap();
+        drop(f);
+        a.poll_session("s1");
+        let (model, effort) = a.conversation_set("s1");
+        assert_eq!(
+            (model.map(|m| m.1), effort),
+            (Some("Sonnet 5.5".to_string()), None)
+        );
     }
 
     /// The owner's report of 17 Nov 2026: "a row that show how many agents

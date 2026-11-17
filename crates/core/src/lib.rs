@@ -65,6 +65,7 @@ pub mod loops;
 pub mod manage;
 pub mod memory;
 pub mod messages;
+pub mod modelswitch;
 pub mod notify;
 pub mod orders;
 pub mod paths;

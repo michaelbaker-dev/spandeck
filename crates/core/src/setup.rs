@@ -690,6 +690,12 @@ impl Daemon {
                     .push(json!({"pane": m.id, "name": m.name, "why": "in the middle of a turn"}));
                 continue;
             }
+            // A question of the program's own is on its screen: a command
+            // typed now would be taken as its answer (modelswitch.rs).
+            if let Some(asks) = self.prompt_up(&p) {
+                skipped.push(json!({"pane": m.id, "name": m.name, "why": format!("asking {asks} in its terminal")}));
+                continue;
+            }
             match self.send_text(&m.id, command, true) {
                 Ok(()) => sent.push(json!({"pane": m.id, "name": m.name})),
                 Err(e) => skipped.push(json!({"pane": m.id, "name": m.name, "why": e.to_string()})),

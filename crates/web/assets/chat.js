@@ -861,7 +861,10 @@ class Conv {
       && !held.some(q => q.item === x.id || (q.item === null && q.kind === x.kind))) : [];
     const asked = waiting.filter(settled);
     this.askSoon = waiting.length > asked.length;
-    const blocked = !exited && this.available === true && !approvals.length && !asked.length && !held.length && (L.state === 'needs_you' || L.state === 'error');
+    // The program asks whether to switch its model (the station read its
+    // screen exactly): a card of its own, answered with the keys it takes.
+    const switching = !exited && L.prompt && L.prompt.kind === 'model_switch' ? L.prompt : null;
+    const blocked = !switching && !exited && this.available === true && !approvals.length && !asked.length && !held.length && (L.state === 'needs_you' || L.state === 'error');
     // A banner that waits in the terminal shows the terminal's last lines.
     // (Made from the screen, the conversation already ends with them.)
     if (blocked && !this.wasBlocked && this.source !== 'screen') this.peekOpen = true;
@@ -918,6 +921,16 @@ class Conv {
       h('div', { class: 'wait-keys', role: 'group', 'aria-label': 'Keys for the terminal' },
         WAIT_KEYS.map(([label, bytes]) => h('button', { type: 'button', class: 'key', 'aria-label': KEY_SAYS[label] || label, onclick: () => this.key1(bytes) }, label)),
         h('button', { type: 'button', class: 'primary', onclick: () => setFace(this.st, p, 'terminal') }, 'Open terminal')))));
+    if (switching) cards.push(this.node(cache, used, 'switch', JSON.stringify(switching), () => h('div', { class: 'chat-card wait model-ask' },
+      h('b', {}, `${p.agent_name || 'The agent'} asks: switch model to ${String(switching.name || '')}?`),
+      h('div', { class: 'muted small' }, 'It says the next reply will be slower and use more tokens: the whole conversation is read again by the new model. Until it is answered, nothing you send is typed into the pane.'),
+      h('div', { class: 'wait-keys', role: 'group', 'aria-label': 'Answer' },
+        // Enter takes the choice its marker is on, so "Yes" is offered
+        // only while the marker is on it.
+        switching.on_yes ? h('button', { type: 'button', class: 'primary model-yes', onclick: () => this.key1('\r') }, 'Yes, switch') : null,
+        h('button', { type: 'button', class: 'model-no', onclick: () => this.key1('\x1b') }, 'No, go back'),
+        h('button', { type: 'button', onclick: () => setFace(this.st, p, 'terminal') }, 'Open terminal')),
+      switching.on_yes ? null : h('div', { class: 'muted small' }, 'Its marker is on "No": to switch, choose Yes in the terminal.'))));
     // Held: stopped and staying stopped, or waiting for you after a restart.
     if (L.held && !exited) cards.push(this.node(cache, used, 'held', JSON.stringify(L.held), () => h('div', { class: 'chat-card wait' },
       h('b', {}, heldWords(L.held)),
@@ -1209,11 +1222,14 @@ class Conv {
     b.hidden = !M || typeof M !== 'object' || this.available !== true;
     if (b.hidden) return;
     const model = M.model || this.p.usage?.model || '';
-    const label = model ? [modelName(model), M.effort ? cap1(String(M.effort)) : ''].filter(Boolean).join(' · ') : 'Model';
+    // (A model a command has just set is named by the program before the
+    // agent has answered on it: `set`.)
+    const shown = typeof M.set === 'string' && M.set ? M.set : model ? modelName(model) : '';
+    const label = shown ? [shown, M.effort ? cap1(String(M.effort)) : ''].filter(Boolean).join(' · ') : 'Model';
     const waits = this.modelQueued ? ' · queued' : '';
     if (b.textContent !== label + waits) b.textContent = label + waits;
-    b.title = model ? `Model: ${model}${M.effort ? ', effort ' + M.effort : ''}. Tap to change.` : 'Choose the model';
-    b.setAttribute('aria-label', (model ? `Model ${label}` : 'Choose the model') + (waits ? ', a change is queued' : ''));
+    b.title = shown ? `Model: ${M.set || model}${M.effort ? ', effort ' + M.effort : ''}. Tap to change.` : 'Choose the model';
+    b.setAttribute('aria-label', (shown ? `Model ${label}` : 'Choose the model') + (waits ? ', a change is queued' : ''));
     // A choice made in the middle of a turn goes when the turn is over.
     if (this.modelQueued && this.live.state !== 'working') { const q = this.modelQueued; this.modelQueued = null; this.setModel(q, true); }
   }
@@ -1222,7 +1238,8 @@ class Conv {
   // the pane, as the owner would, and only while the agent is idle.
   setModel(params, late) {
     return env.rpc(this.st, 'pane.model', { pane: this.p.id, ...params }).then((r) => {
-      if (r && r.sent) toast(`Sent ${r.command} to ${this.p.name}. The chip follows what it reports with its next reply.`);
+      if (r && r.restarted) toast(`${this.p.name} was started again for this pane alone and resumes its conversation.`);
+      else if (r && r.sent) toast(`Sent ${r.command} to ${this.p.name}. The chip follows what it reports.`);
       else if (r && r.busy && !late) { this.modelQueued = params; toast('It is in the middle of a turn. It will be sent when this turn ends, while this page stays open.'); }
       else toast(`Not sent: ${this.p.name} is ${r?.why || 'not ready'}.`, 'error');
       this.modelState();
@@ -1237,8 +1254,22 @@ class Conv {
     // An alias is ticked when the model in use is of its family
     // ("fable" for claude-fable-5-2); "default" is a way back, not a model.
     const is = (m) => m.id !== 'default' && current !== '' && (current === m.id || modelShort(current).split(/[-.]/).includes(m.id));
-    const box = dialog('Model', (close) => {
-      const pick = (params) => { close(); this.setModel(params); };
+    const box = dialog('Model', (close, body) => {
+      const go = (params) => { close(); this.setModel(params); };
+      // Said before anything is typed: what the program's own command
+      // changes beyond this pane, and the way that changes this pane only.
+      const only = M.only_pane && typeof M.only_pane === 'object' ? M.only_pane : {};
+      const pick = (params) => {
+        const what = params.model ? 'model' : 'effort', value = params.model || cap1(params.effort);
+        if (!M.saves && !only[what]) return go(params);
+        body.replaceChildren(h('div', { class: 'model-sheet model-confirm' },
+          h('b', { class: 'ask-q' }, params.model ? `Switch ${this.p.name} to ${value}?` : `Set ${this.p.name}'s effort to ${value}?`),
+          M.saves ? h('p', { class: 'model-saves' }, String(M.saves)) : null,
+          h('button', { type: 'button', class: 'primary model-go', onclick: () => go(params) }, M.saves ? 'Switch, and keep it as the default' : 'Switch'),
+          only[what] ? h('button', { type: 'button', class: 'model-only', onclick: () => go({ ...params, only_pane: true }) }, 'Only this pane: start it again and resume') : null,
+          only[what] ? h('p', { class: 'muted small' }, `"Only this pane" types nothing and changes no default: ${name} is started again on ${value} and picks its conversation up where it was. What it left running in the background stops, and it must be idle.`) : null,
+          h('button', { type: 'button', class: 'model-back', onclick: close }, 'Cancel')));
+      };
       const other = h('input', { class: 'ask-other model-other', placeholder: 'A model\'s name, as the program takes it', 'aria-label': 'Another model\'s name', maxLength: 120, autocapitalize: 'off', autocorrect: 'off', spellcheck: false, enterkeyhint: 'send' });
       const set = h('button', { type: 'button', class: 'primary model-set', onclick: () => { const v = other.value.trim(); if (v) pick({ model: v }); } }, 'Set');
       other.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); set.click(); } });

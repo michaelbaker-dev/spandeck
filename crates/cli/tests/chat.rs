@@ -382,6 +382,7 @@ fn busy_script() -> Value {
         {"transcript": {"type": "system", "subtype": "away_summary", "content": "You asked for a count of the herons, and it is done: nine, with three egrets beside them. Next, you can decide whether the tally script should skip the egrets. (disable recaps in /config)"}},
         {"turn_end": "ok"}],
       "on_input": [
+        {"model_screen": {"name": "Fable 5.2"}},
         {"effort": "high"},
         {"transcript": {"type": "user", "message": {"role": "user", "content": "<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>toolu_a1</tool-use-id>\n<status>completed</status>\n<summary>Agent completed</summary>\n</task-notification>"}, "origin": {"kind": "task-notification"}}},
         said_line("Now on another model.", "claude-fable-5-2"),
@@ -630,6 +631,36 @@ fn a_panes_tasks_its_model_and_its_cleared_notes_are_the_owners() {
         "{sent}"
     );
     s.wait_text(&lead, "[fake] got: /model fable");
+    // Found with the real Claude Code on 17 Nov 2026: it then asks
+    // "Switch model?", and nothing noticed. The owner chose the model in
+    // the sheet, which says what switching costs: the question that
+    // follows spandeck's own command is answered, once, and it is in the
+    // ship's log. The pane never reads as needing the owner for it.
+    s.wait_text(&lead, "[fake] model switched to Fable 5.2");
+    assert!(!s.text(&lead).contains("swallowed"), "{}", s.text(&lead));
+    let logged = s
+        .call("log.query", json!({"kind": "model.switch.confirmed"}))
+        .to_string();
+    assert!(logged.contains("Fable 5.2"), "{logged}");
+    // The program's own word for the model it set is what the chip is
+    // given until the agent has answered on it: a pane that says nothing
+    // after the switch.
+    let mute = pane(
+        &s,
+        "fake",
+        "mute",
+        &dir,
+        json!({"steps": [{"prompt": "x"}, said_line("Counted.", "claude-opus-5-5"), {"turn_end": "ok"}],
+            "on_input": [{"model_screen": {"name": "Sonnet 5.5"}}]}),
+    );
+    s.wait_state(&mute, "done");
+    s.call("pane.model", json!({"pane": mute, "model": "sonnet"}));
+    s.wait_text(&mute, "[fake] model switched to Sonnet 5.5");
+    let named = wait_for("the model as the program named it", 10, || {
+        let l = live(&mute);
+        (l["model"]["set"] == json!("Sonnet 5.5")).then_some(l)
+    });
+    assert_eq!(named["model"]["model"], json!("claude-opus-5-5"), "{named}");
     assert!(
         !s.text(&other).contains("/model"),
         "nothing was typed into the busy pane"
@@ -664,6 +695,127 @@ fn a_panes_tasks_its_model_and_its_cleared_notes_are_the_owners() {
         json!({"pane": lead, "session": session, "restore": true}),
     );
     assert_eq!(live(&lead)["cleared"], json!([]));
+
+    // The same question when it is not the answer to spandeck's own
+    // command (the owner typed `/model` in the terminal): nothing is
+    // pressed. The pane needs the owner and says what is asked; a
+    // message sent now would be typed into the question and lost, as the
+    // real one was, so it is refused and nothing of it reaches the pane;
+    // keys still go, since they are the answer.
+    s.wait_state(&lead, "done");
+    s.call(
+        "pane.input",
+        json!({"pane": lead, "data": "/model fable\r"}),
+    );
+    let asks = wait_for("the pane to say what it asks", 10, || {
+        let p = s.pane(&lead);
+        (p["state"] == json!("needs_you") && p["prompt"].is_object()).then_some(p)
+    });
+    assert_eq!(
+        (
+            &asks["needs_reason"],
+            &asks["prompt"]["kind"],
+            &asks["prompt"]["name"],
+            &asks["prompt"]["on_yes"]
+        ),
+        (
+            &json!(
+                "asks whether to switch model to Fable 5.2: answer it in Chat or in the terminal"
+            ),
+            &json!("model_switch"),
+            &json!("Fable 5.2"),
+            &json!(true)
+        ),
+        "{asks}"
+    );
+    assert_eq!(live(&lead)["prompt"]["name"], json!("Fable 5.2"));
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    assert!(
+        !s.text(&lead)
+            .contains("model switched to Fable 5.2\n[fake] model switched"),
+        "nothing was pressed for the owner"
+    );
+    for (method, params) in [
+        (
+            "pane.paste",
+            json!({"pane": lead, "text": "count the egrets too", "enter": true}),
+        ),
+        (
+            "pane.send_text",
+            json!({"pane": lead, "text": "count the egrets too"}),
+        ),
+        ("pane.model", json!({"pane": lead, "model": "haiku"})),
+    ] {
+        match s.try_call(method, params) {
+            Err(e) => assert!(
+                e.code == "invalid" && e.message.contains("Switch model?"),
+                "{method}: {e}"
+            ),
+            Ok(v) => assert!(
+                v["sent"] == json!(false) && v["why"].as_str().unwrap().contains("Switch model?"),
+                "{method}: {v}"
+            ),
+        }
+    }
+    s.call("pane.input", json!({"pane": lead, "data": "\u{1b}"}));
+    s.wait_text(&lead, "[fake] model kept");
+    assert!(
+        !s.text(&lead).contains("egrets too") && !s.text(&lead).contains("swallowed"),
+        "{}",
+        s.text(&lead)
+    );
+    let after = wait_for("the pane as it was", 10, || {
+        let p = s.pane(&lead);
+        p["prompt"].is_null().then_some(p)
+    });
+    assert_eq!(
+        (&after["state"], &after["needs_reason"]),
+        (&json!("done"), &Value::Null),
+        "{after}"
+    );
+    // And a message goes again.
+    wait_for("a message to go again", 5, || {
+        s.try_call(
+            "pane.paste",
+            json!({"pane": other, "text": "", "enter": false}),
+        )
+        .ok()
+    });
+
+    // For this pane alone: its program is started again on the model
+    // with its own flag and resumes; nothing is typed, and a later
+    // restart keeps it. Refused in the middle of a turn.
+    let busy = s.call(
+        "pane.model",
+        json!({"pane": other, "model": "haiku", "only_pane": true}),
+    );
+    assert_eq!(
+        (&busy["sent"], &busy["busy"]),
+        (&json!(false), &json!(true)),
+        "{busy}"
+    );
+    s.wait_state(&lead, "done");
+    let only = s.call(
+        "pane.model",
+        json!({"pane": lead, "model": "haiku", "only_pane": true}),
+    );
+    assert_eq!(
+        (&only["restarted"], &only["args"]),
+        (&json!(true), &json!(["--model", "haiku"])),
+        "{only}"
+    );
+    s.wait_text(&lead, "[fake] started on the model haiku, resuming");
+    assert!(!s.text(&lead).contains("/model haiku"), "nothing was typed");
+    assert_eq!(
+        live(&lead)["model"]["only_pane"]["args"],
+        json!(["--model", "haiku"])
+    );
+    s.call("pane.restart", json!({"pane": lead}));
+    wait_for("the model kept through a restart", 10, || {
+        (s.text(&lead).matches("started on the model haiku").count() >= 1
+            && s.pane(&lead)["exited"] != json!(true))
+        .then_some(())
+    });
 
     // Codex: its own command for each, and no task in its file. OpenCode:
     // a picker of its own, so nothing is typed, and the answer says where.
@@ -2169,7 +2321,35 @@ mod in_a_browser {
         // Choosing sends the program's own command, and the chip waits
         // for the agent's word: it is not changed by the tap.
         page.js("document.querySelector('.model-opt[data-model=\"fable\"]').click()");
+        // Found with the real program, 17 Nov 2026: its command also
+        // saves the owner's default, and switching re-reads the history.
+        // The sheet says both before anything is typed, and offers the
+        // way that changes this pane only.
+        let confirm = page.wait("what the choice changes", "(c => c && [c.querySelector('.ask-q').innerText, c.querySelector('.model-saves').innerText, c.querySelector('.model-go').innerText, c.querySelector('.model-only').innerText])(document.querySelector('.dialog .model-confirm'))");
+        assert_eq!(confirm[0], json!("Switch lead to fable?"));
+        let saves = confirm[1].as_str().unwrap();
+        assert!(
+            saves.contains("saves this as your default")
+                && saves.contains("every new Claude Code session on this station")
+                && saves.contains("slower and uses more tokens"),
+            "{saves}"
+        );
+        assert_eq!(
+            (&confirm[2], &confirm[3]),
+            (
+                &json!("Switch, and keep it as the default"),
+                &json!("Only this pane: start it again and resume")
+            )
+        );
+        assert!(
+            !s.text(&lead).contains("/model"),
+            "nothing is typed before the owner confirms"
+        );
+        shoot(&page, "extras-model-confirm");
+        page.js("document.querySelector('.dialog .model-go').click()");
         s.wait_text(&lead, "[fake] got: /model fable");
+        // The program's own question after spandeck's command is answered.
+        s.wait_text(&lead, "[fake] model switched to Fable 5.2");
         assert_eq!(
             page.wait(
                 "the chip follows the agent's report",
@@ -2180,6 +2360,48 @@ mod in_a_browser {
         // Its sub-agent reported over: one task runs.
         assert_eq!(page.wait("one task left", "(b => b && b.innerText === '1 running task' && b.innerText)(document.querySelector('.phone-chat .chat-tasks'))"), json!("1 running task"));
         shoot(&page, "extras-after-model");
+
+        // The same question when the owner typed the command in the
+        // terminal: a card in Chat, and a message written meanwhile is
+        // not typed into the question: it stays in the box, which says why.
+        s.wait_state(&lead, "done");
+        s.call(
+            "pane.input",
+            json!({"pane": lead, "data": "/model fable\r"}),
+        );
+        let card = page.wait("the card", "(c => c && [c.querySelector('b').innerText, [...c.querySelectorAll('.wait-keys button')].map(b => b.innerText)])(document.querySelector('.phone-chat .chat-card.model-ask'))");
+        assert_eq!(
+            card,
+            json!([
+                "Fake agent asks: switch model to Fable 5.2?",
+                ["Yes, switch", "No, go back", "Open terminal"]
+            ])
+        );
+        page.js(&say(chat, "count the egrets too"));
+        let kept = page.wait("the message kept", "(p => p && !p.hidden && [p.innerText, document.querySelector('.phone-chat .chat-box').value])(document.querySelector('.phone-chat .send-said'))");
+        assert!(
+            kept[0]
+                .as_str()
+                .unwrap()
+                .contains("is asking Switch model?")
+                && kept[0].as_str().unwrap().contains("still in the box"),
+            "{kept}"
+        );
+        assert_eq!(kept[1], json!("count the egrets too"));
+        shoot(&page, "extras-switch-model-card");
+        page.js("document.querySelector('.phone-chat .model-ask .model-yes').click()");
+        s.wait_text(&lead, "[fake] model switched to Fable 5.2\n");
+        page.wait(
+            "the card gone",
+            "!document.querySelector('.phone-chat .chat-card.model-ask')",
+        );
+        assert!(
+            !s.text(&lead).contains("egrets too") && !s.text(&lead).contains("swallowed"),
+            "{}",
+            s.text(&lead)
+        );
+        page.js("(b => { b.value = ''; b.dispatchEvent(new Event('input')); return true; })(document.querySelector('.phone-chat .chat-box'))");
+        page.wait("one task still", "(b => b && b.innerText === '1 running task')(document.querySelector('.phone-chat .chat-tasks'))");
 
         // With the keyboard up the message box, chip and all, stands on
         // the bottom edge of what is in sight.

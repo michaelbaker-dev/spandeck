@@ -40,6 +40,13 @@ pub struct Menu {
     pub picker: Option<&'static str>,
     /// What the owner should know before choosing, in a sentence.
     pub note: &'static str,
+    /// What a typed choice changes beyond this pane, said before it is
+    /// made; empty when it changes nothing else.
+    pub saves: &'static str,
+    /// The flags that start the program on a model and an effort, for a
+    /// pane that is started again with them and changes nothing else.
+    pub start_model: Option<&'static str>,
+    pub start_effort: Option<&'static str>,
     /// Where this was read, and when.
     pub source: &'static str,
 }
@@ -89,7 +96,16 @@ const CLAUDE: Menu = Menu {
     model_cmd: Some("/model "),
     effort_cmd: Some("/effort "),
     picker: None,
-    note: "Claude Code also keeps a model chosen here as the default for new sessions.",
+    note: "",
+    // Seen with the real program on 17 Nov 2026: "Set model to `Sonnet
+    // 5.5` and saved as your default for new sessions", and "Set effort
+    // level to low (saved as your default for new sessions)". Its
+    // documentation says the same of `/model` (model-config.md), and
+    // that only its picker can choose for the session alone.
+    saves: "Claude Code saves this as your default: every new Claude Code session on this station starts with it, in any project. Changing the model in the middle of a conversation makes it read the whole history again: the next reply is slower and uses more tokens.",
+    // Its documentation names both flags (model-config.md).
+    start_model: Some("--model"),
+    start_effort: Some("--effort"),
     source: "code.claude.com/docs/en/model-config.md and commands.md, read 16 Nov 2026",
 };
 
@@ -110,6 +126,9 @@ const CODEX: Menu = Menu {
     effort_cmd: Some("/model --reasoning="),
     picker: None,
     note: "For this session of Codex only. Its models are listed by /model in its terminal: type a name under Other.",
+    saves: "",
+    start_model: None,
+    start_effort: None,
     source: "learn.chatgpt.com/docs/developer-commands and codex-rs/tui at rust-v0.169.0, read 16 Nov 2026",
 };
 
@@ -123,6 +142,9 @@ const OPENCODE: Menu = Menu {
     effort_cmd: None,
     picker: Some("/models"),
     note: "OpenCode chooses its model in a picker of its own, in its terminal.",
+    saves: "",
+    start_model: None,
+    start_effort: None,
     source: "opencode.ai/docs/tui/, read 16 Nov 2026",
 };
 
@@ -139,6 +161,10 @@ const ANTIGRAVITY: Menu = Menu {
     effort_cmd: Some("/effort "),
     picker: Some("/model"),
     note: "Antigravity chooses its model in a picker of its own, in its terminal, and keeps the choice. Its effort can be set from here.",
+    // Its documentation: `/effort` "persists as default".
+    saves: "Antigravity keeps an effort set this way as its default for new sessions.",
+    start_model: None,
+    start_effort: None,
     source: "antigravity.google/docs/cli/reference/ and /commands/effort/, read 16 Nov 2026",
 };
 
@@ -194,9 +220,243 @@ pub fn effort_command(agent: AgentKind, level: &str) -> Result<String, String> {
     }
 }
 
+/// The flags that start a pane's program on a model or an effort, for a
+/// pane that is started again and resumes its conversation: nothing is
+/// typed and nothing of the program's own settings is changed. `have`:
+/// the flags the pane was last started with, which the new one replaces.
+pub fn start_args(
+    agent: AgentKind,
+    have: &[String],
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let menu = menu(agent).ok_or("this pane runs no agent whose model can be chosen")?;
+    let no = || {
+        format!(
+            "{} has no documented way to be started on a model or an effort",
+            agent.display()
+        )
+    };
+    let mut out: Vec<String> = have.to_vec();
+    let mut set = |flag: &str, value: &str| {
+        if let Some(at) = out.iter().position(|a| a == flag) {
+            out.drain(at..(at + 2).min(out.len()));
+        }
+        out.push(flag.to_string());
+        out.push(value.to_string());
+    };
+    if let Some(model) = model {
+        if !name_ok(model) {
+            return Err("a model's name is one word: letters, digits and . _ : / @ [ ] -".into());
+        }
+        set(menu.start_model.ok_or_else(no)?, model);
+    }
+    if let Some(level) = effort {
+        if !menu.efforts.contains(&level) {
+            return Err(format!(
+                "{} has no effort level \"{level}\"",
+                agent.display()
+            ));
+        }
+        set(menu.start_effort.ok_or_else(no)?, level);
+    }
+    Ok(out)
+}
+
+/// Claude Code's "Switch model?": what it asks after `/model <name>` in a
+/// conversation it has cached for another model. As the real program drew
+/// it on 17 Nov 2026 (the coordinator's capture):
+///
+/// ```text
+///    Switch model?
+///    Your next response will be slower and use more tokens
+///    This conversation is cached for the current model. Switching to Sonnet 5.5 means the full history gets re-read.
+///    ❯ 1. Yes, switch to Sonnet 5.5
+///      2. No, go back
+///    Enter to confirm · Esc to cancel
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Switch {
+    /// The model it would switch to, as the program names it.
+    pub name: String,
+    /// Its marker is on "Yes": Enter switches.
+    pub on_yes: bool,
+}
+
+const SWITCH_TITLE: &str = "Switch model?";
+const SWITCH_HINT: &str = "Enter to confirm · Esc to cancel";
+const SWITCH_NO: &str = "2. No, go back";
+const SWITCH_YES: &str = "1. Yes, switch to ";
+
+/// Read a pane's screen as that question, and only as that: the screen
+/// ends with it, word for word from its title to its last line, the same
+/// model is named in its sentence and in its first choice, and exactly
+/// one choice is marked. Anything else is not it.
+pub fn switch_screen(agent: AgentKind, lines: &[String]) -> Option<Switch> {
+    if !matches!(agent, AgentKind::Claude | AgentKind::Fake) {
+        return None;
+    }
+    let rows: Vec<String> = lines
+        .iter()
+        .map(|l| crate::foldertrust::clean(l))
+        .filter(|l| !l.is_empty())
+        .collect();
+    let n = rows.len();
+    if n < 5 || rows[n - 1] != SWITCH_HINT {
+        return None;
+    }
+    let marked = |row: &str| -> Option<(bool, String)> {
+        match row.strip_prefix('❯') {
+            Some(rest) if rest.starts_with(char::is_whitespace) => {
+                Some((true, rest.trim_start().to_string()))
+            }
+            Some(_) => None,
+            None => Some((false, row.to_string())),
+        }
+    };
+    let (yes_on, yes) = marked(&rows[n - 3])?;
+    let (no_on, no) = marked(&rows[n - 2])?;
+    let name = yes.strip_prefix(SWITCH_YES)?.to_string();
+    let plain = !name.is_empty()
+        && name.chars().count() <= 60
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || " .-_[]()".contains(c));
+    if no != SWITCH_NO || yes_on == no_on || !plain {
+        return None;
+    }
+    // The nearest title above the choices, and between them the program's
+    // two sentences and nothing else (where a line wraps is the
+    // terminal's width).
+    let title = rows[..n - 3].iter().rposition(|r| r == SWITCH_TITLE)?;
+    let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let want = squash(&format!(
+        "Your next response will be slower and use more tokens This conversation is cached for the current model. Switching to {name} means the full history gets re-read."
+    ));
+    (squash(&rows[title + 1..n - 3].concat()) == want).then_some(Switch {
+        name,
+        on_yes: yes_on,
+    })
+}
+
+/// The question as the program draws it, for the stand-in agent and the
+/// tests: three blanks before each line, the marker on one choice.
+pub fn switch_drawn(name: &str, on_yes: bool) -> Vec<String> {
+    let mark = |on: bool| if on { "❯ " } else { "  " };
+    vec![
+        "   Switch model?".to_string(),
+        "   Your next response will be slower and use more tokens".to_string(),
+        format!("   This conversation is cached for the current model. Switching to {name} means the full history gets re-read."),
+        format!("   {}1. Yes, switch to {name}", mark(on_yes)),
+        format!("   {}2. No, go back", mark(!on_yes)),
+        "   Enter to confirm · Esc to cancel".to_string(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Found with the real Claude Code on 17 Nov 2026: after `/model
+    /// sonnet` it asked "Switch model?", nothing in spandeck noticed, and
+    /// the next message sent to the pane was swallowed by the question.
+    /// The screen is read as that question only when it is exactly that.
+    #[test]
+    fn the_switch_model_question_is_read_only_when_it_is_exactly_that() {
+        let lines = |v: Vec<String>| v;
+        let mut screen = vec!["> /model sonnet".to_string(), String::new()];
+        screen.extend(switch_drawn("Sonnet 5.5", true));
+        screen.push(String::new());
+        let read = |l: &[String]| switch_screen(AgentKind::Claude, l);
+        assert_eq!(
+            read(&screen),
+            Some(Switch {
+                name: "Sonnet 5.5".into(),
+                on_yes: true
+            })
+        );
+        // The marker on "No".
+        let mut no = vec![];
+        no.extend(switch_drawn("Opus 5.5", false));
+        assert_eq!(
+            read(&no),
+            Some(Switch {
+                name: "Opus 5.5".into(),
+                on_yes: false
+            })
+        );
+        // In a narrow pane its sentence wraps: the same question.
+        let mut narrow = lines(switch_drawn("Sonnet 5.5", true));
+        let long = narrow.remove(2);
+        let (a, b) = long.split_at(60);
+        narrow.insert(2, a.to_string());
+        narrow.insert(3, format!("   {b}"));
+        assert!(read(&narrow).is_some());
+        // Not it: something under it, another model in the sentence, no
+        // marker or two, other words, an agent quoting it in its reply,
+        // and any other program.
+        let mut under = screen.clone();
+        under.push("> hello".into());
+        assert_eq!(read(&under), None);
+        let mut other = switch_drawn("Sonnet 5.5", true);
+        other[3] = "   ❯ 1. Yes, switch to Opus 5.5".into();
+        assert_eq!(read(&other), None);
+        let mut none = switch_drawn("Sonnet 5.5", true);
+        none[3] = "     1. Yes, switch to Sonnet 5.5".into();
+        assert_eq!(read(&none), None);
+        let mut both = switch_drawn("Sonnet 5.5", true);
+        both[4] = "   ❯ 2. No, go back".into();
+        assert_eq!(read(&both), None);
+        let mut words = switch_drawn("Sonnet 5.5", true);
+        words[1] = "   Your next response will be faster".into();
+        assert_eq!(read(&words), None);
+        let mut extra = switch_drawn("Sonnet 5.5", true);
+        extra.insert(3, "   Also delete everything?".into());
+        assert_eq!(read(&extra), None);
+        let quoted: Vec<String> = switch_drawn("Sonnet 5.5", true)
+            .iter()
+            .map(|l| format!("  │ {l}"))
+            .chain(["  done".to_string()])
+            .collect();
+        assert_eq!(read(&quoted), None);
+        assert_eq!(switch_screen(AgentKind::Codex, &screen), None);
+    }
+
+    /// The same finding: both of Claude Code's commands write the owner's
+    /// defaults. A pane can be started again on a model instead, with the
+    /// program's own flags, where it documents them.
+    #[test]
+    fn a_pane_is_started_on_a_model_with_the_programs_own_flags() {
+        let none: Vec<String> = vec![];
+        assert_eq!(
+            start_args(AgentKind::Claude, &none, Some("opus"), None).unwrap(),
+            ["--model", "opus"]
+        );
+        let had = start_args(AgentKind::Claude, &none, Some("opus"), Some("high")).unwrap();
+        assert_eq!(had, ["--model", "opus", "--effort", "high"]);
+        // A second choice takes the first one's place.
+        assert_eq!(
+            start_args(AgentKind::Claude, &had, Some("haiku"), None).unwrap(),
+            ["--effort", "high", "--model", "haiku"]
+        );
+        assert!(start_args(AgentKind::Claude, &none, Some("a b"), None).is_err());
+        assert!(start_args(AgentKind::Claude, &none, None, Some("extreme")).is_err());
+        for agent in [
+            AgentKind::Codex,
+            AgentKind::OpenCode,
+            AgentKind::Antigravity,
+            AgentKind::Shell,
+        ] {
+            assert!(
+                start_args(agent, &none, Some("x"), None).is_err(),
+                "{agent:?}"
+            );
+        }
+        assert!(
+            !menu(AgentKind::Claude).unwrap().saves.is_empty()
+                && menu(AgentKind::Codex).unwrap().saves.is_empty()
+        );
+    }
 
     /// The owner's report of 17 Nov 2026 ("a model picker ... for all
     /// chats"): what is typed into an agent is that program's documented

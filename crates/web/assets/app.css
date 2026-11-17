@@ -923,3 +923,6 @@ button.ask-opt.model-opt { align-items: center; } .model-opt .ask-label { flex: 
   .fo-row, .fo-next button, .via-bar button { min-height: 44px; }
   .fo-list { flex-direction: column; } .fo-row { text-align: left; }
 }
+/* Before a model is switched: what it changes, and the two ways. */
+.model-confirm button { min-height: 46px; justify-content: center; white-space: normal; } .model-saves { color: var(--text); }
+.chat-card.model-ask .wait-keys button { min-height: 44px; padding: 0 14px; } .chat-card.model-ask .wait-keys .primary { margin-left: 0; }

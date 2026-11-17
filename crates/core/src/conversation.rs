@@ -435,16 +435,39 @@ impl Daemon {
     /// the agent's own session data last said), the effort (as its hooks
     /// last said), and what its program takes as a typed command
     /// (`spandeck_agents::models`). `null` for a shell.
-    fn conversation_model(&self, meta: &PaneMeta) -> Value {
+    fn conversation_model(&self, meta: &PaneMeta, session: Option<&str>) -> Value {
         let Some(menu) = spandeck_agents::models::menu(meta.agent) else {
             return Value::Null;
         };
         let usage = self.pane_usage(meta);
+        // What the program printed for a command that set its model or
+        // effort, when that is newer than its last reply: the model is
+        // known before the agent has answered on it.
+        let (set_model, set_effort) = match session {
+            Some(s) => {
+                let (model, effort) = self.archive.conversation_set(s);
+                let replied = self.archive.last_reply_line(s);
+                let newer = |v: Option<(u64, String)>| {
+                    v.filter(|(line, _)| *line > replied).map(|(_, name)| name)
+                };
+                (newer(model), newer(effort))
+            }
+            None => (None, None),
+        };
         json!({
-            "model": usage["model"], "effort": meta.effort,
+            "model": usage["model"], "effort": set_effort.clone().or_else(|| meta.effort.clone()),
+            // The program's own name for the model a command just set
+            // ("Sonnet 5.5"), until its next reply names the model itself.
+            "set": set_model,
             "models": menu.models.iter().map(|m| json!({"id": m.id, "name": m.name, "says": m.says})).collect::<Vec<_>>(),
             "efforts": if menu.effort_cmd.is_some() { menu.efforts } else { &[] },
             "can_set": menu.model_cmd.is_some(),
+            "saves": menu.saves,
+            "only_pane": {
+                "model": menu.start_model.is_some(), "effort": menu.start_effort.is_some(),
+                // What the pane was last started with, for it alone.
+                "args": meta.model_args,
+            },
             "picker": menu.picker, "note": menu.note, "source": menu.source,
         })
     }
@@ -459,6 +482,51 @@ impl Daemon {
         let p = self.pane(pane)?;
         let meta = p.meta();
         let word = |key: &str| params.get(key).and_then(|v| v.as_str());
+        // For this pane alone: its program is started again with its own
+        // flags and resumes its conversation. Nothing is typed, and the
+        // program's saved defaults are not touched.
+        if params.get("only_pane").and_then(|v| v.as_bool()) == Some(true) {
+            let args = spandeck_agents::models::start_args(
+                meta.agent,
+                &meta.model_args,
+                word("model"),
+                word("effort"),
+            )
+            .map_err(invalid)?;
+            if word("model").is_none() && word("effort").is_none() {
+                return Err(invalid("give a model or an effort"));
+            }
+            if meta.exit.is_some() {
+                return Err(invalid("this pane has ended"));
+            }
+            if matches!(
+                meta.state,
+                spandeck_agents::AgentState::Working | spandeck_agents::AgentState::NeedsYou
+            ) {
+                return Ok(json!({"ok": false, "sent": false, "busy": true,
+                    "why": "in the middle of a turn: starting it again now would end the turn"}));
+            }
+            if self.resumable(&meta).is_none() {
+                return Err(invalid(
+                    "this pane has no saved conversation to resume yet: starting it again would begin a new one",
+                ));
+            }
+            p.meta.lock().unwrap().model_args = args.clone();
+            self.record(
+                "pane.model",
+                Some(&p.id),
+                meta.project.as_deref(),
+                None,
+                Some(by),
+                json!({"only_pane": true, "args": args}),
+            );
+            let d = self.clone();
+            let (id, who) = (p.id.clone(), by.to_string());
+            tokio::task::spawn_blocking(move || d.restart_pane(&id, false, &who).map(|_| ()))
+                .await
+                .map_err(|e| invalid(e.to_string()))??;
+            return Ok(json!({"ok": true, "sent": false, "restarted": true, "args": args}));
+        }
         let command = match (word("model"), word("effort")) {
             (Some(model), None) => spandeck_agents::models::model_command(meta.agent, model),
             (None, Some(level)) => spandeck_agents::models::effort_command(meta.agent, level),
@@ -477,6 +545,12 @@ impl Daemon {
         }
         if here["sent"].as_array().is_none_or(|s| s.is_empty()) {
             return Err(invalid("this pane has ended, or runs no agent"));
+        }
+        // The program may ask before it switches ("Switch model?"): the
+        // owner chose this in the sheet, so that question, when it
+        // follows this command, is answered (modelswitch.rs).
+        if word("model").is_some() {
+            self.model_typed(&p.id);
         }
         Ok(json!({"ok": true, "sent": true, "command": command}))
     }
@@ -694,12 +768,13 @@ impl Daemon {
             "subagents": meta.subagents, "paused": meta.paused,
             "held": self.held_view(meta),
             "trust": self.folder_trust_view(meta),
+            "prompt": meta.prompt,
             "exited": meta.exit.is_some(), "resumed": meta.resumed,
             "hooks_seen": meta.hooks_seen,
             "approvals": approvals,
             "questions": questions,
             "tasks": self.conversation_tasks(p, meta, session),
-            "model": self.conversation_model(meta),
+            "model": self.conversation_model(meta, session),
             "cleared": match session {
                 Some(s) => self.notes_cleared(&p.id, s),
                 None => self.notes_cleared(&p.id, &Self::screen_session(meta)),
@@ -855,6 +930,23 @@ impl Daemon {
         detail["pane"] = json!(p.id);
         detail["session"] = json!(session);
         Ok(detail)
+    }
+}
+
+impl Daemon {
+    /// Refuse a message for a pane whose program is asking a question of
+    /// its own on its screen: typed there it would be taken as the answer
+    /// and lost (seen with the real Claude Code on 17 Nov 2026). The
+    /// caller keeps what was written.
+    pub(crate) fn not_into_a_prompt(&self, pane: &str) -> Result<()> {
+        let p = self.pane(pane)?;
+        match self.prompt_up(&p) {
+            Some(asks) => Err(invalid(format!(
+                "not sent: {} is asking {asks} in this pane, and a message typed now would be taken as its answer. Answer it first (above the message box, or in the terminal), then send again",
+                p.meta().agent.display()
+            ))),
+            None => Ok(()),
+        }
     }
 }
 
