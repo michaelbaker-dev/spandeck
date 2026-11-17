@@ -2082,6 +2082,13 @@ fn a_terminals_history_on_a_phone_is_scrolled_by_the_phone() {
         phone.js("getComputedStyle(document.documentElement).touchAction"),
         json!("manipulation")
     );
+    // The owner, 17 Nov 2026: the password field for secure access made the
+    // iPhone enlarge the page, which then ran off the screen. A field typed
+    // in on a phone is never under 16 px, which is what Safari enlarges for.
+    assert_eq!(
+        phone.js("(() => { const i = document.createElement('input'); i.type = 'password'; document.body.append(i); const f = parseFloat(getComputedStyle(i).fontSize); i.remove(); return f >= 16; })()"),
+        json!(true)
+    );
     phone.touches();
     phone.goto(&format!("#/s/alpha/p/{pane}"));
     phone.wait(

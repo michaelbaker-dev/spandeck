@@ -926,3 +926,14 @@ button.ask-opt.model-opt { align-items: center; } .model-opt .ask-label { flex: 
 /* Before a model is switched: what it changes, and the two ways. */
 .model-confirm button { min-height: 46px; justify-content: center; white-space: normal; } .model-saves { color: var(--text); }
 .chat-card.model-ask .wait-keys button { min-height: 44px; padding: 0 14px; } .chat-card.model-ask .wait-keys .primary { margin-left: 0; }
+/* On a phone, a field you type in is never under 16 px: iPhone Safari enlarges the whole page when a
+   smaller one takes the keyboard, and leaves it enlarged (the owner, 17 Nov 2026, at the password for
+   secure access: the dialog ran off the right edge). Fields that set their own size already keep to this;
+   the terminal's own hidden field is left alone, since the terminal measures itself by it. */
+@media (max-width: 760px), (pointer: coarse) {
+  :root :is(input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]), select, textarea):not(.composer-box):not(.chat-box):not(.ask-other):not(.ask-note):not(.chat-first):not(.xterm-helper-textarea) { font-size: max(16px, 1em) !important; }
+}
+/* The offer of the secure deck on a phone: the words across, the buttons under them. */
+@media (max-width: 760px) {
+  .secure-bar { flex-wrap: wrap; align-items: flex-start; } .secure-bar .grow { flex: 1 1 100%; } .secure-bar button { min-height: 44px; flex: 1 1 0; justify-content: center; }
+}

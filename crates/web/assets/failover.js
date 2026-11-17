@@ -307,7 +307,8 @@ export function initFailover(env) {
       ? h('div', { class: 'vault-prompt secure-bar', role: 'region', 'aria-label': 'The secure deck' },
         h('div', { class: 'grow' }, h('b', {}, `${me.station} also serves this deck securely (HTTPS).`), ' ',
           h('span', { class: 'muted' }, 'From there it can be saved to your phone, and it opens even while this station is off.')),
-        h('button', { class: 'primary', onclick: () => env.hopTo(`https://${st.name}:${st.port}`, `${me.station}'s secure deck`) }, 'Open the secure deck'), later)
+        // (Opened once, it is not offered again on this address: the owner took it up.)
+        h('button', { class: 'primary', onclick: () => { try { localStorage.setItem('spandeck.secure.later', '1'); } catch (e) { /* this page only */ } env.hopTo(`https://${st.name}:${st.port}`, `${me.station}'s secure deck`); } }, 'Open the secure deck'), later)
       : h('div', { class: 'vault-prompt secure-bar', role: 'region', 'aria-label': 'Secure access' },
         h('div', { class: 'grow' }, h('b', {}, `Secure access (HTTPS) is not on for ${me.station} yet.`), ' ',
           h('span', { class: 'muted' }, 'With it the deck can be saved to your phone and opens while a station is off.')),
