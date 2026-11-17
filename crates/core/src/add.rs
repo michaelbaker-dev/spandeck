@@ -1165,6 +1165,22 @@ until "$bin" status >/dev/null 2>&1; do
   [ "$n" -le 30 ] || {{ echo "spandeck was installed but did not start."; fail start; }}
   sleep 1
 done
+# A station that was already running here from an earlier install goes on
+# running the program it was started from: it is brought to the one just
+# installed, in place. (The owner's Mac, 17 Nov 2026: 0.4.11 was installed
+# beside a running 0.4.10, which went on answering, and could not see the fleet.)
+have=$("$bin" --version 2>/dev/null | sed -n 's/^spandeck \([0-9][0-9.]*\).*/\1/p' | head -n 1)
+runs=$("$bin" status 2>/dev/null | sed -n 's/.*spandeck \([0-9][0-9.]*\).*/\1/p' | head -n 1)
+if [ -n "$have" ] && [ -n "$runs" ] && [ "$have" != "$runs" ]; then
+  echo "spandeck $runs was already running here: bringing it to $have."
+  "$bin" upgrade "$bin" >/dev/null 2>&1 || echo "It could not be brought to $have: it still runs $runs."
+  n=0
+  until [ "$("$bin" status 2>/dev/null | sed -n 's/.*spandeck \([0-9][0-9.]*\).*/\1/p' | head -n 1)" = "$have" ]; do
+    n=$((n + 1))
+    [ "$n" -le 30 ] || break
+    sleep 1
+  done
+fi
 echo "spandeck is running."
 say "version $("$bin" --version 2>/dev/null | head -n 1)"
 say step join
@@ -2458,6 +2474,68 @@ mod tests {
     /// by itself and says so is not gone through again by name; it is asked
     /// by address. When nothing works the script says why, and the
     /// dialog's words name the fleet's stations, not one of them.
+    /// The owner's Mac "monitoring" (17 Nov 2026): 0.4.11 was installed beside
+    /// a station already running 0.4.10, which went on answering as 0.4.10.
+    /// The script brings a running station to the program it has installed.
+    #[test]
+    #[cfg(unix)]
+    fn a_station_already_running_an_older_program_is_brought_to_the_one_installed() {
+        use std::os::unix::fs::PermissionsExt;
+        let script = unix_script(
+            &[("alpha".to_string(), None)],
+            Some("http://127.0.0.1:9"),
+            JoinBy::Code,
+            Default::default(),
+        );
+        let from = script
+            .find("have=$(\"$bin\" --version")
+            .expect("the lines are in the script");
+        let to = from
+            + script[from..]
+                .find("echo \"spandeck is running.\"")
+                .unwrap();
+        let lines = &script[from..to];
+        let run = |running: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let at = |p: &str| dir.path().join(p);
+            std::fs::write(at("runs"), running).unwrap();
+            std::fs::write(
+                at("spandeck"),
+                format!(
+                    "#!/bin/sh\necho \"$1\" >> {d}/calls\ncase \"$1\" in\n  --version) echo 'spandeck 0.4.11' ;;\n  status) echo \"station x  spandeck $(cat {d}/runs)  0 pane(s)\" ;;\n  upgrade) echo 0.4.11 > {d}/runs ;;\nesac\n",
+                    d = dir.path().display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(at("spandeck"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("bin={}\n{lines}", at("spandeck").display()))
+                .output()
+                .unwrap();
+            (
+                String::from_utf8_lossy(&out.stdout).to_string(),
+                std::fs::read_to_string(at("calls")).unwrap_or_default(),
+                std::fs::read_to_string(at("runs"))
+                    .unwrap()
+                    .trim()
+                    .to_string(),
+            )
+        };
+        let (said, calls, runs) = run("0.4.10");
+        assert!(
+            said.contains("spandeck 0.4.10 was already running here: bringing it to 0.4.11."),
+            "{said}"
+        );
+        assert!(calls.lines().any(|c| c == "upgrade"), "{calls}");
+        assert_eq!(runs, "0.4.11");
+        // One that already runs it is left alone.
+        let (said, calls, _) = run("0.4.11");
+        assert_eq!(said, "");
+        assert!(!calls.lines().any(|c| c == "upgrade"), "{calls}");
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_new_station_asks_each_station_of_the_fleet_and_asks_again_on_an_old_release() {
