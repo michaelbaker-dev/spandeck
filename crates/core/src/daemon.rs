@@ -172,6 +172,20 @@ pub struct PaneMeta {
     /// said. `None`: it has not said.
     #[serde(default)]
     pub effort: Option<String>,
+    /// When the agent's hooks last said its effort.
+    #[serde(default)]
+    pub effort_at_ms: u64,
+    /// What the program last printed when a command set its model, and
+    /// its effort, kept with the pane so that it is still known when the
+    /// program is started again (conversation.rs, `model_now`).
+    #[serde(default)]
+    pub model_said: Option<crate::conversation::Said>,
+    #[serde(default)]
+    pub effort_said: Option<crate::conversation::Said>,
+    /// When, and where in its conversation, the pane was started again on
+    /// `model_args` at the owner's choice.
+    #[serde(default)]
+    pub model_chosen: Option<crate::conversation::Said>,
     /// A question of the program's own on its screen that spandeck knows
     /// ("Switch model?": modelswitch.rs). `None` when there is none.
     #[serde(default)]
@@ -1349,6 +1363,10 @@ impl Daemon {
             controller: None,
             subagents: vec![],
             effort: None,
+            effort_at_ms: 0,
+            model_said: None,
+            effort_said: None,
+            model_chosen: None,
             prompt: None,
             model_args: opts.model_args.clone(),
             launcher: opts.program.clone(),
@@ -1913,6 +1931,14 @@ impl Daemon {
                 }
             })?;
         self.keep_owner_marks(&p, &meta);
+        // What is known of its model goes with the pane: what its program
+        // printed for a command, and what the owner chose for this pane.
+        {
+            let mut m = p.meta.lock().unwrap();
+            m.model_said = meta.model_said.clone();
+            m.effort_said = meta.effort_said.clone();
+            m.model_chosen = meta.model_chosen.clone();
+        }
         self.write_instructions(&p.meta());
         self.record(
             "pane.restarted",

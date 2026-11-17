@@ -161,6 +161,7 @@ impl Daemon {
             }
             if ev.effort.is_some() {
                 m.effort = ev.effort.clone();
+                m.effort_at_ms = now;
             }
             match ev.kind {
                 EventKind::PromptSubmit => {

@@ -1228,36 +1228,63 @@ class Conv {
     const model = M.model || this.p.usage?.model || '';
     // (A model a command has just set is named by the program before the
     // agent has answered on it: `set`.)
-    const shown = typeof M.set === 'string' && M.set ? M.set : model ? modelName(model) : '';
+    const shown = this.modelWord(M) || (model ? modelName(model) : '');
     const label = shown ? [shown, M.effort ? cap1(String(M.effort)) : ''].filter(Boolean).join(' · ') : 'Model';
+    b.classList.toggle('unconfirmed', !!this.modelWord(M));
+    b.classList.toggle('failed', !!this.modelLast?.bad);
     const waits = this.modelQueued ? ' · queued' : '';
     if (b.textContent !== label + waits) b.textContent = label + waits;
-    b.title = shown ? `Model: ${M.set || model}${M.effort ? ', effort ' + M.effort : ''}. Tap to change.` : 'Choose the model';
+    b.title = shown ? `${this.modelSays(M)} Tap to change.` : 'Choose the model';
     b.setAttribute('aria-label', (shown ? `Model ${label}` : 'Choose the model') + (waits ? ', a change is queued' : ''));
     // A choice made in the middle of a turn goes when the turn is over.
     if (this.modelQueued && this.live.state !== 'working') { const q = this.modelQueued; this.modelQueued = null; this.setModel(q, true); }
   }
 
+  // The model that holds before the agent has answered on it: what the
+  // owner chose for this pane (it was started again on it), or what the
+  // program said when a command set it. The station says which holds, by
+  // the order of the conversation.
+  modelWord(M) {
+    if (typeof M.chosen === 'string' && M.chosen) return /^[a-z]+$/.test(M.chosen) ? cap1(M.chosen) : modelName(M.chosen);
+    return typeof M.set === 'string' && M.set ? M.set : '';
+  }
+
+  // The state of the model in a sentence, so that after a change the
+  // owner is never left wondering whether it worked.
+  modelSays(M) {
+    const name = this.p.agent_name || 'The agent', last = M.model || this.p.usage?.model || '';
+    const before = last ? ` Its last reply was by ${last}.` : '';
+    const effort = M.effort ? ` Effort: ${M.effort}${M.effort_from === 'chosen' ? ' (as it was started)' : M.effort_from === 'said' ? ` (as ${name} said when it was set)` : ''}.` : '';
+    if (typeof M.chosen === 'string' && M.chosen) return `${this.modelWord(M)}, as you chose for this pane: ${name} was started again on it and has not answered on it yet.${before}${effort}`;
+    if (typeof M.set === 'string' && M.set) return `${M.set}, as ${name} said when it was set. It has not answered on it yet.${before}${effort}`;
+    return last ? `In use now, as ${name} last reported: ${last}.${effort}` : `${name} has not reported its model yet.${effort}`;
+  }
+
   // `pane.model`: the station types the agent program's own command into
-  // the pane, as the owner would, and only while the agent is idle.
+  // the pane, as the owner would, and only while the agent is idle. What
+  // came of it is said at once and kept for the sheet: sent, refused, or
+  // failed. Never silently.
   setModel(params, late) {
-    return env.rpc(this.st, 'pane.model', { pane: this.p.id, ...params }).then((r) => {
-      if (r && r.restarted) toast(`${this.p.name} was started again for this pane alone and resumes its conversation.`);
-      else if (r && r.sent) toast(`Sent ${r.command} to ${this.p.name}. The chip follows what it reports.`);
-      else if (r && r.busy && !late) { this.modelQueued = params; toast('It is in the middle of a turn. It will be sent when this turn ends, while this page stays open.'); }
-      else toast(`Not sent: ${this.p.name} is ${r?.why || 'not ready'}.`, 'error');
-      this.modelState();
-    }).catch(() => {});
+    const what = params.model ? `the model ${params.model}` : `the effort ${params.effort}`;
+    const said = (text, bad) => { this.modelLast = { text, bad: !!bad }; toast(text, bad ? 'error' : 'info'); this.modelState(); };
+    return env.api.on(this.st, 'pane.model', { pane: this.p.id, ...params }).then((r) => {
+      if (r && r.restarted) said(`${this.p.name} was started again on ${what}, for this pane alone, and resumes its conversation.`);
+      else if (r && r.sent) said(`Sent ${r.command} to ${this.p.name}. The chip follows what it reports.`);
+      else if (r && r.busy && !late) { this.modelQueued = params; said(`${this.p.name} is in the middle of a turn: ${what} will be sent when this turn ends, while this page stays open.`); }
+      else said(`Not changed to ${what}: ${this.p.name} is ${r?.why || 'not ready'}.`, true);
+    }).catch((e) => said(`Not changed to ${what}: ${e.message}`, true));
   }
 
   modelSheet() {
     const M = this.live?.model || {}, name = this.p.agent_name || 'The agent';
-    const current = String(M.model || this.p.usage?.model || '');
+    // (What is ticked is what holds now: the owner's choice or the
+    // program's word when the agent has not answered on it yet.)
+    const current = String(M.chosen || M.set || M.model || this.p.usage?.model || '');
     const models = Array.isArray(M.models) ? M.models.filter(m => m && typeof m.id === 'string') : [];
     const efforts = Array.isArray(M.efforts) ? M.efforts.filter(e => typeof e === 'string') : [];
     // An alias is ticked when the model in use is of its family
     // ("fable" for claude-fable-5-2); "default" is a way back, not a model.
-    const is = (m) => m.id !== 'default' && current !== '' && (current === m.id || modelShort(current).split(/[-.]/).includes(m.id));
+    const is = (m) => m.id !== 'default' && current !== '' && (current === m.id || modelShort(current).toLowerCase().split(/[-. ]/).includes(m.id));
     const box = dialog('Model', (close, body) => {
       const go = (params) => { close(); this.setModel(params); };
       // Said before anything is typed: what the program's own command
@@ -1284,7 +1311,8 @@ class Conv {
         setFace(this.st, this.p, 'terminal');
       }).catch(() => {}); };
       return h('div', { class: 'model-sheet' },
-        current ? h('p', { class: 'muted small model-now' }, `In use now, as ${name} last reported: ${current}${M.effort ? ' · effort ' + M.effort : ''}`) : h('p', { class: 'muted small model-now' }, `${name} has not reported its model yet.`),
+        h('p', { class: 'small model-now' + (this.modelWord(M) ? ' unconfirmed' : ' muted') }, this.modelSays(M)),
+        this.modelLast ? h('p', { class: 'small model-last' + (this.modelLast.bad ? ' warn-text' : ' muted'), role: this.modelLast.bad ? 'alert' : 'note' }, 'The last change from here: ' + this.modelLast.text) : null,
         M.can_set ? h('div', { class: 'ask-opts model-list', role: 'radiogroup', 'aria-label': 'Models' },
           models.map(m => h('button', { type: 'button', class: 'ask-opt model-opt' + (is(m) ? ' on' : ''), role: 'radio', 'aria-checked': String(is(m)), dataset: { model: m.id }, onclick: () => pick({ model: m.id }) },
             h('span', { class: 'ask-label' }, h('b', {}, String(m.name || m.id)), m.says ? h('span', { class: 'muted' }, String(m.says)) : null),

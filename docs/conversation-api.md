@@ -527,9 +527,30 @@ Code: `--model`, `--effort`) and resumes its conversation, as `pane.restart` doe
 turn; `invalid` for a pane with no saved conversation or a program without the flags. The
 flags stay with the pane (`only_pane.args`).
 
-`live.model.set`: the program's own name for a model its command has just set ("Sonnet
-5.5"), from what it printed, until its next reply names the model. Show it in place of
-`model` when present. `model` is one
+**Which word on the model holds: the last one, in the conversation's own order** (17 Nov
+2026; `model_now`, `crates/core/src/conversation.rs`). Three things say what a pane's model
+is, and `live.model` gives at most one of `set` and `chosen` beside `model`:
+
+| Field | What says it | Holds |
+|---|---|---|
+| `model` | The last reply that names the model that wrote it (the agent's session data). Always given when known. | When neither of the two below does. |
+| `set` | The program's own name for a model a command of its own set ("Sonnet 5.5"), from what it printed: Claude Code's "Set model to `<name>` …". | While no reply that names its model has been written **after** those words. |
+| `chosen` | The model the owner chose for this pane alone (`only_pane`): the value of the flag its program was started with ("opus"). | From the moment the pane is back, while no reply that names its model has been written **after** it was started again. |
+
+- A reply written **after** `set` or `chosen` is the truth and they are no longer given; one
+  written **before** does not count against them. So a command typed before the session's
+  first reply is overtaken by that reply, and one typed after the last reply holds until the
+  next.
+- In one session the order is the lines' of its file. When the program began another
+  session on being started again, it is the records' own times; a reply with no time is
+  taken to be the newer, so nothing is claimed that a reply may have overtaken.
+- Of `set` and `chosen`, the later holds.
+- Both are kept with the pane through `pane.restart` and "Only this pane".
+- Show `chosen` or `set` in place of `model` when present, as not yet answered on.
+- `effort` is whichever spoke last of the agent's hooks, what the program printed for an
+  effort command, and the flag the pane was started with; `effort_from` says which
+  (`hooks`, `said`, `chosen`). `null` until one of them has spoken: a pane just started has
+  none until its first hook that carries one. `model` is one
 word (letters, digits and `. _ : / @ [ ] -`, 120 at most); `effort` is one of `efforts`.
 `invalid`: anything else, both at once, a shell, or a program that takes no such command
 (the message names its picker). Nothing says the program took it: `live.model` follows

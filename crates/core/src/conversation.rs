@@ -24,6 +24,60 @@ use spandeck_archive::stores;
 use crate::daemon::{invalid, Daemon, PaneEntry, PaneMeta, Result};
 use crate::paths::now_ms;
 
+/// Something said of a pane's model at a moment of its conversation: what
+/// its program printed for a command (`name`), or the owner's choice for
+/// the pane alone (no name: the flags are on the pane's record).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Said {
+    #[serde(default)]
+    pub name: String,
+    /// When: the record's own time, else this station's clock when it was
+    /// first read.
+    pub at_ms: u64,
+    /// The session it was in, and the last line of it then.
+    pub session: String,
+    pub line: u64,
+}
+
+/// Which word on a pane's model holds now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Now {
+    /// The model its last reply names (or nothing is known).
+    Reply,
+    /// What its program printed when a command set the model.
+    Said,
+    /// What the owner chose for this pane, which it was started on.
+    Chosen,
+}
+
+/// The rule (docs/conversation-api.md, `live.model`): **the last word in
+/// the conversation's own order holds.** A reply that names its model,
+/// written after the program printed "Set model to ...", or after the
+/// pane was started again on a model, is the truth; one written before
+/// is not. In the same session the order is the lines'. Across sessions
+/// (the program began another file when it was started again) it is the
+/// records' own times, and a reply with no time is taken to be the newer:
+/// nothing is claimed that a reply may have overtaken. Of the two that
+/// are not replies, the later holds.
+pub(crate) fn model_now(
+    session: &str,
+    reply: Option<(u64, u64)>,
+    said: Option<&Said>,
+    chosen: Option<&Said>,
+) -> Now {
+    let stands = |w: &Said| match reply {
+        None => true,
+        Some((line, _)) if w.session == session => line <= w.line,
+        Some((_, ts)) => ts != 0 && ts <= w.at_ms,
+    };
+    match (said.filter(|w| stands(w)), chosen.filter(|w| stands(w))) {
+        (Some(s), Some(c)) if c.at_ms >= s.at_ms => Now::Chosen,
+        (Some(_), _) => Now::Said,
+        (None, Some(_)) => Now::Chosen,
+        (None, None) => Now::Reply,
+    }
+}
+
 fn read_key(pane: &str) -> String {
     format!("conversation.read.{pane}")
 }
@@ -435,30 +489,84 @@ impl Daemon {
     /// the agent's own session data last said), the effort (as its hooks
     /// last said), and what its program takes as a typed command
     /// (`spandeck_agents::models`). `null` for a shell.
-    fn conversation_model(&self, meta: &PaneMeta, session: Option<&str>) -> Value {
+    fn conversation_model(&self, p: &PaneEntry, meta: &PaneMeta, session: Option<&str>) -> Value {
         let Some(menu) = spandeck_agents::models::menu(meta.agent) else {
             return Value::Null;
         };
         let usage = self.pane_usage(meta);
-        // What the program printed for a command that set its model or
-        // effort, when that is newer than its last reply: the model is
-        // known before the agent has answered on it.
-        let (set_model, set_effort) = match session {
-            Some(s) => {
-                let (model, effort) = self.archive.conversation_set(s);
-                let replied = self.archive.last_reply_line(s);
-                let newer = |v: Option<(u64, String)>| {
-                    v.filter(|(line, _)| *line > replied).map(|(_, name)| name)
-                };
-                (newer(model), newer(effort))
+        // What the session's file says, in its own order; and what the
+        // program printed for a command is kept with the pane.
+        let words = session
+            .map(|s| self.archive.conversation_set(s))
+            .unwrap_or_default();
+        let keep = |had: &Option<Said>,
+                    now: &Option<spandeck_archive::conversation::Said>|
+         -> Option<Said> {
+            let (line, name, ts) = now.clone()?;
+            let session = session?.to_string();
+            match had {
+                Some(h) if h.session == session && h.line == line && h.name == name => None,
+                _ => Some(Said {
+                    name,
+                    at_ms: if ts > 0 { ts } else { now_ms() },
+                    session,
+                    line,
+                }),
             }
-            None => (None, None),
         };
+        let (model_said, effort_said) = (
+            keep(&meta.model_said, &words.model),
+            keep(&meta.effort_said, &words.effort),
+        );
+        if model_said.is_some() || effort_said.is_some() {
+            let mut m = p.meta.lock().unwrap();
+            if let Some(said) = model_said.clone() {
+                m.model_said = Some(said);
+            }
+            if let Some(said) = effort_said.clone() {
+                m.effort_said = Some(said);
+            }
+        }
+        let model_said = model_said.or_else(|| meta.model_said.clone());
+        let effort_said = effort_said.or_else(|| meta.effort_said.clone());
+        let flag = |name: Option<&str>| {
+            let at = meta
+                .model_args
+                .iter()
+                .position(|a| Some(a.as_str()) == name)?;
+            meta.model_args.get(at + 1).cloned()
+        };
+        let now = model_now(
+            session.unwrap_or(""),
+            words.reply,
+            model_said.as_ref(),
+            meta.model_chosen
+                .as_ref()
+                .filter(|_| flag(menu.start_model).is_some()),
+        );
+        // The effort: whichever spoke last of the agent's hooks, what the
+        // program printed for its command, and the flag the pane was
+        // started with.
+        let mut effort = (meta.effort.clone(), meta.effort_at_ms, "hooks");
+        if let Some(said) = effort_said.as_ref().filter(|s| s.at_ms >= effort.1) {
+            effort = (Some(said.name.clone()), said.at_ms, "said");
+        }
+        if let (Some(chosen), Some(level)) = (meta.model_chosen.as_ref(), flag(menu.start_effort)) {
+            if chosen.at_ms >= effort.1 {
+                effort = (Some(level), chosen.at_ms, "chosen");
+            }
+        }
         json!({
-            "model": usage["model"], "effort": set_effort.clone().or_else(|| meta.effort.clone()),
+            "model": usage["model"], "effort": effort.0,
+            "effort_from": effort.0.as_ref().map(|_| effort.2),
             // The program's own name for the model a command just set
-            // ("Sonnet 5.5"), until its next reply names the model itself.
-            "set": set_model,
+            // ("Sonnet 5.5"), until a reply written after it names the
+            // model itself.
+            "set": match now { Now::Said => model_said.as_ref().map(|s| s.name.clone()), _ => None },
+            // The model the owner chose for this pane alone, which its
+            // program was started on, until a reply written after that
+            // names the model.
+            "chosen": match now { Now::Chosen => flag(menu.start_model), _ => None },
             "models": menu.models.iter().map(|m| json!({"id": m.id, "name": m.name, "says": m.says})).collect::<Vec<_>>(),
             "efforts": if menu.effort_cmd.is_some() { menu.efforts } else { &[] },
             "can_set": menu.model_cmd.is_some(),
@@ -511,7 +619,20 @@ impl Daemon {
                     "this pane has no saved conversation to resume yet: starting it again would begin a new one",
                 ));
             }
-            p.meta.lock().unwrap().model_args = args.clone();
+            // Where its conversation stands now: a reply written after this
+            // is by the model it was started on.
+            let session = meta.session_id.clone().unwrap_or_default();
+            let line = self.archive.session(&session).map_or(0, |s| s.lines);
+            {
+                let mut m = p.meta.lock().unwrap();
+                m.model_args = args.clone();
+                m.model_chosen = Some(Said {
+                    name: String::new(),
+                    at_ms: now_ms(),
+                    session,
+                    line,
+                });
+            }
             self.record(
                 "pane.model",
                 Some(&p.id),
@@ -774,7 +895,7 @@ impl Daemon {
             "approvals": approvals,
             "questions": questions,
             "tasks": self.conversation_tasks(p, meta, session),
-            "model": self.conversation_model(meta, session),
+            "model": self.conversation_model(p, meta, session),
             "cleared": match session {
                 Some(s) => self.notes_cleared(&p.id, s),
                 None => self.notes_cleared(&p.id, &Self::screen_session(meta)),
@@ -970,4 +1091,95 @@ fn side_file(stem: Option<&str>, task_id: Option<&str>) -> Option<std::path::Pat
                 .into()
         })
         .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The owner's report of 17 Nov 2026, from a phone: "when I changed
+    /// from fable to opus, it either didn't work or it didn't update the
+    /// model name". The program had switched; the chip named the model of
+    /// the last reply, and nothing told it of the change. Which word
+    /// holds is the order of the conversation, in both orders, and
+    /// through a program started again.
+    #[test]
+    fn the_last_word_on_a_panes_model_holds() {
+        let at = |session: &str, line: u64, at_ms: u64| Said {
+            name: "Opus 5.5".into(),
+            at_ms,
+            session: session.into(),
+            line,
+        };
+        // Nothing but replies.
+        assert_eq!(model_now("s", Some((9, 100)), None, None), Now::Reply);
+        // The command's words after the last reply: they hold. A reply
+        // after them: the reply.
+        assert_eq!(
+            model_now("s", Some((9, 100)), Some(&at("s", 12, 200)), None),
+            Now::Said
+        );
+        assert_eq!(
+            model_now("s", Some((14, 300)), Some(&at("s", 12, 200)), None),
+            Now::Reply
+        );
+        // Before any reply at all.
+        assert_eq!(
+            model_now("s", None, Some(&at("s", 2, 200)), None),
+            Now::Said
+        );
+        // Started again on a model at line 9: the reply on line 9 was by
+        // the model before; one after it is the truth.
+        assert_eq!(
+            model_now("s", Some((9, 100)), None, Some(&at("s", 9, 400))),
+            Now::Chosen
+        );
+        assert_eq!(
+            model_now("s", Some((11, 500)), None, Some(&at("s", 9, 400))),
+            Now::Reply
+        );
+        // Both: the later of the two.
+        assert_eq!(
+            model_now(
+                "s",
+                Some((9, 100)),
+                Some(&at("s", 12, 200)),
+                Some(&at("s", 12, 400))
+            ),
+            Now::Chosen
+        );
+        assert_eq!(
+            model_now(
+                "s",
+                Some((9, 100)),
+                Some(&at("s", 15, 600)),
+                Some(&at("s", 12, 400))
+            ),
+            Now::Said
+        );
+        // The program began another session when it was started again:
+        // by the records' own times.
+        assert_eq!(
+            model_now("t", Some((3, 100)), Some(&at("s", 12, 200)), None),
+            Now::Said
+        );
+        assert_eq!(
+            model_now("t", Some((3, 100)), None, Some(&at("s", 12, 400))),
+            Now::Chosen
+        );
+        assert_eq!(
+            model_now(
+                "t",
+                Some((30, 900)),
+                Some(&at("s", 12, 200)),
+                Some(&at("s", 12, 400))
+            ),
+            Now::Reply
+        );
+        // And a reply with no time is taken to be the newer.
+        assert_eq!(
+            model_now("t", Some((3, 0)), Some(&at("s", 12, 200)), None),
+            Now::Reply
+        );
+    }
 }

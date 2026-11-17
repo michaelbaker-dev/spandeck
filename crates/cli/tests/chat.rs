@@ -663,6 +663,13 @@ fn a_panes_tasks_its_model_and_its_cleared_notes_are_the_owners() {
         (l["model"]["set"] == json!("Sonnet 5.5") && !l["model"]["model"].is_null()).then_some(l)
     });
     assert_eq!(named["model"]["model"], json!("claude-opus-5-5"), "{named}");
+    // The owner's report of 17 Nov 2026 ("it either didn't work or it
+    // didn't update the model name"): its program started again, what
+    // it said of its model is still what holds.
+    s.call("pane.restart", json!({"pane": mute}));
+    wait_for("the program's word through a restart", 10, || {
+        (live(&mute)["model"]["set"] == json!("Sonnet 5.5")).then_some(())
+    });
     assert!(
         !s.text(&other).contains("/model"),
         "nothing was typed into the busy pane"
@@ -674,6 +681,13 @@ fn a_panes_tasks_its_model_and_its_cleared_notes_are_the_owners() {
         (l["model"]["model"] == json!("claude-fable-5-2") && l["model"]["effort"] == json!("high"))
             .then_some(l)
     });
+    // (The other order: its reply came after the command's words, and
+    // names the model itself. The words no longer hold.)
+    assert_eq!(
+        (&l["model"]["set"], &l["model"]["chosen"]),
+        (&Value::Null, &Value::Null),
+        "{l}"
+    );
     assert_eq!(
         rows(&l["tasks"]["running"]),
         vec![(
@@ -807,6 +821,18 @@ fn a_panes_tasks_its_model_and_its_cleared_notes_are_the_owners() {
         "{only}"
     );
     s.wait_text(&lead, "[fake] started on the model haiku, resuming");
+    // The same report: started again on a model, the pane says so from
+    // the moment it is back, though its last reply was by another.
+    let back = live(&lead);
+    assert_eq!(
+        (
+            &back["model"]["chosen"],
+            &back["model"]["set"],
+            &back["model"]["model"]
+        ),
+        (&json!("haiku"), &Value::Null, &json!("claude-fable-5-2")),
+        "{back}"
+    );
     assert!(!s.text(&lead).contains("/model haiku"), "nothing was typed");
     assert_eq!(
         live(&lead)["model"]["only_pane"]["args"],
@@ -2471,6 +2497,76 @@ mod in_a_browser {
             json!([0, "Open its picker in the terminal (/models)", false])
         );
         shoot(&page, "extras-picker-only");
+        page.js("document.querySelector('.dialog .icon-btn').click()");
+
+        // The owner's report of 17 Nov 2026: "when I changed from fable
+        // to opus, it either didn't work or it didn't update the model
+        // name". The chip changes after each way of changing the model,
+        // with no new turn of the agent: first by the program's own word
+        // for the command, then by the owner's choice for the pane; the
+        // sheet says which, and what its last reply was by.
+        let mute = pane(
+            &s,
+            "fake",
+            "mute",
+            &dir,
+            json!({"effort": "medium", "steps": [{"prompt": "x"}, said_line("Counted.", "claude-fable-5-2"), {"turn_end": "ok"}],
+                "on_input": [{"model_screen": {"name": "Opus 5.5"}}, {"turn_end": "ok"}]}),
+        );
+        s.wait_state(&mute, "done");
+        page.goto(&format!("#/s/alpha/p/{mute}"));
+        let chip = "document.querySelector('.phone-chat .chat-tools .chat-model')";
+        page.wait("the chip", &format!("location.hash.endsWith('{mute}') && (c => c && c.innerText === 'Fable 5.2 · Medium')({chip})"));
+        let choose = |how: &str, model: &str| {
+            page.js(&format!("{chip}.click()"));
+            page.wait("the sheet", &format!("(o => o && (o.click(), true))(document.querySelector('.dialog .model-opt[data-model=\"{model}\"]'))"));
+            page.wait(
+                "the confirm step",
+                &format!("(b => b && (b.click(), true))(document.querySelector('.dialog .{how}'))"),
+            );
+        };
+        choose("model-go", "opus");
+        s.wait_text(&mute, "[fake] model switched to Opus 5.5");
+        assert_eq!(page.wait("the chip after the typed command", &format!("(c => c.innerText.startsWith('Opus') && [c.innerText, c.classList.contains('unconfirmed')])({chip})")), json!(["Opus 5.5 · Medium", true]));
+        page.js(&format!("{chip}.click()"));
+        let now = page.wait("the sheet's state", "(d => d && [d.querySelector('.model-now').innerText, d.querySelector('.model-last').innerText, d.querySelector('.model-opt[data-model=\"opus\"]').getAttribute('aria-checked')])(document.querySelector('.dialog .model-sheet'))");
+        assert_eq!(now[0], json!("Opus 5.5, as Fake agent said when it was set. It has not answered on it yet. Its last reply was by claude-fable-5-2. Effort: medium."));
+        assert!(
+            now[1]
+                .as_str()
+                .unwrap()
+                .starts_with("The last change from here: Sent /model opus to mute."),
+            "{now}"
+        );
+        assert_eq!(now[2], json!("true"));
+        shoot(&page, "extras-model-after-typed");
+        page.js("document.querySelector('.dialog .icon-btn').click()");
+        s.wait_state(&mute, "done");
+        choose("model-only", "haiku");
+        s.wait_text(&mute, "[fake] started on the model haiku, resuming");
+        assert_eq!(page.wait("the chip after Only this pane", &format!("(c => c && c.innerText.startsWith('Haiku') && [c.innerText, c.classList.contains('unconfirmed')])({chip})")), json!(["Haiku", true]));
+        page.js(&format!("{chip}.click()"));
+        let now = page.wait("the sheet's state", "(d => d && d.querySelector('.model-now').innerText)(document.querySelector('.dialog .model-sheet'))");
+        assert_eq!(now, json!("Haiku, as you chose for this pane: Fake agent was started again on it and has not answered on it yet. Its last reply was by claude-fable-5-2."));
+        shoot(&page, "extras-model-after-only-pane");
+        // A change that is refused is said in the sheet too, never silently.
+        page.js("(i => { i.value = 'not a name'; return true; })(document.querySelector('.dialog .model-other'))");
+        page.js("document.querySelector('.dialog .model-set').click()");
+        page.wait(
+            "the confirm step",
+            "(b => b && (b.click(), true))(document.querySelector('.dialog .model-go'))",
+        );
+        page.wait("it is said", "[...document.querySelectorAll('.toast.error')].some(t => t.innerText.startsWith('Not changed to the model not a name'))");
+        page.js(&format!("{chip}.click()"));
+        let last = page.wait("the refusal in the sheet", "(l => l && [l.innerText, l.getAttribute('role')])(document.querySelector('.dialog .model-last'))");
+        assert!(
+            last[0]
+                .as_str()
+                .unwrap()
+                .contains("Not changed to the model not a name: ")
+                && last[1] == json!("alert"),
+            "{last}"
+        );
     }
 
     /// Pictures of each kind of pane's Chat, for a human to lay side by

@@ -937,3 +937,7 @@ button.ask-opt.model-opt { align-items: center; } .model-opt .ask-label { flex: 
 @media (max-width: 760px) {
   .secure-bar { flex-wrap: wrap; align-items: flex-start; } .secure-bar .grow { flex: 1 1 100%; } .secure-bar button { min-height: 44px; flex: 1 1 0; justify-content: center; }
 }
+/* The chip before the agent has answered on a model just chosen, and
+   after a change that was not made. */
+.chat-row .chat-tools button.chat-model.unconfirmed { border-style: dashed; color: var(--text); } .chat-row .chat-tools button.chat-model.failed { border-color: var(--red); }
+.model-now.unconfirmed { color: var(--text); }

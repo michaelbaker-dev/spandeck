@@ -229,6 +229,8 @@ pub struct Parsed {
     pub items: Vec<Item>,
     pub results: Vec<ToolResult>,
     pub title: Option<String>,
+    /// The line is a reply that names the model that wrote it.
+    pub by_model: bool,
     /// A background task reported that it is over.
     pub notes: Vec<TaskNote>,
     /// The line was not understood: what kind of record it is.
@@ -277,8 +279,22 @@ pub struct Job {
     pub task_id: Option<String>,
 }
 
-/// What a program printed, and the session line it is on.
-pub type Said = (u64, String);
+/// What a program printed for a command of its own: the session line it
+/// is on, the name it gave, and when the record says it was written (0
+/// when it carries no time).
+pub type Said = (u64, String, u64);
+
+/// What a session's file says of its model, in the order it says it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelWords {
+    /// What the program last printed when a command set its model.
+    pub model: Option<Said>,
+    /// And its effort.
+    pub effort: Option<Said>,
+    /// The last reply that names the model that wrote it: its line, and
+    /// when it was written (0 when the record carries no time).
+    pub reply: Option<(u64, u64)>,
+}
 
 /// How many tasks of a session are kept: the finished ones go first.
 pub const JOBS_MAX: usize = 200;
@@ -723,6 +739,11 @@ fn claude_assistant(line: u64, v: &Value, out: &mut Parsed) {
             .push(Item::notice(line, 0, "error", ts).with_text(&text_of(&json!(blocks))));
         return;
     }
+    // (Claude Code writes `<synthetic>` for words of its own.)
+    out.by_model = v
+        .pointer("/message/model")
+        .and_then(|m| m.as_str())
+        .is_some_and(|m| !m.is_empty() && !m.starts_with('<'));
     for (n, b) in blocks.iter().enumerate() {
         match b["type"].as_str().unwrap_or("") {
             "text" => {
@@ -1649,8 +1670,7 @@ struct Conv {
     jobs: Vec<Job>,
     /// What the program last printed for a model command of its own, and
     /// for an effort command: the line, and the name it gave.
-    set_model: Option<(u64, String)>,
-    set_effort: Option<(u64, String)>,
+    words: ModelWords,
     title: Option<String>,
     unknown: u64,
     unknown_kinds: Vec<(String, u64)>,
@@ -1668,8 +1688,7 @@ impl Conv {
             closes: vec![],
             open: vec![],
             jobs: vec![],
-            set_model: None,
-            set_effort: None,
+            words: ModelWords::default(),
             title: None,
             unknown: 0,
             unknown_kinds: vec![],
@@ -1714,6 +1733,10 @@ impl Conv {
                 }
             }
         }
+        if p.by_model {
+            let ts = p.items.iter().find_map(|i| i.ts_ms).unwrap_or(0);
+            self.words.reply = Some((line, ts));
+        }
         for note in &p.notes {
             let job = self.jobs.iter_mut().rev().find(|j| {
                 j.status == "running"
@@ -1732,11 +1755,12 @@ impl Conv {
         for item in p.items {
             if item.what == Some("command_output") {
                 let (model, effort) = said_set(item.text.as_deref().unwrap_or(""));
+                let ts = item.ts_ms.unwrap_or(0);
                 if let Some(model) = model {
-                    self.set_model = Some((line, model));
+                    self.words.model = Some((line, model, ts));
                 }
                 if let Some(effort) = effort {
-                    self.set_effort = Some((line, effort));
+                    self.words.effort = Some((line, effort, ts));
                 }
             }
             if item.is_boundary() {
@@ -2096,13 +2120,11 @@ impl crate::Archive {
     /// What the program itself last printed when its model, and its
     /// effort, were set by a command (`said_set`), each with the session
     /// line it is on: `(model, effort)`.
-    pub fn conversation_set(&self, session: &str) -> (Option<Said>, Option<Said>) {
+    pub fn conversation_set(&self, session: &str) -> ModelWords {
+        self.poll_session(session);
         match self.conv(session) {
-            Some(conv) => {
-                let c = conv.lock().unwrap();
-                (c.set_model.clone(), c.set_effort.clone())
-            }
-            None => (None, None),
+            Some(conv) => conv.lock().unwrap().words.clone(),
+            None => ModelWords::default(),
         }
     }
 
@@ -2243,7 +2265,10 @@ mod tests {
         assert_eq!(said_set("The model was set to Sonnet"), (None, None));
         assert_eq!(said_set("I Set model to `x`"), (None, None));
         let (a, dir) = following("claude", CLAUDE, usize::MAX);
-        assert_eq!(a.conversation_set("s1"), (None, None));
+        let before = a.conversation_set("s1");
+        assert_eq!((&before.model, &before.effort), (&None, &None));
+        // The fixture's last reply names its model: its place is known.
+        let replied = before.reply.expect("a reply that names its model").0;
         let mut f = std::fs::OpenOptions::new()
             .append(true)
             .open(dir.path().join("session.jsonl"))
@@ -2252,11 +2277,28 @@ mod tests {
             "content": "<local-command-stdout>Set model to `Sonnet 5.5` and saved as your default for new sessions</local-command-stdout>"}})).unwrap();
         drop(f);
         a.poll_session("s1");
-        let (model, effort) = a.conversation_set("s1");
-        assert_eq!(
-            (model.map(|m| m.1), effort),
-            (Some("Sonnet 5.5".to_string()), None)
-        );
+        let words = a.conversation_set("s1");
+        let said = words.model.clone().expect("what the command printed");
+        assert_eq!((said.1.as_str(), &words.effort), ("Sonnet 5.5", &None));
+        // The owner's report of 17 Nov 2026 ("it either didn't work or it
+        // didn't update the model name"): which is newer is the order in
+        // the file. Printed after the last reply, it is what holds now;
+        // a reply written after it is the truth again.
+        assert!(said.0 > replied && words.reply.unwrap().0 == replied);
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("session.jsonl"))
+            .unwrap();
+        writeln!(f, "{}", json!({"type": "assistant", "isSidechain": false, "timestamp": "2026-11-15T11:00:00.000Z",
+            "message": {"role": "assistant", "model": "claude-sonnet-5-5", "content": [{"type": "text", "text": "On it."}]}})).unwrap();
+        // (And words of the program's own are not a reply of a model.)
+        writeln!(f, "{}", json!({"type": "assistant", "isSidechain": false,
+            "message": {"role": "assistant", "model": "<synthetic>", "content": [{"type": "text", "text": "No response requested."}]}})).unwrap();
+        drop(f);
+        a.poll_session("s1");
+        let words = a.conversation_set("s1");
+        let reply = words.reply.unwrap();
+        assert!(reply.0 == said.0 + 1 && reply.1 > 0, "{words:?}");
     }
 
     /// The owner's report of 17 Nov 2026: "a row that show how many agents
