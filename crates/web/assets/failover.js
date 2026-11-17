@@ -336,7 +336,7 @@ export function initFailover(env) {
           kids.push(h('p', { class: 'muted' }, 'The plain address keeps working. The name of this machine and of your tailnet is in the public list of certificates; the machine is still reached only from your tailnet.'));
         } else if (st.state === 'needs_operator') {
           kids.push(h('p', {}, `spandeck asks ${s.station} to let your user (${user}) manage Tailscale there, so that it can fetch the machine's certificate. This needs your password on ${s.station} once; it is used for that one command and not kept.`));
-          kids.push(h('p', { class: 'muted' }, `After this, programs running as ${user} on ${s.station}, your agents included, can change Tailscale's settings on that machine without a password. Undo it here, or with "sudo tailscale set --operator=" there. Turning HTTPS on also puts the name of this machine and of your tailnet in the public list of certificates.`));
+          kids.push(h('p', { class: 'muted' }, `After this, programs running as ${user} on ${s.station}, your agents included, can change Tailscale's settings on that machine without a password. To undo it, run "sudo tailscale set --operator=" there. Turning HTTPS on also puts the name of this machine and of your tailnet in the public list of certificates.`));
         } else if (st.state === 'not_enabled') {
           kids.push(h('p', {}, 'HTTPS certificates are not switched on for your tailnet. In Tailscale\'s admin console, under DNS, turn on "HTTPS Certificates"; then come back.'));
           kids.push(h('p', {}, h('a', { href: TS_DNS, target: '_blank', rel: 'noopener noreferrer' }, 'Open Tailscale\'s DNS settings')));
@@ -346,8 +346,7 @@ export function initFailover(env) {
           kids.push(h('p', {}, `Not on${st.why ? `: ${st.why}` : ''}. Everything works over the plain address meanwhile.`));
         }
         if (note) kids.push(h('p', { class: note.bad ? 'warn-text https-said' : 'https-said' }, note.text));
-        const wantsPassword = st.state === 'needs_operator' || (st.on && st.os === 'linux');
-        if (wantsPassword && !reach) {
+        if (st.state === 'needs_operator' && !reach) {
           kids.push(h('p', { class: 'muted' }, `Your password goes only to the station it is for, never through another one, and this page cannot reach ${s.station} directly. Open ${s.station}'s own Control Deck and choose this there.`));
           kids.push(h('div', { class: 'row end' }, h('button', { onclick: close }, 'Close'), h('button', { class: 'primary', onclick: () => { close(); env.hopOpen(s); } }, `Open ${s.station}'s own Control Deck`)));
         } else if (st.state === 'needs_operator') {
@@ -381,9 +380,9 @@ export function initFailover(env) {
       };
       // What the station says now, asked of it a few times after a change.
       let watching = 0;
-      const look = () => (here ? api.call('station.info', {}) : api.on(s.station, 'station.info', {})).then(i => ({ ...i.https, os: i.os }));
+      const look = () => (here ? api.call('https.status', {}) : api.on(s.station, 'https.status', {}));
       const watch = () => { clearInterval(watching); let n = 0; watching = setInterval(() => { if (!body.isConnected || ++n > 40) return clearInterval(watching); look().then((st) => { if (st.on || (st.state !== 'starting' && n > 3)) { clearInterval(watching); draw(st); env.refresh(); } }).catch(() => {}); }, 3000); };
-      draw({ ...(s.https || {}), os: s.os });
+      draw(s.https || {});
       look().then(st => draw(st)).catch(() => {});
       return body;
     });

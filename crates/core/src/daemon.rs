@@ -2944,9 +2944,9 @@ impl Daemon {
             "keep_awake": self.keep_awake_active(),
             "at_keyboard": self.at_keyboard(),
             "web": self.web_addrs.lock().unwrap().clone(),
-            // The deck over HTTPS: whether, at which name and port, until
-            // when, and if not, why. Nothing of the key.
-            "https": self.https_view(),
+            // The deck over HTTPS: whether, at which name and port, and if
+            // not, why. Nothing of the key, and not when it runs out.
+            "https": self.https_brief(),
             "load": load_average(),
             "macs": crate::manage::mac_addresses(),
             // The fleet's members as this station knows them, and the ones

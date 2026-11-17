@@ -234,9 +234,12 @@ async fn a_station_serves_https_and_takes_a_members_deck_as_an_origin() {
         ),
         "{https}"
     );
+    // When it runs out is the owner's to read, not an agent's.
+    assert!(https.get("expires_ms").is_none() && https.get("days_left").is_none());
+    let status = block(&|| alpha.call("https.status", json!({})));
     assert!(
-        (58..=60).contains(&https["days_left"].as_i64().unwrap()),
-        "{https}"
+        (58..=60).contains(&status["days_left"].as_i64().unwrap()),
+        "{status}"
     );
     let caps = |v: &Value| v["caps"].as_array().unwrap().clone();
     assert!(caps(&info).contains(&json!("https")) && caps(&info).contains(&json!("deck_via")));
@@ -461,14 +464,14 @@ async fn a_station_serves_https_and_takes_a_members_deck_as_an_origin() {
     );
 
     // --- Renewal: a new certificate is taken, said, and logged.
-    let before = block(&|| alpha.call("station.info", json!({})))["https"]["expires_ms"]
+    let before = block(&|| alpha.call("https.status", json!({})))["expires_ms"]
         .as_u64()
         .unwrap();
     make_cert(&fleet.https[0].1, 90);
     block(&|| alpha.call("https.refresh", json!({})));
     let after = tokio::task::block_in_place(|| {
         wait_for("the renewed certificate", 20, || {
-            let now = alpha.call("station.info", json!({}))["https"]["expires_ms"]
+            let now = alpha.call("https.status", json!({}))["expires_ms"]
                 .as_u64()
                 .unwrap();
             (now > before).then_some(now)
@@ -666,6 +669,7 @@ fn ask_off(s: &Station, password: &str) {
 use common::browser::Page;
 
 const API: &str = "document.getElementById('app').api";
+#[cfg(unix)]
 const FO: &str = "document.getElementById('app').failover";
 
 fn token_for(s: &Station) -> String {
@@ -701,7 +705,7 @@ fn picture(page: &Page, name: &str) {
 /// because the page's code does (the every-change tier has no JavaScript
 /// engine).
 #[test]
-#[ignore = "merge tier: a real browser; about three seconds"]
+#[ignore = "nightly: a real browser; about three seconds"]
 fn the_rules_of_the_list_and_the_choice() {
     let s = Station::start("alpha");
     let page = Page::open(&s, 900, 700);
@@ -1234,7 +1238,7 @@ fn the_saved_deck_opens_with_its_station_down_and_takes_a_new_build_whole() {
 /// About ten seconds.
 #[cfg(unix)]
 #[test]
-#[ignore = "merge tier: a real browser; about ten seconds"]
+#[ignore = "nightly: a real browser; about ten seconds"]
 fn secure_access_is_turned_on_from_the_deck() {
     use std::os::unix::fs::PermissionsExt;
     let system = tempfile::tempdir().unwrap();

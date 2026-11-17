@@ -1619,6 +1619,7 @@ impl Daemon {
             "tailnet.signin" => self.tailnet_signin(caller)?,
             // Ask for the certificate again now (the owner has just
             // switched HTTPS certificates on for the tailnet, say).
+            "https.status" => self.https_view(),
             "https.refresh" => {
                 self.https.kick.notify_one();
                 self.https_view()
@@ -2572,6 +2573,7 @@ mod tests {
         for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
             assert!(!allowed(who, "tailnet.operator"), "{who:?}");
             assert!(!allowed(who, "https.refresh"), "{who:?}");
+            assert!(!allowed(who, "https.status"), "{who:?}");
         }
         assert!(allowed(Authority::Owner, "tailnet.operator"));
         assert!(not_forwarded("tailnet.operator") && !reads("tailnet.operator"));

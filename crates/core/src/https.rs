@@ -589,7 +589,20 @@ impl Daemon {
             .collect()
     }
 
-    /// What `station.info` says of HTTPS here. Nothing of the key.
+    /// What `station.info` says of HTTPS here: whether, and where. An
+    /// agent may read that answer, so it says no more than the machine's
+    /// own `tailscale status` does: not when the certificate runs out.
+    pub fn https_brief(&self) -> Value {
+        let mut v = self.https_view();
+        if let Some(o) = v.as_object_mut() {
+            o.remove("expires_ms");
+            o.remove("days_left");
+        }
+        v
+    }
+
+    /// All of it, for the owner and the fleet (`https.status`, `perf.get`,
+    /// `spandeck doctor`). Nothing of the key.
     pub fn https_view(&self) -> Value {
         let s = self.https.status.lock().unwrap().clone();
         let on = self.https.serving();
@@ -768,7 +781,7 @@ impl Daemon {
             Err(e) => {
                 let (state, why) = match e {
                     NoCert::NeedsOperator => ("needs_operator", "Tailscale gives this machine's certificate only to an administrator or to the user it was told to trust".to_string()),
-                    NoCert::NotEnabled => ("not_enabled", "HTTPS certificates are not switched on for this tailnet (Tailscale's admin console: DNS, HTTPS Certificates)".to_string()),
+                    NoCert::NotEnabled => ("not_enabled", "HTTPS certificates are not switched on for your Tailscale network (its admin console: DNS, HTTPS Certificates)".to_string()),
                     NoCert::NoTailscale => ("no_tailscale", "Tailscale is not answering on this machine".to_string()),
                     NoCert::Other(why) => ("error", why),
                 };
