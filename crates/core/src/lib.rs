@@ -64,6 +64,7 @@ pub mod latest;
 pub mod links;
 pub mod look;
 pub mod loops;
+pub mod made;
 pub mod manage;
 pub mod memory;
 pub mod messages;

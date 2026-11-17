@@ -1598,6 +1598,152 @@ fn a_file_goes_with_a_message_and_is_the_owners() {
     });
 }
 
+/// A reply of the agent's, in Claude Code's shape, with these words.
+fn says(text: &str) -> Value {
+    json!({"transcript": {"type": "assistant", "message": {"role": "assistant", "model": "claude-fable-5-2", "content": [{"type": "text", "text": text}]}}})
+}
+
+/// The owner, 17 Nov 2026: "Can I paste or add an image in ChatGPT or
+/// Gemini and have it make a image or video for me, would that work in out
+/// chat?" With the real Codex and Antigravity that day each made a
+/// picture, and Chat showed its path as text.
+///
+/// A picture and a video an agent's reply names are on the item, each
+/// with an id of the station's own, and are read by that id: not by
+/// another pane, a made-up id or a path, and by no agent. A file named as
+/// a picture that is not one is not there, nor one the owner's own
+/// message names. One that is gone later is said to be gone. A picture
+/// made becomes a file of the owner's next message at the station.
+#[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
+fn what_an_agent_made_is_on_its_reply_and_is_the_owners() {
+    use base64::Engine;
+    let s = Station::start("alpha");
+    let dir = folder(&s, "mere");
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(DOT_PNG)
+        .unwrap();
+    std::fs::write(dir.join("out/heron.png"), &png).unwrap();
+    std::fs::write(
+        dir.join("tide.webm"),
+        b"\x1a\x45\xdf\xa3\x9fB\x86\x81\x01 a clip",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("notes.png"),
+        b"the owner's notes, named as a picture",
+    )
+    .unwrap();
+    let reply = format!("Made it.\n\nPath: {}\nTool: image_gen.imagegen\n\nA clip too: `tide.webm`, and see notes.png and https://example.org/x.png.", dir.join("out/heron.png").display());
+    let lead = pane(
+        &s,
+        "fake",
+        "lead",
+        &dir,
+        json!({"steps": [{"prompt": "make out/heron.png again"}, says(&reply), {"turn_end": "ok"}]}),
+    );
+    let other = pane(
+        &s,
+        "fake",
+        "other",
+        &dir,
+        json!({"steps": [{"prompt": "x"}, {"turn_end": "ok"}]}),
+    );
+    s.wait_state(&lead, "done");
+    let items = wait_for("the reply with what it made", 10, || {
+        let c = conversation(&s, &lead, true);
+        c["items"]
+            .as_array()
+            .is_some_and(|i| i.iter().any(|x| x["media"].is_array()))
+            .then_some(c["items"].clone())
+    });
+    let with: Vec<&Value> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["media"].is_array())
+        .collect();
+    assert_eq!(with.len(), 1, "only the agent's reply: {items}");
+    let media = with[0]["media"].as_array().unwrap();
+    assert_eq!(
+        media
+            .iter()
+            .map(|m| (
+                m["name"].as_str().unwrap(),
+                m["kind"].as_str().unwrap(),
+                m["size"].as_u64().unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("heron.png", "image", png.len() as u64),
+            ("tide.webm", "video", 16)
+        ],
+        "{media:?}"
+    );
+    assert_eq!((&media[0]["w"], &media[0]["h"]), (&json!(1), &json!(1)));
+    assert!(
+        with[0]["text"].as_str().unwrap().contains("Path: "),
+        "the words are as the agent wrote them"
+    );
+    let id = media[0]["id"].as_str().unwrap().to_string();
+    // Read by the station's id.
+    let got = s.call("pane.media.get", json!({"pane": lead, "id": id}));
+    assert_eq!(
+        (got["data_b64"].as_str(), &got["next"], &got["kind"]),
+        (Some(DOT_PNG), &Value::Null, &json!("image")),
+        "{got}"
+    );
+    // Not by another pane, a made-up id, or a path; and by no agent.
+    let path = dir.join("out/heron.png").display().to_string();
+    for (pane_id, what) in [
+        (&other, id.as_str()),
+        (&lead, "00000000000000000000"),
+        (&lead, path.as_str()),
+        (&lead, "../../config.toml"),
+    ] {
+        let e = s
+            .try_call("pane.media.get", json!({"pane": pane_id, "id": what}))
+            .unwrap_err();
+        assert_eq!(e.code, "not_found", "{what}: {e}");
+    }
+    for method in ["pane.media.get", "pane.media.attach"] {
+        assert_eq!(
+            s.call_as_pane(&lead, method, json!({"pane": lead, "id": id}))
+                .unwrap_err()
+                .code,
+            "denied",
+            "{method}"
+        );
+    }
+    // "Attach to my next message": a file of the message, at the station.
+    let chip = s.call("pane.media.attach", json!({"pane": lead, "id": id}));
+    assert_eq!(
+        (&chip["name"], &chip["image"], chip["size"].as_u64()),
+        (&json!("heron.png"), &json!(true), Some(png.len() as u64)),
+        "{chip}"
+    );
+    s.call(
+        "pane.paste",
+        json!({"pane": lead, "text": "now at night", "enter": true, "files": [chip["id"]]}),
+    );
+    wait_for("the message with the picture", 10, || {
+        let typed = s.text(&lead).replace('\n', "");
+        (typed.contains("[fake] got: now at night Attached file: ") && typed.contains("-heron.png"))
+            .then_some(())
+    });
+    // The agent's file is where it was; gone later, it is said to be gone.
+    assert!(dir.join("out/heron.png").exists());
+    std::fs::remove_file(dir.join("out/heron.png")).unwrap();
+    let gone = s
+        .try_call("pane.media.get", json!({"pane": lead, "id": id}))
+        .unwrap_err();
+    assert!(
+        gone.code == "not_found" && gone.message.contains("not there any more"),
+        "{gone}"
+    );
+}
+
 /// OpenCode's database in a station's throwaway home, with the two tables
 /// of OpenCode 2.3.0 that are read (their columns as its own schema has
 /// them, the ones not read left out where it allows).
@@ -3714,6 +3860,108 @@ mod in_a_browser {
         wide.js(&give("drop", "plan.pdf", "application/pdf", "JVBERi0="));
         wide.wait("the chip on a computer", "(c => c && c.querySelector('.att-kind').innerText === 'PDF')(document.querySelector('.chat-pane .att-chip.done'))");
         shoot(&wide, "attach-desktop");
+    }
+
+    /// The owner, 17 Nov 2026: "Can I paste or add an image in ChatGPT or
+    /// Gemini and have it make a image or video for me, would that work in
+    /// out chat?"
+    ///
+    /// At a phone's size, with a real picture and a real short video the
+    /// agent "made" (drawn and recorded by the browser, written where the
+    /// agent's reply says): the picture is drawn under the reply, a tap
+    /// shows it large with Save, Copy path and "Attach to my next
+    /// message"; the video loads on a tap and can be played; attached, the
+    /// picture is a chip without being sent up, and Send gives the program
+    /// its path; the same after a reload; and on a computer.
+    #[test]
+    #[ignore = "merge tier: a browser"]
+    fn what_an_agent_made_is_shown_played_and_sent_back() {
+        use base64::Engine;
+        let s = Station::start("alpha");
+        let dir = folder(&s, "mere");
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        let reply = format!("Here is the watercolour.\n\nPath: {}\nTool: image_gen.imagegen\n\nAnd the tide as a clip: `out/tide.webm`", dir.join("out/heron.png").display());
+        let lead = pane(
+            &s,
+            "fake",
+            "lead",
+            &dir,
+            json!({"steps": [{"prompt": "x"}, {"turn_end": "ok"}], "on_input": [says(&reply), {"turn_end": "ok"}]}),
+        );
+        s.wait_state(&lead, "done");
+        let page = Page::open(&s, 390, 844);
+        page.phone_screen();
+        page.goto(&format!("#/s/alpha/p/{lead}"));
+        page.wait(
+            "the chat",
+            "!!document.querySelector('.phone-chat .chat-box')",
+        );
+        // A picture that looks like one, and a second of real video.
+        page.js(r#"(() => { const c = document.createElement('canvas'); c.width = 640; c.height = 400; const g = c.getContext('2d');
+            const sky = g.createLinearGradient(0, 0, 0, 400); sky.addColorStop(0, '#f7b267'); sky.addColorStop(.55, '#f4845f'); sky.addColorStop(1, '#2d6a8f'); g.fillStyle = sky; g.fillRect(0, 0, 640, 400);
+            g.fillStyle = 'rgba(255,255,255,.85)'; g.beginPath(); g.arc(470, 150, 46, 0, 7); g.fill(); g.fillStyle = '#1b3a4b'; g.fillRect(0, 300, 640, 100);
+            g.fillStyle = '#fff'; g.font = '600 34px sans-serif'; g.fillText('Heron at dusk', 36, 360);
+            window.__png = c.toDataURL('image/png').split(',')[1];
+            const v = document.createElement('canvas'); v.width = 160; v.height = 100; const d = v.getContext('2d'); let n = 0;
+            const tick = setInterval(() => { d.fillStyle = `hsl(${n * 40}, 70%, 50%)`; d.fillRect(0, 0, 160, 100); d.fillStyle = '#fff'; d.fillRect(10 + n * 8, 40, 30, 20); n += 1; }, 60);
+            const rec = new MediaRecorder(v.captureStream(15), { mimeType: 'video/webm' }); const parts = [];
+            rec.ondataavailable = (e) => parts.push(e.data);
+            rec.onstop = async () => { clearInterval(tick); const b = new Uint8Array(await new Blob(parts).arrayBuffer()); let bin = ''; for (const x of b) bin += String.fromCharCode(x); window.__webm = btoa(bin); };
+            rec.start(); setTimeout(() => rec.stop(), 900); return true; })()"#);
+        let webm = page.wait(
+            "a second of video",
+            "window.__webm && window.__webm.length > 200 && window.__webm",
+        );
+        let png = page.js("window.__png");
+        let bytes = |v: &Value| {
+            base64::engine::general_purpose::STANDARD
+                .decode(v.as_str().unwrap())
+                .unwrap()
+        };
+        std::fs::write(dir.join("out/heron.png"), bytes(&png)).unwrap();
+        std::fs::write(dir.join("out/tide.webm"), bytes(&webm)).unwrap();
+        page.js(&say(
+            ".phone-chat",
+            "make a watercolour of the heron, and a clip of the tide",
+        ));
+        let made = "(m => m && m.querySelector('.made-pic img') && m.querySelector('.made-pic img').naturalWidth === 640 && [m.dataset.made, m.querySelector('.made-pic').getAttribute('aria-label').replace(/, [^:]*:/, ':'), !!m.querySelector('.made-video, .made-playing'), Math.round(m.querySelector('.made-pic').getBoundingClientRect().right) <= 390])(document.querySelector('.chat-text .chat-made'))";
+        let shown = page.wait("the picture under the reply", made);
+        assert_eq!(
+            shown,
+            json!(["2", "Picture heron.png: show it large", true, true])
+        );
+        shoot(&page, "made-reply-phone");
+        // Large, with what can be done with it.
+        page.js("document.querySelector('.chat-made .made-pic').click()");
+        let acts = page.wait("it large", "(d => d && d.querySelector('.made-large').naturalWidth === 640 && [...d.querySelectorAll('.made-acts button')].map(b => b.innerText))(document.querySelector('.dialog .made-view'))");
+        assert_eq!(
+            acts,
+            json!(["Save", "Copy path", "Attach to my next message"])
+        );
+        shoot(&page, "made-viewer-phone");
+        // Back with the next message, from the station.
+        page.js("document.querySelector('.dialog .made-attach').click()");
+        page.wait("a chip, with nothing sent up", "(c => c && c.dataset.name === 'heron.png' && !!c.querySelector('img.att-thumb') && !document.querySelector('.dialog .made-view'))(document.querySelector('.phone-chat .att-chip.done.pic'))");
+        // The video: loads on a tap, and can be played.
+        page.js("document.querySelector('.chat-made .made-video').click()");
+        let plays = page.wait("the video ready to play", "(v => v && v.readyState >= 2 && [v.videoWidth, v.hasAttribute('playsinline'), v.controls])(document.querySelector('.chat-made .made-player'))");
+        assert_eq!(plays, json!([160, true, true]));
+        shoot(&page, "made-video-phone");
+        s.wait_state(&lead, "done");
+        page.js(&say(".phone-chat", "now make it night-time"));
+        wait_for("the picture's path with the message", 10, || {
+            let typed = s.text(&lead).replace('\n', "");
+            (typed.contains("[fake] got: now make it night-time Attached file: ")
+                && typed.contains("-heron.png"))
+            .then_some(())
+        });
+        // After a reload, from the station; and on a computer.
+        page.js("(location.reload(), true)");
+        page.wait("the same after a reload", made);
+        let wide = Page::open(&s, 1300, 900);
+        wide.goto(&format!("#/s/alpha/p/{lead}"));
+        wide.wait("the picture on a computer", "(i => i && i.naturalWidth === 640)(document.querySelector('.chat-pane .chat-made .made-pic img'))");
+        shoot(&wide, "made-reply-desktop");
     }
 
     /// Pictures of each kind of pane's Chat, for a human to lay side by

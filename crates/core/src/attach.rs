@@ -412,6 +412,49 @@ impl Daemon {
         }
     }
 
+    /// A file that is on the station already (a picture the agent made)
+    /// becomes a file for the owner's next message to this pane: copied
+    /// into the pane's folder, whole, as if it had been sent up.
+    pub(crate) fn attach_adopt(
+        &self,
+        pane: &str,
+        from: &std::path::Path,
+        name: &str,
+    ) -> Result<Value> {
+        let dir = self.attach_dir(pane);
+        std::fs::create_dir_all(&dir)?;
+        let size = std::fs::metadata(from)?.len();
+        if size > FILE_MAX {
+            return Err(invalid("a file is at most 64 MB"));
+        }
+        let id = crate::paths::new_id("a").replace(|c: char| !c.is_ascii_alphanumeric(), "");
+        let on_disk = format!("{id}-{}", safe(name));
+        let mut open = std::fs::OpenOptions::new();
+        open.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open.mode(0o600);
+        }
+        let mut to = open.open(dir.join(&on_disk))?;
+        std::io::copy(&mut std::fs::File::open(from)?, &mut to)?;
+        let mut index = self.attach_index(pane);
+        let f = File {
+            id,
+            name: shown(name),
+            on_disk,
+            size,
+            image: is_image(name),
+            ts: now_ms(),
+            whole: true,
+            sent: false,
+        };
+        let out = view(&f);
+        index.files.push(f);
+        self.attach_save(pane, &index);
+        Ok(out)
+    }
+
     /// A closed pane's files go with it.
     pub(crate) fn attach_forget(&self, pane: &str) {
         let _ = std::fs::remove_dir_all(self.attach_dir(pane));

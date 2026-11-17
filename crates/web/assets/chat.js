@@ -804,12 +804,12 @@ class Conv {
         : it.open ? h('button', { type: 'button', class: 'mini', onclick: () => setFace(this.st, this.p, 'terminal') }, 'Earlier lines are in the terminal')
           : h('button', { type: 'button', class: 'mini', onclick: () => { this.open.add(flag); this.whole(it); } }, 'Show all of it');
       return h('div', { class: 'chat-text chat-screen' + (it.open ? ' open' : '') },
-        label ? h('div', { class: 'chat-from' }, label) : null, more, body,
+        label ? h('div', { class: 'chat-from' }, label) : null, more, body, this.madeEl(it),
         done || !it.open ? this.actsEl(copy, body, 'Copied', done) : null);
     }
     if (it.kind === 'text') {
       const body = md(text);
-      return h('div', { class: 'chat-text' + (it.phase === 'commentary' ? ' commentary' : '') }, body, rest,
+      return h('div', { class: 'chat-text' + (it.phase === 'commentary' ? ' commentary' : '') }, body, rest, this.madeEl(it),
         this.actsEl(text, body, 'Copied', done));
     }
     if (it.kind === 'question') {
@@ -1287,6 +1287,130 @@ class Conv {
       h('p', { class: 'muted small list-hint' }, `${name}'s own keys: ${String(k.hint || '')}`));
   }
 
+  // ---- pictures and videos an agent made ----
+
+  // The bytes of a picture or a video the agent's reply named, from the
+  // station that holds it: asked for by the station's own id for it, in
+  // pieces, and kept for the page's life. `said(done, of)`: how far.
+  madeBlob(m, said) {
+    const key = `${this.key}/made/${m.id}`;
+    if (!pictures.has(key)) {
+      pictures.set(key, (async () => {
+        const parts = [];
+        let offset = 0, got = 0;
+        while (offset !== null && offset !== undefined) {
+          const r = await env.api.on(this.st, 'pane.media.get', { pane: this.p.id, id: m.id, offset });
+          const piece = Uint8Array.from(atob(r.data_b64 || ''), c => c.charCodeAt(0));
+          parts.push(piece);
+          got += piece.length;
+          if (said) said(got, r.size || m.size);
+          offset = r.next;
+        }
+        const ext = ((/\.([a-z0-9]+)$/i.exec(m.name || '') || [])[1] || '').toLowerCase();
+        const type = m.kind === 'video' ? (ext === 'webm' ? 'video/webm' : ext === 'mov' ? 'video/quicktime' : 'video/mp4') : 'image/' + ({ jpg: 'jpeg' }[ext] || ext || 'png');
+        return URL.createObjectURL(new Blob(parts, { type }));
+      })().catch((e) => { pictures.delete(key); throw e; }));
+    }
+    return pictures.get(key);
+  }
+
+  // What the agent made, under what it said: pictures as the apps lay
+  // them out (one large with its shape kept, several as a grid), fetched
+  // when they come near; a video as a tile that loads and plays on a tap.
+  // Names are text; what is drawn is bytes the station gave for an id of
+  // its own, never an address or a path from the agent's words.
+  madeEl(it) {
+    const all = Array.isArray(it.media) ? it.media.filter(m => m && typeof m.id === 'string' && (m.kind === 'image' || m.kind === 'video')) : [];
+    if (!all.length) return null;
+    const gone = (el, m) => { el.replaceChildren(h('span', { class: 'made-gone' }, `${m.name}: not on ${this.st} any more`)); el.classList.add('gone'); el.disabled = true; };
+    const one = all.filter(m => m.kind === 'image').length === 1;
+    return h('div', { class: 'chat-made' + (one ? '' : ' many'), dataset: { made: String(all.length) } }, all.map((m) => {
+      const name = String(m.name || 'file'), size = fileSize(Number(m.size) || 0);
+      if (m.kind === 'video') {
+        const tile = h('button', { type: 'button', class: 'made-video', title: `${name} · ${size}`, 'aria-label': `Video ${name}, ${size}: load and play`, dataset: { made: m.id } },
+          h('span', { class: 'made-play', 'aria-hidden': 'true' }, '▶'), h('span', { class: 'att-what' }, h('b', {}, name), h('span', { class: 'muted made-says' }, `Video · ${size} · tap to load`)));
+        tile.onclick = () => {
+          if (tile.dataset.loading) return;
+          tile.dataset.loading = '1';
+          // (Drawn again, as an item is when the station says more of
+          // it, a video that was opened is still open.)
+          (this.madeOpen ||= new Set()).add(m.id);
+          const says = tile.querySelector('.made-says');
+          this.madeBlob(m, (got, of) => { says.textContent = `Loading… ${Math.round((got / Math.max(of, 1)) * 100)}% of ${size}`; }).then((url) => {
+            const v = h('video', { class: 'made-player', controls: true, playsInline: true, preload: 'auto', title: name });
+            v.setAttribute('playsinline', '');
+            v.src = url;
+            const wrap = h('div', { class: 'made-playing', dataset: { made: m.id } }, v, this.madeActs(m, url));
+            tile.replaceWith(wrap);
+          }).catch(() => gone(tile, m));
+        };
+        if (this.madeOpen?.has(m.id)) tile.onclick();
+        return tile;
+      }
+      const img = h('img', { class: 'att-thumb', alt: name });
+      const btn = h('button', { type: 'button', class: 'att-pic made-pic', title: `${name} · ${size}`, 'aria-label': `Picture ${name}, ${size}: show it large`, dataset: { made: m.id } }, img);
+      // (Its shape is known before its bytes, where the file says it.)
+      if (one && m.w > 0 && m.h > 0) btn.style.aspectRatio = `${m.w} / ${m.h}`;
+      else if (one) img.addEventListener('load', () => { if (img.naturalWidth && img.naturalHeight) btn.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`; });
+      let url = null;
+      const load = () => { if (btn.dataset.asked) return; btn.dataset.asked = '1'; this.madeBlob(m).then((u) => { url = u; img.src = u; }).catch(() => gone(btn, m)); };
+      btn.onclick = () => { if (url) this.madeView(m, url); };
+      // Fetched when it comes near what is in sight.
+      if (typeof IntersectionObserver === 'function') {
+        const io = new IntersectionObserver((seen) => { if (seen.some(e => e.isIntersecting)) { io.disconnect(); load(); } }, { root: this.log, rootMargin: '600px' });
+        io.observe(btn);
+        // (A log drawn before it is on the page is not watched: asked for soon.)
+        setTimeout(() => { if (btn.isConnected) load(); }, 1500);
+      } else load();
+      return btn;
+    }), it.media_more ? h('div', { class: 'muted small' }, `and ${plural(Number(it.media_more) || 0, 'more file')} named in this reply`) : null);
+  }
+
+  // What can be done with one: keep it, copy where it is, or send it back
+  // with the next message ("now make it night-time").
+  madeActs(m, url) {
+    const name = String(m.name || 'file');
+    const save = async () => {
+      // A phone's share sheet where it takes a file; else a download.
+      try {
+        const file = new File([await (await fetch(url)).blob()], name);
+        if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; }
+      } catch (e) { if (e && e.name === 'AbortError') return; }
+      const a = h('a', { href: url, download: name, class: 'copy-buffer' });
+      document.getElementById('overlays').append(a);
+      a.click();
+      a.remove();
+    };
+    return h('div', { class: 'row made-acts' },
+      h('button', { type: 'button', class: 'made-save', onclick: save }, 'Save'),
+      typeof m.path === 'string' && m.path ? h('button', { type: 'button', class: 'made-path', onclick: () => copyText(m.path, 'Copied where it is') }, 'Copy path') : null,
+      h('button', { type: 'button', class: 'primary made-attach', title: 'It goes with your next message to this agent, from the station: nothing is sent up again.', onclick: () => this.attachMade(m, url) }, 'Attach to my next message'));
+  }
+
+  // A picture, large: a tap makes it larger still, to look closely.
+  madeView(m, url) {
+    const big = h('img', { class: 'att-large made-large', alt: String(m.name || ''), src: url, title: 'Tap to look closer' });
+    big.onclick = () => big.classList.toggle('close');
+    const box = dialog(String(m.name || 'Picture'), () => h('div', { class: 'att-view made-view' }, h('div', { class: 'made-zoom' }, big),
+      h('p', { class: 'muted small' }, `${fileSize(Number(m.size) || 0)}${m.w && m.h ? ` · ${m.w} × ${m.h}` : ''} · where the agent saved it on ${this.st}`),
+      this.madeActs(m, url)));
+    box.body.parentNode.classList.add('sheet', 'chat-sheet');
+    this.madeBox = box;
+  }
+
+  // "Attach to my next message": the station makes it a file of the
+  // message itself (it has it already), and it is a chip here.
+  attachMade(m, url) {
+    if (this.files.length >= FILES_MAX) return toast(`At most ${FILES_MAX} files go with one message.`, 'error');
+    env.api.on(this.st, 'pane.media.attach', { pane: this.p.id, id: m.id }).then((f) => {
+      this.files.push({ file: null, name: f.name, size: f.size, image: !!f.image, url: f.image ? url : null, keepUrl: true, state: 'done', sent: f.size, id: f.id });
+      this.drawFiles();
+      if (this.madeBox) { this.madeBox.close(); this.madeBox = null; }
+      toast(`${f.name} goes with your next message`);
+      this.box.focus();
+    }).catch((e) => toast(`It could not be attached: ${e.message}`, 'error'));
+  }
+
   // ---- a photo or a document with a message ----
 
   // A picture that was attached, from the station that holds it: asked for
@@ -1397,7 +1521,7 @@ class Conv {
     this.files.splice(this.files.indexOf(a), 1);
     a.run = (a.run || 0) + 1;
     if (a.id) env.api.on(this.st, 'pane.attach.remove', { pane: this.p.id, id: a.id }).catch(() => {});
-    if (a.url) URL.revokeObjectURL(a.url);
+    if (a.url && !a.keepUrl) URL.revokeObjectURL(a.url);
     this.drawFiles();
   }
 
@@ -1784,7 +1908,7 @@ class Conv {
     let failed = null;
     try {
       await sendAct(env.api, this.st, 'pane.paste', { pane: this.p.id, text, enter: true, ...(files.length ? { files: files.map(a => a.id) } : {}) });
-      for (const a of files) if (a.url) URL.revokeObjectURL(a.url);
+      for (const a of files) if (a.url && !a.keepUrl) URL.revokeObjectURL(a.url);
       this.files.length = 0;
       this.drawFiles();
       // A command of the program's own: what it draws for it is in no

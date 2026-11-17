@@ -1068,6 +1068,23 @@ impl Daemon {
             "pane.model" => self.pane_model(s(&params, "pane")?, &params, by).await?,
             // A photo or a document for a message (attach.rs): kept at
             // the pane's station, read back by its id. The owner's only.
+            // A picture or a video an agent's reply named (made.rs): read
+            // by the station's own id for it, or made a file for the
+            // owner's next message. The owner's only.
+            "pane.media.get" | "pane.media.attach" => {
+                let pane = self.pane(s(&params, "pane")?)?.id.clone();
+                let d = self.clone();
+                let get = method == "pane.media.get";
+                tokio::task::spawn_blocking(move || match get {
+                    true => d.made_get(&pane, &params),
+                    false => d.made_attach(
+                        &pane,
+                        params.get("id").and_then(|i| i.as_str()).unwrap_or(""),
+                    ),
+                })
+                .await
+                .map_err(|e| invalid(e.to_string()))??
+            }
             "pane.attach.put" | "pane.attach.get" | "pane.attach.remove" => {
                 let pane = self.pane(s(&params, "pane")?)?.id.clone();
                 let d = self.clone();
@@ -2803,6 +2820,10 @@ mod tests {
             "pane.attach.put",
             "pane.attach.get",
             "pane.attach.remove",
+            // A picture or a video an agent made (17 Nov 2026): shown to
+            // the owner alone, whatever the agent's text names.
+            "pane.media.get",
+            "pane.media.attach",
         ] {
             for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
                 assert!(!allowed(who, m), "{who:?} {m}");

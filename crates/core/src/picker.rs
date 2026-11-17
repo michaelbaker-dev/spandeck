@@ -142,9 +142,8 @@ impl Daemon {
                 .get(&self.picker_key(&p.id))
                 .copied()
                 .unwrap_or(0);
-            let settled = now_ms().saturating_sub(p.term.last_output_ms()) >= 1_500
-                && (agent != spandeck_agents::AgentKind::Antigravity
-                    || now_ms().saturating_sub(sent) >= 20_000);
+            let settled = now_ms().saturating_sub(p.term.last_output_ms()) >= 1_500;
+            let _ = sent;
             let other = match state {
                 AgentState::Working => still && known,
                 _ => settled && (known || showing(agent, &lines)),

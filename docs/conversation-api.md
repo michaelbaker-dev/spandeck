@@ -714,6 +714,27 @@ pane.paste {pane, text, enter: true, files: [id, …]}     the message, with its
   `pane.attach.get`, piece by piece (`next` is the next `offset`, or `null`).
 - Kept under the station's state for the pane (200 files), removed when the pane is closed.
 
+## What an agent made: `media`, `pane.media.get`, `pane.media.attach`
+
+17 Nov 2026; `crates/core/src/made.rs`. A `text` item (and a `screen` item, and a `tool`
+item by its `summary`) that names a picture or a video file on the pane's station has
+
+```json
+"media": [{"id": "b2158dfd33ca282b79b0", "name": "heron.png", "size": 3312640, "kind": "image",
+           "w": 1672, "h": 941, "path": "/home/ada/.codex/generated_images/5b1e/exec-77aa.png"}],
+"media_more": 2
+```
+
+- `kind` is `image` or `video`, by the file's first bytes. `w`, `h`: a PNG's size. `path`:
+  where it is, to copy as text; never to be sent back as a way to read it. `media_more`:
+  how many more the item names than the eight shown.
+- `pane.media.get {pane, id, offset?}` → `{id, name, size, kind, data_b64, next}`: pieces of
+  256 KB, as `pane.attach.get`. `not_found`: no such id for this pane, or "that file is not
+  there any more".
+- `pane.media.attach {pane, id}` → `{id, name, size, image}`: the file is made one of the
+  owner's next message to this pane, at the station; use the `id` in `pane.paste`'s `files`.
+- Both are the owner's only. The item's own `text` is unchanged.
+
 ## `pane.conversation.detail`
 
 ```

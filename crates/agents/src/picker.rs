@@ -514,14 +514,24 @@ pub fn showing(agent: crate::AgentKind, lines: &[String]) -> bool {
                         !left.is_empty()
                             && left.chars().count() <= 32
                             && !right.is_empty()
-                            && right.chars().count() <= 40
+                            && right.chars().count() <= 72
                             && !right.contains("     ")
                     })
                 }
             };
             match boxed {
                 Some(i) => lines[i + 2..=end].iter().enumerate().any(|(n, l)| {
-                    !clean(l).is_empty() && !(n == 0 && own_row(l)) && !status_row(l)
+                    // (Found with the real 1.5.10: after its turn, with a
+                    // sub-agent still listed, a row `● Agent(…)` and a rule
+                    // stand between its box and its status row. Its own.)
+                    !clean(l).is_empty()
+                        && !own_row(l)
+                        && !status_row(l)
+                        && !l.trim_start().starts_with("● Agent(")
+                        && {
+                            let _ = n;
+                            true
+                        }
                 }),
                 None => false,
             }
@@ -1158,6 +1168,13 @@ mod tests {
                 assert!(waits, "{agent:?}\n{screen}");
             }
         }
+        // Found with the real Antigravity 1.5.10 after a turn that used a
+        // sub-agent: its list of sub-agents and a rule stand between its
+        // box and its status row, and the pane read as showing something.
+        // (The words are made up.)
+        let listed = "────────────────────────────────────────────────────────────\n>\n────────────────────────────────────────────────────────────\n  ● Agent(image-generator: a watercolour of the heron) · Gemini 4 Hydrogen                  · 11s\n────────────────────────────────────────────────────────────\n? for shortcuts                                                        Gemini 4 Carbon · medium · 1 subagent(s)";
+        assert!(!showing(AgentKind::Antigravity, &lines(listed)), "{listed}");
+        assert_eq!(read(&lines(listed)), None);
         // Its own lists and screens are not its wait.
         for (agent, screen) in [
             (AgentKind::Claude, real::MODEL),

@@ -295,6 +295,7 @@ impl Daemon {
             k: cleared_key(pane),
         });
         self.attach_forget(pane);
+        self.made_forget(pane);
     }
 
     /// The notes of a pane's conversation the owner cleared: ids of items
@@ -998,6 +999,7 @@ impl Daemon {
         out["reset"] = json!(reset);
         out["live"] = self.conversation_live(&p, Some(&session));
         self.attach_decorate(&p.id, &mut out);
+        self.made_decorate(&p.id, &meta.cwd, &mut out);
         Ok(out)
     }
 

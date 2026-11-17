@@ -522,6 +522,7 @@ impl Daemon {
         out["older_dropped"] = json!(dropped);
         out["live"] = self.conversation_live(p, None);
         self.attach_decorate(&p.id, &mut out);
+        self.made_decorate(&p.id, &meta.cwd, &mut out);
         Ok(out)
     }
 
