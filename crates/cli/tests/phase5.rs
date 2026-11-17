@@ -2190,7 +2190,19 @@ fn a_terminals_history_on_a_phone_is_scrolled_by_the_phone() {
 
     // The pane prints while earlier output is being read: nothing moves, and
     // a button says so.
-    let reading = phone.js(&format!("(t => [t.body.scrollTop, {TOP_ROW}(t)])({T})"));
+    // (Where it is being read is taken once the view has stopped: on a slow
+    // CI runner the phone's own scrolling was still coming to rest after the
+    // finger lifted, a line further on, and that was read as the new output
+    // moving it. 17 Nov 2026.)
+    let mut reading = phone.js(&format!("(t => [t.body.scrollTop, {TOP_ROW}(t)])({T})"));
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(250));
+        let now = phone.js(&format!("(t => [t.body.scrollTop, {TOP_ROW}(t)])({T})"));
+        if now == reading {
+            break;
+        }
+        reading = now;
+    }
     paste(&s, &pane, "seq 2000 2100");
     s.wait_text(&pane, "2100");
     phone.wait(
