@@ -674,6 +674,7 @@ impl Daemon {
             quit: tokio::sync::Notify::new(),
         }));
         daemon.prices_load();
+        daemon.agents_jobs_load();
         let _ = std::fs::write(daemon.paths.pid_file(), std::process::id().to_string());
 
         let adopted = match opts.handoff {
@@ -2897,6 +2898,10 @@ impl Daemon {
         // The folder-trust tick, the one tap and the list: a deck offers
         // them only for a station that says so.
         caps.push(crate::foldertrust::CAP);
+        // An update or install of an agent program is a job this station
+        // keeps (`agents.status` rows carry `job` and `latest`), and
+        // `agents.check` asks whether each is the newest.
+        caps.push(crate::agents::CAP);
         // The tick for spandeck's own hooks, its switch and the one tap.
         caps.push(crate::hookstrust::CAP);
         // A question and a plan are held for the owner, and

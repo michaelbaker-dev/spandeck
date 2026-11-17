@@ -534,6 +534,37 @@ code.cmd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; backgrou
 .key-steps h3 { margin: 12px 0 2px; font-size: calc(13px * var(--ui-scale)); }
 .vault-prompt .grow { min-width: 0; } .vault-prompt .muted { overflow-wrap: anywhere; }
 .vault-checks h3 { margin: 14px 0 4px; font-size: calc(13px * var(--ui-scale)); } .vault-checks td { vertical-align: top; overflow-wrap: anywhere; } .vault-checks td:nth-child(2) { white-space: nowrap; }
+/* Agent programs: every card is the same three lines in the same order (the
+   name with its version and marks; how it is installed; the actions, at the
+   right), with what a job is doing or how it ended between the first and the
+   second. Nothing is placed by how much room a card happens to have. */
+.ap-fleet { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.ap-fleet-words { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; } .ap-fleet-actions { display: flex; gap: 8px; margin-left: auto; }
+.ap-head { display: flex; align-items: center; gap: 8px; position: sticky; top: -12px; z-index: 1; background: var(--panel); padding: 12px 0 6px; }
+.ap-head h3 { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ap-batch:empty, .ap-status:empty { display: none; } .ap-batch { margin-bottom: 6px; }
+.agent-program { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.ap-line1 { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; min-width: 0; } .ap-line1 > * { min-width: 0; overflow-wrap: anywhere; } .ap-line1 > svg, .ap-line1 > .pane-icon { flex: none; }
+.ap-latest { color: var(--green); } .ap-available { color: var(--amber); font-weight: 600; } .ap-unknown { color: var(--muted); }
+.ap-status { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ap-job { overflow-wrap: anywhere; min-width: 0; } .ap-job.good { color: var(--green); } .ap-job.failed { color: var(--red); } .ap-job.unsure { color: var(--amber); }
+.ap-spin { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--blue); animation: ap-spin .9s linear infinite; vertical-align: -1px; }
+@keyframes ap-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .ap-spin { animation: pulse 1.6s ease-in-out infinite; } }
+.ap-line { color: var(--muted); font-size: calc(12px * var(--ui-scale)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ap-output summary, .ap-itself summary { cursor: pointer; color: var(--muted); } .ap-itself { margin-top: 14px; } .ap-itself p { margin: 6px 0; overflow-wrap: anywhere; }
+.ap-output pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--well); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin: 4px 0 0; font-size: calc(12px * var(--ui-scale)); }
+.ap-line2 { display: flex; align-items: center; gap: 8px; min-width: 0; } .ap-label { flex: none; font-size: calc(12px * var(--ui-scale)); }
+.ap-line2 .ap-way { flex: 0 1 auto; width: auto; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.ap-line3 { display: flex; justify-content: flex-end; gap: 8px; }
+button.quiet { background: none; color: var(--muted); }
+/* Not installed: the way and the one action share a row. */
+.agent-program[data-health="missing"] { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.agent-program[data-health="missing"] > .ap-line1, .agent-program[data-health="missing"] > .ap-status { grid-column: 1 / -1; }
+@media (max-width: 760px) {
+  .agent-programs button, .agent-programs select { min-height: 44px; } .agent-programs select { font-size: 16px; } .ap-line3 button { min-width: 96px; justify-content: center; }
+  .ap-output summary, .ap-itself summary { min-height: 44px; display: flex; align-items: center; }
+}
 .agent-problem { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 3px; font-size: calc(12px * var(--ui-scale)); }
 
 /* Add a machine: the last tile of the fleet, and its dialog. */

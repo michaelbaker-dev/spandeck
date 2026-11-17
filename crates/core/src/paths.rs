@@ -184,6 +184,74 @@ pub struct AgentLauncher {
     pub update_cmd: Option<Vec<String>>,
     /// The command that prints its version, instead of `<program> --version`.
     pub version_cmd: Option<Vec<String>>,
+    /// Where the newest published version is read, instead of the address
+    /// in the catalogue (for a mirror, and for tests). Read the same way.
+    pub latest_url: Option<String>,
+    /// A command that prints the newest published version, instead of
+    /// anything in the catalogue.
+    pub latest_cmd: Option<Vec<String>>,
+}
+
+/// `[agents]`: a table per agent (`[agents.claude]`), and beside them the
+/// one switch `check_latest`.
+#[derive(Debug, Clone, Default)]
+pub struct Agents {
+    /// `check_latest = false`: this station never asks a release host
+    /// which version of an agent program is the newest.
+    pub check_latest: Option<bool>,
+    launchers: BTreeMap<String, AgentLauncher>,
+}
+
+impl std::ops::Deref for Agents {
+    type Target = BTreeMap<String, AgentLauncher>;
+    fn deref(&self) -> &Self::Target {
+        &self.launchers
+    }
+}
+
+impl<'a> IntoIterator for &'a Agents {
+    type Item = (&'a String, &'a AgentLauncher);
+    type IntoIter = std::collections::btree_map::Iter<'a, String, AgentLauncher>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.launchers.iter()
+    }
+}
+
+impl<'de> Deserialize<'de> for Agents {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let raw: BTreeMap<String, toml::Value> = Deserialize::deserialize(d)?;
+        let mut agents = Agents::default();
+        for (name, value) in raw {
+            if name == "check_latest" {
+                agents.check_latest =
+                    Some(value.as_bool().ok_or_else(|| {
+                        D::Error::custom("[agents] check_latest is true or false")
+                    })?);
+            } else {
+                let launcher = value
+                    .try_into()
+                    .map_err(|e| D::Error::custom(format!("[agents.{name}]: {e}")))?;
+                agents.launchers.insert(name, launcher);
+            }
+        }
+        Ok(agents)
+    }
+}
+
+impl Serialize for Agents {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = s.serialize_map(None)?;
+        // A plain value before the tables, as TOML wants.
+        if let Some(on) = self.check_latest {
+            map.serialize_entry("check_latest", &on)?;
+        }
+        for (name, launcher) in &self.launchers {
+            map.serialize_entry(name, launcher)?;
+        }
+        map.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -220,7 +288,7 @@ pub struct Config {
     /// How long a permission request waits for a remote answer.
     pub approval_timeout_secs: u64,
     pub notify: NotifyConfig,
-    pub agents: BTreeMap<String, AgentLauncher>,
+    pub agents: Agents,
     /// Find other stations through the local Tailscale client.
     pub discovery: bool,
     /// Extra peers as `host:port` (stations discovery cannot see, and tests).
@@ -334,7 +402,7 @@ impl Default for Config {
             at_keyboard_secs: 120,
             approval_timeout_secs: 300,
             notify: NotifyConfig::default(),
-            agents: BTreeMap::new(),
+            agents: Agents::default(),
             discovery: true,
             peers: vec![],
             stuck_same_failure: 3,

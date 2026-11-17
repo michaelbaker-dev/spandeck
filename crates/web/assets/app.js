@@ -1196,77 +1196,321 @@ function commandDialog(st, pane) {
 
 // MCP servers, skills and model defaults: set once, applied on every station.
 // Which agent programs each station has, whether each one starts, at what
-// version, and installing or updating them. Everything a program or a station
-// said (an error line, a path, a command) is put in as text.
-async function agentsPanel() {
+// version, whether that is the newest published, and installing or updating
+// them. Everything a program or a station said (an error line, a path, a
+// command, what an updater printed) is put in as text.
+//
+// The owner, 17 Nov 2026, from an iPhone: "I picked update all on
+// m4-MacBook, no feedback, don't know if it's doing it, if it worked, don't
+// know if the version listed is the latest or not"; and "I can't press
+// update twice in a row, it should grey out until the update process is
+// complete". So (DECISIONS.md, "Agent programs: every action says what it
+// did"):
+// - An update or install is a job its station keeps (`job` in each row of
+//   `agents.status`). What a row shows, and whether its buttons are greyed,
+//   comes from that record, not from this page's memory: it is the same on
+//   another device, and after this dialog is closed and opened again.
+// - Each station is asked by itself and drawn when it answers: a slow one
+//   holds up only its own rows.
+// - Every card is the same three lines in the same order, at any width.
+const AP_RECENT_MS = 10 * 60 * 1000;
+const AP_RULE = 'After an update that changes the version, an idle agent of this program restarts and goes back to its conversation; one in the middle of a turn, or waiting for you, restarts when the turn is over. A reinstall does not restart it.';
+// What a job is doing, or how it ended. `row` is the station's row.
+function apJobWords(r) {
+  const j = r.job;
+  if (!j) return null;
+  const doing = j.action === 'install' ? 'Installing' : 'Updating';
+  if (j.state === 'running') return j.step === 'running' && j.command ? `${doing}… running \`${j.command}\`` : `${doing}… reading its version first`;
+  const from = j.from || '?', to = j.to || '?';
+  let s;
+  if (j.outcome === 'updated') s = `Updated ${from} → ${to}`;
+  else if (j.outcome === 'latest') s = r.latest?.state === 'available' && r.latest.version ? `Still ${to}: the updater finished without installing ${r.latest.version}` : `Already the latest: ${to}`;
+  else if (j.outcome === 'installed') s = `${j.from ? 'Reinstalled' : 'Installed'} ${j.to || ''}`.trim();
+  else if (j.outcome === 'failed') s = `Could not ${j.action === 'install' ? 'install' : 'update'}: ${j.reason || 'it did not say why'}`;
+  else if (j.outcome === 'interrupted') s = `Not known whether it finished: ${j.reason || ''}`;
+  else return null;
+  const now = (j.restarted || []).length, later = (j.restart_when_idle || []).length;
+  if (now) s += ` · ${now} restarted into ${now === 1 ? 'its conversation' : 'their conversations'}`;
+  if (later) s += ` · ${later} ${later === 1 ? 'restarts' : 'restart'} when the turn ends`;
+  return s;
+}
+const apPlural = (n, one, many) => `${n} ${n === 1 ? one : many || one + 's'}`;
+
+function agentsPanel() {
   const stations = S.fleet.stations.filter(s => s.state === 'online').map(s => s.station);
-  const load = () => Promise.all(stations.map(st => api.on(st, 'agents.status').then(rows => ({ st, rows })).catch(e => ({ st, rows: [], problem: e.message }))));
-  let all = await load();
-  let open = true;
-  const picked = new Map();   // "station agent" -> the way to install the owner picked here
-  dialog('Agent programs', (close) => {
-    const body = h('div', {});
-    // A station that does not say (an older spandeck) only knows there or not.
-    const healthOf = (r) => r.health || (r.installed ? 'ok' : 'missing');
-    const update = (st, agent) => rpc(st, 'agents.update', agent ? { agent } : {}).then((r) => {
-      toast(r.started?.length ? `${st}: updating ${r.started.map(x => x.name).join(', ')}` : `${st}: nothing to update`);
-      setTimeout(settle, 1500);
-    });
-    const wayOf = (st, r) => {
-      const ways = r.methods || [];
-      return ways.find(m => m.id === picked.get(st + ' ' + r.agent) && m.available) || ways.find(m => m.id === r.method) || ways.find(m => m.available);
+  const openedAt = Date.now();
+  const view = new Map(stations.map(st => [st, { rows: null, problem: null }]));   // what each station last said
+  const picked = new Map();    // "station agent" -> the way to install the owner picked here
+  const asked = new Map();     // "station agent" -> what this page is asking of the station, until it answers
+  const errs = new Map();      // "station agent" (or "station") -> a request that could not be made, in the station's words
+  const shown = new Set();     // "station agent": "Show what it said" is open
+  const timers = new Map();
+  let open = true, drawn = '', draw = () => {};
+  const key = (st, agent) => st + ' ' + agent;
+  const knows = (st) => hasCap(st, 'agent_jobs');
+  // A station that does not say (an older spandeck) only knows there or not.
+  const healthOf = (r) => r.health || (r.installed ? 'ok' : 'missing');
+  const running = (st, r) => r.job ? r.job.state === 'running' : !!(r.updating || r.installing);
+  const busy = (st, r) => running(st, r) || asked.has(key(st, r.agent));
+  const updatable = (r) => ['ok', 'no_answer'].includes(healthOf(r)) && r.can_update !== false;
+  const rowsOf = (st) => view.get(st)?.rows || [];
+
+  // One look at a station at a time; a look asked for meanwhile is made
+  // straight after, and whoever asked waits for that one.
+  const looking = new Map();
+  const look = (st) => {
+    if (looking.has(st)) { looking.get(st).again = true; return looking.get(st).done; }
+    const mine = { again: false };
+    mine.done = (async () => {
+      clearTimeout(timers.get(st));
+      const v = view.get(st);
+      do {
+        mine.again = false;
+        try { v.rows = await api.on(st, 'agents.status', {}, { within: 9000 }); v.problem = null; } catch (e) { v.problem = e.message; }
+      } while (mine.again && open);
+      looking.delete(st);
+      if (!open) return;
+      draw();
+      // Look again soon while something is going on there; now and then
+      // otherwise, since another device may start something.
+      const live = v.problem || rowsOf(st).some(r => running(st, r) || r.reading || r.latest?.checking);
+      timers.set(st, setTimeout(() => look(st), live ? 1000 : 6000));
+    })();
+    looking.set(st, mine);
+    return mine.done;
+  };
+  const check = (st, again) => {
+    if (!knows(st)) return;
+    api.on(st, 'agents.check', again ? { again: true } : {}).then(() => look(st)).catch(() => {});
+  };
+
+  // Ask a station to start something, for some of its rows. From the press
+  // until the station has answered, those rows say so and their buttons
+  // are greyed; after that the station's own record does both.
+  const ask = async (st, agents, words, method, params) => {
+    for (const a of agents) { asked.set(key(st, a), words); errs.delete(key(st, a)); }
+    errs.delete(st);
+    draw();
+    const jobOf = (a) => rowsOf(st).find(x => x.agent === a)?.job?.id;
+    const before = new Map(agents.map(a => [a, jobOf(a)]));
+    const where = agents.length === 1 ? key(st, agents[0]) : st;
+    let failed = null, unsure = false;
+    try {
+      const r = await api.on(st, method, params);
+      // Not started, and no job of its own to show: the station's reason.
+      for (const s of r.skipped || []) if (!s.job && (agents.length === 1 || s.why !== 'not installed on this station')) errs.set(key(st, s.agent), `Not started: ${s.why}`);
+    } catch (e) {
+      // No answer in time is not "no": the station may have started. Its
+      // own record says, and is read next.
+      if (/did not answer|could not confirm/.test(e.message)) unsure = true; else failed = `Could not start: ${e.message}`;
+    }
+    await look(st);
+    for (const a of agents) asked.delete(key(st, a));
+    const began = agents.some(a => { const r = rowsOf(st).find(x => x.agent === a); return r && (running(st, r) || jobOf(a) !== before.get(a)); });
+    if (failed) errs.set(where, failed);
+    else if (unsure && !began) errs.set(where, `${st} did not confirm in time, and nothing is running there now: it may not have started. Look at the rows, then try again.`);
+    draw(true);
+  };
+  const update = (st, agent) => {
+    const rows = rowsOf(st).filter(r => (agent ? r.agent === agent : updatable(r)) && !busy(st, r));
+    if (!rows.length) return;
+    return ask(st, rows.map(r => r.agent), `Asking ${st} to update it…`, 'agents.update', agent ? { agent } : {});
+  };
+  const wayOf = (st, r) => {
+    const ways = r.methods || [];
+    return ways.find(m => m.id === picked.get(key(st, r.agent)) && m.available) || ways.find(m => m.id === r.method) || ways.find(m => m.available);
+  };
+  const install = (st, r) => {
+    const way = wayOf(st, r), again = healthOf(r) !== 'missing';
+    if (!way || busy(st, r)) return;
+    dialog(`${again ? 'Reinstall' : 'Install'} ${r.name} on ${st}?`, (shut) => h('div', {},
+      h('p', {}, `This runs on ${st}, and is remembered as the way ${r.name} is installed there:`),
+      h('div', { class: 'note mono' }, way.command),
+      h('p', { class: 'muted' }, 'Whether it worked is judged by the program answering afterwards. Agents that are running are not restarted.'),
+      h('div', { class: 'row end' }, h('button', { onclick: shut }, 'Cancel'),
+        h('button', { class: 'primary', onclick: () => { shut(); ask(st, [r.agent], `Asking ${st} to ${again ? 'reinstall' : 'install'} it…`, 'agents.install', { agent: r.agent, method: way.id }); } }, again ? 'Reinstall' : 'Install'))));
+  };
+
+  // ---- one card: three lines, the same in every card ----
+  const version = (r) => {
+    const health = healthOf(r);
+    if (health === 'broken') return h('span', { class: 'chip bad' }, 'Installed but not working');
+    if (health === 'no_answer') return h('span', { class: 'warn-text', title: 'It was asked its version and did not answer in time. It was left running, not stopped. This is not known to be a fault.' }, r.reading ? 'reading its version…' : 'did not answer when asked its version');
+    if (health === 'missing') return h('span', { class: 'muted' }, 'not installed');
+    return h('span', {}, r.version || 'version not read');
+  };
+  const latestMark = (st, r) => {
+    const l = r.latest;
+    if (!l || healthOf(r) === 'missing') return null;
+    const when = l.checked_ms ? `Checked ${ago(l.checked_ms)} ago${l.asked ? ', asking ' + l.asked : ''}.` : '';
+    if (l.state === 'latest') return h('span', { class: 'ap-mark ap-latest', title: `${when} ${l.version && l.version !== r.version ? `The newest published is ${l.version}.` : 'Nothing newer is published.'}` }, '✓ latest');
+    if (l.state === 'available') return h('span', { class: 'ap-mark ap-available', title: when }, `${l.version} available`);
+    if (l.checking || l.state === 'not_checked') return h('span', { class: 'ap-mark muted' }, l.checking ? 'checking for a newer one…' : 'not checked yet');
+    if (l.state === 'off') return h('span', { class: 'ap-mark muted', title: `[agents] check_latest = false in ${st}'s config.toml: it asks no release host.` }, 'checks are off');
+    return h('span', { class: 'ap-mark ap-unknown', title: when }, `could not check: ${l.why || 'no reason given'}`);
+  };
+  const lastMark = (st, r, quiet) => {
+    if (!quiet) return null;
+    const j = r.job;
+    if (j && j.state !== 'running' && j.ended_ms) return h('span', { class: 'ap-mark muted', title: apJobWords(r) || '' }, `${j.outcome === 'installed' ? 'installed' : j.outcome === 'updated' ? 'updated' : 'checked by its updater'} ${ago(j.ended_ms)} ago`);
+    // A station from before: what its log says.
+    if (!j && r.last_update) return h('span', { class: r.last_update.ok ? 'ap-mark muted' : 'ap-mark warn-text', title: r.last_update.message || '' }, r.last_update.ok ? `updated ${ago(r.last_update.at_ms)} ago` : 'the last update failed');
+    return null;
+  };
+  const status = (st, r) => {
+    const k = key(st, r.agent), j = r.job, out = [];
+    const health = healthOf(r);
+    if (health === 'broken') {
+      const way = wayOf(st, r);
+      out.push(h('div', { class: 'agent-problem' },
+        h('div', { class: 'muted' }, 'Found at ', h('span', { class: 'mono' }, r.path || ''), '. When started it said:'),
+        h('div', { class: 'mono warn-text' }, r.problem || 'nothing'),
+        way ? h('div', { class: 'muted' }, 'Reinstall runs ', h('span', { class: 'mono' }, way.command)) : h('div', { class: 'muted' }, 'spandeck knows no install command for it.')));
+    }
+    if (asked.has(k)) out.push(h('div', { class: 'ap-job running' }, h('span', { class: 'ap-spin' }), h('span', {}, asked.get(k))));
+    else if (running(st, r)) {
+      out.push(h('div', { class: 'ap-job running' }, h('span', { class: 'ap-spin' }),
+        h('span', {}, apJobWords(r) || (r.installing ? 'Installing…' : 'Updating…'), j?.started_ms ? h('span', { class: 'muted' }, ` · started ${ago(j.started_ms)} ago${j.by ? ' by ' + j.by : ''}`) : null)));
+      if (j?.last_line) out.push(h('div', { class: 'ap-line mono' }, j.last_line));
+    } else if (j && j.ended_ms && !quietJob(j)) {
+      const kind = j.outcome === 'failed' ? 'failed' : j.outcome === 'interrupted' ? 'unsure' : 'good';
+      out.push(h('div', { class: 'ap-job ' + kind }, h('span', {}, apJobWords(r)), h('span', { class: 'muted' }, ` · ${ago(j.ended_ms)} ago`)));
+      // What it printed is behind a tap when it did not end well.
+      if (kind !== 'good' && (j.output || '').trim()) out.push(h('details', { class: 'ap-output', open: shown.has(k), ontoggle: (e) => { e.target.open ? shown.add(k) : shown.delete(k); } },
+        h('summary', {}, 'Show what it said'), h('pre', { class: 'mono' }, j.output)));
+    }
+    if (errs.has(k)) out.push(h('div', { class: 'ap-job failed' }, errs.get(k)));
+    return out;
+  };
+  // A result stays on its row while it is news: ten minutes, or since this
+  // dialog was opened; a failure stays until something else is done.
+  const quietJob = (j) => !['failed', 'interrupted'].includes(j.outcome) && j.ended_ms < openedAt && Date.now() - j.ended_ms > AP_RECENT_MS;
+  const row = (st, r) => {
+    const health = healthOf(r), ways = r.methods || [], way = wayOf(st, r), off = busy(st, r);
+    const available = r.latest?.state === 'available';
+    const quiet = !asked.has(key(st, r.agent)) && !running(st, r) && (!r.job || quietJob(r.job));
+    const updating = running(st, r) ? (r.job ? r.job.action === 'update' : !!r.updating) : /update/.test(asked.get(key(st, r.agent)) || '');
+    const button = (label, cls, on, title) => h('button', { class: cls, disabled: off, 'aria-disabled': off ? 'true' : 'false', 'aria-busy': off ? 'true' : null, title, onclick: on }, label);
+    return h('div', { class: 'note agent-program', 'data-agent': r.agent, 'data-health': health, 'data-busy': off ? '1' : null, 'data-available': available ? '1' : null },
+      h('div', { class: 'ap-line1' },
+        paneIcon(r.agent), h('b', { class: 'ap-name' }, r.name), h('span', { class: 'ap-version' }, version(r)),
+        latestMark(st, r),
+        r.panes ? h('span', { class: 'ap-mark muted ap-running', title: AP_RULE }, `${r.panes} running: ${r.panes === 1 ? 'it restarts' : 'they restart'} after an update`) : null,
+        lastMark(st, r, quiet)),
+      h('div', { class: 'ap-status' }, status(st, r)),
+      h('div', { class: 'ap-line2' },
+        h('span', { class: 'ap-label muted' }, health === 'missing' ? 'Install with' : 'Installed with'),
+        ways.length > 1 ? h('select', { class: 'ap-way', 'aria-label': `How ${r.name} is installed on ${st}`, title: way ? way.command : '', disabled: off,
+          onchange: (e) => { picked.set(key(st, r.agent), e.target.value); draw(true); } },
+          ways.map(m => h('option', { value: m.id, selected: way && m.id === way.id, disabled: !m.available }, m.available ? m.label : `${m.label} (not on this station)`)))
+          : h('span', { class: 'ap-way', title: way ? way.command : '' }, way ? way.label : 'no way known')),
+      h('div', { class: 'ap-line3' },
+        way && health !== 'missing' ? button('Reinstall', health === 'broken' ? 'primary' : 'quiet', () => install(st, r), way.command) : null,
+        way && health === 'missing' ? button('Install', 'primary', () => install(st, r), way.command) : null,
+        updatable(r) ? button(updating ? 'Updating…' : 'Update', available ? 'primary ap-update' : 'ap-update', () => update(st, r.agent), r.update_command ? `Runs ${r.update_command} on ${st}` : '') : null));
+  };
+
+  // ---- "Update all here": the newest batch of a station's jobs ----
+  const batchLine = (st) => {
+    const rows = rowsOf(st);
+    const pending = rows.filter(r => asked.has(key(st, r.agent)));
+    const inBatch = rows.filter(r => r.job?.batch);
+    const newest = inBatch.reduce((m, r) => (!m || r.job.started_ms > m.started_ms ? r.job : m), null);
+    const out = [];
+    if (errs.has(st)) out.push(h('div', { class: 'ap-job failed' }, errs.get(st)));
+    if (pending.length > 1) { out.push(h('div', { class: 'ap-job running' }, h('span', { class: 'ap-spin' }), `Asking ${st} to update ${apPlural(pending.length, 'program')}…`)); return out; }
+    if (!newest) return out;
+    const mine = inBatch.filter(r => r.job.batch === newest.batch);
+    const done = mine.filter(r => r.job.state !== 'running');
+    if (done.length < mine.length) { out.push(h('div', { class: 'ap-job running' }, h('span', { class: 'ap-spin' }), `Updating ${apPlural(mine.length, 'program')} on ${st}… ${done.length} of ${mine.length}`)); return out; }
+    const ended = Math.max(...mine.map(r => r.job.ended_ms || 0));
+    if (ended < openedAt && Date.now() - ended > AP_RECENT_MS) return out;
+    const n = (o) => mine.filter(r => r.job.outcome === o);
+    const bad = mine.filter(r => !['updated', 'latest'].includes(r.job.outcome));
+    const parts = [];
+    if (n('updated').length) parts.push(`${n('updated').length} updated`);
+    if (n('latest').length) parts.push(`${n('latest').length} already the latest`);
+    if (bad.length) parts.push(`${bad.length} failed: ${bad.map(r => r.name).join(', ')}`);
+    out.push(h('div', { class: 'ap-job ' + (bad.length ? 'failed' : 'good') }, parts.join(', '), h('span', { class: 'muted' }, ` · ${ago(ended)} ago`)));
+    return out;
+  };
+  const station = (st) => {
+    const v = view.get(st), rows = rowsOf(st), info = S.fleet.stations.find(s => s.station === st);
+    const any = rows.some(r => busy(st, r));
+    return h('div', { class: 'ap-station', 'data-station': st },
+      h('div', { class: 'ap-head' }, h('h3', {}, st), h('span', { class: 'grow' }),
+        rows.some(updatable) ? h('button', { class: 'ap-all', disabled: any, 'aria-disabled': any ? 'true' : 'false', onclick: () => update(st) }, any ? 'Updating…' : 'Update all here') : null),
+      h('div', { class: 'ap-batch' }, batchLine(st)),
+      v.problem ? h('p', { class: 'warn-text ap-problem' }, rows.length ? `${v.problem}. Showing what it last said.` : v.problem) : null,
+      !v.rows && !v.problem ? h('p', { class: 'muted' }, `Asking ${st}…`) : null,
+      v.rows && !knows(st) ? h('p', { class: 'muted ap-old' }, `${st} runs spandeck ${info?.version || 'from before'}: it cannot say whether a version is the latest, and shows no progress while it updates. Update spandeck there to get both.`) : null,
+      h('div', { class: 'list' }, rows.map(r => row(st, r))));
+  };
+
+  // ---- the whole fleet in a line ----
+  const fleetLine = () => {
+    const rows = stations.flatMap(st => rowsOf(st).filter(r => healthOf(r) !== 'missing').map(r => ({ st, r })));
+    const of = (state) => rows.filter(x => x.r.latest?.state === state);
+    const avail = of('available'), unknown = of('unknown'), off = [...new Set(of('off').map(x => x.st))];
+    const old = stations.filter(st => view.get(st).rows && !knows(st));
+    const checking = rows.some(x => x.r.latest?.checking), waiting = stations.some(st => !view.get(st).rows && !view.get(st).problem);
+    const any = stations.some(st => rowsOf(st).some(r => busy(st, r)));
+    const checked = rows.map(x => x.r.latest?.checked_ms).filter(Boolean);
+    let words, cls = 'muted';
+    if (avail.length) { words = `${apPlural(avail.length, 'update')} available on ${apPlural(new Set(avail.map(x => x.st)).size, 'station')}`; cls = 'ap-available'; }
+    else if (waiting || checking) words = 'Checking for newer versions…';
+    else if (rows.length && of('latest').length === rows.length) { words = 'Everything is the latest'; cls = 'ap-latest'; }
+    else if (of('latest').length) words = `${of('latest').length} of ${rows.length} are the latest`;
+    else words = 'Whether these are the latest is not known';
+    const notes = [];
+    if (unknown.length) notes.push(`${unknown.length} could not be checked`);
+    if (off.length) notes.push(`checks are off on ${off.join(', ')}`);
+    if (old.length) notes.push(`${old.join(', ')} cannot say (older spandeck)`);
+    if (checked.length && !checking) notes.push(`checked ${ago(Math.min(...checked))} ago`);
+    return h('div', { class: 'ap-fleet' },
+      h('div', { class: 'ap-fleet-words' }, h('b', { class: cls }, words), notes.length ? h('span', { class: 'muted' }, ' · ' + notes.join(' · ')) : null),
+      h('div', { class: 'ap-fleet-actions' },
+        h('button', { class: 'quiet ap-check', disabled: checking, onclick: () => stations.forEach(st => check(st, true)) }, 'Check again'),
+        h('button', { class: (avail.length ? 'primary ' : '') + 'ap-fleet-all', disabled: any, 'aria-disabled': any ? 'true' : 'false', title: 'Each station updates its own programs', onclick: () => stations.forEach(st => update(st)) }, any ? 'Updating…' : 'Update all')));
+  };
+
+  // What each program does about updates without being asked, as its
+  // station's catalogue has it from the vendor's own pages.
+  const byItself = () => {
+    const said = new Map();
+    for (const st of stations) for (const r of rowsOf(st)) if (r.by_itself && !said.has(r.name)) said.set(r.name, r.by_itself);
+    if (!said.size) return null;
+    return h('details', { class: 'ap-itself', open: shown.has('itself'), ontoggle: (e) => { e.target.open ? shown.add('itself') : shown.delete('itself'); } },
+      h('summary', {}, 'What each program does about updates by itself'),
+      [...said].map(([name, text]) => h('p', { class: 'small' }, h('b', {}, name + ': '), text)));
+  };
+
+  const { close } = dialog('Agent programs', (shut) => {
+    const body = h('div', { class: 'agent-programs' });
+    draw = (force) => {
+      if (!open) return;
+      // Drawn again only when something to show has changed: a select that
+      // is open, or text being read, is not replaced under the finger
+      // every second. Times ("2 min ago") move on with the next change.
+      const now = JSON.stringify([[...view], [...asked], [...errs], [...picked], Math.floor(Date.now() / 20000)]);
+      if (now === drawn && !force) return;
+      drawn = now;
+      const at = body.closest('.dialog-body')?.scrollTop;
+      body.replaceChildren(
+        fleetLine(),
+        h('p', { class: 'muted small ap-rule' }, 'An update restarts that program\'s agents and they go back to their conversations; an agent in the middle of a turn is restarted when it finishes, not interrupted. Starting an agent never checks for or installs an update. A program that is not installed, or does not start, is installed the first time you start a pane for it, or here.'),
+        ...stations.map(station),
+        byItself(),
+        h('div', { class: 'row end' }, h('button', { onclick: shut }, 'Close')));
+      if (at !== undefined) body.closest('.dialog-body').scrollTop = at;
     };
-    const install = (st, r) => {
-      const way = wayOf(st, r), again = healthOf(r) !== 'missing';
-      if (!way) return;
-      dialog(`${again ? 'Reinstall' : 'Install'} ${r.name} on ${st}?`, (shut) => h('div', {},
-        h('p', {}, `This runs on ${st}, and is remembered as the way ${r.name} is installed there:`),
-        h('div', { class: 'note mono' }, way.command),
-        h('p', { class: 'muted' }, 'Whether it worked is judged by the program answering afterwards. Agents that are running are not restarted.'),
-        h('div', { class: 'row end' }, h('button', { onclick: shut }, 'Cancel'),
-          h('button', { class: 'primary', onclick: () => { shut(); rpc(st, 'agents.install', { agent: r.agent, method: way.id }).then(() => { toast(`${st}: installing ${r.name}`); setTimeout(settle, 800); }); } }, again ? 'Reinstall' : 'Install'))));
-    };
-    const status = (r) => {
-      const health = healthOf(r);
-      if (health === 'broken') return h('span', { class: 'chip bad' }, 'Installed but not working');
-      if (health === 'no_answer') return h('span', { class: 'warn-text', title: 'It was asked its version and did not answer in time. It was left running, not stopped. This is not known to be a fault.' }, 'installed · it did not answer when asked its version');
-      if (health === 'missing') return h('span', { class: 'muted' }, 'not installed');
-      return h('span', {}, r.version || 'installed, version not read');
-    };
-    const row = (st, r) => {
-      const health = healthOf(r), ways = r.methods || [], way = wayOf(st, r), busy = !!(r.updating || r.installing);
-      return h('div', { class: 'note agent-program', 'data-agent': r.agent, 'data-health': health },
-        h('div', { class: 'row', style: { flexWrap: 'wrap' } },
-          paneIcon(r.agent), h('b', {}, r.name), status(r),
-          r.panes ? h('span', { class: 'muted' }, `· ${r.panes} running`) : null,
-          r.installing ? h('span', { class: 'chip warn' }, 'installing…') : r.updating ? h('span', { class: 'chip warn' }, 'updating…') : null,
-          r.last_update && !busy ? h('span', { class: 'muted', title: r.last_update.message || '' }, r.last_update.ok ? `· updated ${ago(r.last_update.at_ms)} ago` : '· last update failed') : null,
-          r.last_install && !busy ? h('span', { class: r.last_install.ok ? 'muted' : 'warn-text', title: r.last_install.message || '' }, r.last_install.ok ? `· installed ${ago(r.last_install.at_ms)} ago` : '· the last install did not work') : null,
-          h('span', { class: 'grow' }),
-          ways.length > 1 ? h('select', { 'aria-label': `How ${r.name} is installed on ${st}`, title: way ? way.command : '', disabled: busy, style: { width: 'auto', flex: 'none' },
-            onchange: (e) => { picked.set(st + ' ' + r.agent, e.target.value); draw(); } },
-            ways.map(m => h('option', { value: m.id, selected: way && m.id === way.id, disabled: !m.available }, m.available ? m.label : `${m.label} (not on this station)`))) : null,
-          way ? h('button', { class: health === 'broken' ? 'mini primary' : 'mini', disabled: busy, title: way.command, onclick: () => install(st, r) }, health === 'missing' ? 'Install' : 'Reinstall') : null,
-          (health === 'ok' || health === 'no_answer') && r.can_update !== false ? h('button', { class: 'mini', disabled: busy, onclick: () => update(st, r.agent) }, 'Update') : null),
-        health === 'broken' ? h('div', { class: 'agent-problem' },
-          h('div', { class: 'muted' }, 'Found at ', h('span', { class: 'mono' }, r.path || ''), '. When started it said:'),
-          h('div', { class: 'mono warn-text' }, r.problem || 'nothing'),
-          way ? h('div', { class: 'muted' }, 'Reinstall runs ', h('span', { class: 'mono' }, way.command)) : h('div', { class: 'muted' }, 'spandeck knows no install command for it.')) : null);
-    };
-    const draw = () => body.replaceChildren(
-      h('p', { class: 'muted' }, 'An update restarts that program\'s agents and they go back to their conversations. An agent in the middle of a turn is restarted when it finishes, not interrupted. A program that is not installed, or is installed but does not start, is installed the first time you start a pane for it, or here.'),
-      h('div', { class: 'row end' }, h('button', { class: 'primary', onclick: () => Promise.all(stations.map(st => update(st))) }, 'Update everything on every station')),
-      ...all.map(({ st, rows, problem }) => h('div', {},
-        h('div', { class: 'row' }, h('h3', {}, st), h('span', { class: 'grow' }), rows.some(r => ['ok', 'no_answer'].includes(healthOf(r)) && r.can_update !== false) ? h('button', { class: 'mini', onclick: () => update(st) }, 'Update all here') : null),
-        problem ? h('p', { class: 'warn-text' }, problem) : null,
-        h('div', { class: 'list' }, rows.map(r => row(st, r))))),
-      h('div', { class: 'row end' }, h('button', { onclick: redraw }, 'Check again'), h('button', { onclick: close }, 'Close')));
-    const redraw = async () => { all = await load(); if (open) draw(); };
-    // Look again until nothing is being installed or updated.
-    const settle = async () => { await redraw(); if (open && all.some(x => x.rows.some(r => r.installing || r.updating))) setTimeout(settle, 2000); };
     draw();
     return body;
-  }, { wide: true, onClose: () => { open = false; } });
+  }, { wide: true, onClose: () => { open = false; for (const t of timers.values()) clearTimeout(t); } });
+  // Each station by itself; and each is asked whether its programs are the
+  // newest (it reuses an answer under three hours old).
+  for (const st of stations) look(st).then(() => check(st, false));
+  return close;
 }
 
 async function setupPanel() {

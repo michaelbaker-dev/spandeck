@@ -1037,9 +1037,10 @@ fn an_update_shows_the_new_version_and_restarts_each_pane_into_its_conversation(
     assert_eq!(err.code, "denied");
 
     let started = s.call("agents.update", json!({"agent": "fake"}));
+    let job = started["started"][0]["job"].clone();
     assert_eq!(
         started["started"],
-        json!([{"agent": "fake", "name": "Fake agent", "from": "1.0.0"}])
+        json!([{"agent": "fake", "name": "Fake agent", "from": "1.0.0", "job": job}])
     );
     // The idle pane comes back in its conversation; the busy one is left
     // alone until its turn ends, and then does the same.
@@ -1064,5 +1065,19 @@ fn an_update_shows_the_new_version_and_restarts_each_pane_into_its_conversation(
         (&logged["restarted"], &logged["restart_when_idle"]),
         (&json!([idle]), &json!([busy])),
         "{logged}"
+    );
+    // The row says the same of its job (17 Nov 2026: every action says what
+    // it did): which panes went back to their conversations, and which do
+    // when their turn ends.
+    let done = &fake["job"];
+    assert_eq!(
+        (
+            &done["id"],
+            &done["outcome"],
+            &done["restarted"],
+            &done["restart_when_idle"]
+        ),
+        (&job, &json!("updated"), &json!([idle]), &json!([busy])),
+        "{done}"
     );
 }

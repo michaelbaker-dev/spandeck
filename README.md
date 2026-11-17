@@ -164,6 +164,24 @@ Right-click a station and choose **Agent programs and versions…** to see, for 
 station, each agent program (Claude Code, Codex, OpenCode, Antigravity), its version, and
 buttons to update or reinstall it. `spandeck doctor` shows the same on one station.
 
+- Beside each version the dialog says whether it is the newest published: **✓ latest**,
+  **2.1.330 available**, or **could not check** with why. Each station asks the place
+  the program's own installer reads its newest version from (or `npm view` /
+  `brew info` for a copy installed that way) when you open the dialog, and keeps the
+  answer for three hours; **Check again** asks anew. Nothing is asked in the background,
+  and starting an agent never checks for or installs an update. `[agents]
+  check_latest = false` in a station's config turns the asking off there.
+- **Update**, **Reinstall** and **Install** are jobs the station keeps: the row says
+  what is running (`claude update`, and its last line) and how it ended ("Updated
+  2.1.326 → 2.1.330", "Already the latest: 2.1.326", "Could not update: …" with what the
+  updater printed). A row's buttons are greyed until its job has ended, on every
+  device; a second press starts nothing. A job is given 15 minutes.
+- After an update that changed the version, that program's idle agents restart into
+  their conversations, and one in the middle of a turn restarts when the turn ends.
+- From a terminal: `spandeck agents` lists every station's programs with the same
+  marks; `spandeck agents update [AGENT] [--station NAME | --all] [--no-restart]`
+  updates them and shows the same progress and outcome.
+
 - spandeck tells four cases apart: **not installed**; **installed** (it answered when
   asked its version); **installed but not working** (it is there but exits with an error
   or cannot be run, and its own error line is shown); and **installed, but it did not

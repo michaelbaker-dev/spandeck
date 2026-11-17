@@ -3,6 +3,7 @@
 //! Every subcommand except `daemon` is a thin client of the local socket, so
 //! the CLI covers the API and nothing else.
 
+mod agents_cmd;
 mod mcp;
 
 use std::io::Read;
@@ -200,6 +201,20 @@ enum Cmd {
         #[arg(long)]
         station: Option<String>,
     },
+    /// The agent programs on each station: version, whether it is the
+    /// newest published, and the last update. `spandeck agents update`
+    /// updates them.
+    Agents {
+        #[command(subcommand)]
+        cmd: Option<AgentsCmd>,
+        /// One station of the fleet, by name. Default: every station for
+        /// the list, this one for an update.
+        #[arg(long, global = true)]
+        station: Option<String>,
+        /// Do not ask the release hosts: show what is already known.
+        #[arg(long)]
+        no_check: bool,
+    },
     /// Wake a sleeping station on this network (wake-on-LAN).
     Wake { station: String },
     /// Start a station whose daemon is not running, over SSH (needs remote_start = true).
@@ -218,6 +233,29 @@ enum Cmd {
     /// Used by upgrades to check a new binary before switching to it.
     #[command(hide = true)]
     HandoffCheck,
+}
+
+#[derive(Subcommand)]
+enum AgentsCmd {
+    /// Ask the release hosts again whether each program is the newest,
+    /// and show the list.
+    Check,
+    /// Update one program (claude, codex, opencode, antigravity) or, with
+    /// none named, every installed one: on this station, on the one named
+    /// with --station, or with --all on every station. Shows each one's
+    /// progress and how it ended. After an update that changed the
+    /// version, that program's idle panes restart into their
+    /// conversations, and a pane in a turn restarts when the turn ends.
+    Update {
+        agent: Option<String>,
+        /// Every station of the fleet, each updating its own programs.
+        #[arg(long)]
+        all: bool,
+        /// Leave running panes as they are: the update applies to panes
+        /// started afterwards.
+        #[arg(long)]
+        no_restart: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1217,6 +1255,34 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     )
                 }
             });
+        }
+        Cmd::Agents {
+            cmd,
+            station,
+            no_check,
+        } => {
+            if station.as_deref().is_some_and(|s| s.is_empty()) {
+                anyhow::bail!("--station needs a name");
+            }
+            let station = station.as_deref();
+            match cmd {
+                None => agents_cmd::list(&mut c, j, station, !no_check, false)?,
+                Some(AgentsCmd::Check) => agents_cmd::list(&mut c, j, station, true, true)?,
+                Some(AgentsCmd::Update {
+                    agent,
+                    all,
+                    no_restart,
+                }) => {
+                    if all && station.is_some() {
+                        anyhow::bail!("--all is every station: leave out --station");
+                    }
+                    let ok =
+                        agents_cmd::update(&mut c, j, station, agent.as_deref(), all, !no_restart)?;
+                    if !ok {
+                        std::process::exit(1);
+                    }
+                }
+            }
         }
         Cmd::Wake { station } => {
             let v = c.call("fleet.wake", json!({"station": station}))?;

@@ -113,6 +113,20 @@ jobs:
       # and a half minutes.
       - name: A page carries on through another station; the deck saved on the device; HTTPS turned on from the deck
         run: cargo test -p spandeck --test failover -- --ignored
+      # Agent programs (the owner's report of 17 Nov 2026: "no feedback,
+      # don't know if it's doing it, if it worked, don't know if the
+      # version listed is the latest"). With stand-in programs, release
+      # hosts on this machine and stand-in npm and brew: an update that
+      # changes the version, one that finds nothing newer, one that fails;
+      # one job at a time; update all; the time limit; a restart in the
+      # middle; is it the latest, kept and asked again; an update asked
+      # through another station, and the command line; and the dialog at a
+      # phone's size. No real agent program is run. About forty seconds.
+      - name: Agent programs (every action says what it did; one job at a time; is it the latest; the dialog on a phone)
+        run: |
+          cargo test -p spandeck --test agent_programs every_update -- --ignored
+          cargo test -p spandeck --test agent_programs an_update_asked -- --ignored
+          cargo test -p spandeck --test agent_programs on_a_phone -- --ignored
   build:
     strategy:
       fail-fast: false

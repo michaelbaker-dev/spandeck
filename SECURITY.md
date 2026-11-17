@@ -269,6 +269,20 @@ days, not hours.
   to that station, and is never passed from one station to another; an agent, another
   station and a read-only caller cannot make the call. Three wrong tries a minute.
 
+- **Asking whether an agent program is the latest** (17 Nov 2026). When you open
+  Agent programs, run `spandeck agents`, or press "Check again", each station asks the
+  release host of each program it has for the newest version number: a plain GET of a
+  public address (`downloads.claude.ai`, `releases.openai.com`, `opencode.ai`, Google's
+  updater host for Antigravity), or `npm view` / `brew info` for a copy installed that
+  way. The request carries nothing about you, the station or a project; what the host
+  learns is that a machine at that address asked for a public version number. Nothing
+  is asked in the background or when an agent starts, an answer is reused for three
+  hours, and nothing is downloaded or installed by asking. What comes back is read as
+  a version number or thrown away, and is shown as text. `[agents] check_latest = false`
+  in a station's `config.toml` turns it off on that station. Only you can make a
+  station ask (`agents.check`): an agent, a read-only caller and another station
+  cannot.
+
 ## Known limits
 
 - Turning HTTPS on at a station publishes its name, `<machine>.<tailnet>.ts.net`, in
