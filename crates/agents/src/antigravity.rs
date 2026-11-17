@@ -102,6 +102,7 @@ impl Adapter for Antigravity {
             tool: None,
             message,
             source: None,
+            effort: None,
             raw_event: raw,
         })
     }

@@ -103,6 +103,10 @@ pub struct AgentEvent {
     /// startup, resume, compact, auto, manual: the vendor's qualifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// How hard the model is asked to think, when the event says
+    /// (Claude Code's hooks: `effort.level`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// The vendor's own event name, kept for replies and debugging.
     pub raw_event: String,
 }

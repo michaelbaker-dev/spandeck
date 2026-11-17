@@ -990,12 +990,17 @@ impl Daemon {
             // read-only one. Another station passes on the owner's request
             // with `rpc.forward` and keeps nothing. They read files and the
             // databases, so they run off the async runtime.
-            "pane.conversation" | "pane.conversation.detail" | "pane.read" => {
+            // Choosing the pane's model or effort types the agent's own
+            // command into it, while it is idle: the owner's only, like
+            // `agents.command`, which it goes through.
+            "pane.model" => self.pane_model(s(&params, "pane")?, &params, by).await?,
+            "pane.conversation" | "pane.conversation.detail" | "pane.read" | "pane.notes.clear" => {
                 let pane = self.pane(s(&params, "pane")?)?.id.clone();
                 let d = self.clone();
                 let method = method.to_string();
                 tokio::task::spawn_blocking(move || match method.as_str() {
                     "pane.conversation" => d.conversation(&pane, &params),
+                    "pane.notes.clear" => d.conversation_clear(&pane, &params),
                     "pane.conversation.detail" => d.conversation_detail(&pane, &params),
                     _ => d.conversation_read(&pane, params.get("upto").and_then(|v| v.as_u64())),
                 })
@@ -2591,6 +2596,21 @@ mod tests {
             assert!(allowed(Authority::Owner, m) && !not_forwarded(m), "{m}");
         }
         assert_eq!(class("pane.trust_folder", &none), Class::Never);
+        // The chat's model chip and its cleared notes (17 Nov 2026):
+        // choosing an agent's model types a command into its pane, and
+        // clearing a note changes what the owner is shown. Both are the
+        // owner's alone, like `agents.command`, and neither is done a
+        // second time for a second try.
+        for m in ["pane.model", "pane.notes.clear", "agents.command"] {
+            for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
+                assert!(!allowed(who, m), "{who:?} {m}");
+            }
+            assert!(
+                allowed(Authority::Owner, m) && !not_forwarded(m) && !reads(m),
+                "{m}"
+            );
+        }
+        assert_eq!(class("pane.model", &none), Class::Never);
         // Trusting spandeck's own hooks (16 Nov 2026) is the owner's alone
         // in the same way: the tick (`pane.spawn`), the station's switch
         // and the one tap. No agent, no station acting for itself and no

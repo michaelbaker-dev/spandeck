@@ -55,6 +55,9 @@
 //!                                        another session file
 //!   {"wait_file": "name"}                wait until that file is in the folder
 //!   {"hooks": true}                      this program's hooks run from here on
+//!   {"effort": "high"}                   from here on its hooks say this effort
+//!                                        level, as Claude Code's do (also a word
+//!                                        of the script itself, for the start)
 //!   {"name_session": {"id": "…", "path": "…"}}  a hook names that session as this
 //!                                        program's, from here on
 //! Beside the steps, `"codex": true`: this program keeps its conversation as
@@ -89,6 +92,8 @@ struct Agent {
     input: Receiver<u8>,
     round: usize,
     interrupted: bool,
+    /// The effort level its hooks say, when the script gives one.
+    effort: Option<String>,
     /// The script's `hook_deadline`.
     hook_deadline: Value,
     /// The script's `question_deadline`.
@@ -151,6 +156,9 @@ impl Agent {
         obj.insert("session_id".into(), json!(self.session));
         obj.insert("transcript_path".into(), json!(self.transcript));
         obj.insert("cwd".into(), json!(self.cwd));
+        if let Some(level) = &self.effort {
+            obj.insert("effort".into(), json!({"level": level}));
+        }
         // The hook itself is `spandeck hook`'s own code (core/guard.rs):
         // what it does while the daemon is away is what a real agent's
         // hook does. What a real agent adds is its timeout, which this
@@ -599,6 +607,8 @@ impl Agent {
         } else if step.get("codex_new").is_some() {
             self.rollout = false;
             out("[fake] new conversation");
+        } else if let Some(level) = step.get("effort").and_then(|s| s.as_str()) {
+            self.effort = Some(level.to_string());
         } else if let Some(on) = step.get("hooks").and_then(|s| s.as_bool()) {
             self.hooks = on;
         } else if let Some(named) = step.get("name_session") {
@@ -904,6 +914,7 @@ fn main() {
         input: rx,
         round,
         interrupted: false,
+        effort: script["effort"].as_str().map(String::from),
         hook_deadline: script["hook_deadline"].clone(),
         question_deadline: script["question_deadline"].as_u64(),
         paste: script["paste"].as_bool().unwrap_or(false),

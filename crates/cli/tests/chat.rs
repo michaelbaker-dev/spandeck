@@ -352,6 +352,380 @@ fn a_shell_pane_is_served_as_what_was_sent_and_what_it_printed() {
     assert_eq!(err.code, "denied");
 }
 
+/// Lines of a session file in Claude Code's shapes (the fixture's), for the
+/// stand-in agent to write.
+fn said_line(text: &str, model: &str) -> Value {
+    json!({"transcript": {"type": "assistant", "message": {"id": format!("msg_{}", text.len()), "role": "assistant", "model": model,
+        "content": [{"type": "text", "text": text}],
+        "usage": {"input_tokens": 100, "output_tokens": 250, "cache_read_input_tokens": 700000, "cache_creation_input_tokens": 50}}}})
+}
+
+/// A pane whose agent has a sub-agent and a command running in the
+/// background, has printed its recap, and answers the next thing typed by
+/// reporting another model and its sub-agent over.
+fn busy_script() -> Value {
+    let call = |id: &str, name: &str, input: Value| {
+        json!({"transcript": {"type": "assistant", "message": {"role": "assistant",
+        "content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}}})
+    };
+    json!({"effort": "medium", "steps": [
+        {"prompt": "Count the herons"},
+        call("toolu_a1", "Agent", json!({"description": "Look for other tally scripts", "prompt": "Search.", "subagent_type": "Explore", "run_in_background": true})),
+        {"transcript": {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_a1", "content": "Async agent launched."}]},
+            "toolUseResult": {"isAsync": true, "status": "async_launched", "agentId": "a1", "description": "Look for other tally scripts"}}},
+        call("toolu_s1", "Bash", json!({"command": "cargo watch -x test", "run_in_background": true})),
+        {"transcript": {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_s1", "content": "Running in the background"}]},
+            "toolUseResult": {"stdout": "", "stderr": "", "backgroundTaskId": "bash_1"}}},
+        said_line("Nine herons, counted from `survey.csv`.", "claude-opus-5-5"),
+        said_line("And **three** egrets.", "claude-opus-5-5"),
+        {"transcript": {"type": "system", "subtype": "turn_duration", "durationMs": 15000}},
+        {"transcript": {"type": "system", "subtype": "away_summary", "content": "You asked for a count of the herons, and it is done: nine, with three egrets beside them. Next, you can decide whether the tally script should skip the egrets. (disable recaps in /config)"}},
+        {"turn_end": "ok"}],
+      "on_input": [
+        {"effort": "high"},
+        {"transcript": {"type": "user", "message": {"role": "user", "content": "<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>toolu_a1</tool-use-id>\n<status>completed</status>\n<summary>Agent completed</summary>\n</task-notification>"}, "origin": {"kind": "task-notification"}}},
+        said_line("Now on another model.", "claude-fable-5-2"),
+        {"turn_end": "ok"}]})
+}
+
+/// Where the stand-in agent keeps a pane's session file.
+fn session_file(s: &Station, pane: &str) -> PathBuf {
+    let session = conversation(s, pane, true)["session"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut dirs = vec![s.root.clone()];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            if e.path().is_dir() {
+                dirs.push(e.path());
+            } else if e.file_name().to_string_lossy() == format!("{session}.jsonl") {
+                return e.path();
+            }
+        }
+    }
+    panic!("no session file for {pane}");
+}
+
+/// The sub-agent's own transcript, where Claude Code keeps one.
+fn write_side(s: &Station, pane: &str) {
+    let file = session_file(s, pane);
+    let dir = file.with_extension("").join("subagents");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lines = [
+        json!({"type": "user", "isSidechain": true, "message": {"role": "user", "content": "Search the repository for scripts that count birds."}}),
+        json!({"type": "assistant", "isSidechain": true, "message": {"role": "assistant", "content": [{"type": "text", "text": "One script counts birds: `tally.py`."}]}}),
+    ];
+    std::fs::write(
+        dir.join("agent-a1.jsonl"),
+        lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
+    )
+    .unwrap();
+}
+
+/// The owner's report of 17 Nov 2026, from an iPhone, against Anthropic's
+/// own app: "a row that show how many agents are running as well as a
+/// detail window ... a model picker, can we add that for all chats ? I
+/// think they are just [calling] the model command and effort", and "can I
+/// clear the while you were away message?", and "make sure this all this
+/// is for any agent chat not just Claude".
+///
+/// What the station serves for it, and to whom: a pane's background tasks
+/// from its agent's own session file (running, then over), a sub-agent's
+/// own transcript, the model and the effort as the agent reports them,
+/// and the notes the owner cleared. Choosing a model types the agent
+/// program's own command, exactly, and only while the agent is idle; a
+/// program with only a picker is typed nothing. No agent can do any of it.
+#[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
+fn a_panes_tasks_its_model_and_its_cleared_notes_are_the_owners() {
+    let s = Station::start("alpha");
+    let dir = folder(&s, "mere");
+    let lead = pane(&s, "fake", "lead", &dir, busy_script());
+    s.wait_state(&lead, "done");
+    let live = |pane: &str| conversation(&s, pane, true)["live"].clone();
+    let rows = |v: &Value| -> Vec<(String, String, String)> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                (
+                    t["kind"].as_str().unwrap().to_string(),
+                    t["title"].as_str().unwrap().to_string(),
+                    t["status"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let l = live(&lead);
+    assert_eq!(
+        rows(&l["tasks"]["running"]),
+        vec![
+            (
+                "agent".to_string(),
+                "Look for other tally scripts".to_string(),
+                "running".to_string()
+            ),
+            (
+                "shell".into(),
+                "cargo watch -x test".into(),
+                "running".into()
+            )
+        ],
+        "{l}"
+    );
+    assert_eq!(
+        (
+            &l["tasks"]["finished_total"],
+            &l["tasks"]["running"][0]["transcript"]
+        ),
+        (&json!(0), &json!(false)),
+        "{l}"
+    );
+    // The model as its session file says (counted once a second), the
+    // effort as its hooks say, and what its program takes.
+    let l = wait_for("the model in use", 10, || {
+        let l = live(&lead);
+        l["model"]["model"].is_string().then_some(l)
+    });
+    let m = &l["model"];
+    assert_eq!(
+        (&m["model"], &m["effort"], &m["can_set"], &m["picker"]),
+        (
+            &json!("claude-opus-5-5"),
+            &json!("medium"),
+            &json!(true),
+            &Value::Null
+        ),
+        "{m}"
+    );
+    assert!(m["models"].as_array().unwrap().iter().any(|x| x["id"] == json!("fable") && x["says"].as_str().is_some_and(|t| !t.is_empty())), "{m}");
+    assert_eq!(
+        m["efforts"],
+        json!(["low", "medium", "high", "xhigh", "max"])
+    );
+
+    // Its sub-agent's own transcript, once the program has written one.
+    write_side(&s, &lead);
+    let task = l["tasks"]["running"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        live(&lead)["tasks"]["running"][0]["transcript"],
+        json!(true)
+    );
+    let side = s.call(
+        "pane.conversation.detail",
+        json!({"pane": lead, "task": task}),
+    );
+    assert_eq!(
+        said(&side),
+        vec![
+            (
+                "user".to_string(),
+                "Search the repository for scripts that count birds.".to_string()
+            ),
+            ("text".into(), "One script counts birds: `tally.py`.".into())
+        ]
+    );
+    // A command has no transcript, and no other file can be named.
+    for bad in ["0.0", "child:../../x", "pane:x"] {
+        let e = s
+            .try_call(
+                "pane.conversation.detail",
+                json!({"pane": lead, "task": bad}),
+            )
+            .unwrap_err();
+        assert_eq!(e.code, "not_found", "{bad}: {e}");
+    }
+
+    // The recap is a note, and the owner clears it: for every device.
+    let page = conversation(&s, &lead, true);
+    let session = page["session"].as_str().unwrap().to_string();
+    let recap = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["what"] == json!("away_summary"))
+        .expect("the recap")
+        .clone();
+    let note = recap["id"].as_str().unwrap().to_string();
+    assert_eq!(live(&lead)["cleared"], json!([]));
+    s.call(
+        "pane.notes.clear",
+        json!({"pane": lead, "session": session, "item": note}),
+    );
+    s.call(
+        "pane.notes.clear",
+        json!({"pane": lead, "session": session, "item": note}),
+    );
+    assert_eq!(live(&lead)["cleared"], json!([note]));
+    // Nothing was taken out of the conversation itself.
+    assert!(conversation(&s, &lead, true)["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["id"] == json!(note)));
+    for bad in [
+        json!({"pane": lead, "session": session, "item": "../x"}),
+        json!({"pane": lead, "item": note}),
+    ] {
+        assert_eq!(
+            s.try_call("pane.notes.clear", bad).unwrap_err().code,
+            "invalid"
+        );
+    }
+
+    // No agent chooses a model, its own or another's, or clears a note.
+    let other = pane(
+        &s,
+        "fake",
+        "other",
+        &dir,
+        json!({"steps": [{"prompt": "x"}, {"work": 60_000}]}),
+    );
+    s.wait_state(&other, "working");
+    for who in [&lead, &other] {
+        for (method, params) in [
+            ("pane.model", json!({"pane": lead, "model": "haiku"})),
+            (
+                "pane.notes.clear",
+                json!({"pane": lead, "session": session, "restore": true}),
+            ),
+            (
+                "agents.command",
+                json!({"pane": lead, "command": "/model haiku"}),
+            ),
+        ] {
+            let refused = s.call_as_pane(who, method, params).unwrap_err();
+            assert_eq!(refused.code, "denied", "{method}: {refused}");
+        }
+    }
+    assert_eq!(live(&lead)["cleared"], json!([note]));
+
+    // In the middle of a turn nothing is typed, and the answer says so.
+    let busy = s.call("pane.model", json!({"pane": other, "model": "opus"}));
+    assert_eq!(
+        (&busy["sent"], &busy["busy"], &busy["command"]),
+        (&json!(false), &json!(true), &json!("/model opus")),
+        "{busy}"
+    );
+    // A name is one word; a shell has no model.
+    for bad in [
+        json!({"pane": lead, "model": "opus; /clear"}),
+        json!({"pane": lead, "effort": "extreme"}),
+        json!({"pane": lead}),
+        json!({"pane": lead, "model": "a", "effort": "low"}),
+    ] {
+        assert_eq!(
+            s.try_call("pane.model", bad.clone()).unwrap_err().code,
+            "invalid",
+            "{bad}"
+        );
+    }
+
+    // Idle: the program's own command, exactly, as the owner would type it.
+    let sent = s.call("pane.model", json!({"pane": lead, "model": "fable"}));
+    assert_eq!(
+        (&sent["sent"], &sent["command"]),
+        (&json!(true), &json!("/model fable")),
+        "{sent}"
+    );
+    s.wait_text(&lead, "[fake] got: /model fable");
+    assert!(
+        !s.text(&other).contains("/model"),
+        "nothing was typed into the busy pane"
+    );
+    // What the chip then shows is what the agent reports, and its
+    // sub-agent is over.
+    let l = wait_for("the agent's report", 10, || {
+        let l = live(&lead);
+        (l["model"]["model"] == json!("claude-fable-5-2") && l["model"]["effort"] == json!("high"))
+            .then_some(l)
+    });
+    assert_eq!(
+        rows(&l["tasks"]["running"]),
+        vec![(
+            "shell".to_string(),
+            "cargo watch -x test".to_string(),
+            "running".to_string()
+        )],
+        "{l}"
+    );
+    assert_eq!(
+        rows(&l["tasks"]["finished"]),
+        vec![(
+            "agent".to_string(),
+            "Look for other tally scripts".to_string(),
+            "completed".to_string()
+        )],
+        "{l}"
+    );
+    s.call(
+        "pane.notes.clear",
+        json!({"pane": lead, "session": session, "restore": true}),
+    );
+    assert_eq!(live(&lead)["cleared"], json!([]));
+
+    // Codex: its own command for each, and no task in its file. OpenCode:
+    // a picker of its own, so nothing is typed, and the answer says where.
+    let codex = pane(&s, "codex", "codex", &folder(&s, "weir"), hookless_codex());
+    s.wait_text(&codex, "[fake] session");
+    let c = live(&codex);
+    assert_eq!(
+        (
+            &c["tasks"]["running"],
+            &c["tasks"]["finished"],
+            &c["model"]["can_set"]
+        ),
+        (&json!([]), &json!([]), &json!(true)),
+        "{c}"
+    );
+    let sent = s.call("pane.model", json!({"pane": codex, "effort": "high"}));
+    assert_eq!(sent["command"], json!("/model --reasoning=high"), "{sent}");
+    s.wait_text(&codex, "[fake] got: /model --reasoning=high");
+    let oc = pane(
+        &s,
+        "opencode",
+        "oc",
+        &folder(&s, "fen"),
+        json!({"no_hooks": true, "steps": []}),
+    );
+    let o = live(&oc);
+    assert_eq!(
+        (
+            &o["model"]["can_set"],
+            &o["model"]["picker"],
+            &o["model"]["efforts"]
+        ),
+        (&json!(false), &json!("/models"), &json!([])),
+        "{o}"
+    );
+    let refused = s
+        .try_call(
+            "pane.model",
+            json!({"pane": oc, "model": "anthropic/claude"}),
+        )
+        .unwrap_err();
+    assert!(
+        refused.code == "invalid" && refused.message.contains("/models"),
+        "{refused}"
+    );
+    // A shell: no model, and nothing to type.
+    let sh = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "sh", "cwd": dir}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(live(&sh)["model"], Value::Null);
+    assert_eq!(
+        s.try_call("pane.model", json!({"pane": sh, "model": "opus"}))
+            .unwrap_err()
+            .code,
+        "invalid"
+    );
+}
+
 /// OpenCode's database in a station's throwaway home, with the two tables
 /// of OpenCode 2.3.0 that are read (their columns as its own schema has
 /// them, the ones not read left out where it allows).
@@ -1216,9 +1590,12 @@ mod in_a_browser {
             lists: [text.querySelector('.md ol').className, text.querySelectorAll('.md ol > li').length, text.querySelectorAll('.md ul > li').length, !!text.querySelector('.md .md-code-in')],
             acts: [acts.className, ...[...acts.children].map(b => b.className + ': ' + b.innerText), ...css(acts.firstChild, 'width', 'height')],
             composer: [q('.chat-composer').tagName, row.className, ...css(row, 'borderTopLeftRadius', 'backgroundColor'), q('.chat-box').className, q('.chat-box').placeholder,
-                [...q('.chat-tools').children].map(b => b.className.replace(/ ?(on|danger|primary)\b/g, '').trim() + ': ' + b.innerText)],
+                // (What the model chip says is the agent's own; that it is there, and where, is the component's.)
+                [...q('.chat-tools').children].map(b => b.className.replace(/ ?(on|danger|primary)\b/g, '').trim() + ': ' + (b.classList.contains('chat-model') ? String(b.hidden) : b.innerText))],
             keys: !!q('.chat-keys:not([hidden])'),
-            bar: [...root.querySelectorAll(':scope > .chat-bar > *, .chat-pane > .chat-bar > *')].map(e => e.className.replace(/ ?(working|idle|done|needs_you|error)\b/g, '')).filter(c => c !== 'chat-next'),
+            // (How full the ring is, is the agent's own; that every agent's chat has it, is the component's.)
+            bar: [...root.querySelectorAll(':scope > .chat-bar > *, .chat-pane > .chat-bar > *')].map(e => e.className.replace(/ ?(working|idle|done|needs_you|error|none|count|high|full)\b/g, '')).filter(c => c !== 'chat-next'),
+            copies: [root.querySelectorAll('.chat-text').length > 0, [...root.querySelectorAll('.chat-text')].every(t => t.hidden || !!t.querySelector('.chat-acts .act-copy')), [...root.querySelectorAll('.chat-user')].every(t => !!t.querySelector('.chat-acts.mine .act-copy'))],
         };
     })()"#;
 
@@ -1290,6 +1667,8 @@ mod in_a_browser {
         say("idle");
 
         let page = Page::open(&c.s, 390, 844);
+        // (A full Chrome's window is never as narrow as a phone.)
+        page.phone_screen();
         let open = |id: &str| {
             page.goto(&format!("#/s/alpha/p/{id}"));
             page.wait(
@@ -1338,6 +1717,22 @@ mod in_a_browser {
             assert_eq!(look, &looks[0].1, "{name} is not drawn as claude is");
         }
         assert_eq!(looks[0].1["keys"], json!(false));
+        // The owner, 17 Nov 2026: "make sure this all this is for any
+        // agent chat not just Claude". The ring is in every agent's bar,
+        // the model chip in every message box, and copy under every reply
+        // and every message of the owner's: the comparison above holds
+        // them equal, and this says they are there.
+        let bar = looks[0].1["bar"].as_array().unwrap();
+        assert!(bar.contains(&json!("chat-ring")), "{bar:?}");
+        assert!(
+            looks[0].1["composer"][6]
+                .as_array()
+                .unwrap()
+                .contains(&json!("chat-model: false")),
+            "{}",
+            looks[0].1["composer"]
+        );
+        assert_eq!(looks[0].1["copies"], json!([true, true, true]));
         assert_eq!(
             looks[0].1["acts"],
             json!([
@@ -1416,11 +1811,10 @@ mod in_a_browser {
             (&json!(150), &json!(630), &json!([0, 0, true]), &json!(true)),
             "{up}"
         );
-        // Nothing between the message box and the keyboard but its own edge.
-        assert!(
-            up["dock"]["bottom"].as_i64().unwrap() - up["row"]["bottom"].as_i64().unwrap() <= 8,
-            "{up}"
-        );
+        // Nothing between the message box and the keyboard: the owner's
+        // report of 17 Nov 2026 was a gap there. The card's own bottom
+        // edge is the bottom of what is in sight, to the pixel.
+        assert_eq!(up["row"]["bottom"], json!(630), "{up}");
         // The last thing said is still in sight above it.
         assert_eq!(up["log"][2], json!(0), "{up}");
         assert!(
@@ -1479,8 +1873,7 @@ mod in_a_browser {
             "{small} {}",
             page.js("[window.innerHeight, window.visualViewport.height, document.getElementById('app').style.height]")
         );
-        page.protocol("Emulation.clearDeviceMetricsOverride", json!({}));
-        page.wait("the window as it was", "window.innerHeight > 800");
+        page.phone_screen();
 
         // A phone's layout view: the same pane, the same component, the
         // same place for everything, and the same with the keyboard up.
@@ -1524,6 +1917,7 @@ mod in_a_browser {
             (&json!(150), &json!(630), &json!([0, 0, true]), &json!(0)),
             "{up}"
         );
+        assert_eq!(up["row"]["bottom"], json!(630), "in a layout: {up}");
         shoot(&page, "one-chat-layout-keyboard-up");
 
         // A computer: a cell of a layout is the same component.
@@ -1553,6 +1947,306 @@ mod in_a_browser {
             "document.querySelectorAll('.split .chat-pane').length === 2",
         );
         shoot(&wide, "one-chat-desktop-layout");
+    }
+
+    /// The owner's report of 17 Nov 2026, from an iPhone, with four
+    /// pictures against Anthropic's own app: "On the top right, there is a
+    /// circle that show usage. Can we do that? Then there is a row that
+    /// show how many agents are running as well as a detail window pop
+    /// that lets you see details of the sub agents/ tasks running. And a
+    /// small copy icon that you can pick that copies each return to the
+    /// clipboard. Also there is a model picker, can we add that for all
+    /// chats ?" And: "Also can I clear the while you were away message?"
+    ///
+    /// At a phone's size, at the plain address a phone uses today: the
+    /// ring says how full the context is; "2 running tasks" opens the
+    /// sheet, with a sub-agent's transcript one tap in; copy under each
+    /// reply copies that reply's own source; the recap is one line that
+    /// opens, is cleared for every device and comes back from the menu;
+    /// and the model chip shows what the agent reports, lists its models
+    /// with a tick, sends the program's own command and then follows the
+    /// agent's report.
+    #[test]
+    #[ignore = "merge tier: a browser"]
+    fn the_ring_the_tasks_copy_notes_and_the_model_on_a_phone() {
+        let prices = fake_prices::Prices::start();
+        let s = Station::start_with("alpha", &prices.config(), &[]);
+        let dir = folder(&s, "mere");
+        let lead = pane(&s, "fake", "lead", &dir, busy_script());
+        s.wait_state(&lead, "done");
+        write_side(&s, &lead);
+        // An agent that reports nothing has the ring all the same: empty.
+        let quiet = pane(
+            &s,
+            "opencode",
+            "quiet",
+            &folder(&s, "fen"),
+            json!({"no_hooks": true, "steps": []}),
+        );
+        let page = Page::open(&s, 390, 844);
+        page.phone_screen();
+        page.goto(&format!("#/s/alpha/p/{lead}"));
+        let chat = ".phone-chat";
+
+        // The ring: 700,150 of the list's 1,000,000.
+        let ring = page.wait(
+            "the ring",
+            "(r => r && r.dataset.pct ? [r.dataset.pct, r.getAttribute('aria-label'), r.className, getComputedStyle(r.firstChild).getPropertyValue('--pct').trim(), r.getBoundingClientRect().right <= 390, r.nextSibling.className] : false)(document.querySelector('.phone-chat .chat-bar .chat-ring'))",
+        );
+        assert_eq!(
+            ring,
+            json!([
+                "70",
+                "Context 70% used",
+                "chat-ring high",
+                "70",
+                true,
+                "icon-btn chat-more"
+            ])
+        );
+        // (The sheet says what the conversation's own answer brought: wait for it.)
+        page.wait(
+            "the conversation's answer",
+            "(c => !!c && !c.hidden && c.innerText.includes('Medium'))(document.querySelector('.phone-chat .chat-model'))",
+        );
+        page.js("document.querySelector('.phone-chat .chat-ring').click()");
+        let facts = page.wait("the ring's sheet", "(d => d && [...d.querySelectorAll('.fact')].map(f => f.innerText.replace(/\\s+/g, ' ')))(document.querySelector('.dialog.chat-sheet .usage-sheet'))");
+        let facts: Vec<&str> = facts
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f.as_str().unwrap())
+            .collect();
+        assert!(
+            facts.contains(&"Model claude-opus-5-5")
+                && facts.contains(&"Effort Medium")
+                && facts
+                    .iter()
+                    .any(|f| f.starts_with("Context 700k of 1M (70% used)"))
+                && facts.contains(&"Tokens out 500"),
+            "{facts:?}"
+        );
+        shoot(&page, "extras-ring-sheet");
+        page.js("document.querySelector('.dialog .icon-btn').click()");
+        shoot(&page, "extras-bar-ring-tasks-chip");
+
+        // The tasks.
+        let link = page.wait(
+            "the tasks link",
+            "(b => b && b.innerText)(document.querySelector('.phone-chat .chat-tasks'))",
+        );
+        assert_eq!(link, json!("2 running tasks"));
+        page.js("document.querySelector('.phone-chat .chat-tasks').click()");
+        let rows = page.wait("the tasks sheet", "(l => l && l.querySelectorAll('.task-row').length === 2 && [...l.querySelectorAll('.task-row')].map(r => [r.dataset.kind, r.querySelector('b').innerText, r.querySelector('.task-what .muted').innerText.replace(/ · \\d.*$/, ''), !!r.querySelector('.task-open'), !!r.querySelector('.task-stop')]))(document.querySelector('.dialog.chat-sheet .task-list'))");
+        assert_eq!(
+            rows,
+            json!([
+                [
+                    "agent",
+                    "Look for other tally scripts",
+                    "Agent · Explore",
+                    true,
+                    false
+                ],
+                ["shell", "cargo watch -x test", "Shell", false, false]
+            ])
+        );
+        shoot(&page, "extras-tasks-sheet");
+        page.js("document.querySelector('.task-row .task-open').click()");
+        let side = page.wait("the sub-agent's transcript", "(l => l && l.querySelector('.chat-text') && [l.querySelector('.chat-bubble').innerText, l.querySelector('.chat-text .md').innerText.trim(), !!l.closest('.dialog').querySelector('.chat-box'), (r => r.height > 10 && r.top > 40 && r.bottom < 844)(l.querySelector('.chat-text .md').getBoundingClientRect())])(document.querySelector('.dialog .side-log'))");
+        assert_eq!(
+            side,
+            json!([
+                "Search the repository for scripts that count birds.",
+                "One script counts birds: tally.py.",
+                false,
+                true
+            ])
+        );
+        shoot(&page, "extras-task-transcript");
+        page.js(
+            "[...document.querySelectorAll('.dialog .icon-btn')].reverse().forEach(b => b.click())",
+        );
+
+        // Copy, at a plain address: each reply's own source, and the
+        // owner's own message. (A phone reaches a station at http://, where
+        // a browser has no `navigator.clipboard`: the test's own address
+        // is 127.0.0.1, which has one, so it is taken away here.)
+        let copied = page.js("(() => { const out = []; Object.defineProperty(navigator, 'clipboard', { configurable: true, get: () => undefined }); document.execCommand = (c) => { if (c === 'copy') out.push(document.activeElement.value); return c === 'copy'; };             for (const b of document.querySelectorAll('.phone-chat .chat-log .act-copy')) b.click();             return [!!navigator.clipboard, out]; })()");
+        assert_eq!(
+            copied[1],
+            json!([
+                "Count the herons",
+                "Nine herons, counted from `survey.csv`.",
+                "And **three** egrets.",
+                "ok"
+            ]),
+            "{copied}"
+        );
+        page.wait(
+            "it says Copied",
+            "[...document.querySelectorAll('.toast')].some(t => t.innerText === 'Copied')",
+        );
+
+        // The recap: one quiet line, without Claude Code's hint; it opens.
+        let note = "document.querySelector('.phone-chat .chat-note[data-note=\"away_summary\"]')";
+        let line = page.wait("the recap", &format!("(n => n && [n.querySelector('.note-text').innerText, getComputedStyle(n.querySelector('.note-text')).whiteSpace, n.getBoundingClientRect().height < 50, !!n.querySelector('.chat-note-body')])({note})"));
+        assert_eq!(line, json!(["While you were away: You asked for a count of the herons, and it is done: nine, with three egrets beside them. Next, you can decide whether the tally script should skip the egrets.", "nowrap", true, false]));
+        shoot(&page, "extras-recap-one-line");
+        page.js(&format!("{note}.querySelector('.chat-note-line').click()"));
+        let open = page.wait(
+            "the recap opened",
+            &format!("(b => b && b.innerText)({note}.querySelector('.chat-note-body'))"),
+        );
+        assert!(
+            open.as_str().unwrap().contains("skip the egrets.")
+                && open
+                    .as_str()
+                    .unwrap()
+                    .contains("type /config in the terminal"),
+            "{open}"
+        );
+        // Cleared: gone here, after a reload, and on another device.
+        page.js(&format!("{note}.querySelector('.chat-note-x').click()"));
+        page.wait("the recap cleared", &format!("!{note}"));
+        wait_for("the station keeps it", 5, || {
+            (conversation(&s, &lead, true)["live"]["cleared"]
+                .as_array()
+                .is_some_and(|c| c.len() == 1))
+            .then_some(())
+        });
+        page.js("(location.reload(), true)");
+        page.wait("the page again", "!!document.querySelector('.phone-chat .chat-text .chat-acts') && [...document.querySelectorAll('.phone-chat .chat-quiet')].some(e => e.innerText.startsWith('Turn ended'))");
+        assert_eq!(
+            page.js(&format!("!!{note}")),
+            json!(false),
+            "after a reload"
+        );
+        let second = Page::open(&s, 390, 844);
+        second.phone_screen();
+        second.goto(&format!("#/s/alpha/p/{lead}"));
+        second.wait("the conversation on a second device", "[...document.querySelectorAll('.phone-chat .chat-quiet')].some(e => e.innerText.startsWith('Turn ended'))");
+        assert_eq!(
+            second.js(&format!("!!{note}")),
+            json!(false),
+            "on a second device"
+        );
+        // And back, from the pane's menu.
+        page.js("document.querySelector('.phone-chat .chat-more').click()");
+        page.wait("the menu", "(b => b && (b.click(), true))([...document.querySelectorAll('.menu .menu-item')].find(b => b.innerText.startsWith('Show cleared notes')))");
+        page.wait("the recap shown again", &format!("!!{note}"));
+        page.js("document.querySelector('.phone-chat .chat-more').click()");
+        page.wait("the menu", "(b => b && (b.click(), true))([...document.querySelectorAll('.menu .menu-item')].find(b => b.innerText.startsWith('Bring cleared notes back')))");
+        second.wait("the recap back on the second device", &format!("!!{note}"));
+
+        // The model chip: what the agent reports.
+        let chip = "document.querySelector('.phone-chat .chat-tools .chat-model')";
+        assert_eq!(page.wait("the chip", &format!("(c => c && !c.hidden && c.innerText !== 'Model' && [c.innerText, c.previousSibling.className.includes('chat-keys-btn'), c.getBoundingClientRect().width < 200])({chip})")), json!(["Opus 5.5 · Medium", true, true]));
+        page.js(&format!("{chip}.click()"));
+        let sheet = page.wait("the model sheet", "(d => d && d.querySelectorAll('.model-opt').length > 3 && [[...d.querySelectorAll('.model-opt')].map(o => [o.dataset.model, o.querySelector('b').innerText, o.querySelector('.ask-label .muted').innerText.length > 10, o.getAttribute('aria-checked'), o.querySelector('.model-tick').innerText]), [...d.querySelectorAll('.effort-switch button')].map(b => [b.innerText, b.getAttribute('aria-checked')]), !!d.querySelector('.model-other')])(document.querySelector('.dialog.chat-sheet .model-sheet'))");
+        assert_eq!(
+            sheet[0][2],
+            json!(["opus", "Opus", true, "true", "✓"]),
+            "{sheet}"
+        );
+        assert_eq!(
+            sheet[0][1],
+            json!(["fable", "Fable", true, "false", ""]),
+            "{sheet}"
+        );
+        assert_eq!(
+            sheet[1],
+            json!([
+                ["Low", "false"],
+                ["Medium", "true"],
+                ["High", "false"],
+                ["Xhigh", "false"],
+                ["Max", "false"]
+            ])
+        );
+        assert_eq!(sheet[2], json!(true));
+        shoot(&page, "extras-model-sheet");
+        // Choosing sends the program's own command, and the chip waits
+        // for the agent's word: it is not changed by the tap.
+        page.js("document.querySelector('.model-opt[data-model=\"fable\"]').click()");
+        s.wait_text(&lead, "[fake] got: /model fable");
+        assert_eq!(
+            page.wait(
+                "the chip follows the agent's report",
+                &format!("(c => c.innerText.startsWith('Fable') && c.innerText)({chip})")
+            ),
+            json!("Fable 5.2 · High")
+        );
+        // Its sub-agent reported over: one task runs.
+        assert_eq!(page.wait("one task left", "(b => b && b.innerText === '1 running task' && b.innerText)(document.querySelector('.phone-chat .chat-tasks'))"), json!("1 running task"));
+        shoot(&page, "extras-after-model");
+
+        // With the keyboard up the message box, chip and all, stands on
+        // the bottom edge of what is in sight.
+        keyboard(&page, 480, 150);
+        let up = page.js(PLACE);
+        assert_eq!(
+            (
+                &up["row"]["bottom"],
+                &up["dock"]["bottom"],
+                &up["bar"]["top"],
+                &up["kbd"]
+            ),
+            (&json!(630), &json!(630), &json!(150), &json!(true)),
+            "{up}"
+        );
+        shoot(&page, "extras-keyboard-up");
+        // The numbers the owner can read out say the same, and reach the
+        // station's log.
+        page.js("document.querySelector('.phone-chat .chat-more').click()");
+        page.wait("the menu", "(b => b && (b.click(), true))([...document.querySelectorAll('.menu .menu-item')].find(b => b.innerText.startsWith('About this screen')))");
+        let about = page.wait(
+            "the numbers",
+            "(o => o && JSON.parse(o.innerText))(document.querySelector('.dialog .about-out'))",
+        );
+        assert_eq!(
+            (
+                &about["under_card"],
+                &about["vv"]["h"],
+                &about["vv"]["top"],
+                &about["dock_pad_bottom"],
+                &about["kbd"]
+            ),
+            (
+                &json!(0),
+                &json!(480),
+                &json!(150),
+                &json!("0px"),
+                &json!([true, true])
+            ),
+            "{about}"
+        );
+        page.js("document.querySelector('.dialog .about-copy').click()");
+        wait_for("the report in the station's log", 5, || {
+            let rows = s.call("log.query", json!({"kind": "client.report"}));
+            rows.to_string().contains("layout-numbers").then_some(())
+        });
+        page.js("document.querySelector('.dialog .icon-btn').click()");
+        keyboard(&page, 844, 0);
+
+        // An agent that reports no usage and has only a picker: the same
+        // ring, empty, which says so; and the chip, which leads to the
+        // picker in its terminal.
+        page.goto(&format!("#/s/alpha/p/{quiet}"));
+        let bare = page.wait("the quiet agent's chat", &format!("location.hash.endsWith('{quiet}') && (r => r && (c => c && !c.hidden && [r.className, r.getAttribute('aria-label'), c.innerText])(document.querySelector('{chat} .chat-model')))(document.querySelector('{chat} .chat-ring'))"));
+        assert_eq!(
+            bare,
+            json!(["chat-ring none", "Context not reported", "Model"])
+        );
+        page.js(&format!(
+            "document.querySelector('{chat} .chat-model').click()"
+        ));
+        let picker = page.wait("its sheet", "(d => d && [d.querySelectorAll('.model-opt').length, d.querySelector('.model-picker').innerText, !!d.querySelector('.effort-switch')])(document.querySelector('.dialog.chat-sheet .model-sheet'))");
+        assert_eq!(
+            picker,
+            json!([0, "Open its picker in the terminal (/models)", false])
+        );
+        shoot(&page, "extras-picker-only");
     }
 
     /// Pictures of each kind of pane's Chat, for a human to lay side by

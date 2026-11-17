@@ -159,6 +159,9 @@ impl Daemon {
                     session_changed = true;
                 }
             }
+            if ev.effort.is_some() {
+                m.effort = ev.effort.clone();
+            }
             match ev.kind {
                 EventKind::PromptSubmit => {
                     let idle_turns = m.turn.idle_turns;

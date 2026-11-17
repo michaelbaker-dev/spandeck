@@ -101,6 +101,71 @@ pub fn opencode_since(db: &Path, since_ms: u64) -> Vec<Stored> {
         .unwrap_or_default()
 }
 
+/// A conversation a program began itself, for a sub-agent of the one
+/// named: what its own store says of it, and no more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Child {
+    pub id: String,
+    /// The store's own title for it, when it keeps one.
+    pub title: String,
+    pub started_ms: u64,
+    pub modified_ms: u64,
+    /// Whether it is still at work, as far as the store says: `None` when
+    /// the store has no word for it.
+    pub running: Option<bool>,
+}
+
+/// How many children of one conversation are listed: the newest.
+pub const CHILDREN_MAX: usize = 50;
+
+/// The conversations OpenCode began for sub-agents of `parent`
+/// (`session_v2.parent_id`), newest first. One is at work while its newest
+/// message is still being made, or it has none yet.
+pub fn opencode_children(db: &Path, parent: &str) -> Vec<Child> {
+    let Some(conn) = read_only(db) else {
+        return vec![];
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, COALESCE(title, ''), time_created, time_updated FROM session_v2
+         WHERE parent_id=?1 ORDER BY time_created DESC LIMIT ?2",
+    ) else {
+        return vec![];
+    };
+    let rows: Vec<(String, String, i64, i64)> = stmt
+        .query_map(rusqlite::params![parent, CHILDREN_MAX as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+    rows.into_iter()
+        .map(|(id, title, created, updated)| {
+            let last: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT type, data FROM session_message WHERE session_id=?1
+                     ORDER BY seq DESC LIMIT 1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok();
+            let running = match last {
+                None => true,
+                Some((ty, _)) if ty == "idle" => false,
+                Some((ty, data)) => {
+                    ty != "assistant"
+                        || !serde_json::from_str::<Value>(&data).is_ok_and(|d| settled(&d))
+                }
+            };
+            Child {
+                id,
+                title,
+                started_ms: created.max(0) as u64,
+                modified_ms: updated.max(0) as u64,
+                running: Some(running),
+            }
+        })
+        .collect()
+}
+
 /// Is this one of OpenCode's conversations?
 pub fn opencode_has(db: &Path, session: &str) -> bool {
     read_only(db).is_some_and(|conn| {
@@ -278,6 +343,47 @@ fn uri_path(uri: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// The conversations Antigravity began for sub-agents of `parent`
+/// (`parent_conversation_id`), newest first. Its store has no title for
+/// one and no word for whether it is still at work: when it began is its
+/// transcript's first line, and when it was last written to is the file's.
+pub fn antigravity_children(dir: &Path, parent: &str) -> Vec<Child> {
+    let Some(conn) = read_only(&dir.join("conversation_summaries.db")) else {
+        return vec![];
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT conversation_id FROM conversation_summaries
+         WHERE parent_conversation_id=?1 LIMIT 200",
+    ) else {
+        return vec![];
+    };
+    let ids: Vec<String> = stmt
+        .query_map([parent], |r| r.get(0))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+    let mut out: Vec<Child> = ids
+        .into_iter()
+        .filter_map(|id| {
+            let path = antigravity_transcript(dir, &id)?;
+            let mut first = String::new();
+            BufReader::new(std::fs::File::open(&path).ok()?)
+                .read_line(&mut first)
+                .ok()?;
+            let first: Value = serde_json::from_str(&first).ok()?;
+            Some(Child {
+                id,
+                title: String::new(),
+                started_ms: first["created_at"].as_str().and_then(ts_ms)?,
+                modified_ms: modified_ms(&path),
+                running: None,
+            })
+        })
+        .collect();
+    out.sort_by_key(|c| std::cmp::Reverse(c.started_ms));
+    out.truncate(CHILDREN_MAX);
+    out
+}
+
 /// Antigravity's own conversations whose transcript was begun at or after
 /// `since_ms`: not one it started itself (a child). When one began is its
 /// transcript's first line, to the second; a conversation whose line is not
@@ -441,6 +547,60 @@ pub(crate) mod tests {
         assert_eq!(ids, vec!["ses_a"]);
         assert!(opencode_has(&db, "ses_old") && !opencode_has(&db, "ses_none"));
         assert!(opencode_messages(&dir.path().join("absent.db"), "ses_a", 0, 10).is_empty());
+    }
+
+    /// The owner, 17 Nov 2026: "make sure this all this is for any agent
+    /// chat not just Claude". OpenCode and Antigravity keep a conversation
+    /// of its own for each sub-agent, under its parent's id: those are the
+    /// background tasks their chats list.
+    #[test]
+    fn a_programs_own_child_conversations_are_listed_under_their_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("opencode.db");
+        let oc = opencode_db(&db);
+        oc.execute_batch(
+            "INSERT INTO session_v2 VALUES('ses_parent', 'p', NULL, 's', '/w/reeds', 'Reeds', '2.3.0', 1000, 2000, NULL);
+             INSERT INTO session_v2 VALUES('ses_kid1', 'p', 'ses_parent', 's', '/w/reeds', 'Count the nests', '2.3.0', 1100, 1500, NULL);
+             INSERT INTO session_v2 VALUES('ses_kid2', 'p', 'ses_parent', 's', '/w/reeds', 'Map the bank', '2.3.0', 1200, 1900, NULL);
+             INSERT INTO session_v2 VALUES('ses_other', 'p', 'ses_else', 's', '/w/reeds', 'Not ours', '2.3.0', 1300, 1900, NULL);
+             INSERT INTO session_message VALUES('m1', 'ses_kid1', 'assistant', 1, 1100, 1500, '{\"time\":{\"completed\":1500},\"content\":[]}');
+             INSERT INTO session_message VALUES('m2', 'ses_kid2', 'assistant', 1, 1200, 1900, '{\"content\":[{\"state\":{\"status\":\"running\"}}]}');",
+        )
+        .unwrap();
+        let kids = opencode_children(&db, "ses_parent");
+        assert_eq!(
+            kids.iter()
+                .map(|c| (c.id.as_str(), c.title.as_str(), c.running))
+                .collect::<Vec<_>>(),
+            vec![
+                ("ses_kid2", "Map the bank", Some(true)),
+                ("ses_kid1", "Count the nests", Some(false))
+            ]
+        );
+        assert!(opencode_children(&db, "ses_kid1").is_empty());
+
+        let agy = dir.path();
+        let conn = Connection::open(agy.join("conversation_summaries.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversation_summaries (conversation_id text PRIMARY KEY, workspace_uris text NOT NULL,
+                parent_conversation_id text NOT NULL DEFAULT '');
+             INSERT INTO conversation_summaries VALUES('aaaa-1', '[]', '');
+             INSERT INTO conversation_summaries VALUES('bbbb-2', '[]', 'aaaa-1');
+             INSERT INTO conversation_summaries VALUES('cccc-3', '[]', 'aaaa-1');",
+        )
+        .unwrap();
+        // (One of the two has no transcript to read yet: it is left out.)
+        let logs = agy.join("brain/bbbb-2/.system_generated/logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("transcript_full.jsonl"),
+            "{\"step_index\":0,\"type\":\"USER_INPUT\",\"created_at\":\"2026-11-16T10:00:00Z\"}\n",
+        )
+        .unwrap();
+        let kids = antigravity_children(agy, "aaaa-1");
+        assert_eq!(kids.len(), 1, "{kids:?}");
+        assert_eq!((kids[0].id.as_str(), kids[0].running), ("bbbb-2", None));
+        assert_eq!(Some(kids[0].started_ms), ts_ms("2026-11-16T10:00:00Z"));
     }
 
     /// The same report, for Antigravity: a conversation is tied to a folder

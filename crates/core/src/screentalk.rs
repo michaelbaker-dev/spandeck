@@ -420,7 +420,7 @@ impl Daemon {
         });
     }
 
-    fn screen_session(meta: &PaneMeta) -> String {
+    pub(crate) fn screen_session(meta: &PaneMeta) -> String {
         format!("screen:{}", meta.proc_started_ms.unwrap_or(meta.created_ms))
     }
 

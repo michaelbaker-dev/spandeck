@@ -168,6 +168,10 @@ pub struct PaneMeta {
     /// Sub-agents the agent itself has running (its own, not spandeck helpers).
     #[serde(default)]
     pub subagents: Vec<SubAgent>,
+    /// How hard the model is asked to think, as the agent's hooks last
+    /// said. `None`: it has not said.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// The program the pane was asked to run instead of its agent's usual
     /// one (tests and custom launchers), so a restart uses it again. Only
     /// meaningful when `launcher_recorded`: older panes did not keep it.
@@ -1323,6 +1327,7 @@ impl Daemon {
             turn: TurnStats::default(),
             controller: None,
             subagents: vec![],
+            effort: None,
             launcher: opts.program.clone(),
             launcher_recorded: true,
             resumed: resume.is_some(),

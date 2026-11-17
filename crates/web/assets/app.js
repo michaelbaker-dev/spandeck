@@ -21,7 +21,7 @@ import { phoneLook } from './phonelook.js';
 import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook, refreshAsked, refreshCorrected } from './perf.js';
 import { qrSvg } from './qr.js';
 import { sendAct } from './typed.js';
-import { initChat, conversation, faceOf, setFace, chatToggle, termBox, chatBeforeRender, chatAfterRender, chatPark, chatResized, sync as syncKids, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
+import { initChat, chatMenu, conversation, faceOf, setFace, chatToggle, termBox, chatBeforeRender, chatAfterRender, chatPark, chatResized, sync as syncKids, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
 
 // The page opens in the look this browser last had, before anything is asked.
 applyRemembered();
@@ -650,6 +650,9 @@ function paneMenu(e, st, p, where, term) {
     { label: p.muted ? 'Unmute notifications' : 'Mute notifications', action: act('pane.set', { muted: !p.muted }) },
     '-',
     agent && { label: 'Usage', action: () => usageDialog(st, p) },
+    // What the pane's conversation adds: its background tasks, its cleared
+    // notes, and the numbers of the screen (chat.js).
+    ...chatMenu(st, p),
     { label: 'Show changes (diff)', action: () => diffPanel(st, p) },
     agent && { label: 'Standing orders for this pane', action: () => ordersPanel(st, p) },
     agent && p.project && alive && { label: 'Start a review loop on its work', action: () => rpc(st, 'recipe.review', { pane: p.id }).then(() => toast('Review loop started')) },
@@ -4017,15 +4020,21 @@ addEventListener('keydown', (e) => {
 // While the keyboard is up the bars that are not the pane's step aside.
 // (What the viewport is, is read each time: `window.visualViewport`.)
 if (window.visualViewport) {
+  // The tallest the screen has been at each width: a browser that makes
+  // the window itself shorter with the keyboard up (and not only what is
+  // in sight) still has its keyboard known.
+  const tallest = new Map();
   const fit = () => {
     const vv = window.visualViewport, app = document.getElementById('app');
+    const wide = Math.round(vv.width), was = tallest.get(wide) || 0;
+    if (Math.max(vv.height, window.innerHeight) > was) tallest.set(wide, Math.max(vv.height, window.innerHeight));
     // (Zoomed in with two fingers, what is in sight is a part of the page
     // and no keyboard: the page stays as it is, to be looked over.)
     const zoomed = (vv.scale || 1) > 1.01;
     const top = zoomed ? 0 : Math.max(0, Math.round(vv.offsetTop || 0));
     app.style.height = zoomed ? '' : vv.height + 'px';
     app.style.top = top ? top + 'px' : '';
-    const keyboard = !zoomed && vv.height < window.innerHeight * 0.78;
+    const keyboard = !zoomed && vv.height < Math.max(window.innerHeight, tallest.get(wide) || 0) * 0.78;
     app.classList.toggle('kbd', keyboard);
     app.classList.toggle('kbd-term', keyboard && !!document.activeElement?.closest?.('.xterm'));
     // Dialogs, sheets and toasts are in what is in sight too (app.css, the
@@ -4045,15 +4054,18 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('scroll', fit);
   window.addEventListener('resize', fit);
   window.addEventListener('scroll', fit, { passive: true });
-  document.addEventListener('focusin', () => setTimeout(fit, 50));
-  document.addEventListener('focusout', () => setTimeout(fit, 50));
+  // (And again once the keyboard has finished moving: iOS has told of the
+  // viewport's new size before it was final, and not again after.)
+  const soon = () => { for (const ms of [50, 350, 800]) setTimeout(fit, ms); };
+  document.addEventListener('focusin', soon);
+  document.addEventListener('focusout', soon);
   fit();
 }
 
 // The conversation view is given what it needs of the page: nothing of it
 // reaches a station but through the calls the page already makes.
 initChat({
-  api, isPhone, update, go, paneUrl, rpc, findPane, paneMenu, online, onlineStations, panesOf, freeName, lastSessionNote, pref, setPref,
+  api, isPhone, update, go, paneUrl, rpc, findPane, paneMenu, usage: usageDialog, online, onlineStations, panesOf, freeName, lastSessionNote, pref, setPref,
   AGENTS: AGENT_CHOICES,
   approvals: () => S.approvals,
   stations: () => stationsByName(),
