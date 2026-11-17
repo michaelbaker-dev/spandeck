@@ -736,7 +736,12 @@ button.ask-opt.on { border-color: var(--accent-line); background: var(--accent-b
 html, body { overflow: hidden; overscroll-behavior: none; }
 body { position: fixed; inset: 0; width: 100%; }
 #app { position: relative; padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); }
-#app.kbd .chat-dock { padding-bottom: 6px; }
+/* With the keyboard up the message box stands on the bottom edge of what
+   is in sight, with nothing of ours under it: no safe area (the keyboard
+   covers it) and no padding. What a phone leaves between that edge and its
+   keyboard is the phone's own, and has the page's colour. */
+#app.kbd .chat-dock, html.kbd .chat-dock { padding-bottom: 0; }
+html.kbd .sheet-foot { padding-bottom: 10px; }
 /* Reading. */
 .chat-body { line-height: 1.55; }
 .chat-log { gap: 12px; }
@@ -857,3 +862,48 @@ button.new-session { min-height: 48px; border-radius: 24px; }
 .pl-font-text { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 2px; } .pl-font-text .pl-name { padding: 0; }
 .pl-font-sample { font: 14px/1.3 var(--pl-font), monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .top-more { font-size: calc(18px * var(--ui-scale)); min-width: 44px; min-height: 44px; justify-content: center; }
+
+/* ---- The chat's bar, tasks, copy and the model (17 Nov 2026; DECISIONS.md) ---- */
+/* How full the context is: a small ring at the right of the pane's bar. */
+.chat-ring { flex: none; width: 36px; height: 36px; min-width: 36px; padding: 0; border-radius: 50%; background: none; border-color: transparent; justify-content: center; --ring-c: var(--blue); }
+.chat-ring .ring { width: 20px; height: 20px; border-radius: 50%; background: conic-gradient(var(--ring-c) calc(var(--pct, 0) * 1%), var(--line) 0); -webkit-mask: radial-gradient(circle, transparent 5.5px, #000 6.5px); mask: radial-gradient(circle, transparent 5.5px, #000 6.5px); }
+.chat-ring.high { --ring-c: var(--amber); } .chat-ring.full { --ring-c: var(--red); }
+.chat-ring.none .ring { background: none; -webkit-mask: none; mask: none; border: 1.5px dashed var(--muted); opacity: .7; }
+.chat-ring:hover:not(:disabled) { background: var(--panel2); border-color: transparent; }
+.usage-sheet { display: flex; flex-direction: column; gap: 10px; } .usage-sheet p { margin: 0; } .usage-sheet .facts { display: flex; flex-direction: column; gap: 0; }
+.usage-sheet .facts .fact { display: flex; flex-direction: row; align-items: baseline; justify-content: space-between; gap: 12px; padding: 9px 0; border: none; border-bottom: 1px solid var(--line); border-radius: 0; background: none; } .usage-sheet .fact b { text-align: right; overflow-wrap: anywhere; }
+/* The model and the effort, beside "+": what the agent reports. */
+.chat-row .chat-tools button.chat-model { display: block; width: auto; min-width: 0; max-width: 52%; height: 30px; min-height: 30px; padding: 0 10px; border-radius: 15px; border-color: var(--line); color: var(--muted); font-size: calc(12.5px * var(--ui-scale)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-left: 2px; }
+.chat-row .chat-tools button.chat-model::before { content: none; }
+.model-sheet { display: flex; flex-direction: column; gap: 12px; } .model-sheet p { margin: 0; }
+button.ask-opt.model-opt { align-items: center; } .model-opt .ask-label { flex: 1 1 0; } .model-tick { flex: none; width: 1.2em; text-align: center; color: var(--blue); font-weight: 700; } .model-opt.on .model-tick { color: var(--on-accent); }
+.model-other-row { display: flex; flex-direction: column; gap: 4px; } .model-other-row .row { gap: 8px; } .model-other { flex: 1 1 0; min-width: 0; } .model-set, .model-picker { min-height: 44px; padding: 0 16px; justify-content: center; }
+.effort-switch { display: flex; flex-wrap: wrap; } .effort-switch button { flex: 1 1 0; min-height: 40px; padding: 3px 8px; } .model-effort h3 { margin: 0 0 6px; }
+/* "3 running tasks", and the sheet it opens. */
+.chat-tasks { min-height: 28px; font-size: calc(13px * var(--ui-scale)); }
+.task-list { display: flex; flex-direction: column; gap: 4px; } .task-list h3 { margin: 4px 0 2px; font-size: calc(13px * var(--ui-scale)); color: var(--muted); font-weight: 600; }
+.task-row { display: flex; align-items: flex-start; gap: 10px; padding: 9px 2px; border-bottom: 1px solid var(--line); min-width: 0; }
+.task-mark { flex: none; width: 30px; height: 30px; border-radius: 8px; background: var(--panel2); color: var(--muted); display: inline-flex; align-items: center; justify-content: center; font: 600 12px var(--mono-font); }
+.task-row.running .task-mark { color: var(--blue); }
+.task-what { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; overflow-wrap: anywhere; } .task-what .muted { font-size: calc(12.5px * var(--ui-scale)); }
+.task-open { background: none; color: var(--blue); border-color: transparent; padding: 2px 0; min-height: 28px; }
+.task-stop { flex: none; width: 36px; height: 36px; min-width: 36px; padding: 0; border-radius: 50%; justify-content: center; color: var(--red); font-size: 11px; }
+.task-fold { background: none; border: none; border-radius: 0; justify-content: flex-start; gap: 6px; padding: 8px 0; min-height: 40px; color: var(--muted); font-weight: 600; font-size: calc(13px * var(--ui-scale)); }
+/* (A sub-agent's conversation in its sheet: the sheet's body is what scrolls.) */
+.side-body { flex: none; min-height: 0; } .chat-log.side-log { flex: none; overflow: visible; padding: 4px 0 12px; }
+/* A note to read: one quiet line that opens, and a mark that clears it. */
+.chat-note { align-self: stretch; color: var(--muted); font-size: calc(12.5px * var(--ui-scale)); min-width: 0; }
+.chat-note-row { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.chat-note-line { flex: 1 1 0; min-width: 0; background: none; border: none; border-radius: 6px; padding: 4px 2px; min-height: 30px; color: inherit; font-size: inherit; gap: 6px; justify-content: center; }
+.chat-note-line .note-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-note-x { flex: none; width: 30px; height: 30px; min-height: 0; padding: 0; background: none; border-color: transparent; color: var(--muted); border-radius: 50%; justify-content: center; font-size: calc(15px * var(--ui-scale)); line-height: 1; }
+.chat-note-x:hover:not(:disabled), .chat-note-line:hover:not(:disabled) { color: var(--text); background: var(--panel2); border-color: transparent; }
+.chat-note-body { margin: 2px 0 4px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); font-size: calc(13.5px * var(--ui-scale)); display: flex; flex-direction: column; gap: 6px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.chat-note-body .md, .chat-note-body pre { white-space: normal; } .chat-note-body pre.chat-out { white-space: pre-wrap; margin: 0; max-height: 40dvh; overflow: auto; }
+/* Copy, under the owner's own message. */
+.chat-acts.mine { margin: 0 -4px 0 0; opacity: .65; } .chat-acts.mine .chat-act { height: 26px; }
+.about-screen { display: flex; flex-direction: column; gap: 8px; } .about-out { max-height: 46dvh; overflow: auto; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.4 var(--mono-font); background: var(--well); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+@media (max-width: 760px) {
+  .chat-bar .chat-ring { min-width: 36px; min-height: 36px; }
+  .chat-note-x { width: 40px; height: 36px; } .chat-note-line { min-height: 36px; }
+}

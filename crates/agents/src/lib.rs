@@ -20,6 +20,7 @@ pub mod event;
 pub mod foldertrust;
 pub mod hookstrust;
 pub mod install;
+pub mod models;
 pub mod opencode;
 pub mod sessions;
 

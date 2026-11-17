@@ -215,6 +215,9 @@ pub struct ToolResult {
     pub removed: Option<u32>,
     pub answers: Option<Vec<(String, String)>>,
     pub background: bool,
+    /// Left running in the background: the program's own id for it (a
+    /// sub-agent's `agentId`, a shell's `backgroundTaskId`), when it gave one.
+    pub task_id: Option<String>,
     /// For a plan that was approved: the plan as the result has it. The
     /// call's own record can hold an earlier text (see `settle`).
     pub plan: Option<String>,
@@ -226,9 +229,56 @@ pub struct Parsed {
     pub items: Vec<Item>,
     pub results: Vec<ToolResult>,
     pub title: Option<String>,
+    /// A background task reported that it is over.
+    pub notes: Vec<TaskNote>,
     /// The line was not understood: what kind of record it is.
     pub unknown: Option<String>,
 }
+
+/// Claude Code's `<task-notification>`: something it left running is over.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TaskNote {
+    /// The call that started it (`tool-use-id`), and the program's id for
+    /// it (`task-id`).
+    pub tool_id: Option<String>,
+    pub task_id: Option<String>,
+    /// As the program wrote it: completed, failed, ...
+    pub status: String,
+    pub ts_ms: Option<u64>,
+}
+
+/// Something an agent started and did not wait for, or a sub-agent it is
+/// waiting for: what the "Background tasks" sheet lists
+/// (docs/conversation-api.md, `tasks`). Made from the session file only.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Job {
+    /// The id of the item of the call that started it.
+    pub id: String,
+    /// agent (a sub-agent) or shell (a command left running).
+    pub kind: &'static str,
+    /// A sub-agent's kind ("Explore").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// What it was asked, or the command, in one line.
+    pub title: String,
+    /// running, or how it ended: completed, failed (and whatever else the
+    /// program wrote) for one left in the background; ok, error, denied,
+    /// interrupted for a sub-agent that was waited for.
+    pub status: String,
+    pub background: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_ms: Option<u64>,
+    #[serde(skip)]
+    pub tool_id: String,
+    /// The program's own id for it. Not served: it names a file.
+    #[serde(skip)]
+    pub task_id: Option<String>,
+}
+
+/// How many tasks of a session are kept: the finished ones go first.
+pub const JOBS_MAX: usize = 200;
 
 // ------------------------------------------------------------------ text
 
@@ -549,6 +599,11 @@ fn claude_result(v: &Value, block: &Value, ts: Option<u64>) -> Option<ToolResult
         background: tur["status"] == json!("async_launched")
             || tur["isAsync"] == json!(true)
             || tur.get("backgroundTaskId").is_some_and(|b| !b.is_null()),
+        task_id: tur
+            .get("agentId")
+            .or_else(|| tur.get("backgroundTaskId"))
+            .and_then(|t| t.as_str())
+            .map(|t| one_line(t, 80)),
     })
 }
 
@@ -608,6 +663,17 @@ fn claude_user(line: u64, v: &Value, out: &mut Parsed) {
         let mut item = Item::notice(line, 0, "task", ts)
             .with_text(tagged(said, "summary").unwrap_or("").trim());
         item.level = tagged(said, "status").map(|s| one_line(s, 40));
+        let id = |tag: &str| {
+            tagged(said, tag)
+                .map(|t| one_line(t, 80))
+                .filter(|t| !t.is_empty())
+        };
+        out.notes.push(TaskNote {
+            tool_id: id("tool-use-id"),
+            task_id: id("task-id"),
+            status: item.level.clone().unwrap_or_default(),
+            ts_ms: ts,
+        });
         out.items.push(item);
         return;
     }
@@ -753,6 +819,11 @@ fn claude_system(line: u64, v: &Value, out: &mut Parsed) {
 
 /// Claude Code `~/.claude/projects/<dir>/<session>.jsonl`.
 fn claude_line(line: u64, raw: &str) -> Parsed {
+    claude_line_of(line, raw, false)
+}
+
+/// `side`: the file is a sub-agent's own, so its lines are the conversation.
+fn claude_line_of(line: u64, raw: &str, side: bool) -> Parsed {
     let mut out = Parsed::default();
     let Ok(head) = serde_json::from_str::<Head>(raw) else {
         out.unknown = Some("not-json".into());
@@ -771,7 +842,7 @@ fn claude_line(line: u64, raw: &str) -> Parsed {
         return out;
     };
     // A sub-agent's own lines, when they are in the same file.
-    if v["isSidechain"] == json!(true) {
+    if v["isSidechain"] == json!(true) && !side {
         return out;
     }
     match ty {
@@ -1222,6 +1293,41 @@ fn abandon(item: &mut Item) {
     });
 }
 
+/// A sub-agent's own transcript as items, oldest first: the lines of the
+/// file Claude Code keeps beside the session
+/// (`<session>/subagents/agent-<id>.jsonl`), each call settled by its
+/// result. Read whole from what it is given; the caller bounds that.
+pub fn side_items<'a>(dialect: Dialect, lines: impl Iterator<Item = &'a str>) -> Vec<Item> {
+    let mut items: Vec<Item> = vec![];
+    for (n, raw) in lines.enumerate() {
+        let line = n as u64 + 1;
+        let p = match dialect {
+            Dialect::Claude => claude_line_of(line, raw, true),
+            other => parse_line(other, line, raw),
+        };
+        for r in &p.results {
+            let call = items
+                .iter_mut()
+                .rev()
+                .find(|i| i.status == Some("running") || i.status == Some("waiting"))
+                .filter(|i| i.tool_id.as_deref() == Some(r.tool_id.as_str()));
+            match call {
+                Some(item) => settle(item, r),
+                None => {
+                    if let Some(item) = items
+                        .iter_mut()
+                        .find(|i| i.tool_id.as_deref() == Some(r.tool_id.as_str()))
+                    {
+                        settle(item, r);
+                    }
+                }
+            }
+        }
+        items.extend(p.items);
+    }
+    items
+}
+
 // ----------------------------------------------------------------- detail
 
 pub fn paged(full: &str, offset: usize) -> Value {
@@ -1497,6 +1603,7 @@ struct Open {
     name: String,
     summary: String,
     slot: usize,
+    ts_ms: Option<u64>,
 }
 
 /// Where each item of one conversation is, so that a page is a few lines
@@ -1509,6 +1616,8 @@ struct Conv {
     /// (the line that settled a call, the call's slot), by line.
     closes: Vec<(u64, usize)>,
     open: Vec<Open>,
+    /// What the agent started and left running, and its sub-agents.
+    jobs: Vec<Job>,
     title: Option<String>,
     unknown: u64,
     unknown_kinds: Vec<(String, u64)>,
@@ -1525,6 +1634,7 @@ impl Conv {
             slots: vec![],
             closes: vec![],
             open: vec![],
+            jobs: vec![],
             title: None,
             unknown: 0,
             unknown_kinds: vec![],
@@ -1540,10 +1650,60 @@ impl Conv {
                 let o = self.open.remove(at);
                 self.slots[o.slot].closed_at = line;
                 self.closes.push((line, o.slot));
+                let id = format!("{}.{}", self.slots[o.slot].line, self.slots[o.slot].block);
+                match self.jobs.iter_mut().find(|j| j.tool_id == r.tool_id) {
+                    // A sub-agent left in the background goes on; one that
+                    // was waited for is over with its result.
+                    Some(job) if r.background => {
+                        job.background = true;
+                        job.task_id = r.task_id.clone();
+                    }
+                    Some(job) => {
+                        job.status = r.status.to_string();
+                        job.ended_ms = r.ts_ms;
+                    }
+                    // A command the agent left running.
+                    None if r.background => self.job(Job {
+                        id,
+                        kind: "shell",
+                        name: None,
+                        title: o.summary.clone(),
+                        status: "running".into(),
+                        background: true,
+                        started_ms: o.ts_ms,
+                        ended_ms: None,
+                        tool_id: r.tool_id.clone(),
+                        task_id: r.task_id.clone(),
+                    }),
+                    None => {}
+                }
+            }
+        }
+        for note in &p.notes {
+            let job = self.jobs.iter_mut().rev().find(|j| {
+                j.status == "running"
+                    && ((note.tool_id.is_some() && note.tool_id.as_deref() == Some(&j.tool_id))
+                        || (note.task_id.is_some() && note.task_id == j.task_id))
+            });
+            if let Some(job) = job {
+                job.status = if note.status.is_empty() {
+                    "done".into()
+                } else {
+                    note.status.clone()
+                };
+                job.ended_ms = note.ts_ms;
             }
         }
         for item in p.items {
             if item.is_boundary() {
+                // A sub-agent that was being waited for when the turn ended
+                // never returned. One in the background goes on.
+                for job in self.jobs.iter_mut() {
+                    if job.status == "running" && !job.background {
+                        job.status = "interrupted".into();
+                        job.ended_ms = item.ts_ms;
+                    }
+                }
                 for o in self.open.drain(..) {
                     self.slots[o.slot].closed_at = line;
                     self.slots[o.slot].abandoned = true;
@@ -1565,6 +1725,21 @@ impl Conv {
                     name: item.name.clone().unwrap_or_default(),
                     summary: item.summary.clone().unwrap_or_default(),
                     slot: self.slots.len(),
+                    ts_ms: item.ts_ms,
+                });
+            }
+            if item.kind == "tasks" {
+                self.job(Job {
+                    id: item.id.clone(),
+                    kind: "agent",
+                    name: item.name.clone(),
+                    title: item.summary.clone().unwrap_or_default(),
+                    status: "running".into(),
+                    background: false,
+                    started_ms: item.ts_ms,
+                    ended_ms: None,
+                    tool_id: item.tool_id.clone().unwrap_or_default(),
+                    task_id: None,
                 });
             }
             self.slots.push(Slot {
@@ -1595,6 +1770,20 @@ impl Conv {
             self.open.iter_mut().for_each(|o| o.slot -= gone);
             self.trimmed = true;
         }
+    }
+
+    /// Keep a task, within `JOBS_MAX`: the oldest finished one goes first,
+    /// and a running one only when every one kept is running.
+    fn job(&mut self, job: Job) {
+        if self.jobs.len() >= JOBS_MAX {
+            let at = self
+                .jobs
+                .iter()
+                .position(|j| j.status != "running")
+                .unwrap_or(0);
+            self.jobs.remove(at);
+        }
+        self.jobs.push(job);
     }
 
     /// The first slot on a line after `line`.
@@ -1849,6 +2038,17 @@ impl crate::Archive {
             .collect()
     }
 
+    /// What the agent of a session started and left running, and the
+    /// sub-agents it waited for: oldest first, `JOBS_MAX` at most, as the
+    /// file has them now.
+    pub fn conversation_tasks(&self, session: &str) -> Vec<Job> {
+        self.poll_session(session);
+        match self.conv(session) {
+            Some(conv) => conv.lock().unwrap().jobs.clone(),
+            None => vec![],
+        }
+    }
+
     /// The session's title, when its file has one.
     pub fn conversation_title(&self, session: &str) -> Option<String> {
         self.conv(session)?.lock().unwrap().title.clone()
@@ -1963,6 +2163,185 @@ mod tests {
             .iter()
             .map(|i| i.what.unwrap_or(i.kind))
             .collect::<Vec<_>>()
+    }
+
+    /// The owner's report of 17 Nov 2026: "a row that show how many agents
+    /// are running as well as a detail window ... that lets you see details
+    /// of the sub agents/ tasks running". What runs beside the turn is read
+    /// from the session file: the fixture's sub-agent, started in the
+    /// background (`async_launched`, `agentId`) and reported over by its
+    /// `<task-notification>` (tied by `tool-use-id`); a command left
+    /// running; and a sub-agent that was being waited for when the turn
+    /// was stopped. A Codex session has none.
+    ///
+    /// The command's two lines are NOT in a fixture taken from a real
+    /// session: `backgroundTaskId` in a Bash result is what this reader
+    /// already took as "left running", and its notice is written here in
+    /// the shape of the sub-agent's.
+    #[test]
+    fn what_an_agent_left_running_is_read_from_its_session_file() {
+        let line = |v: Value| v.to_string();
+        let call = |id: &str, name: &str, input: Value, at: &str| {
+            line(
+                json!({"type": "assistant", "isSidechain": false, "timestamp": at, "message": {"role": "assistant",
+                "content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}}),
+            )
+        };
+        let more = [
+            // A command left running, then reported over.
+            call(
+                "toolu_sh1",
+                "Bash",
+                json!({"command": "cargo watch -x test", "run_in_background": true}),
+                "2026-11-15T10:05:00.000Z",
+            ),
+            line(
+                json!({"type": "user", "isSidechain": false, "timestamp": "2026-11-15T10:05:01.000Z",
+                "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_sh1", "content": "Command running in background"}]},
+                "toolUseResult": {"stdout": "", "stderr": "", "interrupted": false, "backgroundTaskId": "bash_1"}}),
+            ),
+            // Another one, still running at the end.
+            call(
+                "toolu_sh2",
+                "Bash",
+                json!({"command": "sleep 600", "run_in_background": true}),
+                "2026-11-15T10:05:02.000Z",
+            ),
+            line(
+                json!({"type": "user", "isSidechain": false, "timestamp": "2026-11-15T10:05:03.000Z",
+                "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_sh2", "content": "Command running in background"}]},
+                "toolUseResult": {"stdout": "", "stderr": "", "interrupted": false, "backgroundTaskId": "bash_2"}}),
+            ),
+            line(
+                json!({"type": "user", "isSidechain": false, "timestamp": "2026-11-15T10:06:00.000Z",
+                "message": {"role": "user", "content": "<task-notification>\n<task-id>bash_1</task-id>\n<tool-use-id>toolu_sh1</tool-use-id>\n<status>failed</status>\n<summary>Background command failed</summary>\n</task-notification>"},
+                "origin": {"kind": "task-notification"}}),
+            ),
+            // A sub-agent that is waited for, and the owner stops the turn.
+            call(
+                "toolu_agent2",
+                "Agent",
+                json!({"description": "Count the egrets", "prompt": "Count.", "subagent_type": "general-purpose"}),
+                "2026-11-15T10:07:00.000Z",
+            ),
+        ];
+        let (a, dir) = following("claude", CLAUDE, usize::MAX);
+        let said = |a: &Archive| -> Vec<(String, String, String, bool)> {
+            a.poll_session("s1");
+            a.conversation_tasks("s1")
+                .into_iter()
+                .map(|j| (j.kind.to_string(), j.title, j.status, j.background))
+                .collect()
+        };
+        // The fixture: its sub-agent was started in the background and
+        // its notice says it completed, 3 m 19 s later.
+        let jobs = a.conversation_tasks("s1");
+        assert_eq!(jobs.len(), 1, "{jobs:?}");
+        let j = &jobs[0];
+        assert_eq!(
+            (
+                j.id.as_str(),
+                j.kind,
+                j.name.as_deref(),
+                j.title.as_str(),
+                j.status.as_str(),
+                j.background,
+                j.task_id.as_deref()
+            ),
+            (
+                "21.0",
+                "agent",
+                Some("Explore"),
+                "Look for other tally scripts",
+                "completed",
+                true,
+                Some("a1")
+            )
+        );
+        assert_eq!(j.ended_ms.unwrap() - j.started_ms.unwrap(), 199_000);
+        // While it ran (the file as it was before the notice): running.
+        let (early, _d) = following("claude", CLAUDE, 30);
+        assert_eq!(
+            said(&early),
+            vec![(
+                "agent".into(),
+                "Look for other tally scripts".into(),
+                "running".into(),
+                true
+            )]
+        );
+
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("session.jsonl"))
+            .unwrap();
+        for l in &more {
+            writeln!(f, "{l}").unwrap();
+        }
+        assert_eq!(
+            said(&a)[1..],
+            [
+                (
+                    "shell".to_string(),
+                    "cargo watch -x test".to_string(),
+                    "failed".to_string(),
+                    true
+                ),
+                ("shell".into(), "sleep 600".into(), "running".into(), true),
+                (
+                    "agent".into(),
+                    "Count the egrets".into(),
+                    "running".into(),
+                    false
+                ),
+            ]
+        );
+        // The owner stops the turn: the sub-agent that was waited for is
+        // over; the command left in the background goes on.
+        writeln!(f, "{}", line(json!({"type": "user", "isSidechain": false, "timestamp": "2026-11-15T10:07:30.000Z",
+            "message": {"role": "user", "content": "[Request interrupted by user]"}}))).unwrap();
+        let after = said(&a);
+        assert_eq!(
+            (after[2].2.as_str(), after[3].2.as_str()),
+            ("running", "interrupted"),
+            "{after:?}"
+        );
+        // Served as JSON with nothing of the program's ids.
+        let served = serde_json::to_string(&a.conversation_tasks("s1")).unwrap();
+        assert!(
+            !served.contains("bash_2") && !served.contains("toolu_") && !served.contains("\"a1\""),
+            "{served}"
+        );
+
+        // A sub-agent's own file is read as a conversation: its lines are
+        // marked as a side chain, and are the items here.
+        let side = [
+            line(
+                json!({"type": "user", "isSidechain": true, "message": {"role": "user", "content": "Search the repository."}}),
+            ),
+            line(
+                json!({"type": "assistant", "isSidechain": true, "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_s1", "name": "Grep", "input": {"pattern": "tally"}}]}}),
+            ),
+            line(
+                json!({"type": "user", "isSidechain": true, "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_s1", "content": "tally.py"}]}}),
+            ),
+            line(
+                json!({"type": "assistant", "isSidechain": true, "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "One script counts birds: `tally.py`."}]}}),
+            ),
+        ];
+        let items = side_items(Dialect::Claude, side.iter().map(|l| l.as_str()));
+        assert_eq!(kinds(&items), vec!["user", "tool", "text"]);
+        assert_eq!(
+            (items[1].status, items[2].text.as_deref()),
+            (Some("ok"), Some("One script counts birds: `tally.py`."))
+        );
+
+        // Codex writes none of this to its file.
+        let (codex, _d) = following("codex", CODEX, usize::MAX);
+        assert!(codex.conversation_tasks("s1").is_empty());
     }
 
     /// Found with the real Claude Code 2.1.325 on 16 Nov 2026: a second plan
