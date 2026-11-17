@@ -62,6 +62,15 @@ jobs:
       # the 816 calls a minute of before.
       - name: The deck asks each station one question (a frozen station, one from before, an idle count)
         run: cargo test -p spandeck --test refresh -- --ignored --nocapture
+      # A machine that cannot download is sent the release over SSH: two
+      # real stations are installed and started from what was sent (this
+      # station's own copy, and a published release), and join. And the
+      # Add a machine dialog on a phone, which says so as progress. About
+      # twenty seconds.
+      - name: Add a machine (a release sent over SSH installs and joins; the dialog on a phone)
+        run: |
+          cargo test -p spandeck --test phase5 a_machine_that_cannot_download_is_sent -- --ignored
+          cargo test -p spandeck --test phase5 add_a_machine_on_a_phone -- --ignored
       # Chat for every pane, in a real browser at a phone's width and a
       # computer's: a layout of a Codex whose hooks never ran and a shell,
       # each with Chat and Terminal. And one chat for every pane: a Claude

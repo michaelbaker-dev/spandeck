@@ -2132,7 +2132,7 @@ pub mod fake_vault {
 #[allow(dead_code)]
 pub mod fake_releases {
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use axum::extract::{Path, State};
     use axum::http::{header, StatusCode};
@@ -2143,8 +2143,20 @@ pub mod fake_releases {
 
     pub const TAG: &str = "v9.9.9";
 
+    /// What the stand-in serves, and what it was asked for.
+    #[derive(Default)]
+    struct Served {
+        files: HashMap<String, Vec<u8>>,
+        asked: Vec<String>,
+        /// Answers nothing but "unavailable".
+        down: bool,
+        /// Publishes checksums that match no file.
+        wrong_sums: bool,
+    }
+
     pub struct Releases {
         pub port: u16,
+        served: Arc<Mutex<Served>>,
     }
 
     impl Releases {
@@ -2152,8 +2164,113 @@ pub mod fake_releases {
             format!("http://127.0.0.1:{}", self.port)
         }
 
+        /// How many times a file of the release was asked for.
+        pub fn asked(&self, file: &str) -> usize {
+            let served = self.served.lock().unwrap();
+            served.asked.iter().filter(|f| *f == file).count()
+        }
+
+        /// Every path that was asked for, in order.
+        pub fn all_asked(&self) -> Vec<String> {
+            self.served.lock().unwrap().asked.clone()
+        }
+
+        /// Stop answering (every request gets "unavailable"), or answer again.
+        pub fn down(&self, down: bool) {
+            self.served.lock().unwrap().down = down;
+        }
+
+        /// Publish checksums that match no file, or the true ones again.
+        pub fn wrong_sums(&self, wrong: bool) {
+            self.served.lock().unwrap().wrong_sums = wrong;
+        }
+
         /// `honest`: whether the published checksum matches the file.
         pub fn start(honest: bool) -> Releases {
+            Releases::start_with(honest, true, &[])
+        }
+
+        /// A release that also holds `more`: archives for other kinds of
+        /// machine, by file name, each published with its true checksum.
+        /// `own`: whether it holds the archive for this machine (the binary
+        /// the tests run, which is large and takes seconds to pack).
+        pub fn start_with(honest: bool, own: bool, more: &[(String, Vec<u8>)]) -> Releases {
+            let mut files: HashMap<String, Vec<u8>> = HashMap::new();
+            for (file, bytes) in more {
+                let sum: String = Sha256::digest(bytes)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                files.insert(
+                    format!("{file}.sha256"),
+                    format!("{sum}  {file}\n").into_bytes(),
+                );
+                files.insert(file.clone(), bytes.clone());
+            }
+            if own {
+                Releases::pack_own(honest, &mut files);
+            }
+            let served = Arc::new(Mutex::new(Served {
+                files,
+                ..Served::default()
+            }));
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let app = Router::new()
+                .route(
+                    "/latest",
+                    get(|State(served): State<Arc<Mutex<Served>>>| async move {
+                        let mut served = served.lock().unwrap();
+                        served.asked.push("latest".into());
+                        if served.down {
+                            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        }
+                        (
+                            StatusCode::FOUND,
+                            [(header::LOCATION, format!("/tag/{TAG}"))],
+                        )
+                            .into_response()
+                    }),
+                )
+                .route("/tag/{tag}", get(|| async { "a release" }))
+                .route(
+                    "/download/{tag}/{file}",
+                    get(
+                        |State(served): State<Arc<Mutex<Served>>>,
+                         Path((tag, file)): Path<(String, String)>| async move {
+                            let mut served = served.lock().unwrap();
+                            served.asked.push(file.clone());
+                            if served.down {
+                                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                            }
+                            match served.files.get(&file).filter(|_| tag == TAG) {
+                                Some(_) if served.wrong_sums && file.ends_with(".sha256") => {
+                                    format!("{}  {file}\n", "0".repeat(64)).into_response()
+                                }
+                                Some(bytes) => bytes.clone().into_response(),
+                                None => StatusCode::NOT_FOUND.into_response(),
+                            }
+                        },
+                    ),
+                )
+                .with_state(served.clone());
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async move {
+                    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                    let _ = axum::serve(listener, app).await;
+                });
+            });
+            Releases { port, served }
+        }
+
+        /// The archive for this machine: the binary the tests run.
+        fn pack_own(honest: bool, files: &mut HashMap<String, Vec<u8>>) {
             let target = format!(
                 "{}-{}",
                 std::env::consts::ARCH,
@@ -2189,52 +2306,11 @@ pub mod fake_releases {
             if !honest {
                 sum = sum.chars().rev().collect();
             }
-            let mut files: HashMap<String, Vec<u8>> = HashMap::new();
             files.insert(
                 format!("{name}.tar.gz.sha256"),
                 format!("{sum}  {name}.tar.gz\n").into_bytes(),
             );
             files.insert(format!("{name}.tar.gz"), archive);
-            let files = Arc::new(files);
-
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
-            let port = listener.local_addr().unwrap().port();
-            let app = Router::new()
-                .route(
-                    "/latest",
-                    get(|| async {
-                        (
-                            StatusCode::FOUND,
-                            [(header::LOCATION, format!("/tag/{TAG}"))],
-                        )
-                    }),
-                )
-                .route("/tag/{tag}", get(|| async { "a release" }))
-                .route(
-                    "/download/{tag}/{file}",
-                    get(
-                        |State(files): State<Arc<HashMap<String, Vec<u8>>>>,
-                         Path((tag, file)): Path<(String, String)>| async move {
-                            match files.get(&file).filter(|_| tag == TAG) {
-                                Some(bytes) => bytes.clone().into_response(),
-                                None => StatusCode::NOT_FOUND.into_response(),
-                            }
-                        },
-                    ),
-                )
-                .with_state(files);
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                rt.block_on(async move {
-                    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-                    let _ = axum::serve(listener, app).await;
-                });
-            });
-            Releases { port }
         }
     }
 }

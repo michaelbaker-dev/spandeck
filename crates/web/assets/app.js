@@ -13,7 +13,7 @@
 
 import { Api } from './api.js';
 import { PaneTerm } from './term.js';
-import { h, showMenu, closeMenu, toast, dialog, confirmBox, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText, heldWords, hooksTick, hooksCard, hooksAnsweredWords, trustTick, trustCard, trustAnsweredWords, TRUST_WARNING } from './ui.js';
+import { h, showMenu, closeMenu, toast, dialog, confirmBox, keepInView, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText, heldWords, hooksTick, hooksCard, hooksAnsweredWords, trustTick, trustCard, trustAnsweredWords, TRUST_WARNING } from './ui.js';
 import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
 import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners, termSize } from './look.js';
 import { lookEditor } from './lookedit.js';
@@ -990,12 +990,12 @@ function trustPanel() {
         h('div', {}, h('b', {}, r.kind === 'station' ? `Station ${r.name}${cameWith(r.with)}` : r.name), h('span', { class: 'muted' }, ` · from ${r.from}${r.at && r.at !== t.station ? ` · asked at ${r.at}` : ''}`)),
         h('div', {}, 'It shows the code ', h('b', { class: 'code' }, r.code), '. Approve only if you started this and the codes match: it will be able to control every station.',
           (r.with || []).length ? ` Its whole fleet joins this one: every station that holds its key, whatever names it gives. Browsers signed in to those stations sign in again; browsers signed in to this fleet are not affected.` : '',
-          r.at && r.at !== t.station ? ` Your answer is passed to ${r.at}, which decides.` : ''),
+          r.at && r.at !== t.station ? ` Your answer is passed to ${r.at}, the station that was asked, which hands over the key.` : ''),
         h('div', { class: 'row end' }, h('button', { class: 'mini', onclick: () => answer(r, false) }, 'Refuse'), h('button', { class: 'mini primary', onclick: () => answer(r, true) }, 'Approve')))))
         : h('p', { class: 'muted' }, 'Nothing is waiting.'),
       t.outgoing ? h('p', { class: t.outgoing.problem ? 'warn-text' : '' }, t.outgoing.problem
-        ? `Joining ${t.outgoing.station}'s fleet did not finish: ${t.outgoing.problem}.`
-        : `Waiting for an approval at ${t.outgoing.station}, or at any station of its fleet, of the request that shows the code ${t.outgoing.code}. ${(t.outgoing.with || []).length ? `This station${cameWith(t.outgoing.with)} then move into one fleet with ${t.outgoing.station}.` : `This station then joins ${t.outgoing.station}'s fleet.`}`) : null,
+        ? `Joining the fleet ${t.outgoing.station} is in did not finish: ${t.outgoing.problem}.`
+        : `Waiting for an approval of the request that shows the code ${t.outgoing.code}, at any station of that fleet (${t.outgoing.station} was the one asked). ${(t.outgoing.with || []).length ? `This station${cameWith(t.outgoing.with)} then move into that fleet.` : 'This station then joins that fleet.'}`) : null,
       h('h3', {}, 'Browsers signed in to this fleet'),
       (t.devices || []).length ? h('div', { class: 'list' }, t.devices.map(d => h('div', { class: 'note' },
         h('div', { class: 'row' }, h('b', {}, d.name), h('span', { class: 'muted' }, [d.from ? `from ${d.from}` : '', d.approved_ms ? `approved${d.at ? ` at ${d.at}` : ''} ${ago(d.approved_ms)} ago` : d.at ? `first seen at ${d.at}` : ''].filter(Boolean).map(x => ' · ' + x).join('')), h('span', { class: 'grow' }),
@@ -1670,6 +1670,7 @@ function topbar() {
     isPhone() ? null : h('button', { onclick: palette, title: 'Ctrl+K' }, '⌘K'),
     // A phone's bar has no room for the rest: they are in a menu.
     isPhone() ? h('button', { class: 'top-more', 'aria-label': 'More', title: 'More', 'aria-haspopup': 'menu', onclick: (e) => { const b = e.currentTarget.getBoundingClientRect(); showMenu(b.right, b.bottom + 2, [
+      { label: 'Add a machine…', hint: 'to this fleet', action: () => addMachineDialog() },
       { label: 'Appearance', hint: 'theme and text size', action: () => appearance('deck') },
       { label: 'Usage', hint: 'tokens and cost', action: fleetUsageDialog },
       { label: 'Performance', action: () => go('#/perf') }]); } }, '⋯') : null);
@@ -1964,13 +1965,23 @@ function addChanged() {
   if (a && a.stage === 'done') { toast(a.kind === 'uninstall' ? `spandeck was uninstalled on ${a.name}` : `${a.station || a.name} is in your fleet`); addClear(); }
 }
 
+// While a new station asks to join it first has to find a station of the
+// fleet: any of them, since they are peers.
+const addStageWords = (a) => (a.stage === 'joining' ? 'Asking to join your fleet… (looking for its stations)' : ADD_STAGE[a.stage] || a.stage);
+// What had worked, what did not, and what to do: three pieces, each text.
+const addProblem = (a, fallback) => [
+  a.problem?.worked ? h('p', { class: 'add-worked' }, '✓ ' + a.problem.worked) : null,
+  h('p', { class: 'warn-text add-problem' }, a.problem?.text || fallback),
+  a.problem?.next ? h('p', { class: 'muted add-next' }, a.problem.next) : null];
+
 function addBody(a) {
   if (a.stage === 'approve') return [
     h('div', {}, a.kind === 'join' ? `It asks to join${(a.with || []).length ? `, with its fleet: ${a.name}${cameWith(a.with)}` : ''}. It shows the code ` : 'spandeck is installed there and asks to join. It shows the code ', h('b', { class: 'code' }, a.code), '.'),
     h('div', { class: 'row end' }, h('button', { class: 'mini', onclick: (e) => { e.stopPropagation(); addAnswer(a, false); } }, 'Refuse'), h('button', { class: 'mini primary', onclick: (e) => { e.stopPropagation(); addAnswer(a, true); } }, 'Approve'))];
-  if (a.stage === 'failed') return [h('div', { class: 'warn-text' }, a.problem?.text || (a.kind === 'uninstall' ? 'It was not uninstalled.' : 'It was not added.'))];
+  if (a.stage === 'failed') return [a.problem?.worked ? h('div', {}, a.problem.worked) : null, h('div', { class: 'warn-text' }, a.problem?.text || (a.kind === 'uninstall' ? 'It was not uninstalled.' : 'It was not added.'))];
   if (a.stage === 'needs_password') return [h('div', {}, `It asks for a password for ${a.user}. Open this to enter it.`)];
-  return [h('div', {}, ADD_STAGE[a.stage] || a.stage), h('div', { class: 'muted add-last' }, a.lines?.length ? a.lines[a.lines.length - 1] : '')];
+  // A release being sent over SSH is progress, said in the station's own words.
+  return [h('div', {}, a.note || addStageWords(a)), h('div', { class: 'muted add-last' }, a.lines?.length ? a.lines[a.lines.length - 1] : '')];
 }
 
 function addTile() {
@@ -2001,7 +2012,10 @@ function addMachineDialog(target) {
   if (addDlg) return;
   // A job that is under way is shown, whatever was asked for.
   if (target && S.adding?.running) target = null;
-  let info = null, picked = null, shown = null, again = !!target;
+  // `listOpen`: the list of machines is shown whole. Once one is picked it
+  // is that one row, with "Change", so the row and the box under it are both
+  // in sight above a phone's keyboard.
+  let info = null, picked = null, listOpen = true, shown = null, again = !!target;
   const erase = h('input', { type: 'checkbox' });
   const plain = { autocapitalize: 'none', autocorrect: 'off', spellcheck: false, autocomplete: 'off' };
   let lastUser = '';
@@ -2014,8 +2028,10 @@ function addMachineDialog(target) {
   // `what` is a machine's id, or { station, kind } for a station.
   const start = (what, name, password) => {
     try { localStorage.setItem('spandeck.addUser', user.value.trim()); } catch (e) { /* no storage */ }
-    const station = typeof what === 'object' ? what : null;
-    const params = station ? { station: station.station, user: user.value.trim() } : { machine: what, user: user.value.trim() };
+    // { again: true }: the machine of the try before is only made to ask
+    // again; nothing is installed a second time.
+    const station = typeof what === 'object' && !what.again ? what : null;
+    const params = what.again ? { again: true, user: user.value.trim() } : station ? { station: station.station, user: user.value.trim() } : { machine: what, user: user.value.trim() };
     if (station && station.kind === 'uninstall') params.erase = station.erase !== undefined ? !!station.erase : erase.checked;
     // The password goes in this one request and is dropped from the page.
     if (password) params.password = password;
@@ -2030,21 +2046,29 @@ function addMachineDialog(target) {
     }).catch((e) => toast(e.message, 'error'));
   };
   // What a job was started on, to start it again with a password.
-  const whatOf = (a) => (a.kind === 'join' || a.kind === 'uninstall' ? { station: a.station || a.name, kind: a.kind, erase: a.erase } : a.machine);
+  const whatOf = (a) => (a.can_ask_again ? { again: true } : a.kind === 'join' || a.kind === 'uninstall' ? { station: a.station || a.name, kind: a.kind, erase: a.erase } : a.machine);
   const load = () => api.call('fleet.candidates').then((r) => { info = r; redraw(); }).catch((e) => { info = { enabled: true, tailscale: true, machines: [], error: e.message }; redraw(); });
   const closeBtn = (label = 'Close') => h('button', { onclick: () => d.close() }, label);
+  // Said under the user name, before anything is tapped.
+  // The station is named with why it is the one: the stations of a fleet
+  // are peers, and this one acts only because the page is open on it (the
+  // owner, 17 Nov 2026: "It sound like spark2 is some master machine").
+  const here = () => `${info.station} (the station this page is open on)`;
+  const userHint = (name, does) => `${here()} connects to ${name} over SSH as this user${does}. If ${name} asks for a password you will be asked for it next; it is used for that one connection and not kept. With Tailscale SSH or an SSH key that already lets ${info.station} in, none is asked.`;
+  const whoConnects = () => h('p', { class: 'muted add-quiet add-who' }, `Any station of your fleet can add a machine. ${info.station} does the connecting now because this page is open on it: if ${info.station} is down, open the deck on another station and add the machine from there.`);
   const form = (fields, okLabel, submit) => h('form', { onsubmit: (e) => { e.preventDefault(); submit(); } }, fields, h('div', { class: 'row end' }, closeBtn('Cancel'), h('button', { class: 'primary', type: 'submit' }, okLabel)));
 
   // A station that is running: add it to this fleet, or uninstall it.
   function stationForm() {
     const st = target.station, s = (S.fleet?.stations || []).find(x => x.station === st) || {};
     if (target.kind === 'join') return [
-      h('p', {}, `${info.station} connects to ${st} over SSH and has spandeck there ask to join this fleet. You do not go to ${st}, and nothing is installed on it. Its code then appears here for you to approve.`),
+      h('p', {}, `${here()} connects to ${st} over SSH and has spandeck there ask to join this fleet. You do not go to ${st}, and nothing is installed on it. Its code then appears here for you to approve.`),
       h('p', { class: s.merge ? 'muted' : 'warn-text' }, s.merge
         ? `If ${st} is in a fleet with other stations, they come with it: one approval moves its whole fleet into this one, and the request names them. Browsers signed in to ${st} (and to those stations) from other devices sign in again; browsers signed in to this fleet are not affected.`
         : `${st} runs spandeck ${s.version || ''}, from before a join brought a station's fleet with it: it joins alone. If it is in a fleet with other stations, they stay behind in that fleet, and you add each of them the same way. Browsers signed in to ${st} from other devices sign in again.`),
-      form(field(`Your user name on ${st}`, user, `${info.station} connects to ${st} as this user. If Tailscale SSH or an SSH key already lets it in, no password is asked.`),
-        'Connect and ask', () => { if (user.value.trim()) start(target, st); else user.focus(); })];
+      form(field(`Your user name on ${st}`, user, userHint(st, '')),
+        'Connect and ask', () => { if (user.value.trim()) start(target, st); else user.focus(); }),
+      whoConnects()];
     const inFleet = s.state !== 'not_linked', dirs = s.dirs;
     const others = (S.fleet?.stations || []).filter(x => x.station !== st && x.state !== 'not_linked');
     const absent = others.filter(x => x.state !== 'online').map(x => x.station);
@@ -2064,7 +2088,7 @@ function addMachineDialog(target) {
         h('li', {}, `Afterwards ${st} is listed under Add a machine again.`)),
       h('label', { class: 'check' }, erase, h('span', {}, `Erase everything: also delete ${st}'s history, archive and settings`,
         h('small', {}, 'This cannot be undone. Worktrees that helpers were given, which spandeck keeps with its own data, go with it.'))),
-      field(`Your user name on ${st}`, user, `${info.station} connects to ${st} as this user. If Tailscale SSH or an SSH key already lets it in, no password is asked.`),
+      field(`Your user name on ${st}`, user, userHint(st, '')),
       h('div', { class: 'row end' },
         h('button', { class: 'cancel', onclick: () => d.close() }, 'Cancel'),
         h('button', { class: 'primary danger', onclick: () => { if (user.value.trim()) start(target, st); else user.focus(); } }, `Uninstall spandeck on ${st}`)))];
@@ -2073,23 +2097,30 @@ function addMachineDialog(target) {
   function picker() {
     if (!info) return [h('p', { class: 'muted' }, target ? 'Checking…' : 'Looking for your machines…')];
     if (!info.enabled) return [
-      h('p', {}, `Adding a machine is turned off on ${info.station}.`),
+      h('p', {}, `Adding a machine is turned off on ${here()}.`),
       h('p', { class: 'muted' }, `Turning it on lets ${info.station} connect to another of your machines over SSH, to install spandeck there, to have a station join this fleet, or to uninstall spandeck there, when you ask it to from the Control Deck. Agents cannot do this, and other stations cannot ask ${info.station} to. You can turn it off again from this dialog.`),
       h('div', { class: 'row end' }, closeBtn('Not now'), h('button', { class: 'primary', onclick: () => api.call('fleet.add_enable', { on: true }).then(() => { info = null; redraw(); load(); }).catch((e) => toast(e.message, 'error')) }, `Turn it on for ${info.station}`))];
     if (target && !info.error) return stationForm();
-    if (info.error || !info.tailscale) return [h('p', { class: 'warn-text' }, info.error || `Tailscale is not answering on ${info.station}, so your machines cannot be listed.`), h('div', { class: 'row end' }, closeBtn())];
+    if (info.error || !info.tailscale) return [h('p', { class: 'warn-text' }, info.error || `Tailscale is not answering on ${here()}, so your machines cannot be listed.`), h('div', { class: 'row end' }, closeBtn())];
     if (!info.machines.length) return [
       h('p', {}, 'No Mac, Linux or Windows machine under your Tailscale login is online that is not already a station.'),
       h('p', { class: 'muted' }, 'Phones and tagged machines are not listed. A machine that is asleep is listed once it wakes. A Windows machine needs its OpenSSH server turned on first.'),
       h('div', { class: 'row end' }, h('button', { onclick: () => { info = null; redraw(); load(); } }, 'Look again'), closeBtn())];
     const m = info.machines.find(x => x.id === picked);
+    const about = (x) => [h('b', {}, x.name), h('span', { class: 'muted' }, `${x.os} · ${x.address}`), x.tailscale_ssh ? h('span', { class: 'chip ok', title: 'Tailscale SSH is on there, so no password is needed' }, 'Tailscale SSH') : null];
     return [
-      h('p', { class: 'muted' }, 'Your Mac, Linux and Windows machines that are online and not stations yet:'),
-      h('div', { class: 'list' }, info.machines.map(x => h('button', { class: 'list-row add-machine' + (x.id === picked ? ' first' : ''), type: 'button', 'aria-pressed': x.id === picked, onclick: () => { picked = x.id; redraw(); user.focus(); } },
-        h('b', {}, x.name), h('span', { class: 'muted' }, `${x.os} · ${x.address}`), x.tailscale_ssh ? h('span', { class: 'chip ok', title: 'Tailscale SSH is on there, so no password is needed' }, 'Tailscale SSH') : null))),
-      m ? form(field(`Your user name on ${m.name}`, user, `${info.station} connects to ${m.name} over SSH as this user and runs the spandeck install script there. If Tailscale SSH or an SSH key already lets it in, no password is asked.`),
+      m && !listOpen
+        ? h('div', { class: 'list-row add-machine add-picked first' }, about(m), h('button', { class: 'mini add-change', type: 'button', 'aria-label': 'Pick another machine', onclick: () => { listOpen = true; redraw(); } }, 'Change'))
+        : [h('p', { class: 'muted' }, 'Your Mac, Linux and Windows machines that are online and not stations yet:'),
+          h('div', { class: 'list' }, info.machines.map(x => h('button', { class: 'list-row add-machine' + (x.id === picked ? ' first' : ''), type: 'button', 'aria-pressed': x.id === picked, onclick: () => { picked = x.id; listOpen = false; redraw(); user.focus(); } }, about(x))))],
+      m ? form(field(`Your user name on ${m.name}`, user, userHint(m.name, ' and runs the spandeck install script there')),
         'Connect and install', () => { if (user.value.trim()) start(m.id, m.name); else user.focus(); }) : h('div', { class: 'row end' }, closeBtn('Cancel')),
-      info.by_config ? null : h('p', { class: 'muted' }, h('button', { type: 'button', onclick: () => api.call('fleet.add_enable', { on: false }).then(() => { info = null; redraw(); load(); }).catch((e) => toast(e.message, 'error')) }, `Turn adding machines off on ${info.station}`))];
+      whoConnects(),
+      // The switch for this feature, away from the buttons that act: beside
+      // "Connect and install" it read as turning the station off.
+      info.by_config ? null : h('p', { class: 'muted add-off' }, `Adding machines is switched on at ${here()}: it may connect to your other machines over SSH when you ask it to here. `,
+        h('button', { type: 'button', onclick: () => api.call('fleet.add_enable', { on: false }).then(() => { info = null; redraw(); load(); }).catch((e) => toast(e.message, 'error')) }, `Stop ${info.station} from adding machines`),
+        ` That switches off only this feature: ${info.station} and its panes keep running, and this dialog offers to turn it on again.`)];
   }
 
   function view(a) {
@@ -2097,16 +2128,23 @@ function addMachineDialog(target) {
     // like a wrong password, and the owner could retype only the password.
     if (user.dataset.forJob !== a.id) { user.value = a.user; user.dataset.forJob = a.id; }
     const station = a.kind === 'join' || a.kind === 'uninstall', un = a.kind === 'uninstall';
-    const another = station ? null : h('button', { type: 'button', onclick: () => { picked = null; again = true; redraw(); if (!info) load(); } }, 'Pick another machine');
+    const another = station ? null : h('button', { type: 'button', onclick: () => { picked = null; listOpen = true; again = true; redraw(); if (!info) load(); } }, 'Pick another machine');
     const passForm = (label) => h('form', { onsubmit: (e) => { e.preventDefault(); if (!user.value.trim()) user.focus(); else if (pass.value) start(whatOf(a), a.name, pass.value); else pass.focus(); } },
       field(`Your user name on ${a.name}`, user, 'The short name of your account there. Change it here if it was wrong.'),
       field(`Password on ${a.name}`, pass, 'Used once, for this connection. It is not saved, logged or shown anywhere.'),
-      h('div', { class: 'row end' }, another, closeBtn('Cancel'), h('button', { class: 'primary', type: 'submit' }, label)));
+      h('div', { class: 'row end' }, closeBtn('Cancel'), h('button', { class: 'primary', type: 'submit' }, label)),
+      another ? h('div', { class: 'row end add-another' }, another) : null);
     if (a.stage === 'needs_password') return [h('p', {}, `${a.name} asks for a password: neither Tailscale SSH nor an SSH key let ${api.station} in as ${a.user}.${un ? ` Nothing has been deleted on ${a.name} yet.` : ''}`), passForm(un ? 'Connect and uninstall' : station ? 'Connect and ask' : 'Connect and install')];
     if (a.stage === 'failed') return [
-      h('p', { class: 'warn-text' }, a.problem?.text || (un ? 'It was not uninstalled.' : 'It was not added.')), log,
+      addProblem(a, un ? 'It was not uninstalled.' : 'It was not added.'), log,
       a.problem?.kind === 'wrong_password' ? passForm('Try again')
-        : h('div', { class: 'row end' }, h('button', { onclick: () => { addClear(); d.close(); } }, 'Close'), h('button', { class: 'primary', onclick: () => { if (station) { target = whatOf(a); erase.checked = !!a.erase; } else picked = a.machine; user.value = a.user; again = true; redraw(); if (!info) load(); } }, 'Try again'))];
+        : h('div', { class: 'row end' }, h('button', { onclick: () => { addClear(); d.close(); } }, 'Close'), h('button', { class: 'primary', onclick: () => {
+          user.value = a.user;
+          // spandeck runs there and only the asking failed: ask again.
+          if (a.can_ask_again) return start({ again: true }, a.name);
+          if (station && !a.rejoin) { target = whatOf(a); erase.checked = !!a.erase; } else { picked = a.machine; listOpen = !picked; }
+          again = true; redraw(); if (!info) load();
+        } }, 'Try again'))];
     if (a.stage === 'approve') return [
       h('p', {}, a.kind === 'join' ? `spandeck on ${a.name} asks to join this fleet as ` : `spandeck is installed and running on ${a.name}. It asks to join this fleet as `, h('b', {}, a.station), ' and shows the code ', h('b', { class: 'code' }, a.code), '.'),
       (a.with || []).length ? h('p', {}, h('b', {}, `Its fleet comes with it: ${a.station}${cameWith(a.with)}.`), ' Every station that holds its fleet\'s key joins, whatever names it gives; one that is off joins when it is next seen. Browsers signed in to those stations from other devices sign in again.')
@@ -2124,7 +2162,9 @@ function addMachineDialog(target) {
     const at = steps.findIndex(s => s[0] === a.stage);
     return [
       h('p', {}, un ? `Uninstalling spandeck on ${a.name}, as ${a.user}.` : station ? `Asking ${a.name} to join, as ${a.user}.` : `Adding ${a.name} as ${a.user}.`),
-      h('ol', { class: 'add-steps' }, steps.map(([, label], i) => h('li', { class: i < at ? 'done' : i === at ? 'now' : '' }, h('span', { 'aria-hidden': 'true' }, i < at ? '✓' : i === at ? '›' : '·'), label + (i === at ? '…' : '')))),
+      h('ol', { class: 'add-steps' }, steps.map(([, label], i) => h('li', { class: i < at ? 'done' : i === at ? 'now' : '' }, h('span', { 'aria-hidden': 'true' }, i < at ? '✓' : i === at ? '›' : '·'), label + (i === at ? '…' : '') + (i === at && a.stage === 'joining' ? ' (looking for its stations)' : '')))),
+      // What the steps do not say: the machine cannot download and is sent the release.
+      a.note ? h('p', { class: 'add-note' }, a.note) : null,
       log,
       h('div', { class: 'row end' }, h('button', { class: 'danger', onclick: () => addClear() }, 'Stop'), closeBtn('Hide'))];
   }
@@ -2133,14 +2173,19 @@ function addMachineDialog(target) {
     const a = again ? null : S.adding;
     if (a) setLog(a.lines);
     // Only a change of step redraws: the boxes being typed in are left alone.
-    const key = JSON.stringify(a ? [a.id, a.stage, a.problem?.kind, a.code] : [picked, target, info && [info.enabled, info.tailscale, info.error, info.machines.map(x => x.id)]]);
+    const key = JSON.stringify(a ? [a.id, a.stage, a.problem?.kind, a.code, a.note] : [picked, listOpen, target, info && [info.enabled, info.tailscale, info.error, info.machines.map(x => x.id)]]);
     if (key === shown) return;
     shown = key;
     box.replaceChildren(...(a ? view(a) : picker()).flat().filter(Boolean));
-    const first = box.querySelector(a ? (user.value.trim() ? 'input[type=password], input' : 'input') : '.list-row.first ~ * input, form input');
+    // With the user name already there, the password's box is the one to
+    // type in. (A list of selectors finds whichever comes first on the
+    // page, which was the user name: the password step opened on it.)
+    const first = (a && user.value.trim() && box.querySelector('input[type=password]')) || box.querySelector(a ? 'input' : 'form input');
     // What cannot be undone opens on Cancel, not on a box or the red button.
     const cancel = !a && target && target.kind === 'uninstall' ? box.querySelector('button.cancel') : null;
     if (cancel) cancel.focus(); else if (first) first.focus();
+    // What was drawn may be shorter or longer than what it replaced.
+    keepInView(document.activeElement);
   }
 
   const d = dialog(!target ? 'Add a machine' : target.kind === 'uninstall' ? `Uninstall spandeck on ${target.station}?` : `Add ${target.station} to this fleet`, () => box, { onClose: () => { addDlg = null; pass.value = ''; } });
@@ -4011,7 +4056,16 @@ if (window.visualViewport) {
     const keyboard = !zoomed && vv.height < window.innerHeight * 0.78;
     app.classList.toggle('kbd', keyboard);
     app.classList.toggle('kbd-term', keyboard && !!document.activeElement?.closest?.('.xterm'));
+    // Dialogs, sheets and toasts are in what is in sight too (app.css, the
+    // backdrop): where it begins, how tall it is, and what is under it.
+    const page = document.documentElement;
+    for (const [name, px] of [['--vv-top', top], ['--vv-height', vv.height], ['--vv-bottom', Math.max(0, window.innerHeight - top - vv.height)]]) {
+      if (zoomed) page.style.removeProperty(name); else page.style.setProperty(name, px + 'px');
+    }
+    page.classList.toggle('kbd', keyboard);
     if (window.scrollY || document.documentElement.scrollTop) window.scrollTo(0, 0);
+    // The box being typed in, in a dialog that just got shorter.
+    keepInView(document.activeElement);
     // A conversation's log keeps its place in its new room, now.
     chatResized();
   };

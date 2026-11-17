@@ -87,6 +87,57 @@ fn a_station_joins_the_fleet_only_when_the_owner_approves_it_there() {
     }
 }
 
+/// The owner's report of 17 Nov 2026, adding the Mac "monitoring" from
+/// spark2's deck: spandeck was installed and started there, and its request
+/// to join ended at once with "no station called spark2 was found". A
+/// station that has only just started has not seen the others yet.
+///
+/// Here bravo is told to join alpha before it can see it (alpha is not
+/// running yet). It goes on looking, and asks as soon as alpha is there:
+/// the code alpha shows is the one bravo was given. A station can also be
+/// named by the address it answers at.
+#[test]
+fn a_station_told_to_join_one_it_does_not_see_yet_goes_on_looking_for_it() {
+    let mut a = Station::not_started("alpha", "");
+    let b = Station::start_with(
+        "bravo",
+        &format!("peers = [\"127.0.0.1:{}\"]\n", a.port),
+        &[],
+    );
+    assert_eq!(b.sees("alpha"), None);
+    let (asked, waiting) = std::thread::scope(|s| {
+        let join = s.spawn(|| b.try_call("fleet.join", json!({"station": "alpha"})));
+        // Before this was fixed the answer came at once, and was the error.
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(!join.is_finished(), "it gave up without looking again");
+        a.launch();
+        let asked = join.join().unwrap().expect("the join, once alpha is there");
+        (asked, a.call("trust.status", json!({})))
+    });
+    assert_eq!(asked["station"], json!("alpha"), "{asked}");
+    let req = &waiting["requests"][0];
+    assert_eq!(
+        (req["name"].clone(), req["code"].clone()),
+        (json!("bravo"), asked["code"].clone()),
+        "{waiting}"
+    );
+    // By address: the one in bravo's own config. An address this station
+    // would not look at by itself is not asked.
+    let by_address = b.call(
+        "fleet.join",
+        json!({"station": format!("127.0.0.1:{}", a.port)}),
+    );
+    assert_eq!(by_address["station"], json!("alpha"), "{by_address}");
+    let err = b
+        .try_call("fleet.join", json!({"station": "192.0.2.7:7391"}))
+        .unwrap_err();
+    assert!(
+        err.message.contains("does not ask it") || err.message.contains("Tailscale did not answer"),
+        "{}",
+        err.message
+    );
+}
+
 /// A refused request hands over nothing.
 #[test]
 fn a_refused_station_stays_out() {
@@ -2821,6 +2872,63 @@ exec env -i PATH={remote_bin}:/usr/bin:/bin HOME={c}/home SPANDECK_STATE_DIR={c}
     );
     assert!(at("charlie/bin/spandeck").exists());
 
+    // ---- "Try again" after the step that asks (the owner's report of 17
+    // Nov 2026: the join failed on a machine spandeck had just been
+    // installed on). Here the request is refused, which ends the add at the
+    // same step. The dialog is told what had worked, and trying again only
+    // asks again: the machine is connected to, nothing is downloaded or
+    // installed, and a new code arrives.
+    a.call("trust.deny", json!({"request": v["request"]}));
+    let v = rest_at(&a, &["failed"]);
+    let problem = &v["problem"];
+    assert_eq!(
+        (&problem["kind"], &v["can_ask_again"], &problem["worked"]),
+        (
+            &json!("refused"),
+            &json!(true),
+            &json!(format!(
+                "spandeck {} was installed on charlie and is running.",
+                env!("CARGO_PKG_VERSION")
+            ))
+        ),
+        "{v}"
+    );
+    assert!(
+        problem["next"]
+            .as_str()
+            .unwrap()
+            .starts_with("Try again: it only asks again, and nothing is downloaded or installed a second time. Or on that machine: `spandeck fleet --join <any station of your fleet>` (its stations: alpha)."),
+        "{v}"
+    );
+    let binary = std::fs::metadata(at("charlie/bin/spandeck"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    a.call("fleet.add", json!({"again": true, "user": "sam"}));
+    rest_at(&a, &["needs_password"]);
+    a.call(
+        "fleet.add",
+        json!({"again": true, "user": "sam", "password": RIGHT}),
+    );
+    let v = rest_at(&a, &["approve"]);
+    assert_eq!(
+        (&v["kind"], &v["rejoin"], &v["station"]),
+        (&json!("join"), &json!(true), &json!("charlie")),
+        "{v}"
+    );
+    let said = v["lines"].to_string();
+    assert!(
+        !said.contains("Downloading") && !said.contains("Installed spandeck"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::metadata(at("charlie/bin/spandeck"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        binary
+    );
+
     // The owner approves it with the usual control, and it becomes a station.
     a.call("trust.approve", json!({"request": v["request"]}));
     rest_at(&a, &["done"]);
@@ -2929,7 +3037,7 @@ exec env -i PATH={remote_bin}:/usr/bin:/bin HOME={c}/home SPANDECK_STATE_DIR={c}
     assert!(said.contains("Add charlie to this fleet"), "{said}");
     fill(USER, "sam");
     press("Connect and ask");
-    dialog_says("the password to be asked for", "asks for a password");
+    dialog_says("the password to be asked for", "Password on charlie");
     fill(PASS, RIGHT);
     press("Connect and ask");
     dialog_says("charlie's code", "asks to join this fleet as");
@@ -5868,4 +5976,948 @@ fn pictures_of_the_phones_layout_view() {
         drop(phone);
         s.call("pane.close", json!({"pane": agent}));
     }
+}
+
+/// The owner's report of 17 Nov 2026, from an iPhone, adding the Mac
+/// "monitoring": "I don't see a place to enter a password ... What does turn
+/// off spark2 mean? What if spark2 is down?", "I can't even see what I am
+/// typing for username" (the box was behind the keyboard), a failure that
+/// said only that it "could not ask to join this fleet" over a log ending
+/// "no station called spark2 was found", and "aren't they all peers. It
+/// sound like spark2 is some master machine".
+///
+/// At a phone's size, with a keyboard the page is told of as an iPhone
+/// tells it (what is in sight gets shorter and begins further down): Add a
+/// machine is reached from the Recent list; the dialog says what happens
+/// with a password, who connects and why that station, and what to do if it
+/// is down; the switch for the feature is not among the buttons that act;
+/// a machine that is picked is one row, and it and the box being typed in
+/// are both in sight above the keyboard, in the user name step and in the
+/// password step, with the page itself not moved; the failed join says what
+/// worked, what did not and what to do, naming the fleet and not a station
+/// as its head; and "Try again" only asks again. The New session sheet
+/// keeps its box in sight the same way.
+///
+/// With `SPANDECK_SHOTS=<folder>` it also writes a picture of each state.
+#[test]
+#[ignore = "merge tier: a browser"]
+fn add_a_machine_on_a_phone_is_typed_in_sight_and_says_what_happened() {
+    use common::browser::Page;
+    const RIGHT: &str = "c0rrect-horse-staple-91";
+    let dir = tempfile::tempdir().unwrap();
+    let at = |p: &str| dir.path().join(p);
+    std::fs::create_dir_all(at("standin")).unwrap();
+    // A tailnet with a dozen machines to add: the one wanted is last.
+    let names = [
+        "atlas",
+        "bench",
+        "cedar",
+        "delta",
+        "ember",
+        "forge",
+        "garnet",
+        "harbor",
+        "iris",
+        "juniper",
+        "kestrel",
+        "monitoring",
+    ];
+    let peers: serde_json::Map<String, Value> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            (
+                format!("key-{name}"),
+                json!({"ID": format!("n-{name}"), "HostName": name, "DNSName": format!("{name}.tail0000.ts.net."),
+                    "OS": if i % 3 == 0 { "linux" } else { "macOS" }, "UserID": 7, "Online": true,
+                    "TailscaleIPs": [format!("100.64.0.{}", i + 20)]}),
+            )
+        })
+        .collect();
+    std::fs::write(
+        at("standin/status.json"),
+        json!({"Self": {"UserID": 7, "HostName": "alpha", "TailscaleIPs": ["100.64.0.1"]},
+            "User": {"7": {"LoginName": "owner@example.com"}}, "Peer": peers})
+        .to_string(),
+    )
+    .unwrap();
+    executable(
+        &at("standin/tailscale"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in version) echo 1.0 ;; status) cat {} ;; *) exit 1 ;; esac\n",
+            at("standin/status.json").display()
+        ),
+    );
+    // "ssh": it asks for the password as ssh does, and then says what a
+    // Mac that cannot reach the release page says (the owner's decision of
+    // 17 Nov 2026: it is sent the release over SSH): it asks for the
+    // release, waits where the test can look at the dialog, takes it, and
+    // then prints what the owner's Mac printed: installed, running, and
+    // nobody found to ask. Told there is no release to send, it ends.
+    executable(
+        &at("standin/ssh"),
+        &format!(
+            r#"#!/bin/sh
+user=$1 host=$2
+pw=$("$SSH_ASKPASS" "$user@$host's password: ") || pw=
+if [ "$pw" != "{RIGHT}" ]; then
+  echo "$user@$host: Permission denied (publickey,password)." >&2
+  exit 255
+fi
+while IFS= read -r line; do case "$line" in "main 3<&0"*) break ;; esac; done
+echo "@spandeck step install"
+echo "This machine could not reach the release page"
+echo "@spandeck supply aarch64-apple-darwin network"
+IFS= read -r answer
+set -- $answer
+if [ "$1" != release ]; then echo "@spandeck fail supply"; exit 1; fi
+while [ ! -e {go} ]; do sleep 0.1; done
+echo "@spandeck ready"
+head -c "$3" >/dev/null
+echo "Received $3 bytes, and their SHA-256 matches."
+echo "Installed spandeck v0.4.10 to /Users/michael/.local/bin (checksum verified)"
+echo "@spandeck step start"
+echo "spandeck is running."
+echo "@spandeck version spandeck 0.4.10"
+echo "@spandeck step join"
+echo "spandeck: no station called alpha was found"
+echo "@spandeck why spandeck: no station called alpha was found"
+echo "@spandeck fail join"
+exit 1
+"#,
+            go = at("go").display()
+        ),
+    );
+    // The release page, for the station: it holds a Mac release (a few
+    // bytes; the stand-in above does not unpack it).
+    let mac = format!(
+        "spandeck-{}-aarch64-apple-darwin.tar.gz",
+        common::fake_releases::TAG
+    );
+    let releases =
+        common::fake_releases::Releases::start_with(true, false, &[(mac, vec![7u8; 2400])]);
+    let path = format!(
+        "{}:{}",
+        at("standin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let a = Station::start_with(
+        "alpha",
+        &format!(
+            "add_machine_cmd = [\"{}\", \"{{user}}\", \"{{host}}\"]\n[update]\nurl = \"{}\"\n",
+            at("standin/ssh").display(),
+            releases.url()
+        ),
+        &[("PATH", &path)],
+    );
+    a.call("fleet.add_enable", json!({"on": true}));
+
+    let page = Page::open(&a, 390, 844);
+    page.phone_screen();
+    let shots = std::env::var_os("SPANDECK_SHOTS").map(std::path::PathBuf::from);
+    let shot = |name: &str| {
+        use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png;
+        if let Some(out) = &shots {
+            std::fs::create_dir_all(out).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            let png = page.tab.capture_screenshot(Png, None, None, true).unwrap();
+            std::fs::write(out.join(format!("{name}.png")), png).unwrap();
+        }
+    };
+    // The phone's keyboard, as the page is told of one (chat.rs does the
+    // same): what is in sight is `tall` high and begins `top` down the page.
+    let keyboard = |tall: u32, top: u32| {
+        page.js(&format!(
+            "(() => {{ const real = window.__vv || (window.__vv = window.visualViewport); \
+               const now = {{ height: {tall}, width: window.innerWidth, offsetTop: {top}, offsetLeft: 0, pageTop: {top}, pageLeft: 0, scale: 1 }}; \
+               Object.defineProperty(window, 'visualViewport', {{ configurable: true, get: () => now }}); \
+               real.dispatchEvent(new Event('resize')); return true; }})()"
+        ));
+    };
+    // Where the box being typed in is, and whether anything of the page moved.
+    const PLACE: &str = r#"(() => {
+        const vv = window.visualViewport, top = vv.offsetTop, bottom = vv.offsetTop + vv.height;
+        const box = (e) => { const r = e.getBoundingClientRect(); return [Math.round(r.top), Math.round(r.bottom)]; };
+        const within = (e) => { const r = e.getBoundingClientRect(); return r.height > 0 && r.top >= top - 0.5 && r.bottom <= bottom + 0.5; };
+        const el = document.activeElement, dialog = document.querySelector('.dialog'), picked = document.querySelector('.add-picked');
+        window.scrollTo(0, 300);
+        return {
+            typing: [el.tagName, el.getAttribute('aria-label') || el.className, within(el)],
+            field: box(el), sight: [Math.round(top), Math.round(bottom)], dialog: [...box(dialog), within(dialog)],
+            picked: picked ? within(picked) : null,
+            page: [document.scrollingElement.scrollTop, window.scrollY, document.documentElement.scrollWidth <= document.documentElement.clientWidth],
+            body: (b => [b.scrollHeight > b.clientHeight, getComputedStyle(b).overflowY])(dialog.querySelector('.dialog-body')),
+        };
+    })()"#;
+    let dialog_says = |what: &str, needle: &str| {
+        page.wait(
+            what,
+            &format!(
+                "(document.querySelector('.dialog')?.innerText || '').includes({}) && document.querySelector('.dialog').innerText",
+                json!(needle)
+            ),
+        )
+        .as_str()
+        .unwrap()
+        .to_string()
+    };
+    let press = |label: &str| {
+        page.wait(
+            &format!("the {label} button"),
+            &format!(
+                "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.dialog button')].find(b => b.innerText.trim() === {}))",
+                json!(label)
+            ),
+        );
+    };
+
+    // From the Recent list, which is what a phone opens on: the top bar's menu.
+    page.wait(
+        "the phone's list of sessions, most recent first",
+        "!!document.querySelector('.phone-recents') && !document.querySelector('.add-row')",
+    );
+    page.wait(
+        "the top bar's menu",
+        "(b => b ? (b.click(), true) : false)(document.querySelector('.top-more'))",
+    );
+    page.choose("Add a machine");
+    let said = dialog_says("the list of machines", "monitoring");
+    for words in [
+        // Who connects, why that station, and what if it is down.
+        "Any station of your fleet can add a machine. alpha does the connecting now because this page is open on it: if alpha is down, open the deck on another station and add the machine from there.",
+        // The switch: this feature, not the station.
+        "Adding machines is switched on at alpha (the station this page is open on)",
+        "Stop alpha from adding machines",
+        "That switches off only this feature: alpha and its panes keep running, and this dialog offers to turn it on again.",
+    ] {
+        assert!(said.contains(words), "{words:?} is not in: {said}");
+    }
+    assert!(!said.contains("Turn adding machines off"), "{said}");
+    // It is a quiet last line, not one of the buttons that act.
+    assert_eq!(
+        page.js("[[...document.querySelectorAll('.dialog .row.end button')].map(b => b.innerText.trim()), document.querySelector('.dialog .add-off button').innerText, !!document.querySelector('.dialog .add-off').previousElementSibling, !document.querySelector('.dialog .add-off').nextElementSibling]"),
+        json!([["Cancel"], "Stop alpha from adding machines", true, true])
+    );
+    // Twelve machines are more than the screen: the dialog is as tall as
+    // what is in sight allows and its body is what scrolls.
+    let open = page.js(PLACE);
+    assert_eq!(
+        (&open["dialog"][2], &open["body"], &open["page"]),
+        (&json!(true), &json!([true, "auto"]), &json!([0, 0, true])),
+        "{open}"
+    );
+    shot("1-as-it-opens");
+
+    // The machine is picked: the list is that one row, and the box for the
+    // user name has the keyboard. With the keyboard up, and the page slid
+    // by the browser as iOS slides it, the row and the box are in sight.
+    page.wait(
+        "monitoring's row",
+        "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.dialog .add-machine')].find(b => b.innerText.includes('monitoring')))",
+    );
+    let said = dialog_says("the user name", "Your user name on monitoring");
+    assert!(
+        said.contains("alpha (the station this page is open on) connects to monitoring over SSH as this user and runs the spandeck install script there. If monitoring asks for a password you will be asked for it next; it is used for that one connection and not kept."),
+        "{said}"
+    );
+    assert_eq!(
+        page.js("[document.querySelectorAll('.dialog .add-machine').length, document.querySelector('.add-picked .add-change').innerText, document.querySelector('.add-picked b').innerText]"),
+        json!([1, "Change", "monitoring"])
+    );
+    for (tall, top) in [(420, 0), (400, 130)] {
+        keyboard(tall, top);
+        let up = page.js(PLACE);
+        assert_eq!(
+            (
+                &up["typing"],
+                &up["picked"],
+                &up["dialog"][2],
+                &up["page"],
+                &up["sight"]
+            ),
+            (
+                &json!(["INPUT", "User name on that machine", true]),
+                &json!(true),
+                &json!(true),
+                &json!([0, 0, true]),
+                &json!([top, top + tall])
+            ),
+            "{up}"
+        );
+    }
+    shot("2-keyboard-up-machine-picked");
+    // "Change" brings the list back, and the box is still the one typed in.
+    press("Change");
+    page.wait(
+        "the whole list again",
+        "document.querySelectorAll('.dialog .add-machine').length === 12",
+    );
+    let listed = page.js(PLACE);
+    assert_eq!(
+        (&listed["typing"], &listed["page"]),
+        (
+            &json!(["INPUT", "User name on that machine", true]),
+            &json!([0, 0, true])
+        ),
+        "{listed}"
+    );
+    page.wait(
+        "monitoring's row",
+        "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.dialog .add-machine')].find(b => b.innerText.includes('monitoring')))",
+    );
+    page.wait(
+        "the one row",
+        "document.querySelectorAll('.dialog .add-machine').length === 1",
+    );
+
+    // The password step, keyboard still up: the password's box is in sight.
+    page.js("(document.querySelector(\".dialog input[aria-label='User name on that machine']\").value = 'michael', true)");
+    press("Connect and install");
+    dialog_says("the password to be asked for", "Password on monitoring");
+    let pass = page.js(PLACE);
+    assert_eq!(
+        (&pass["typing"], &pass["dialog"][2], &pass["page"]),
+        (
+            &json!(["INPUT", "Password on that machine", true]),
+            &json!(true),
+            &json!([0, 0, true])
+        ),
+        "{pass}"
+    );
+    shot("3-password-step");
+
+    // The join fails as the owner's did. What worked is said first.
+    page.js(&format!(
+        "(document.querySelector('.dialog input[type=password]').value = {}, true)",
+        json!(RIGHT)
+    ));
+    press("Connect and install");
+    // The Mac cannot reach the release page: that is progress, not a
+    // failure. The dialog says, under the steps and not in the warning
+    // colour, that alpha is sending it the release, and how large it is.
+    let sending = format!(
+        "monitoring cannot reach 127.0.0.1:{}: sending spandeck {} from alpha over SSH (3 KB)…",
+        releases.port,
+        common::fake_releases::TAG
+    );
+    dialog_says("the release being sent", &sending);
+    assert_eq!(
+        page.js("[document.querySelector('.dialog .add-note').innerText, document.querySelector('.dialog .add-note').classList.contains('warn-text'), !!document.querySelector('.dialog .add-problem'), document.querySelector('.dialog .add-steps li.now').innerText.includes('Download and install spandeck')]"),
+        json!([sending, false, false, true])
+    );
+    shot("3b-the-release-is-being-sent");
+    std::fs::write(at("go"), "").unwrap();
+    let said = dialog_says("what happened", "It has not asked to join your fleet");
+    assert!(
+        said.contains("Sent 3 KB to monitoring, which is checking and installing it.")
+            && said.contains("Received 2400 bytes, and their SHA-256 matches."),
+        "{said}"
+    );
+    keyboard(844, 0);
+    assert_eq!(
+        page.js("[document.querySelector('.dialog .add-worked').innerText, document.querySelector('.dialog .add-problem').innerText, document.querySelector('.dialog .add-next').innerText, [...document.querySelectorAll('.dialog .row.end button')].map(b => b.innerText.trim())]"),
+        json!([
+            "✓ spandeck 0.4.10 was installed on monitoring and is running.",
+            "It has not asked to join your fleet: spandeck on monitoring looked several times for the fleet's stations (alpha) among the machines under your Tailscale login and saw none of them. Check that Tailscale is connected on monitoring and signed in to the same account as your other machines.",
+            "Try again: it only asks again, and nothing is downloaded or installed a second time. Or on that machine: `spandeck fleet --join <any station of your fleet>` (its stations: alpha).",
+            ["Close", "Try again"]
+        ]),
+        "{said}"
+    );
+    let failed = page.js(PLACE);
+    assert_eq!(
+        (&failed["dialog"][2], &failed["page"]),
+        (&json!(true), &json!([0, 0, true])),
+        "{failed}"
+    );
+    shot("4-the-join-failed");
+
+    // "Try again" only asks again: the station is not sent a machine to
+    // install on, and the job is the asking alone.
+    press("Try again");
+    let again = wait_for("the asking, again", 30, || {
+        let v = a.call("fleet.add_status", json!({}));
+        (v["rejoin"] == json!(true) && v["running"] == json!(false)).then_some(v)
+    });
+    assert_eq!(
+        (
+            &again["kind"],
+            &again["stage"],
+            &again["name"],
+            &again["version"]
+        ),
+        (
+            &json!("join"),
+            &json!("needs_password"),
+            &json!("monitoring"),
+            &json!("0.4.10")
+        ),
+        "{again}"
+    );
+    dialog_says("the password, for the asking", "Password on monitoring");
+    press("Cancel");
+    a.call("fleet.add_cancel", json!({}));
+
+    // Neither the Mac nor alpha can reach the release page, and alpha (not
+    // a Mac) has no copy that would run there: the dialog says both, what
+    // to do, and which stations are the same kind of machine. (The add is
+    // started as the dialog starts it, with the password in the call.)
+    releases.down(true);
+    let state = std::path::PathBuf::from(
+        a.call("station.info", json!({}))["dirs"]["state"]
+            .as_str()
+            .unwrap(),
+    );
+    std::fs::remove_dir_all(state.join("supply")).unwrap();
+    a.call(
+        "fleet.add",
+        json!({"machine": "n-kestrel", "user": "michael", "password": RIGHT}),
+    );
+    wait_for("the add to fail", 30, || {
+        (a.call("fleet.add_status", json!({}))["stage"] == json!("failed")).then_some(())
+    });
+    page.wait(
+        "the top bar's menu",
+        "(b => b ? (b.click(), true) : false)(document.querySelector('.top-more'))",
+    );
+    page.choose("Add a machine");
+    dialog_says("why nothing was sent", "neither can alpha");
+    assert_eq!(
+        page.js("[document.querySelector('.dialog .add-problem').innerText, !!document.querySelector('.dialog .add-worked'), !!document.querySelector('.dialog .add-note')]"),
+        json!([
+            format!("kestrel cannot reach 127.0.0.1:{p}, and neither can alpha to fetch the macOS (Apple silicon) build. Add it from a station that is the same kind of machine, or one that can reach 127.0.0.1:{p}: any station of your fleet can add a machine. No station of your fleet is known to be the same kind of machine as kestrel (macOS (Apple silicon)).", p = releases.port),
+            false,
+            false
+        ])
+    );
+    shot("5-nothing-to-send");
+    press("Close");
+
+    // Another dialog, a sheet: New session. Its Folder box, with the
+    // keyboard up and the page slid, is in sight above the row of buttons
+    // that stays at the sheet's foot; the sheet is what is in sight, no more.
+    page.wait("no dialog", "!document.querySelector('.dialog')");
+    page.wait(
+        "the New session button",
+        "(b => b ? (b.click(), true) : false)(document.querySelector('button.new-session'))",
+    );
+    page.wait(
+        "the sheet's Folder box",
+        "(i => i ? (i.focus(), true) : false)([...document.querySelectorAll('.dialog.sheet .field')].find(f => f.innerText.startsWith('Folder'))?.querySelector('input'))",
+    );
+    keyboard(400, 130);
+    let sheet = page.js(&format!(
+        "(() => {{ const p = {PLACE}; const foot = document.querySelector('.dialog.sheet .sheet-foot').getBoundingClientRect(); return {{ ...p, clear: document.activeElement.getBoundingClientRect().bottom <= foot.top + 0.5 }}; }})()"
+    ));
+    assert_eq!(
+        (
+            &sheet["typing"][0],
+            &sheet["typing"][2],
+            &sheet["dialog"],
+            &sheet["clear"],
+            &sheet["page"]
+        ),
+        (
+            &json!("INPUT"),
+            &json!(true),
+            &json!([130, 530, true]),
+            &json!(true),
+            &json!([0, 0, true])
+        ),
+        "{sheet}"
+    );
+    shot("5-new-session-keyboard-up");
+}
+
+/// A fixed tailnet for the tests that send a release: machines by name,
+/// system and address, all the owner's and online.
+fn supply_tailnet(dir: &std::path::Path, machines: &[(&str, &str, &str)]) {
+    let peers: serde_json::Map<String, Value> = machines
+        .iter()
+        .map(|(name, os, ip)| {
+            (
+                format!("key-{name}"),
+                json!({"ID": format!("n-{name}"), "HostName": name, "DNSName": format!("{name}.tail0000.ts.net."),
+                    "OS": os, "UserID": 7, "Online": true, "TailscaleIPs": [ip]}),
+            )
+        })
+        .collect();
+    std::fs::write(
+        dir.join("status.json"),
+        json!({"Self": {"UserID": 7, "HostName": "alpha", "TailscaleIPs": ["100.64.0.1"]},
+            "User": {"7": {"LoginName": "owner@example.com"}}, "Peer": peers})
+        .to_string(),
+    )
+    .unwrap();
+    executable(
+        &dir.join("tailscale"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in version) echo 1.0 ;; status) cat {} ;; *) exit 1 ;; esac\n",
+            dir.join("status.json").display()
+        ),
+    );
+}
+
+/// The owner's decision of 17 Nov 2026 ("Yes I want it"): a machine that
+/// cannot download spandeck is sent it over SSH by the station adding it.
+/// Here the machine is another kind from the station (a Mac, added from
+/// this machine), so the station has to fetch that kind's release itself.
+/// Done when:
+///
+/// - the station downloads that platform's archive from the release host
+///   in its own config, checks it against the SHA-256 published there (as
+///   `spandeck update` checks its own), and sends it; the machine checks
+///   what arrived, installs it and starts it; the dialog is told as
+///   progress, with the size;
+/// - a second machine of that kind is sent the kept copy: the archive is
+///   not downloaded again, and the published SHA-256 is still asked for;
+/// - a kept copy that was changed is found out and replaced by a download;
+/// - with the release host away, the kept copy is sent and the dialog says
+///   so; with the kept copy spoiled as well there is nothing to send, and
+///   the failure names both facts and what to do;
+/// - a download that does not match its published SHA-256 is not sent;
+/// - what a machine says decides nothing but which of the five platforms:
+///   a platform that is not one, or not of the system Tailscale gives for
+///   the machine, gets nothing, a second request in a session is not
+///   answered, and no address but the configured one is ever asked.
+///
+/// SSH is a stand-in that runs what arrives on its standard input here, as
+/// a Mac (its `uname` says so) whose `curl` reaches nothing. The release
+/// for a Mac holds a stand-in for the `spandeck` command, so nothing of a
+/// real station starts.
+#[test]
+#[cfg_attr(windows, ignore = "the machines are stand-ins run by sh")]
+fn a_release_for_another_kind_of_machine_is_fetched_checked_kept_and_sent_over_ssh() {
+    use common::fake_releases::{Releases, TAG};
+    let dir = tempfile::tempdir().unwrap();
+    let at = |p: &str| dir.path().join(p);
+    for d in ["standin", "remote-bin", "pack"] {
+        std::fs::create_dir_all(at(d)).unwrap();
+    }
+    // The Mac release: `spandeck` and `sd` that answer what the script asks.
+    let name = format!("spandeck-{TAG}-aarch64-apple-darwin");
+    std::fs::create_dir_all(at("pack").join(&name)).unwrap();
+    for b in ["spandeck", "sd"] {
+        executable(
+            &at("pack").join(&name).join(b),
+            "#!/bin/sh\ncase \"$1\" in --version) echo 'spandeck 9.9.9' ;; --json) echo '{ \"code\": \"K7QM2X\" }' ;; esac\nexit 0\n",
+        );
+    }
+    let packed = std::process::Command::new("tar")
+        .arg("-czf")
+        .arg(at("mac.tar.gz"))
+        .arg("-C")
+        .arg(at("pack"))
+        .arg(&name)
+        .status()
+        .unwrap();
+    assert!(packed.success());
+    let mac = std::fs::read(at("mac.tar.gz")).unwrap();
+    let file = format!("{name}.tar.gz");
+    let releases = Releases::start_with(true, false, &[(file.clone(), mac.clone())]);
+
+    supply_tailnet(
+        &at("standin"),
+        &[
+            ("studio", "macOS", "100.64.0.8"),
+            ("mini", "macOS", "100.64.0.9"),
+            ("rogue", "macOS", "100.64.0.10"),
+        ],
+    );
+    // The machines: Macs, by their `uname`, with no way out.
+    executable(
+        &at("remote-bin/uname"),
+        "#!/bin/sh\ncase \"$1\" in -m) echo arm64 ;; *) echo Darwin ;; esac\n",
+    );
+    executable(&at("remote-bin/curl"), "#!/bin/sh\nexit 7\n");
+    executable(&at("remote-bin/sleep"), "#!/bin/sh\nexit 0\n");
+    for tool in ["systemctl", "launchctl", "loginctl"] {
+        executable(&at("remote-bin").join(tool), "#!/bin/sh\nexit 1\n");
+    }
+    // "ssh". The rogue machine does not run the script: it asks for things
+    // it must not be given, and says what it was answered.
+    executable(
+        &at("standin/ssh"),
+        &format!(
+            r#"#!/bin/sh
+user=$1 host=$2
+case "$host" in
+  100.64.0.8) m=studio ;;
+  100.64.0.9) m=mini ;;
+  *)
+    while IFS= read -r line; do case "$line" in "main 3<&0"*) break ;; esac; done
+    echo "@spandeck step install"
+    echo "@spandeck supply ../../etc/passwd network"
+    IFS= read -r answer; echo "first answer: $answer"
+    echo "@spandeck supply aarch64-apple-darwin network"
+    echo "second request sent"
+    echo "@spandeck fail supply"
+    exit 1 ;;
+esac
+mkdir -p {dir}/$m/home {dir}/$m/tmp
+exec env -i PATH={dir}/remote-bin:/usr/bin:/bin HOME={dir}/$m/home TMPDIR={dir}/$m/tmp \
+  SPANDECK_BIN_DIR={dir}/$m/bin sh -s
+"#,
+            dir = dir.path().display()
+        ),
+    );
+    let path = format!(
+        "{}:{}",
+        at("standin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let a = Station::start_with(
+        "alpha",
+        &format!(
+            "add_machine_cmd = [\"{}\", \"{{user}}\", \"{{host}}\"]\n[update]\nurl = \"{}\"\nin_place = false\n",
+            at("standin/ssh").display(),
+            releases.url()
+        ),
+        &[("PATH", &path)],
+    );
+    a.call("fleet.add_enable", json!({"on": true}));
+    // An add from its start to where it comes to rest, with what was said.
+    let add = |machine: &str| {
+        a.call("fleet.add_cancel", json!({}));
+        a.call(
+            "fleet.add",
+            json!({"machine": format!("n-{machine}"), "user": "sam"}),
+        );
+        wait_for_or(
+            "the add to come to rest",
+            40,
+            || a.call("fleet.add_status", json!({})).to_string(),
+            || {
+                let v = a.call("fleet.add_status", json!({}));
+                (v["running"] == json!(false)).then_some(v)
+            },
+        )
+    };
+    let host = format!("127.0.0.1:{}", releases.port);
+    let kept = std::path::PathBuf::from(
+        a.call("station.info", json!({}))["dirs"]["state"]
+            .as_str()
+            .unwrap(),
+    )
+    .join("supply")
+    .join(TAG)
+    .join("aarch64-apple-darwin.tar.gz");
+    let sent =
+        format!("studio cannot reach {host}: sending spandeck {TAG} from alpha over SSH (1 KB)…");
+
+    // ---- Fetched for a Mac, checked, sent, checked there, installed and
+    // started. (The stand-in's join code is one alpha holds no request
+    // for, so the add ends at the asking, having said what worked.)
+    let v = add("studio");
+    let said = v["lines"].to_string();
+    for piece in [
+        format!("studio cannot reach {host}. Getting spandeck for macOS (Apple silicon) on alpha to send it over SSH…"),
+        sent.clone(),
+        format!("Received {} bytes, and their SHA-256 matches.", mac.len()),
+        format!("Installed spandeck {TAG} to "),
+        "Sent 1 KB to studio, which is checking and installing it.".to_string(),
+        "spandeck is running.".to_string(),
+    ] {
+        assert!(said.contains(&piece), "{piece:?} is not in: {v}");
+    }
+    assert_eq!(
+        (&v["stage"], &v["problem"]["kind"], &v["problem"]["worked"]),
+        (
+            &json!("failed"),
+            &json!("join"),
+            &json!("spandeck 9.9.9 was installed on studio and is running.")
+        ),
+        "{v}"
+    );
+    assert!(at("studio/bin/spandeck").exists() && at("studio/bin/sd").exists());
+    assert_eq!(std::fs::read_dir(at("studio/tmp")).unwrap().count(), 0);
+    assert_eq!(
+        (releases.asked(&file), std::fs::read(&kept).unwrap() == mac),
+        (1, true)
+    );
+    // The ship's log says what was sent, by its SHA-256, and from where.
+    let logged = a
+        .log("fleet.add")
+        .iter()
+        .map(|e| e["data"].clone())
+        .find(|d| d["outcome"] == json!("sending a release over SSH"));
+    let logged = logged.expect("the sending is in the ship's log");
+    assert_eq!(
+        (&logged["release"], &logged["platform"], &logged["bytes"]),
+        (
+            &json!(TAG),
+            &json!("aarch64-apple-darwin"),
+            &json!(mac.len())
+        ),
+        "{logged}"
+    );
+    assert!(logged["from"]
+        .as_str()
+        .unwrap()
+        .starts_with("the release host"));
+    assert_eq!(logged["sha256"].as_str().unwrap().len(), 64);
+
+    // ---- A second Mac: the kept copy, checked against the SHA-256 that is
+    // published now. The archive is not downloaded a second time.
+    let sums = releases.asked(&format!("{file}.sha256"));
+    let v = add("mini");
+    assert!(at("mini/bin/spandeck").exists(), "{v}");
+    assert_eq!(
+        (
+            releases.asked(&file),
+            releases.asked(&format!("{file}.sha256"))
+        ),
+        (1, sums + 1),
+        "{v}"
+    );
+
+    // ---- The kept copy was changed: found out, thrown away, downloaded
+    // again, and what is sent is the release.
+    std::fs::remove_dir_all(at("studio")).unwrap();
+    let mut spoiled = mac.clone();
+    spoiled[10] ^= 0xff;
+    std::fs::write(&kept, &spoiled).unwrap();
+    let v = add("studio");
+    assert!(at("studio/bin/spandeck").exists(), "{v}");
+    assert_eq!(
+        (releases.asked(&file), std::fs::read(&kept).unwrap() == mac),
+        (2, true),
+        "{v}"
+    );
+
+    // ---- The release host is away: the copy downloaded and checked
+    // earlier is sent, and the dialog says that is what it is.
+    releases.down(true);
+    std::fs::remove_dir_all(at("studio")).unwrap();
+    let v = add("studio");
+    assert!(at("studio/bin/spandeck").exists(), "{v}");
+    assert!(
+        v["lines"].to_string().contains(&format!(
+            "studio cannot reach {host}, and alpha cannot reach {host} now either: sending the release alpha downloaded and checked earlier, {TAG} (1 KB)…"
+        )),
+        "{v}"
+    );
+    // And with that copy spoiled there is nothing to send: this station is
+    // another kind of machine, so its own copy would not run on a Mac. The
+    // failure names both facts and what to do. Nothing is installed.
+    std::fs::remove_dir_all(at("studio")).unwrap();
+    std::fs::write(&kept, &spoiled).unwrap();
+    let v = add("studio");
+    assert_eq!(
+        (&v["stage"], &v["problem"]["kind"], &v["problem"]["text"]),
+        (
+            &json!("failed"),
+            &json!("no_release"),
+            &json!(format!(
+                "studio cannot reach {host}, and neither can alpha to fetch the macOS (Apple silicon) build. Add it from a station that is the same kind of machine, or one that can reach {host}: any station of your fleet can add a machine. No station of your fleet is known to be the same kind of machine as studio (macOS (Apple silicon))."
+            ))
+        ),
+        "{v}"
+    );
+    assert!(!at("studio/bin").exists(), "{v}");
+
+    // ---- A download that does not match its published SHA-256 is not
+    // sent, and the spoiled copy is not either.
+    releases.down(false);
+    releases.wrong_sums(true);
+    let v = add("studio");
+    assert_eq!(
+        (&v["stage"], &v["problem"]["kind"]),
+        (&json!("failed"), &json!("supply_checksum")),
+        "{v}"
+    );
+    assert!(
+        v["problem"]["text"].as_str().unwrap().starts_with(&format!(
+            "alpha downloaded the macOS (Apple silicon) build of {TAG} to send to studio, and it does not match its published checksum, so nothing was sent and nothing was installed."
+        )),
+        "{v}"
+    );
+    assert!(!at("studio/bin").exists() && !kept.exists(), "{v}");
+    releases.wrong_sums(false);
+
+    // ---- What a machine says decides nothing but the platform. A
+    // platform that is no platform gets nothing; a second request in the
+    // same session is not answered at all.
+    let before = releases.all_asked().len();
+    let v = add("rogue");
+    let said = v["lines"].to_string();
+    assert!(
+        said.contains("first answer: none") && said.contains("second request sent"),
+        "{v}"
+    );
+    assert_eq!(
+        (&v["stage"], &v["problem"]["kind"]),
+        (&json!("failed"), &json!("unsupported")),
+        "{v}"
+    );
+    assert_eq!(releases.all_asked().len(), before, "{v}");
+    // Everything that was ever asked of the release host was asked at the
+    // address in alpha's config, for the Mac release or the newest name.
+    for path in releases.all_asked() {
+        assert!(
+            path == "latest" || path == file || path == format!("{file}.sha256"),
+            "{path}"
+        );
+    }
+}
+
+/// The same decision, for a machine of the station's own kind, with the
+/// real program: when neither the machine nor the station can reach the
+/// release host, the station sends its own copy, laid out as a release is,
+/// and says so; the README's install script installs it, it starts, asks to
+/// join, shows its code and is approved. And with the release host
+/// answering the station (not the machine), the published release is
+/// fetched, checked and sent the same way, and the machine joins.
+#[test]
+#[ignore = "merge tier: installs and starts two real stations (about half a minute)"]
+fn a_machine_that_cannot_download_is_sent_this_stations_own_copy_and_joins() {
+    let releases = common::fake_releases::Releases::start(true);
+    let dir = tempfile::tempdir().unwrap();
+    let at = |p: &str| dir.path().join(p);
+    for d in ["standin", "remote-bin"] {
+        std::fs::create_dir_all(at(d)).unwrap();
+    }
+    let system = if cfg!(target_os = "macos") {
+        "macOS"
+    } else {
+        "linux"
+    };
+    supply_tailnet(
+        &at("standin"),
+        &[
+            ("charlie", system, "100.64.0.7"),
+            ("delta", system, "100.64.0.8"),
+        ],
+    );
+    executable(&at("remote-bin/curl"), "#!/bin/sh\nexit 7\n");
+    for tool in ["systemctl", "launchctl", "loginctl"] {
+        executable(&at("remote-bin").join(tool), "#!/bin/sh\nexit 1\n");
+    }
+    let (pa, pb) = (free_port(), free_port());
+    let mut ends = vec![];
+    let mut ports = vec![];
+    for m in ["charlie", "delta"] {
+        let port = free_port();
+        std::fs::create_dir_all(at(m).join("config")).unwrap();
+        std::fs::create_dir_all(at(m).join("home")).unwrap();
+        std::fs::write(
+            at(m).join("config/config.toml"),
+            format!("station = \"{m}\"\nweb_port = {port}\nweb_bind = [\"127.0.0.1\"]\ndiscovery = false\nkeep_awake_cmd = [\"sleep\", \"300\"]\nprices.auto = false\npeers = [\"127.0.0.1:{pa}\", \"127.0.0.1:{pb}\"]\n"),
+        )
+        .unwrap();
+        ends.push(KillAtEnd(at(m).join("state/spandeckd.pid")));
+        ports.push(port);
+    }
+    executable(
+        &at("standin/ssh"),
+        &format!(
+            r#"#!/bin/sh
+case "$2" in 100.64.0.7) m=charlie ;; *) m=delta ;; esac
+exec env -i PATH={dir}/remote-bin:/usr/bin:/bin HOME={dir}/$m/home SPANDECK_STATE_DIR={dir}/$m/state \
+  SPANDECK_CONFIG_DIR={dir}/$m/config SPANDECK_BIN_DIR={dir}/$m/bin SPANDECK_LOG=warn sh -s
+"#,
+            dir = dir.path().display()
+        ),
+    );
+    let path = format!(
+        "{}:{}",
+        at("standin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let version = env!("CARGO_PKG_VERSION");
+    let joins = |a: &Station, machine: &str, says: &str| {
+        a.call("fleet.add_enable", json!({"on": true}));
+        a.call(
+            "fleet.add",
+            json!({"machine": format!("n-{machine}"), "user": "sam"}),
+        );
+        let rest = |stage: &str| {
+            wait_for_or(
+                &format!("the add to reach {stage}"),
+                120,
+                || a.call("fleet.add_status", json!({})).to_string(),
+                || {
+                    let v = a.call("fleet.add_status", json!({}));
+                    assert!(
+                        v["stage"] == json!(stage) || v["running"] == json!(true),
+                        "ended somewhere else: {v}"
+                    );
+                    (v["stage"] == json!(stage)).then_some(v)
+                },
+            )
+        };
+        let v = rest("approve");
+        let said = v["lines"].to_string();
+        assert!(said.contains(says), "{says:?} is not in: {v}");
+        assert!(
+            said.contains("and their SHA-256 matches.") && said.contains("(checksum verified)"),
+            "{v}"
+        );
+        assert_eq!(v["version"], json!(version), "{v}");
+        assert!(at(machine).join("bin/spandeck").exists() && at(machine).join("bin/sd").exists());
+        a.call("trust.approve", json!({"request": v["request"]}));
+        rest("done");
+    };
+
+    // Neither end reaches the release host: this station's own copy.
+    let a = Station::start_on(
+        "alpha",
+        pa,
+        &format!(
+            "add_machine_cmd = [\"{}\", \"{{user}}\", \"{{host}}\"]\npeers = [\"127.0.0.1:{}\"]\n[update]\nurl = \"http://127.0.0.1:9\"\nin_place = false\n",
+            at("standin/ssh").display(),
+            ports[0]
+        ),
+        &[("PATH", &path)],
+    );
+    joins(
+        &a,
+        "charlie",
+        &format!("charlie cannot reach 127.0.0.1:9, and neither can alpha: sending this station's own copy, {version} ("),
+    );
+    let from = a
+        .log("fleet.add")
+        .iter()
+        .map(|e| e["data"].clone())
+        .find(|d| d["outcome"] == json!("sending a release over SSH"));
+    assert_eq!(
+        from.expect("the sending is in the ship's log")["from"],
+        json!("this station's own program")
+    );
+    // What was put together to send is not kept.
+    let state = std::path::PathBuf::from(
+        a.call("station.info", json!({}))["dirs"]["state"]
+            .as_str()
+            .unwrap(),
+    );
+    let left: Vec<_> = std::fs::read_dir(state.join("supply"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+
+    // The release host answers the station: the published release.
+    let b = Station::start_on(
+        "bravo",
+        pb,
+        &format!(
+            "add_machine_cmd = [\"{}\", \"{{user}}\", \"{{host}}\"]\npeers = [\"127.0.0.1:{}\"]\n[update]\nurl = \"{}\"\nin_place = false\n",
+            at("standin/ssh").display(),
+            ports[1],
+            releases.url()
+        ),
+        &[("PATH", &path)],
+    );
+    joins(
+        &b,
+        "delta",
+        &format!(
+            "delta cannot reach 127.0.0.1:{}: sending spandeck {} from bravo over SSH (",
+            releases.port,
+            common::fake_releases::TAG
+        ),
+    );
+    drop(ends);
 }

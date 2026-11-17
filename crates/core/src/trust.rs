@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::daemon::{invalid, Authority, Caller, Daemon, Error, Result};
+use crate::fleet::Peer;
 use crate::paths::{now_ms, random_token, Paths};
 
 /// How far apart two stations' clocks may be for a signed call to count.
@@ -22,6 +23,11 @@ const SKEW_MS: u64 = 120_000;
 /// How long a request waits for the owner.
 const REQUEST_MS: u64 = 10 * 60 * 1000;
 const MAX_PENDING: usize = 20;
+/// How long a join goes on looking for a station it does not see yet.
+const JOIN_LOOK: std::time::Duration = std::time::Duration::from_secs(20);
+/// When a join last looked for that long and found nothing.
+static JOIN_LOOKED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+use std::sync::atomic::Ordering;
 
 /// What a signature on a call turned out to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1266,26 +1272,45 @@ impl Daemon {
     /// at any station of that fleet; this station then takes that fleet's key
     /// in place of its own, and hands it to the stations of the fleet it was
     /// in, so they come with it: a join is a merge, never a split.
+    ///
+    /// `station` is a station's name, or the address one answers at. A
+    /// station that is not seen here yet is looked for first (the owner's
+    /// report of 17 Nov 2026: a station that had only just started was told
+    /// to join, had not yet seen the station named, and gave up at once).
     pub async fn fleet_join(&self, station: &str, by: &str) -> Result<Value> {
-        let peer = self
-            .fleet
-            .peer(station)
-            .ok_or_else(|| invalid(format!("no station called {station} was found")))?;
+        let mut peer = self.join_target(station).await?;
         let with: Vec<String> = self
             .fleet_members()
             .into_iter()
             .map(|p| p.station)
             .filter(|s| s != station)
             .collect();
-        let out = self
-            .fleet
-            .call_open(
-                &peer.addr,
-                "fleet.join.request",
-                json!({"station": self.station, "with": with}),
-            )
-            .await
-            .map_err(|e| invalid(format!("{station}: {e}")))?;
+        let ask = |peer: &Peer| {
+            let (addr, with) = (peer.addr.clone(), with.clone());
+            async move {
+                self.fleet
+                    .call_open(
+                        &addr,
+                        "fleet.join.request",
+                        json!({"station": self.station, "with": with}),
+                    )
+                    .await
+            }
+        };
+        let out = match ask(&peer).await {
+            Ok(out) => out,
+            // It did not answer: a station of its fleet that does is asked.
+            Err(e) => match self.join_mate_of(&peer) {
+                Some(mate) => {
+                    peer = mate;
+                    ask(&peer)
+                        .await
+                        .map_err(|e| invalid(format!("{}: {e}", peer.station)))?
+                }
+                None => return Err(invalid(format!("{}: {e}", peer.station))),
+            },
+        };
+        let station = peer.station.as_str();
         let get = |k: &str| out.get(k).and_then(|v| v.as_str()).map(String::from);
         let (Some(id), Some(collect), Some(code)) = (get("id"), get("collect"), get("code")) else {
             return Err(invalid(format!("{station} sent an unexpected reply")));
@@ -1318,17 +1343,189 @@ impl Daemon {
         tokio::spawn(async move { me.fleet_join_wait().await });
         let stations = with.len() + 1;
         let what = match with.len() {
-            0 => format!("This station then joins {station}'s fleet. Browsers signed in to this station from other devices sign in again."),
+            0 => "This station then joins that fleet. Browsers signed in to this station from other devices sign in again.".to_string(),
             n => format!(
-                "This station and the {} of its fleet ({}) then move into one fleet with {station}. Browsers signed in to those {stations} stations from other devices sign in again.",
+                "This station and the {} of its fleet ({}) then move into that fleet: there is one fleet afterwards. Browsers signed in to those {stations} stations from other devices sign in again.",
                 if n == 1 { "other station".to_string() } else { format!("{n} other stations") },
                 with.join(", ")
             ),
         };
         Ok(
             json!({"station": station, "code": code, "expires_ms": expires_ms, "with": with,
-            "next": format!("At {station}, or at any station of its fleet, approve the request that shows the code {code}: in the Control Deck, or with `spandeck approve {code}`. {what}")}),
+            "next": format!("Approve the request that shows the code {code} at any station of that fleet ({station} was the one asked, and tells the others): in the Control Deck, or with `spandeck approve {code}`. {what}")}),
         )
+    }
+
+    /// The station a join is to ask. One this station already sees is taken
+    /// at once. Otherwise every machine under the owner's login is asked
+    /// now, and again every second, for `JOIN_LOOK` at most: a station that
+    /// has only just started has not looked yet, and its first look can
+    /// come back empty (the local Tailscale client slow to answer the first
+    /// time, a round already under way that ended with nothing).
+    async fn join_target(&self, asked: &str) -> Result<Peer> {
+        let asked = asked.trim();
+        let seen = |d: &Daemon| {
+            d.fleet.peer(asked).or_else(|| {
+                d.fleet
+                    .peers()
+                    .into_iter()
+                    .find(|p| p.station.eq_ignore_ascii_case(asked))
+            })
+        };
+        if let Some(peer) = seen(self).filter(|p| p.state != "unreachable") {
+            return Ok(peer);
+        }
+        if let Some(addr) = self.join_addr(asked) {
+            return self.join_at(&addr?).await;
+        }
+        // A join that has just looked for the whole time and found nothing
+        // (the caller is going through the stations of a fleet by name)
+        // looks once for the next name, and does not wait as long again.
+        let budget = match now_ms().saturating_sub(JOIN_LOOKED_MS.load(Ordering::Relaxed)) {
+            since if since < 90_000 => std::time::Duration::ZERO,
+            _ => JOIN_LOOK,
+        };
+        let began = std::time::Instant::now();
+        loop {
+            self.discover_peers().await;
+            match seen(self) {
+                Some(peer) if peer.state != "unreachable" => return Ok(peer),
+                // It is known and does not answer. The stations of a fleet
+                // are peers: any of them that answers is asked instead, and
+                // the owner approves at any of them as before.
+                Some(peer) => {
+                    if let Some(mate) = self.join_mate_of(&peer) {
+                        return Ok(mate);
+                    }
+                    // The call to it says that it does not answer.
+                    if began.elapsed() >= budget {
+                        return Ok(peer);
+                    }
+                }
+                None if began.elapsed() >= budget => break,
+                None => {}
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        JOIN_LOOKED_MS.store(now_ms(), Ordering::Relaxed);
+        Err(invalid(
+            self.join_not_found(asked, began.elapsed().as_secs().max(1)),
+        ))
+    }
+
+    /// A station that answers and says it is in the same fleet as `peer`,
+    /// which does not. What each says of its fleet is what it tells any
+    /// device under the owner's login (`station.hello`); nothing is taken
+    /// on that word but whom to ask, and the owner still approves the code.
+    fn join_mate_of(&self, peer: &Peer) -> Option<Peer> {
+        let fleet = peer.info["fleet"].as_str().filter(|f| !f.is_empty())?;
+        let mut mates: Vec<Peer> = self
+            .fleet
+            .peers()
+            .into_iter()
+            .filter(|p| {
+                p.station != peer.station
+                    && p.state == "not_linked"
+                    && p.info["fleet"].as_str() == Some(fleet)
+            })
+            .collect();
+        mates.sort_by(|a, b| a.station.cmp(&b.station));
+        mates.into_iter().next()
+    }
+
+    /// What was tried, for the owner who reads that a station was not found.
+    fn join_not_found(&self, asked: &str, secs: u64) -> String {
+        let again = format!("then run `spandeck fleet --join {asked}` again");
+        if !self.cfg.discovery {
+            return format!(
+                "{asked} was not found after {secs} s: this station looks only at the addresses under `peers` in its config.toml (discovery is off), and no station called {asked} answered at any of them. Add {asked}'s address there, {again}"
+            );
+        }
+        let d = self.clone();
+        if tokio::task::block_in_place(move || d.fleet.tailnet_self()).is_none() {
+            return format!(
+                "{asked} was not found: Tailscale did not answer on this machine in {secs} s, so spandeck could not list the machines under your Tailscale login. Check that Tailscale is running and signed in here, {again}"
+            );
+        }
+        let asked_at = self.rounds.view().len();
+        let mut answered: Vec<String> = self
+            .fleet
+            .peers()
+            .into_iter()
+            .filter(|p| p.state != "unreachable")
+            .map(|p| p.station)
+            .collect();
+        answered.sort();
+        answered.truncate(8);
+        let answered = if answered.is_empty() {
+            "none of them answered as a spandeck station".to_string()
+        } else {
+            format!("the stations that answered: {}", answered.join(", "))
+        };
+        format!(
+            "{asked} was not found among the {asked_at} machine{} under your Tailscale login after {secs} s of looking ({answered}). Is this machine signed in to the same Tailscale account as {asked}, and is spandeck running on {asked}? Check, {again}",
+            if asked_at == 1 { "" } else { "s" }
+        )
+    }
+
+    /// `asked` as an address, if it is one: `host:port`, or an IP address
+    /// alone (then the port stations listen on). Only where this station
+    /// would look by itself: an address under `peers` in its config, or a
+    /// Tailscale address of a device under the owner's login.
+    fn join_addr(&self, asked: &str) -> Option<Result<String>> {
+        let (ip, addr) = match asked.parse::<std::net::SocketAddr>() {
+            Ok(at) => (at.ip(), asked.to_string()),
+            Err(_) => {
+                let ip = asked.parse::<std::net::IpAddr>().ok()?;
+                (
+                    ip,
+                    std::net::SocketAddr::new(ip, self.cfg.web_port).to_string(),
+                )
+            }
+        };
+        if self.cfg.peers.contains(&addr) {
+            return Some(Ok(addr));
+        }
+        let d = self.clone();
+        let who = tokio::task::block_in_place(move || d.fleet.identify(ip));
+        Some(match who {
+            crate::fleet::Remote::Owner { .. } => Ok(addr),
+            crate::fleet::Remote::NoTailscale => Err(invalid(format!(
+                "Tailscale did not answer on this machine, so spandeck cannot tell whose device {ip} is: check that Tailscale is running and signed in here"
+            ))),
+            _ => Err(invalid(format!(
+                "{ip} is not a device under your Tailscale login, and is not under `peers` in this station's config.toml, so this station does not ask it"
+            ))),
+        })
+    }
+
+    /// The station that answers at `addr`, asked directly.
+    async fn join_at(&self, addr: &str) -> Result<Peer> {
+        let hello = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            self.fleet.call_open(addr, "station.hello", json!({})),
+        )
+        .await
+        .map_err(|_| "no answer in 8 s".to_string())
+        .and_then(|h| h)
+        .map_err(|e| invalid(format!("no spandeck station answered at {addr}: {e}")))?;
+        let station = hello["station"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| invalid(format!("what answered at {addr} is not a spandeck station")))?
+            .to_string();
+        if station == self.station {
+            return Err(invalid(format!("{addr} is this station")));
+        }
+        Ok(Peer {
+            station,
+            addr: addr.to_string(),
+            version: hello["version"].as_str().unwrap_or("?").to_string(),
+            protocol: hello["protocol"].as_u64().unwrap_or(0) as u32,
+            state: "not_linked".into(),
+            last_seen_ms: now_ms(),
+            info: hello,
+        })
     }
 
     async fn fleet_join_wait(&self) {
@@ -1414,7 +1611,7 @@ impl Daemon {
                         "trust.joined",
                         None,
                         None,
-                        &format!("This station joined {}'s fleet", o.station),
+                        &format!("This station joined the fleet {} is in", o.station),
                         &body,
                     );
                     ended(None);

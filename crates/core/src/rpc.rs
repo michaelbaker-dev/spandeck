@@ -781,9 +781,18 @@ impl Daemon {
             "station.info" => self.info(),
             "station.doctor" => {
                 let d = self.clone();
-                tokio::task::spawn_blocking(move || d.doctor())
+                let mut checks = tokio::task::spawn_blocking(move || d.doctor())
                     .await
-                    .map_err(|e| invalid(e.to_string()))?
+                    .map_err(|e| invalid(e.to_string()))?;
+                // `spandeck doctor` also asks whether a release can be
+                // downloaded here. Only when asked to: it goes outside.
+                if flag(&params, "reach") {
+                    let check = self.release_host_check().await;
+                    if let Some(all) = checks["checks"].as_array_mut() {
+                        all.push(check);
+                    }
+                }
+                checks
             }
             // A Control Deck says what happened on a device the station cannot
             // see, such as a phone. Kept in the ship's log for whoever debugs it.
@@ -2061,11 +2070,32 @@ impl Daemon {
                 // A machine to install on, or a station that is running
                 // already and is only to be made to ask.
                 match opt(&params, "station") {
+                    // "Try again" after the join step failed: the machine
+                    // of the last job is only made to ask again.
+                    _ if flag(&params, "again") => {
+                        self.add_again_start(s(&params, "user")?, password, by)?
+                    }
                     Some(station) => {
                         self.add_station_start(station, s(&params, "user")?, password, by)?
                     }
                     None => {
-                        self.add_start(s(&params, "machine")?, s(&params, "user")?, password, by)?
+                        // By hand only (no page asks for it): send the
+                        // release over SSH although the machine could
+                        // download it, or this station's own copy.
+                        let send = match params.get("send") {
+                            Some(Value::String(own)) if own == "own" => {
+                                crate::supply::Force::OwnCopy
+                            }
+                            Some(Value::Bool(true)) => crate::supply::Force::Send,
+                            _ => crate::supply::Force::No,
+                        };
+                        self.add_start(
+                            s(&params, "machine")?,
+                            s(&params, "user")?,
+                            password,
+                            send,
+                            by,
+                        )?
                     }
                 }
             }

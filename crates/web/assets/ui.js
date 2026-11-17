@@ -100,6 +100,24 @@ export function dialog(title, build, opts = {}) {
   return { close, body };
 }
 
+// The box being typed in stays in sight inside its dialog: when a phone's
+// keyboard opens, the dialog gets shorter (app.css, the backdrop) and its
+// body is scrolled, by as little as shows the box with its label and the
+// line under it. Only the dialog's body is moved, never the page.
+export function keepInView(el) {
+  const body = el?.closest?.('.dialog-body');
+  if (!body || !/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+  const b = body.getBoundingClientRect();
+  // A row of buttons that stays at the bottom of a sheet covers what is under it.
+  const foot = body.querySelector('.sheet-foot');
+  const bottom = (foot && !foot.contains(el) ? Math.min(b.bottom, foot.getBoundingClientRect().top) : b.bottom) - 8;
+  const top = b.top + 8;
+  let r = (el.closest('.field') || el).getBoundingClientRect();
+  if (r.height > bottom - top) r = el.getBoundingClientRect();
+  if (r.bottom > bottom) body.scrollTop += Math.min(r.bottom - bottom, r.top - top);
+  else if (r.top < top) body.scrollTop -= top - r.top;
+}
+
 export function confirmBox(title, text, okLabel, action, danger = true) {
   dialog(title, (close) => h('div', {},
     h('p', {}, text),

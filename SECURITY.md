@@ -477,6 +477,34 @@ days, not hours.
   connection to a machine trusts the host key it shows (and the Tailscale address it
   was reached at); a later change of key is refused. The install is the README's
   script: the release is checked against its published SHA-256, as below.
+- A machine that cannot download the release is sent it by the station that adds it,
+  inside the same SSH session (17 Nov 2026). What that changes, and what it does not:
+  - **No new power for the adding station.** It already runs a script of its choosing on
+    that machine as your user; a station that has been taken over could install anything
+    there before this, and can now. Sending the program adds no way in and opens no port.
+  - **Where the release host can be reached from the adding station, what is sent is the
+    published archive, checked against the SHA-256 published beside it**, by the same
+    code as an update, from the address in the code or in that station's own config. A
+    download that does not match is not sent. A copy kept from an earlier add is checked
+    again against the SHA-256 published now before it is sent; when the release host
+    does not answer, against the one it was checked with when it was downloaded. Someone
+    who can change files in a station's state folder can change that copy and its
+    checksum together, and can as easily change the station.
+  - **Where it cannot be reached, a machine of the same kind is sent the station's own
+    running program**, and the dialog says so. That copy is trusted exactly as far as the
+    station is: it has no published checksum to be held against, and a station whose
+    program was tampered with passes the tampering on. The new machine checks only that
+    what arrived is what was sent.
+  - **Never older than the station that sends it**, so a stale or lying copy of the
+    release page cannot have an old release with a known fault sent to a new machine.
+    (A machine that downloads for itself takes what its release page calls newest, as
+    before.)
+  - **The new machine decides nothing** but which of five platforms it is, and that must
+    agree with what Tailscale says it runs. It cannot name an address to download from, a
+    file to send, or a version, and it is answered once.
+  - On the new machine the archive is written to a temporary folder of that user's,
+    checked, and deleted; a transfer that is cut short or altered installs nothing.
+  - The Windows side of this has not been run on a real machine (DECISIONS.md).
 - An update is checked against the SHA-256 published beside it. That catches a damaged
   or swapped download, not a release that was malicious when published.
 - No sandbox. An agent runs with your user's permissions; spandeck observes and can
