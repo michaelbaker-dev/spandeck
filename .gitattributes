@@ -1,0 +1,4 @@
+# Certificates and keys are compared and parsed byte for byte: the same
+# line ends on every system.
+*.pem text eol=lf
+crates/core/tests/fixtures/https/* text eol=lf
