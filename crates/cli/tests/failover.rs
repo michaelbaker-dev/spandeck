@@ -20,15 +20,59 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// A certificate for `localhost` and its key, in one file, as `tailscale
 /// cert --cert-file - --key-file -` prints them. `days`: how long it lasts.
+///
+/// It is made as a strict verifier wants one (macOS's refused the first
+/// kind, a bare self-signed certificate, for its key usage: 17 Nov 2026):
+/// a leaf for a server (`serverAuth`, `digitalSignature`), named in its
+/// subject alternative names as `localhost` and 127.0.0.1, good for well
+/// under 398 days, signed by an authority that is one (`CA:TRUE`,
+/// `keyCertSign`) and is what a client is told to trust. The station is
+/// given the leaf and then the authority, as Tailscale gives a chain.
+/// Returns the authority, for a client to trust.
 fn make_cert(file: &Path, days: i64) -> String {
-    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    use rcgen::{DnType, ExtendedKeyUsagePurpose, IsCa, KeyUsagePurpose};
+    assert!(days < 398);
+    let (ca_params, ca_key, ca_pem) = authority();
+    let issuer = rcgen::Issuer::from_params(ca_params, ca_key);
+    let ca_pem = ca_pem.as_str();
+    let names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+    let mut params = rcgen::CertificateParams::new(names).unwrap();
     let now = time::OffsetDateTime::now_utc();
     params.not_before = now - time::Duration::days(1);
     params.not_after = now + time::Duration::days(days);
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "localhost");
+    params.is_ca = IsCa::ExplicitNoCa;
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    params.use_authority_key_identifier_extension = true;
     let key = key_pair();
-    let cert = params.self_signed(key).unwrap();
-    std::fs::write(file, format!("{}{}", cert.pem(), key.serialize_pem())).unwrap();
-    cert.pem()
+    let cert = params.signed_by(key, &issuer).unwrap();
+    let printed = format!("{}{ca_pem}{}", cert.pem(), key.serialize_pem());
+    std::fs::write(file, printed).unwrap();
+    ca_pem.to_string()
+}
+
+/// The authority every test certificate is signed by: made once.
+fn authority() -> &'static (rcgen::CertificateParams, rcgen::KeyPair, String) {
+    use rcgen::{BasicConstraints, DnType, IsCa, KeyUsagePurpose};
+    static CA: std::sync::OnceLock<(rcgen::CertificateParams, rcgen::KeyPair, String)> =
+        std::sync::OnceLock::new();
+    CA.get_or_init(|| {
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        let now = time::OffsetDateTime::now_utc();
+        params.not_before = now - time::Duration::days(1);
+        params.not_after = now + time::Duration::days(397);
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "spandeck test authority");
+        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let key = rcgen::KeyPair::generate().unwrap();
+        let pem = params.self_signed(&key).unwrap().pem();
+        (params, key, pem)
+    })
 }
 
 /// One key for every certificate a test makes, so that a browser can be

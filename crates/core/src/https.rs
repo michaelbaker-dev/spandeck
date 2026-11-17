@@ -194,13 +194,16 @@ fn why_no_cert(stderr: &str) -> NoCert {
 }
 
 /// The certificate's own blocks and the key's, out of what was printed, in
-/// whichever order.
+/// whichever order. What comes back has one line end, `\n`, whatever the
+/// program printed (`tailscale.exe` may well print `\r\n`), and ends with
+/// one: what is kept and served is the same on every system.
 fn split_pem(text: &str) -> Option<(String, String)> {
     let (mut cert, mut key) = (String::new(), String::new());
     let mut block = String::new();
     let mut kind: Option<bool> = None;
-    for line in text.lines() {
-        let line = line.trim_end();
+    // A byte-order mark, as a Windows program may put first, is no part of it.
+    for line in text.trim_start_matches('\u{feff}').lines() {
+        let line = line.trim();
         if let Some(label) = line.strip_prefix("-----BEGIN ") {
             kind = if label.starts_with("CERTIFICATE") {
                 Some(true)
@@ -231,6 +234,7 @@ fn split_pem(text: &str) -> Option<(String, String)> {
 pub fn not_after_ms(cert_pem: &str) -> Option<u64> {
     let body: String = cert_pem
         .lines()
+        .map(str::trim)
         .skip_while(|l| !l.starts_with("-----BEGIN CERTIFICATE"))
         .skip(1)
         .take_while(|l| !l.starts_with("-----END"))
@@ -925,14 +929,22 @@ mod tests {
 
     // A certificate made for these tests (`CN=localhost`); its key was
     // thrown away.
-    const CERT: &str = include_str!("../tests/fixtures/https/cert.pem");
+    // (It is only ever read for its dates here; nothing verifies it.)
+    const CERT_FILE: &str = include_str!("../tests/fixtures/https/cert.pem");
+
+    /// The fixture with `\n` line ends, however it was checked out.
+    fn cert() -> String {
+        CERT_FILE.replace("\r\n", "\n")
+    }
 
     /// Reason: "The days left are on the Performance page and in `spandeck
     /// doctor`" and renewal is decided by them: read from the certificate
     /// itself, wherever it came from.
     #[test]
     fn a_certificates_end_is_read_from_it() {
-        let ms = not_after_ms(CERT).expect("its end");
+        let ms = not_after_ms(&cert()).expect("its end");
+        // The same from a file with Windows line ends.
+        assert_eq!(not_after_ms(&cert().replace('\n', "\r\n")), Some(ms));
         assert_eq!(
             crate::tailnet::rfc3339(ms),
             include_str!("../tests/fixtures/https/not_after.txt").trim()
@@ -949,13 +961,32 @@ mod tests {
     /// certificate.
     #[test]
     fn what_tailscale_prints_is_split_into_the_chain_and_the_key() {
+        let cert = cert();
         let key = "-----BEGIN EC PRIVATE KEY-----\nMHc=\n-----END EC PRIVATE KEY-----\n";
-        for text in [format!("{CERT}{CERT}{key}"), format!("{key}{CERT}{CERT}")] {
-            let (cert, got) = split_pem(&text).expect("both");
-            assert_eq!(cert, format!("{CERT}{CERT}"));
-            assert_eq!(got, key);
+        let chain = format!("{cert}{cert}");
+        let both = [format!("{cert}{cert}{key}"), format!("{key}{cert}{cert}")];
+        for text in &both {
+            // As printed; with Windows line ends (found on the Windows
+            // station, 17 Nov 2026: the fixture was checked out so, and
+            // `tailscale.exe` may print so); with no line end after the
+            // last line; with a byte-order mark and blank lines around.
+            // What is kept is the same text every time.
+            let crlf = text.replace('\n', "\r\n");
+            let padded = format!("\u{feff}\r\n  {}\r\n\r\n", crlf.trim_end());
+            for form in [
+                text.as_str(),
+                &crlf,
+                text.trim_end(),
+                crlf.trim_end(),
+                &padded,
+            ] {
+                let (got_chain, got_key) = split_pem(form).expect("both");
+                assert_eq!(got_chain, chain, "{form:?}");
+                assert_eq!(got_key, key, "{form:?}");
+                assert!(!got_chain.contains('\r') && !got_key.contains('\r'));
+            }
         }
-        assert!(split_pem(CERT).is_none());
+        assert!(split_pem(&cert).is_none());
         assert!(split_pem(key).is_none());
     }
 
