@@ -329,6 +329,10 @@ class Conv {
   // One answer of the station: the first page, or what came after the cursor.
   apply(a) {
     if (!a || this.disposed) return;
+    // (Where the log is now is taken before anything is drawn again: a
+    // scroll the browser has not told of yet would otherwise be undone
+    // by an answer that arrives in that moment.)
+    if (this.log.isConnected && this.log.scrollTop !== this.top) this.note();
     const was = this.available;
     if (a.available === false) {
       this.available = false;
