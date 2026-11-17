@@ -870,6 +870,9 @@ class Conv {
         case 'task': return this.noteEl(it, `A background task ${it.level || 'reported'}`, text, () => h('div', {}, text));
         // A short line is said as it is; a long one folds like the rest.
         case 'info': return text.length <= 120 ? quiet(text, it.level === 'warning' ? 'warn' : '') : this.noteEl(it, '', text, () => h('div', {}, text));
+        // A picture the agent's own tool made, which its reply did not
+        // have to name (the real Codex, 17 Nov 2026).
+        case 'made': return this.madeEl(it) || quiet(`The agent made a picture: it is not on ${this.st} any more`);
         default: return quiet(String(it.what || 'notice'));
       }
     }

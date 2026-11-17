@@ -254,6 +254,9 @@ impl Daemon {
                 let text = match item["kind"].as_str() {
                     Some("text") | Some("screen") => item["text"].as_str(),
                     Some("tool") => item["summary"].as_str(),
+                    // A picture the program's own tool made, which no
+                    // reply has to name (the real Codex, 17 Nov 2026).
+                    Some("notice") if item["what"] == json!("made") => item["text"].as_str(),
                     _ => None,
                 };
                 let Some(text) = text.filter(|t| !t.is_empty()) else {

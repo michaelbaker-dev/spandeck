@@ -141,7 +141,8 @@ pub struct Item {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answers: Option<Vec<(String, String)>>,
     /// notice: compacted, summary, turn_ended, interrupted, error, info,
-    /// away_summary, command_output, task.
+    /// away_summary, command_output, task, made (a picture the agent's
+    /// own tool made: `text` is where the program keeps it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub what: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -915,6 +916,71 @@ const CODEX_WRAPPERS: &[&str] = &[
     "# AGENTS.md instructions for ",
 ];
 
+/// A picture Codex made with its own tool: where Codex keeps it. Its
+/// reply does not have to say (the real 0.169.0, 17 Nov 2026: "Created a
+/// golden retriever enjoying a sunny park." and no path). The record has
+/// the picture itself, which is never read here beyond its first letters.
+fn codex_made(raw: &str) -> Option<(String, Option<u64>)> {
+    #[derive(Deserialize)]
+    struct Line<'a> {
+        #[serde(borrow)]
+        timestamp: Option<Cow<'a, str>>,
+        #[serde(borrow)]
+        payload: Payload<'a>,
+    }
+    #[derive(Deserialize)]
+    struct Payload<'a> {
+        #[serde(borrow)]
+        thread_id: Option<Cow<'a, str>>,
+        #[serde(borrow)]
+        item: Made<'a>,
+    }
+    #[derive(Deserialize)]
+    struct Made<'a> {
+        #[serde(borrow, rename = "type")]
+        ty: Option<Cow<'a, str>>,
+        #[serde(borrow)]
+        kind: Option<Cow<'a, str>>,
+        #[serde(borrow)]
+        id: Option<Cow<'a, str>>,
+        #[serde(borrow)]
+        result: Option<Cow<'a, str>>,
+    }
+    if !raw.contains("\"image_gen.generation\"") {
+        return None;
+    }
+    let line: Line = serde_json::from_str(raw).ok()?;
+    let item = line.payload.item;
+    if item.ty.as_deref() != Some("Extension")
+        || item.kind.as_deref() != Some("image_gen.generation")
+    {
+        return None;
+    }
+    // Each is one name in a folder, whatever the record says.
+    let plain = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 120
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    };
+    let (thread, id) = (line.payload.thread_id?, item.id?);
+    if !plain(&thread) || !plain(&id) {
+        return None;
+    }
+    let result = item.result.as_deref().unwrap_or("");
+    let ending = if result.starts_with("/9j/") {
+        "jpg"
+    } else if result.starts_with("UklGR") {
+        "webp"
+    } else {
+        "png"
+    };
+    Some((
+        format!("~/.codex/generated_images/{thread}/{id}.{ending}"),
+        line.timestamp.as_deref().and_then(ts_ms),
+    ))
+}
+
 fn codex_text(content: &Value) -> String {
     content
         .as_array()
@@ -945,6 +1011,13 @@ fn codex_line(line: u64, raw: &str) -> Parsed {
     match (ty, sub) {
         ("response_item", "additional_tools") => return out,
         ("response_item", _) | ("compacted", _) => {}
+        ("event_msg", "item_completed") => {
+            if let Some((path, ts)) = codex_made(raw) {
+                out.items
+                    .push(Item::notice(line, 0, "made", ts).with_text(&path));
+            }
+            return out;
+        }
         ("event_msg", quiet) if CODEX_QUIET_EVENTS.contains(&quiet) => return out,
         ("event_msg", _) => {}
         (quiet, _) if CODEX_QUIET.contains(&quiet) => return out,
@@ -2685,6 +2758,53 @@ mod tests {
             &line("What does AGENTS.md say? # AGENTS.md instructions for me"),
         );
         assert_eq!(kinds(&typed.items), vec!["user"]);
+    }
+
+    /// A bug that happened (the real Codex 0.169.0, 17 Nov 2026): asked
+    /// for a picture of a dog, it made one with its own tool, kept it in
+    /// its own folder and replied "Created a golden retriever enjoying a
+    /// sunny park." The reply names no file, so the chat showed none.
+    /// (The record here is the real one's, with the picture cut short.)
+    #[test]
+    fn a_picture_codex_made_is_in_the_conversation_though_no_reply_names_it() {
+        let made = |thread: &str, id: &str, kind: &str, result: &str| {
+            json!({"timestamp": "2026-11-17T22:43:33.000Z", "type": "event_msg", "payload": {
+                "type": "item_completed", "thread_id": thread, "turn_id": "t1",
+                "item": {"type": "Extension", "kind": kind, "id": id, "status": "completed",
+                    "revisedPrompt": "Create an image of a dog.", "result": result}}})
+            .to_string()
+        };
+        let thread = "01a1e403-7315-7ec1-9db9-264fab609b35";
+        let id = "exec-0e18e999-1f58-430c-8a60-4a84250db592";
+        let got = parse_line(
+            Dialect::Codex,
+            9,
+            &made(thread, id, "image_gen.generation", "iVBORw0KGgo"),
+        );
+        assert_eq!(
+            (
+                got.items[0].kind,
+                got.items[0].what,
+                got.items[0].text.as_deref()
+            ),
+            (
+                "notice",
+                Some("made"),
+                Some(&*format!("~/.codex/generated_images/{thread}/{id}.png"))
+            )
+        );
+        // It is not the end of a turn: the call that made it is still open.
+        assert!(!got.items[0].is_boundary());
+        // A name that would leave the folder is no name; and what else
+        // Codex finishes is, as before, no item.
+        for line in [
+            made("../..", id, "image_gen.generation", "iVBORw0KGgo"),
+            made(thread, "a/b", "image_gen.generation", "iVBORw0KGgo"),
+            made(thread, id, "web.search", "image_gen.generation"),
+        ] {
+            let got = parse_line(Dialect::Codex, 9, &line);
+            assert!(got.items.is_empty() && got.unknown.is_none(), "{line}");
+        }
     }
 
     /// Phase M1: the same for Codex, whose rollout file is another shape.
