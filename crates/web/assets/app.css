@@ -997,3 +997,20 @@ button.list-opt:last-child { border-bottom: none; } button.list-opt.on { backgro
   .dialog.list-sheet, html.kbd .dialog.list-sheet { height: auto; max-height: calc(var(--room) - 28px); border-radius: 18px 18px 0 0; border-top: 1px solid var(--line); }
   .list-sheet .sheet-grab { display: block; width: 38px; height: 4px; border-radius: 2px; background: var(--line); margin: 8px auto 0; }
 }
+/* The message box is never pushed out of sight (17 Nov 2026): what is
+   above it in the dock gives way. The log keeps a strip; the cards take
+   what is left and scroll inside themselves; a held question or plan
+   scrolls its choices, with its buttons always in sight under them. */
+.chat-dock { flex: 0 1 auto; min-height: 0; max-height: calc(100% - 44px); }
+.chat-dock > * { flex: none; }
+.chat-dock > .chat-cards, .chat-cards:has(.held), .chat-cards:has(.ask-plan.tall), .chat-cards:has(.list-card) { flex: 0 1 auto; min-height: 0; max-height: none; overflow: auto; }
+.chat-cards:has(.held) { overflow: hidden; }
+.chat-cards > .chat-card.held { flex: 0 1 auto; min-height: 0; overflow: hidden; }
+.chat-card.held > * { flex: none; }
+.chat-card.held > .ask-opts, .chat-card.held > .ask-plan, .chat-card.held > .ask-plan.tall { flex: 0 1 auto; min-height: 48px; max-height: none; overflow: auto; overscroll-behavior: contain; }
+.ask-nav .ask-cancel { background: none; } .ask-cancel-says { margin-top: -4px; }
+.chat-card.held > .ask-opts > * { flex: none; }
+/* With the keyboard up there is too little room for that: the whole card
+   scrolls, and its buttons are reached by scrolling it. */
+html.kbd .chat-cards > .chat-card.held { overflow: auto; overscroll-behavior: contain; }
+html.kbd .chat-card.held > .ask-opts, html.kbd .chat-card.held > .ask-plan { flex: none; overflow: visible; }

@@ -225,6 +225,10 @@ fn verdict(
     params: &Value,
 ) -> std::result::Result<(bool, Option<String>), String> {
     if kind == QUESTION {
+        // "Cancel": the owner declines to answer. The agent is told so.
+        if params.get("cancel") == Some(&json!(true)) {
+            return Ok((false, Some(DECLINED_MARK.to_string())));
+        }
         let given = params
             .get("answers")
             .ok_or("missing parameter: answers (or release: true)")?;
@@ -248,6 +252,13 @@ fn verdict(
         false => (false, Some(note.to_string()).filter(|n| !n.is_empty())),
     })
 }
+
+/// What is kept as the answer of a question the owner cancelled.
+const DECLINED_MARK: &str = "declined";
+
+/// What the agent is told when the owner cancels its question (the reason
+/// of a refused call is shown to the agent: Claude Code's hook reference).
+pub const DECLINED: &str = "The owner saw this question in spandeck and chose not to answer it. Do not ask it again as it is: go on as you judge best with what you know, or stop and say what you need.";
 
 /// What the agent is told when the owner sends a plan back.
 pub fn keep_planning(note: Option<&str>) -> String {
@@ -285,6 +296,11 @@ pub fn decision_for(kind: &str, input: &Value, answer: &ApprovalAnswer) -> HookD
         }
         (PLAN, true) if input.is_object() => HookDecision::answer(input.clone()),
         (PLAN, false) => HookDecision::deny(keep_planning(answer.reason.as_deref())),
+        // The owner cancelled the question (and only then: a question
+        // that ran out of time, or was let go, is the terminal's).
+        (QUESTION, false) if answer.reason.as_deref() == Some(DECLINED_MARK) => {
+            HookDecision::deny(DECLINED.to_string())
+        }
         _ => HookDecision::none(),
     }
 }
@@ -768,6 +784,31 @@ mod tests {
     fn an_answer_goes_back_as_the_calls_own_input() {
         let a = adapter(AgentKind::Claude).unwrap();
         let input = herons();
+        // The owner's report of 17 Nov 2026 ("there was no way to
+        // cancel"): a cancelled question is refused with words for the
+        // agent; one that only ran out of time says nothing.
+        let (allow, reason) = verdict(QUESTION, &input, &json!({"cancel": true})).unwrap();
+        let cancelled = ApprovalAnswer { allow, reason };
+        let out: Value = serde_json::from_str(
+            &a.reply("PreToolUse", &decision_for(QUESTION, &input, &cancelled))
+                .stdout,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                &out["hookSpecificOutput"]["permissionDecision"],
+                &out["hookSpecificOutput"]["permissionDecisionReason"]
+            ),
+            (&json!("deny"), &json!(DECLINED))
+        );
+        let lapsed = ApprovalAnswer {
+            allow: false,
+            reason: None,
+        };
+        assert!(a
+            .reply("PreToolUse", &decision_for(QUESTION, &input, &lapsed))
+            .stdout
+            .is_empty());
         let answers = json!({"Which herons count?": "All herons", "Which rivers?": "Avon"});
         let given = ApprovalAnswer {
             allow: true,

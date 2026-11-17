@@ -26,7 +26,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use spandeck_agents::picker::{read, Class, Picker};
+use spandeck_agents::picker::{read, showing, Class, Picker};
 use spandeck_agents::AgentState;
 use spandeck_terminal::input::Item;
 
@@ -44,6 +44,9 @@ struct Watch {
     last: HashMap<String, Picker>,
     /// The state a pane was in before it was said to need the owner.
     before: HashMap<String, AgentState>,
+    /// A screen the owner said is no prompt ("Not a prompt: hide"): it is
+    /// not said again while the screen is exactly that.
+    hidden: HashMap<String, Picker>,
 }
 
 fn watch() -> &'static Mutex<Watch> {
@@ -78,6 +81,48 @@ impl Daemon {
         format!("{}|{pane}", self.home.display())
     }
 
+    /// What a pane's program shows now: a list read from its screen, or
+    /// (the net under it, which needs nothing to be recognised) the
+    /// screen itself when the program is not in a turn and what is at the
+    /// bottom is known not to be its ordinary wait for a message
+    /// (`spandeck_agents::picker::showing`). The second has no rows: the
+    /// last rows of the screen are kept with it, so it stands only while
+    /// the screen is still.
+    fn on_screen(
+        &self,
+        p: &PaneEntry,
+        state: AgentState,
+        agent: spandeck_agents::AgentKind,
+    ) -> Option<Picker> {
+        let lines = p.term.lines();
+        read(&lines).or_else(|| {
+            (state != AgentState::Working && showing(agent, &lines)).then(|| {
+                let mut rows: Vec<String> = lines
+                    .iter()
+                    .map(|l| l.trim_end().chars().take(160).collect::<String>())
+                    .filter(|l| !l.trim().is_empty())
+                    .collect();
+                if rows.len() > 16 {
+                    rows.drain(..rows.len() - 16);
+                }
+                Picker {
+                    title: String::new(),
+                    about: String::new(),
+                    tabs: vec![],
+                    choices: vec![],
+                    multi: false,
+                    more_above: false,
+                    more_below: false,
+                    footer: rows,
+                    hint: String::new(),
+                    free_text: None,
+                    class: Class::Plain,
+                    exact: false,
+                }
+            })
+        })
+    }
+
     /// One look at every agent pane's screen. `skip`: panes whose screen
     /// another reader has already answered for (the folder-trust
     /// question, the review of hooks, "Switch model?"). The panes it
@@ -97,7 +142,19 @@ impl Daemon {
             let seen = if skip.contains(&p.id) {
                 None
             } else {
-                read(&p.term.lines())
+                self.on_screen(&p, m.state_before_prompt(), m.agent)
+            };
+            // (One the owner hid stays hidden while it is exactly that.)
+            let seen = {
+                let mut w = watch().lock().unwrap();
+                match (&seen, w.hidden.get(&key)) {
+                    (Some(now), Some(hid)) if now == hid => None,
+                    (_, Some(_)) => {
+                        w.hidden.remove(&key);
+                        seen
+                    }
+                    _ => seen,
+                }
             };
             let Some(seen) = seen else {
                 let mut w = watch().lock().unwrap();
@@ -222,6 +279,19 @@ impl Daemon {
     /// "s to use this session only", only when its list says so).
     pub async fn pane_pick(&self, pane: &str, params: &Value, by: &str) -> Result<Value> {
         let p = self.pane(pane)?;
+        // "Not a prompt: hide": what is shown now is not said again while
+        // the screen is exactly this.
+        if params.get("hide").and_then(|h| h.as_bool()) == Some(true) {
+            let m = p.meta();
+            if let Some(now) = self.on_screen(&p, m.state_before_prompt(), m.agent) {
+                watch()
+                    .lock()
+                    .unwrap()
+                    .hidden
+                    .insert(self.picker_key(&p.id), now);
+            }
+            return Ok(json!({"ok": true, "hidden": true}));
+        }
         let text = params
             .get("text")
             .and_then(|t| t.as_str())

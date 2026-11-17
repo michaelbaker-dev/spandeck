@@ -1216,6 +1216,155 @@ fn a_list_a_program_draws_is_chosen_from_and_never_typed_into() {
         .is_err());
 }
 
+/// The owner, 17 Nov 2026: "Confirm the picker works on any agent at
+/// anytime a multiple choice would come up for any reason". It did not:
+/// with Codex's, Antigravity's and OpenCode's own `/model` lists up, the
+/// pane read idle and Chat showed nothing.
+///
+/// The three real screens, drawn by the stand-in program in a pane of each
+/// kind: Codex's and Antigravity's are lists with their rows; OpenCode's,
+/// whose marker no row carries, is its screen. An unknown menu under
+/// Antigravity's message box is its screen too, with nothing recognised;
+/// its ordinary wait for a message, with words typed in the box, is
+/// nothing; nor is anything said in the middle of a turn. A message is
+/// held for each, and a screen the owner hides stays hidden.
+#[test]
+#[ignore = "merge tier: five panes, each drawing a real screen"]
+fn what_any_program_shows_is_said_whatever_it_is() {
+    use spandeck_agents::picker::real;
+    let s = Station::start("alpha");
+    let dir = folder(&s, "mere");
+    let draws = |agent: &str, name: &str, rows: &str| {
+        let id = pane(
+            &s,
+            agent,
+            name,
+            &dir,
+            json!({"no_hooks": true, "steps": [], "on_input": [{"picker": {"raw": rows.lines().collect::<Vec<_>>()}}]}),
+        );
+        s.call("pane.input", json!({"pane": id, "data": "x\r"}));
+        id
+    };
+    let held = |id: &str| {
+        let e = s
+            .try_call(
+                "pane.paste",
+                json!({"pane": id, "text": "count the egrets too", "enter": true}),
+            )
+            .unwrap_err();
+        assert!(
+            e.code == "invalid" && e.message.contains("choose from what it shows"),
+            "{e}"
+        );
+    };
+
+    let codex = draws("codex", "codex", real::CODEX_MODEL);
+    let p = shown(&s, &codex, "picker");
+    let k = &p["prompt"]["picker"];
+    assert_eq!(
+        (
+            &p["needs_reason"],
+            k["choices"].as_array().unwrap().len(),
+            &k["choices"][0]["text"],
+            &k["choices"][0]["marked"],
+            &k["choices"][0]["current"]
+        ),
+        (
+            &json!("shows a list to choose from: Select Model and Effort"),
+            8,
+            &json!("GPT-6.1-Sol"),
+            &json!(true),
+            &json!(true)
+        ),
+        "{p}"
+    );
+    held(&codex);
+
+    let agy = draws("antigravity", "agy", real::ANTIGRAVITY_MODEL);
+    let p = shown(&s, &agy, "picker");
+    assert_eq!(
+        (
+            &p["prompt"]["name"],
+            p["prompt"]["picker"]["choices"].as_array().unwrap().len(),
+            &p["prompt"]["picker"]["choices"][7]["text"]
+        ),
+        (&json!("Switch Model"), 9, &json!("Claude Sonnet 5.5")),
+        "{p}"
+    );
+    held(&agy);
+
+    // No marker a row carries: the screen itself, by what is known of
+    // OpenCode's windows.
+    let oc = draws("opencode", "oc", real::OPENCODE_MODELS);
+    let p = shown(&s, &oc, "screen");
+    assert_eq!(
+        (&p["needs_reason"], &p["prompt"]["picker"]["choices"]),
+        (
+            &json!("shows something in its terminal: its own screen"),
+            &json!([])
+        ),
+        "{p}"
+    );
+    assert!(
+        p["prompt"]["picker"]["footer"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r.as_str().unwrap().contains("Select model")),
+        "{p}"
+    );
+    held(&oc);
+    assert_eq!(
+        s.call("pane.pick", json!({"pane": oc, "text": "Big Pickle"}))["picked"],
+        json!(false)
+    );
+
+    // A menu nobody has seen, under Antigravity's message box: nothing of
+    // it is recognised, and it is said all the same.
+    let unknown = "────────────────────────────────────────────────────────────\n>\n────────────────────────────────────────────────────────────\n\n  ╔══════════════════════════╗\n  ║  Tide tables      F2     ║\n  ║  Moon phases      F3     ║\n  ╚══════════════════════════╝\n\n                                                                                                Gemini 4 Carbon · medium";
+    let odd = draws("antigravity", "odd", unknown);
+    let p = shown(&s, &odd, "screen");
+    assert!(
+        p["prompt"]["picker"]["footer"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r.as_str().unwrap().contains("Moon phases")),
+        "{p}"
+    );
+    held(&odd);
+    // In the middle of a turn it is not said (the program is at work,
+    // and nothing on it names a key).
+    s.call_as_pane(&odd, "pane.report_agent", json!({"state": "working"}))
+        .unwrap();
+    wait_for("nothing said in a turn", 10, || {
+        s.pane(&odd)["prompt"].is_null().then_some(())
+    });
+    assert_eq!(s.pane(&odd)["state"], json!("working"));
+    s.call_as_pane(&odd, "pane.report_agent", json!({"state": "idle"}))
+        .unwrap();
+    shown(&s, &odd, "screen");
+    // "Not a prompt: hide": not said again while it is exactly that.
+    s.call("pane.pick", json!({"pane": odd, "hide": true}));
+    let hid = wait_for("the screen hidden", 10, || {
+        let p = s.pane(&odd);
+        p["prompt"].is_null().then_some(p)
+    });
+    assert_eq!(hid["state"], json!("idle"), "{hid}");
+    std::thread::sleep(std::time::Duration::from_millis(1300));
+    assert!(s.pane(&odd)["prompt"].is_null(), "it stays hidden");
+
+    // Its ordinary wait for a message, with words typed in its box.
+    let idle = draws("antigravity", "idle", real::ANTIGRAVITY_IDLE);
+    s.wait_text(&idle, "count the egrets too");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let p = s.pane(&idle);
+    assert!(
+        p["prompt"].is_null() && p["state"] != json!("needs_you"),
+        "{p}"
+    );
+}
+
 /// OpenCode's database in a station's throwaway home, with the two tables
 /// of OpenCode 2.3.0 that are read (their columns as its own schema has
 /// them, the ones not read left out where it allows).
@@ -2939,7 +3088,11 @@ mod in_a_browser {
         );
         assert_eq!(
             sheet[2],
-            json!(["This session only", "Set as default", "Cancel"])
+            json!([
+                "This session only",
+                "Set as default",
+                "Back or cancel (Esc)"
+            ])
         );
         assert_eq!(
             (&sheet[3], &sheet[4]),
@@ -3046,6 +3199,140 @@ mod in_a_browser {
         shoot(&wide, "window-model-desktop");
         wide.js(&format!("({win}.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', bubbles: true}})), true)"));
         s.wait_text(&model, "[fake] picked: 4.  Sonnet 5.5");
+    }
+
+    /// The owner's report of 17 Nov 2026, from an iPhone: "I wrote this to
+    /// Claude, there was no way to cancel, esc didn't work, it also hid the
+    /// bottom window." A question card with four long choices and
+    /// "Other…" open, the keys row showing and the update bar above: its
+    /// "Next" was cut off and the message box was half off the screen.
+    ///
+    /// At a phone's size with a bar above the pane: the message box's
+    /// bottom is the bottom of what is in sight, every button of the card
+    /// is inside it, and the choices scroll inside the card; the same
+    /// with the keyboard up. The keys row is put away when the card
+    /// appears. Esc on the keys row cancels the question, and so does
+    /// "Cancel": the agent is told the owner did not answer.
+    #[test]
+    #[ignore = "merge tier: a browser"]
+    fn a_question_can_be_cancelled_and_never_hides_the_message_box() {
+        let s = Station::start("alpha");
+        let dir = folder(&s, "mere");
+        let long = "which is the longer way of saying it, with enough words that the row is two or three lines tall on a phone";
+        let asks = |id: &str| {
+            json!({"ask": {"id": id, "questions": [
+            {"header": "Google key", "question": "Which key should the survey's map use, and where should it be kept so that nothing of it is in the repository?", "multiSelect": false,
+             "options": [{"label": "The vault's key", "description": long}, {"label": "A new restricted key", "description": long},
+                         {"label": "No map for now", "description": long}, {"label": "Ask me later", "description": long}]},
+            {"header": "Rivers", "question": "Which rivers?", "multiSelect": true, "options": [{"label": "Avon"}, {"label": "Exe"}]}]}})
+        };
+        let pane_id = pane(
+            &s,
+            "fake",
+            "asker",
+            &dir,
+            json!({"steps": [{"prompt": "x"}, asks("toolu_q1"), {"say": "went on"}, asks("toolu_q2"), {"say": "went on again"}, {"turn_end": "ok"}]}),
+        );
+        let page = Page::open(&s, 390, 844);
+        page.phone_screen();
+        page.goto(&format!("#/s/alpha/p/{pane_id}"));
+        let card = "document.querySelector('.phone-chat .chat-card.held')";
+        page.wait(
+            "the question's card",
+            &format!("(c => c && c.querySelectorAll('.ask-opt').length === 5)({card})"),
+        );
+        // The keys row open, "Other…" open, and a bar above the pane, as
+        // the deck's "new version" bar is.
+        page.js("document.querySelector('.phone-chat .chat-keys-btn').click()");
+        page.js(&format!("[...{card}.querySelectorAll('.ask-opt')].find(o => o.innerText.includes('Other')).click()"));
+        page.wait(
+            "the field",
+            "!!document.querySelector('.phone-chat .ask-other')",
+        );
+        page.js("(() => { const b = document.createElement('div'); b.className = 'vault-prompt shell-bar'; b.textContent = 'A new version of the deck is ready. It is used the next time the deck is opened, or now.'; document.getElementById('app').prepend(b); return true; })()");
+        let fits = r#"(() => {
+            const vv = window.visualViewport, top = Math.round(vv.offsetTop), bottom = Math.round(vv.offsetTop + vv.height);
+            const root = document.querySelector('.phone-chat'), card = root.querySelector('.chat-card.held'), r = (e) => e.getBoundingClientRect();
+            const inside = (e) => r(e).top >= top - 0.5 && r(e).bottom <= bottom + 0.5 && r(e).height > 0;
+            const cut = (e) => { const c = r(card); return r(e).top < c.top - 0.5 || r(e).bottom > c.bottom + 0.5; };
+            const opts = card.querySelector('.ask-opts');
+            return {
+                row: Math.round(r(root.querySelector('.chat-dock')).bottom) === bottom && r(root.querySelector('.chat-row')).bottom <= bottom,
+                buttons: [...card.querySelectorAll('.ask-nav button, .ask-terminal')].map(b => [b.innerText, inside(b) && !cut(b)]),
+                box: inside(root.querySelector('.chat-box')), send: inside(root.querySelector('.chat-send')),
+                scrolls: opts.scrollHeight > opts.clientHeight + 1 && ['auto', 'scroll'].includes(getComputedStyle(opts).overflowY),
+                keys: !root.querySelector('.chat-keys').hidden, bar: !!document.querySelector('#app > .shell-bar'), log: Math.round(r(root.querySelector('.chat-log')).height),
+            };
+        })()"#;
+        let at_rest = page.js(fits);
+        assert_eq!(
+            (
+                &at_rest["row"],
+                &at_rest["box"],
+                &at_rest["send"],
+                &at_rest["scrolls"],
+                &at_rest["keys"],
+                &at_rest["bar"]
+            ),
+            (
+                &json!(true),
+                &json!(true),
+                &json!(true),
+                &json!(true),
+                &json!(true),
+                &json!(true)
+            ),
+            "{at_rest}"
+        );
+        assert_eq!(
+            at_rest["buttons"],
+            json!([
+                ["Cancel", true],
+                ["Next", true],
+                ["Answer in the terminal instead", true]
+            ]),
+            "{at_rest}"
+        );
+        assert!(at_rest["log"].as_i64().unwrap() >= 40, "{at_rest}");
+        shoot(&page, "question-tall-card");
+        // The keyboard up, as with "Your own answer" being written.
+        keyboard(&page, 480, 0);
+        page.js("document.getElementById('app').querySelector(':scope > .shell-bar') || (() => { const b = document.createElement('div'); b.className = 'vault-prompt shell-bar'; b.textContent = 'A new version of the deck is ready.'; document.getElementById('app').prepend(b); })()");
+        let up = page.js(fits);
+        assert_eq!(
+            (&up["row"], &up["box"], &up["send"]),
+            (&json!(true), &json!(true), &json!(true)),
+            "{up}"
+        );
+        // (With so little room the card itself scrolls: its buttons are
+        // reached by scrolling it, and nothing of the message box moves.)
+        let reached = page.js("(() => { const card = document.querySelector('.phone-chat .chat-card.held'); return [...card.querySelectorAll('.ask-nav button, .ask-terminal')].map(b => { b.scrollIntoView({block: 'nearest'}); const r = b.getBoundingClientRect(), c = card.getBoundingClientRect(); return r.top >= c.top - 0.5 && r.bottom <= c.bottom + 0.5 && r.bottom <= 480.5 && r.height > 0; }); })()");
+        assert_eq!(reached, json!([true, true, true]), "{up}");
+        assert_eq!(
+            page.js(fits)["row"],
+            json!(true),
+            "the message box has not moved"
+        );
+        page.js(
+            "document.querySelector('.phone-chat .ask-other').scrollIntoView({block: 'nearest'})",
+        );
+        assert_eq!(page.js("(f => { const r = f.getBoundingClientRect(); return r.top >= 0 && r.bottom <= 480; })(document.querySelector('.phone-chat .ask-other'))"), json!(true), "the field is in sight above the keyboard");
+        shoot(&page, "question-keyboard-up");
+        keyboard(&page, 844, 0);
+
+        // Esc on the keys row: the question is cancelled, and the agent
+        // is told the owner did not answer.
+        page.js("[...document.querySelectorAll('.phone-chat .chat-keys .key')].find(k => k.innerText === 'Esc').click()");
+        s.wait_text(&pane_id, "went on");
+        let told = s.text(&pane_id);
+        assert!(told.contains("chose not to answer"), "{told}");
+        // The next question: its card has the room (the keys are put
+        // away), and "Cancel" does the same.
+        page.wait("the second question's card", &format!("(c => c && !c.querySelector('.ask-opt:disabled') && document.querySelector('.phone-chat .chat-keys').hidden)({card})"));
+        page.js(&format!("{card}.querySelector('.ask-cancel').click()"));
+        s.wait_text(&pane_id, "went on again");
+        page.wait("no card", &format!("!{card}"));
+        assert_eq!(s.text(&pane_id).matches("chose not to answer").count(), 2);
     }
 
     /// Pictures of each kind of pane's Chat, for a human to lay side by
