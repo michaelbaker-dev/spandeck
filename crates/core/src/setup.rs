@@ -135,6 +135,14 @@ impl AgentSetup {
                     return Err(format!("{agent}: {v:?} is not a valid setting value"));
                 }
             }
+            // A word Codex has no flag for would be dropped without a word.
+            if let ("codex", Some(m)) = (agent.as_str(), d.permission_mode.as_deref()) {
+                if !matches!(m, "auto" | "never" | "on-request") {
+                    return Err(format!(
+                        "codex: the permission mode is auto, on-request or never, not {m:?}"
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -190,6 +198,18 @@ impl AgentSetup {
                 }
             }
             AgentKind::Codex => {
+                // `codex --help` 0.169.0. "auto" is Codex's own review of
+                // what it would otherwise ask the owner, inside its sandbox
+                // for the folder: what Claude Code calls auto mode. (Until
+                // 18 Nov 2026 this setting was dropped for Codex, and a
+                // Codex pane asked the owner about each step.)
+                match d.permission_mode.as_deref() {
+                    Some("auto") => args.push("--approve-for-me".to_string()),
+                    Some(m @ ("never" | "on-request")) => {
+                        args.extend(["--ask-for-approval".to_string(), m.to_string()])
+                    }
+                    _ => {}
+                }
                 if let Some(m) = &d.model {
                     args.extend(["-m".to_string(), m.clone()]);
                 }
@@ -730,5 +750,43 @@ impl Daemon {
             stations.extend(crate::fleet::futures_join_all(calls).await);
         }
         Ok(json!({"command": command, "stations": stations}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bug that happened (18 Nov 2026): the permission mode set for an
+    /// agent was passed to Claude Code and Antigravity and dropped for
+    /// Codex, so a Codex pane asked the owner about each step it took.
+    #[test]
+    fn the_permission_mode_set_for_codex_reaches_codex() {
+        let with = |mode: &str| {
+            let mut s = AgentSetup::default();
+            s.defaults.insert(
+                "codex".into(),
+                AgentDefaults {
+                    permission_mode: Some(mode.into()),
+                    ..Default::default()
+                },
+            );
+            s
+        };
+        assert_eq!(
+            with("auto").launch_args(AgentKind::Codex),
+            ["--approve-for-me"]
+        );
+        assert_eq!(
+            with("never").launch_args(AgentKind::Codex),
+            ["--ask-for-approval", "never"]
+        );
+        assert!(with("auto").validate().is_ok());
+        // A word Codex has no flag for is refused, not dropped.
+        assert!(with("acceptEdits").validate().is_err());
+        // Nothing set: Codex starts as its own settings say.
+        assert!(AgentSetup::default()
+            .launch_args(AgentKind::Codex)
+            .is_empty());
     }
 }
