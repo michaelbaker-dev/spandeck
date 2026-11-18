@@ -115,8 +115,11 @@ impl Daemon {
         // its rows name. One that has stopped to ask stands still. (The
         // real Codex, 18 Nov 2026: a row of its own naming Esc and Enter
         // made the pane need the owner anew each second of its turn.)
+        // (Three seconds: a program at work redraws its timer or its
+        // spinner every second or oftener, and a screen it has opened in
+        // its turn, as Claude Code's own /permissions, is noticed soon.)
         let drawing = state == AgentState::Working
-            && now_ms().saturating_sub(p.term.last_output_ms()) < 10_000;
+            && now_ms().saturating_sub(p.term.last_output_ms()) < 3_000;
         read(&lines)
             .filter(|pk| !pk.choices.is_empty() || !drawing)
             .or_else(|| {
