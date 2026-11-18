@@ -196,6 +196,11 @@ pub struct PaneMeta {
     /// the same way.
     #[serde(default)]
     pub model_args: Vec<String>,
+    /// The program was started to review for itself what it would
+    /// otherwise ask the owner (Codex's `--approve-for-me`): its requests
+    /// for permission are its own to answer, not the owner's (hooks.rs).
+    #[serde(default)]
+    pub own_review: bool,
     /// The program the pane was asked to run instead of its agent's usual
     /// one (tests and custom launchers), so a restart uses it again. Only
     /// meaningful when `launcher_recorded`: older panes did not keep it.
@@ -1133,6 +1138,7 @@ impl Daemon {
         let mut resume = opts.resume.clone();
         let mut new_session = None;
         let mut agent_env = vec![];
+        let mut own_review = false;
         let (program, args) = match (adapter(agent), &opts.program) {
             (Some(a), _) => {
                 let cfg = self
@@ -1148,6 +1154,7 @@ impl Daemon {
                 extra.extend(opts.extra_args.iter().cloned());
                 extra.extend(opts.model_args.iter().cloned());
                 extra.extend(opts.args.iter().cloned());
+                own_review = extra.iter().any(|a| a == "--approve-for-me");
                 if resume.is_none() && opts.resume_last {
                     resume = self.last_session(agent, &cwd).session.map(|s| s.id);
                 }
@@ -1382,6 +1389,7 @@ impl Daemon {
             model_chosen: None,
             prompt: None,
             model_args: opts.model_args.clone(),
+            own_review,
             launcher: opts.program.clone(),
             launcher_recorded: true,
             resumed: resume.is_some(),
@@ -1600,6 +1608,14 @@ impl Daemon {
                 self.emit("pane.title", Some(id), None, json!({"title": title}));
             }
             PaneEvent::Exited(info) => {
+                // The end of a program this pane no longer runs: it was
+                // started again under the same id, and the old one's end
+                // came late (a real Codex with commands left running held
+                // its terminal open past the wait, 18 Nov 2026, and the
+                // pane started again was listed as exited while it ran).
+                if p.term.exit_info().is_none() {
+                    return;
+                }
                 let meta = {
                     let mut m = p.meta.lock().unwrap();
                     m.exit = Some(info);

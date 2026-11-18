@@ -395,6 +395,15 @@ impl Daemon {
                     }
                     return HookDecision::none();
                 }
+                // A program started to review these for itself (Codex's
+                // `--approve-for-me`) answers them itself: the hook says
+                // nothing, and nothing waits for the owner. What its own
+                // review still puts to the owner is shown in its terminal.
+                // (Before, each one waited for the owner whatever the
+                // program's mode: the real Codex, 18 Nov 2026.)
+                if meta.own_review {
+                    return HookDecision::none();
+                }
                 let summary = ev
                     .tool
                     .as_ref()

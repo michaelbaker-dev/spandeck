@@ -196,6 +196,26 @@ fn an_unanswered_permission_request_falls_back_to_the_terminal_prompt() {
     assert_eq!(all[0]["status"], json!("expired"));
 }
 
+/// A bug that happened (the real Codex, 18 Nov 2026): started to review
+/// for itself what it would otherwise ask the owner, each of its steps
+/// still waited for the owner, because the station held every request for
+/// permission whatever the program's mode. For such a pane the station
+/// says nothing, at once, and nothing is listed for the owner.
+#[test]
+fn a_program_started_to_review_for_itself_is_not_held_for_the_owner() {
+    let s = Station::start("alpha");
+    let script = json!({"steps": [{"prompt": "x"}, {"permission": {"name": "Bash", "command": "python3 check.py"}}, {"turn_end": "done"}]});
+    let path = s.script_file(&script);
+    let pane = s.fake(
+        script,
+        json!({"args": ["--script", path, "--approve-for-me"]}),
+    );
+    s.wait_text(&pane, "[fake] permission: none");
+    s.wait_state(&pane, "done");
+    assert_eq!(s.call("approval.list", json!({"all": true})), json!([]));
+    assert!(s.log("approval.requested").is_empty());
+}
+
 /// Done when: a session is archived line for line.
 #[test]
 fn the_session_file_is_archived_line_for_line() {
