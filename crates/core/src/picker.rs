@@ -110,69 +110,78 @@ impl Daemon {
         agent: spandeck_agents::AgentKind,
     ) -> Option<Picker> {
         let lines = p.term.lines();
-        read(&lines).or_else(|| {
-            // Not in a turn, and known not to be its wait for a message:
-            // by what is known of its screens, or (Claude Code, Codex)
-            // because it has shown that wait since it started and does
-            // not now. In a turn: only a screen that has stood still for
-            // ten seconds, since a program at work keeps drawing (its
-            // timer, its spinner) and one that has stopped to ask does not.
-            let started = p.meta().proc_started_ms.unwrap_or(0);
-            let key = self.picker_key(&p.id);
-            let known = match waiting(agent, &lines) {
-                Some(true) => {
-                    watch().lock().unwrap().armed.insert(key, started);
-                    false
-                }
-                Some(false) => watch().lock().unwrap().armed.get(&key) == Some(&started),
-                None => false,
-            };
-            let still = now_ms().saturating_sub(p.term.last_output_ms()) >= 10_000;
-            // (Found with the real Antigravity 1.5.10: for some eight
-            // seconds after a message was sent to it, it was beginning its
-            // turn, with rows under its box and its state not yet "working",
-            // and the pane read as showing something. Nothing unread is
-            // said of an Antigravity pane in the twenty seconds after the owner
-            // sent it something, nor of any pane whose screen is still being
-            // drawn.)
-            let sent = watch()
-                .lock()
-                .unwrap()
-                .typed
-                .get(&self.picker_key(&p.id))
-                .copied()
-                .unwrap_or(0);
-            let settled = now_ms().saturating_sub(p.term.last_output_ms()) >= 1_500;
-            let _ = sent;
-            let other = match state {
-                AgentState::Working => still && known,
-                _ => settled && (known || showing(agent, &lines)),
-            };
-            other.then(|| {
-                let mut rows: Vec<String> = lines
-                    .iter()
-                    .map(|l| l.trim_end().chars().take(160).collect::<String>())
-                    .filter(|l| !l.trim().is_empty())
-                    .collect();
-                if rows.len() > 16 {
-                    rows.drain(..rows.len() - 16);
-                }
-                Picker {
-                    title: String::new(),
-                    about: String::new(),
-                    tabs: vec![],
-                    choices: vec![],
-                    multi: false,
-                    more_above: false,
-                    more_below: false,
-                    footer: rows,
-                    hint: String::new(),
-                    free_text: None,
-                    class: Class::Plain,
-                    exact: false,
-                }
+        // Key names with no rows to choose from, on the screen of a
+        // program at work that is still drawing: it is at work, whatever
+        // its rows name. One that has stopped to ask stands still. (The
+        // real Codex, 18 Nov 2026: a row of its own naming Esc and Enter
+        // made the pane need the owner anew each second of its turn.)
+        let drawing = state == AgentState::Working
+            && now_ms().saturating_sub(p.term.last_output_ms()) < 10_000;
+        read(&lines)
+            .filter(|pk| !pk.choices.is_empty() || !drawing)
+            .or_else(|| {
+                // Not in a turn, and known not to be its wait for a message:
+                // by what is known of its screens, or (Claude Code, Codex)
+                // because it has shown that wait since it started and does
+                // not now. In a turn: only a screen that has stood still for
+                // ten seconds, since a program at work keeps drawing (its
+                // timer, its spinner) and one that has stopped to ask does not.
+                let started = p.meta().proc_started_ms.unwrap_or(0);
+                let key = self.picker_key(&p.id);
+                let known = match waiting(agent, &lines) {
+                    Some(true) => {
+                        watch().lock().unwrap().armed.insert(key, started);
+                        false
+                    }
+                    Some(false) => watch().lock().unwrap().armed.get(&key) == Some(&started),
+                    None => false,
+                };
+                let still = now_ms().saturating_sub(p.term.last_output_ms()) >= 10_000;
+                // (Found with the real Antigravity 1.5.10: for some eight
+                // seconds after a message was sent to it, it was beginning its
+                // turn, with rows under its box and its state not yet "working",
+                // and the pane read as showing something. Nothing unread is
+                // said of an Antigravity pane in the twenty seconds after the owner
+                // sent it something, nor of any pane whose screen is still being
+                // drawn.)
+                let sent = watch()
+                    .lock()
+                    .unwrap()
+                    .typed
+                    .get(&self.picker_key(&p.id))
+                    .copied()
+                    .unwrap_or(0);
+                let settled = now_ms().saturating_sub(p.term.last_output_ms()) >= 1_500;
+                let _ = sent;
+                let other = match state {
+                    AgentState::Working => still && known,
+                    _ => settled && (known || showing(agent, &lines)),
+                };
+                other.then(|| {
+                    let mut rows: Vec<String> = lines
+                        .iter()
+                        .map(|l| l.trim_end().chars().take(160).collect::<String>())
+                        .filter(|l| !l.trim().is_empty())
+                        .collect();
+                    if rows.len() > 16 {
+                        rows.drain(..rows.len() - 16);
+                    }
+                    Picker {
+                        title: String::new(),
+                        about: String::new(),
+                        tabs: vec![],
+                        choices: vec![],
+                        multi: false,
+                        more_above: false,
+                        more_below: false,
+                        footer: rows,
+                        hint: String::new(),
+                        free_text: None,
+                        class: Class::Plain,
+                        exact: false,
+                    }
+                })
             })
-        })
     }
 
     /// One look at every agent pane's screen. `skip`: panes whose screen

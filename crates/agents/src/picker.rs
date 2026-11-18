@@ -300,8 +300,23 @@ pub fn read(lines: &[String]) -> Option<Picker> {
             .unwrap_or("")
             .trim()
             .to_lowercase();
-        left == "esc to cancel" || left == "esc to interrupt"
+        // (The real Codex 0.169.0, 18 Nov 2026: scrolled back in its own
+        // history, the row under its message box is "New · enter/esc
+        // latest", its way back to the newest line. Its own row, and
+        // nothing it asks: a pane at work read as needing the owner, with
+        // a new notice each second as its timer counted.)
+        left == "esc to cancel" || left == "esc to interrupt" || left.ends_with("esc latest")
     };
+    // (Codex's row while scrolled back is its own whatever stands over
+    // it: a message waiting in its box, wrapped onto two rows, read as a
+    // list of two.)
+    if clean(&lines[at])
+        .split("          ")
+        .next()
+        .is_some_and(|l| l.trim().to_lowercase().ends_with("esc latest"))
+    {
+        return None;
+    }
     if at > 0 && is_hint(&clean(&lines[at - 1])) {
         lone_stop = false;
         at -= 1;
@@ -881,6 +896,42 @@ mod tests {
     use super::*;
 
     /// The real Antigravity 1.5.10 at the start of a turn (17 Nov 2026).
+    #[test]
+    fn codex_scrolled_back_in_its_history_shows_nothing() {
+        // The real 0.169.0 on 18 Nov 2026, at work, after its terminal
+        // was scrolled.
+        let screen = "\
+› You have 1 new spandeck message from pa…
+         RY'
+    + Show details
+
+• Exited (status 1) python3 reviews/ux_che…
+  └     assert disclosure and not disclosu…
+
+• Working (2m 55s • esc to interrupt)
+
+  New activity · ↓ Back to bottom · esc
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol high · ~/code/pairtest
+  New · enter/esc latest                                  ⚠ 2 · f2";
+        let lines: Vec<String> = screen.lines().map(String::from).collect();
+        assert_eq!(read(&lines), None);
+        assert_eq!(waiting(crate::AgentKind::Codex, &lines), Some(true));
+        // And when its turn is over, with a message waiting in its box.
+        let idle = "\
+                                         New activity · ↓ Back to bottom · esc
+
+› You have 1 new spandeck message from you@spark2. Read it with the spandeck inbox tool and act on it: reply if it asks
+  something.
+
+  GPT-6.1-Sol high · ~/code/pairtest
+  New activity · Earlier messages available.  esc latest                                      ⚠ 2 warnings · f2 to view";
+        let lines: Vec<String> = idle.lines().map(String::from).collect();
+        assert_eq!(read(&lines), None);
+    }
+
     #[test]
     fn antigravity_at_work_shows_nothing() {
         let rule = "\u{2500}".repeat(120);
