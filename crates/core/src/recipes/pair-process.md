@@ -24,6 +24,7 @@ Each ends with the critic's verdict: **approve**, or at most seven numbered find
 4. **Sign-off**: the builder makes the last fixes; the critic's final verdict goes in `reviews/FINAL.md`.
 
 ## Rules that hold at every stage
+- **Your own server, your own port.** Each of you runs what you need on a free port of your own and stops it by that port. Never stop programs by name (`pkill`): the others' servers have the same name. Address each other as `{{project}}/<name>`: other projects on this station have panes with the same names.
 - **Say what you know is weak.** Every hand-over from the builder names the commit, how to run it, the gaps it knows of and what it has not run. A gap kept quiet costs a round.
 - **A finding comes with its evidence** (file and line, a measurement, or a script) and with who is hurt by it. Findings about the product come before findings about proof.
 - **Hold still when a review needs it.** When the critic says its review needs the code as it is, the builder changes nothing there until the critic says it is done, and may work ahead in a git worktree. Each fix for a finding is a commit of its own.
