@@ -223,6 +223,9 @@ const OWNER_READS: &[&str] = &[
     "foldertrust.choice",
     "foldertrust.list",
     "hookstrust.choice",
+    // The names of the ways a project can be set up (recipes.rs). The
+    // owner's, with `project.new`, which is the only call that takes one.
+    "project.recipes",
     // Nothing is kept of it: the recording is deleted and the text goes
     // back to the deck. Beside the others, so that a model that takes ten
     // seconds holds up nothing else the page asks of this station.
@@ -380,6 +383,8 @@ const REPEATABLE: &[&str] = &[
     // And the one for spandeck's own hooks.
     "hookstrust.choice",
     "hookstrust.set",
+    // The list of project recipes is the same list a second time.
+    "project.recipes",
     // Asking a release host again asks the same question.
     "agents.check",
 ];
@@ -1456,6 +1461,12 @@ impl Daemon {
             }
 
             // ------------------------------------------------------ projects
+            // With `recipe`, the project is set up by that recipe (recipes.rs).
+            "project.new" if opt(&params, "recipe").is_some() => {
+                let recipe = opt(&params, "recipe").unwrap_or_default();
+                self.project_recipe(caller, recipe, &params).await?
+            }
+            "project.recipes" => crate::recipes::project_recipes(),
             "project.new" => {
                 let panes: Vec<PaneSlot> =
                     params.get("panes").map(p).transpose()?.unwrap_or_default();
@@ -1482,7 +1493,16 @@ impl Daemon {
             }
             "project.list" => json!(self.projects()),
             "project.get" => self.project_view(s(&params, "name")?)?,
-            "project.open" => self.project_open(s(&params, "name")?, by)?,
+            "project.open" => {
+                let name = s(&params, "name")?;
+                let mut v = self.project_open(name, by)?;
+                // A pair whose agents have not been told their roles (no
+                // brief was written, or a pane was not running) is told now.
+                if let Some(roles) = self.pair_roles(caller, name).await {
+                    v["recipe"] = json!({"name": "pair", "roles": roles});
+                }
+                v
+            }
             "project.close" => {
                 self.project_close(s(&params, "name")?, by)?;
                 json!({"ok": true})

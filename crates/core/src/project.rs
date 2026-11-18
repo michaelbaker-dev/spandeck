@@ -452,6 +452,7 @@ impl Daemon {
         self.db
             .with(|c| c.execute("DELETE FROM projects WHERE name=?1", [name]))?;
         self.links_forget(name);
+        self.pair_forget(name);
         self.record(
             "project.removed",
             None,
