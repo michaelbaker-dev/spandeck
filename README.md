@@ -99,8 +99,9 @@ Workspaces, the other kind of tab, are kept in the browser only and can hold any
 **Who is doing what.** A pane whose agent has others working under it shows an
 **Agents** button; it slides a panel in from the right listing the helpers it gave tasks
 to, and each agent's own sub-agents, with what each is doing. The **Watch** tab shows
-every agent in a project as a small live card, with a line for each task given and each
-message in the last ten minutes, and the messages beside them. On a project layout,
+every agent in a project as a row that says what it is doing, who is waiting for whom
+where that is known, and what the agents and you say to each other as one thread, the
+newest at the bottom. On a project layout,
 **Lines** draws the message lines over the live panes.
 
 ## Looking after stations

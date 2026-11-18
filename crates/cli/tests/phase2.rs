@@ -607,7 +607,12 @@ fn screenshots_of_every_view() {
         );
         shoot(&page, "2g-linked-layout");
         page.goto("/s/spark2/w/api");
-        page.wait("watch", "!!document.querySelector('.watch-card.guest')");
+        // The linked project runs a shell only: Watch has a row for each
+        // agent, so it has none there, and says the two are linked.
+        page.wait(
+            "watch",
+            "!!document.querySelector('.watch-strip .watch-agent') && !!document.querySelector('.lay-head .chip.linked')",
+        );
         shoot(&page, "2h-watch-linked");
         // A global layout with a pane that is in no project, pins, and menus.
         s.call("deck.layout.save", json!({"layout": {"name": "everything", "tree": {"dir": "row", "ratio": 550,
@@ -750,7 +755,7 @@ fn screenshots_of_every_view() {
     phone.goto("/s/spark2/w/api");
     phone.wait(
         "phone watch",
-        "!!document.querySelector('.phone-watch .watch-card')",
+        "!!document.querySelector('.phone-watch .watch-agent')",
     );
     shoot(&phone, "8e-phone-watch");
     phone.goto("/fleet");

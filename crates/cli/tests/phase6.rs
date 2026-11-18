@@ -1026,8 +1026,9 @@ fn mail_that_is_not_read_is_nudged_again_and_mail_sent_at_startup_is_not_lost() 
 }
 
 /// Layouts, step 2 (agreed 14 Nov 2026): a pane shows the agents working
-/// under it, and Watch shows every agent in a project with a line for each
-/// task given and each recent message.
+/// under it, and Watch shows every agent in a project, whose helper each is,
+/// and what they say to each other. (Until 18 Nov 2026 Watch was a map of
+/// cards with a line for each task and message: `the_watch_view_is_a_conversation`.)
 #[test]
 fn the_deck_shows_who_works_for_whom_and_who_is_talking() {
     use common::browser::Page;
@@ -1071,7 +1072,8 @@ fn the_deck_shows_who_works_for_whom_and_who_is_talking() {
         "{drawer}"
     );
 
-    // Watch: both agents, a line for the task and one for the message.
+    // Watch: a row for each agent that says whose helper it is and what it
+    // was given to do, and the message between them in the thread.
     // Watch is an entry under the project in the list, with its own address.
     page.wait(
         "Watch under the project",
@@ -1079,30 +1081,31 @@ fn the_deck_shows_who_works_for_whom_and_who_is_talking() {
     );
     page.wait(
         "two agents",
-        "location.hash === '#/s/alpha/w/demo' && document.querySelectorAll('.watch-card').length === 2 && !!document.querySelector('.side-watch.current')",
+        "location.hash === '#/s/alpha/w/demo' && document.querySelectorAll('.watch-strip .watch-agent').length === 2 && !!document.querySelector('.side-watch.current')",
     );
-    let labels = page.wait("the lines", "(x => x.length >= 2 ? x : null)([...document.querySelectorAll('.watch-map .link-label')].map(e => e.className + ' | ' + e.innerText))");
-    let labels = labels.to_string();
+    let helper_row = page.wait(
+        "the helper's row",
+        "(r => r && r.innerText.includes('run the test suite') ? r.innerText : null)([...document.querySelectorAll('.watch-agent')].find(r => r.innerText.includes('run the test suite')))",
+    );
+    let helper_row = helper_row.as_str().unwrap();
     assert!(
-        labels.contains("task | lead →") && labels.contains("task · run the test suite"),
-        "{labels}"
+        helper_row.contains("tester for lead: run the test suite")
+            && helper_row.contains("working"),
+        "{helper_row}"
     );
+    let thread = page.wait(
+        "the question in the thread",
+        "(t => t && t.innerText.includes('which branch should I test?') ? t.innerText : null)(document.querySelector('.watch-thread'))",
+    );
+    let thread = thread.as_str().unwrap();
     assert!(
-        labels.contains("message") && labels.contains("→ lead · question"),
-        "{labels}"
+        thread.contains("lead") && thread.contains("question"),
+        "{thread}"
     );
-    // Waited for, not read once: the map is redrawn as events arrive, and a
-    // read between two draws found no lines on a busy machine.
-    page.wait(
-        "two lines",
-        "document.querySelectorAll('.watch-map .links .link').length === 2",
-    );
-    let feed = page.js("document.querySelector('.watch-feed').innerText");
-    assert!(
-        feed.as_str()
-            .unwrap()
-            .contains("which branch should I test?"),
-        "{feed}"
+    // The helper asked and went on working: nobody is said to be waiting.
+    assert_eq!(
+        page.js("document.querySelectorAll('.watch-wait').length"),
+        json!(0)
     );
     // For a human to look at: SPANDECK_SHOTS=/some/dir
     if let Ok(dir) = std::env::var("SPANDECK_SHOTS") {
@@ -1119,6 +1122,326 @@ fn the_deck_shows_who_works_for_whom_and_who_is_talking() {
         let png = page.tab.capture_screenshot(Png, None, None, true).unwrap();
         std::fs::write(format!("{dir}/12-agents-drawer.png"), png).unwrap();
     }
+}
+
+/// Watch, as the owner chose it on 18 Nov 2026 after looking at two agents
+/// on an iPhone ("Hard to tell what's really happening between agents, this
+/// window design isn't good"): a row for each agent, who is waiting for
+/// whom where that is known, and the messages as one thread with the newest
+/// at the bottom. On a phone, since that is where it was unreadable.
+#[test]
+#[ignore]
+fn the_watch_view_is_a_conversation() {
+    use common::browser::Page;
+    let shoot = |page: &Page, name: &str| {
+        use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png;
+        let Some(dir) = std::env::var_os("SPANDECK_SHOTS").map(std::path::PathBuf::from) else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        let png = page.tab.capture_screenshot(Png, None, None, true).unwrap();
+        std::fs::write(dir.join(format!("{name}.png")), png).unwrap();
+    };
+    let s = Station::start("alpha");
+    let repo = project(&s, "pairtest", &[], "");
+    // The critic is at work for the whole test; the builder has stopped.
+    let critic = agent(
+        &s,
+        "pairtest",
+        &repo,
+        "critic",
+        json!({"steps": [{"prompt": "review slice 2"}, {"work": 120000}]}),
+    );
+    let builder = agent(
+        &s,
+        "pairtest",
+        &repo,
+        "builder",
+        json!({"steps": [{"prompt": "build slice 2"}, {"turn_end": "Slice 2 is written."}]}),
+    );
+    s.wait_state(&critic, "working");
+    s.wait_state(&builder, "done");
+    let say = |from: &str, to: &str, kind: &str, body: &str| {
+        s.call_as_pane(
+            from,
+            "msg.send",
+            json!({"to": to, "kind": kind, "body": body}),
+        )
+        .unwrap();
+        // A message's place in the thread is its time, to the millisecond.
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let long = "Slice 2 ready: 3105962.\n64 tests pass.\nSearch uses the index now.\nThe <b>x</b> flag is gone.\nThe old path is kept for one release.\nThe migration is new, not an edit.\nNothing else changed.\nLast line of the report.";
+    say(&builder, "critic", "note", long);
+    say(
+        &critic,
+        "builder",
+        "question",
+        "Slice 2 round 1: one finding, should fix.",
+    );
+    // What the owner says is in the thread too.
+    s.call(
+        "msg.send",
+        json!({"to": critic, "body": "Be strict about the migration."}),
+    );
+    for n in 1..=6 {
+        say(
+            &builder,
+            "critic",
+            "note",
+            &format!("Step {n} of the fix is done."),
+        );
+    }
+    say(&builder, "critic", "note", "Finding 1 fixed in 8c915cc");
+    // The critic's question was typed to the builder, which answered "ok".
+    s.wait_state(&builder, "done");
+
+    let page = Page::open(&s, 390, 844);
+    page.phone_screen();
+    page.goto("/s/alpha/w/pairtest");
+    let fits = "document.documentElement.scrollWidth <= innerWidth && document.body.scrollWidth <= innerWidth";
+    let msgs = "[...document.querySelectorAll('.watch-thread .watch-msg')]";
+    page.wait(
+        "the thread",
+        &format!("{msgs}.length === 10 && document.querySelectorAll('.watch-strip .watch-agent').length === 2"),
+    );
+
+    // The strip: a row for each agent, in words, and no picture of a terminal.
+    let rows = page.js("[...document.querySelectorAll('.watch-strip .watch-agent')].map(r => r.innerText.replace(/\\s+/g, ' '))");
+    let rows: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert!(
+        rows[0].contains("builder")
+            && rows[0].contains("done")
+            && rows[1].contains("critic")
+            && rows[1].contains("working"),
+        "{rows:?}"
+    );
+    assert_eq!(
+        page.js(
+            "document.querySelectorAll('.watch .thumb, .watch .links, .watch .link-label').length"
+        ),
+        json!(0)
+    );
+    // A row opens its pane.
+    let href =
+        page.js("document.querySelectorAll('.watch-strip .watch-agent')[0].getAttribute('href')");
+    assert_eq!(href, json!(format!("#/s/alpha/p/{builder}")));
+
+    // The thread: oldest first, who to whom, the kind when it is not a note.
+    let heads = page.js(&format!("{msgs}.map(m => m.querySelector('.watch-msg-head').innerText.replace(/\\s+/g, ' ').replace(/ \\d.*$/, ''))"));
+    let heads: Vec<&str> = heads
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        heads[..4],
+        [
+            "builder → critic",
+            "critic → builder question",
+            "you → critic",
+            "builder → critic"
+        ],
+        "{heads:?}"
+    );
+    let bodies = page.js(&format!(
+        "{msgs}.map(m => m.querySelector('.watch-body').textContent)"
+    ));
+    assert_eq!(bodies[0], json!(long));
+    assert_eq!(bodies[9], json!("Finding 1 fixed in 8c915cc"));
+    // Text from an agent is text: the tag is read, and made nothing.
+    assert_eq!(
+        page.js(&format!("[{msgs}[0].querySelector('.watch-body').textContent.includes('<b>x</b>'), document.querySelectorAll('.watch-thread b').length === document.querySelectorAll('.watch-msg-head b').length]")),
+        json!([true, true])
+    );
+    // The two agents are on different sides, and the owner's words are marked.
+    assert_eq!(
+        page.js(&format!("(m => [m[0].classList.contains('left'), m[1].classList.contains('right'), m[2].classList.contains('you')])({msgs})")),
+        json!([true, true, true])
+    );
+
+    // The newest message is in view, in a thread longer than its room.
+    let newest_seen = format!("(t => (r => t.scrollHeight > t.clientHeight && r.top >= t.getBoundingClientRect().top && r.bottom <= t.getBoundingClientRect().bottom + 1)({msgs}.at(-1).getBoundingClientRect()))(document.querySelector('.watch-thread'))");
+    page.wait("the newest message in view", &newest_seen);
+    assert_eq!(page.js(fits), json!(true));
+
+    // Waiting: the last word between the two was the builder's, the builder
+    // has stopped and the critic is at work.
+    let waits =
+        "[...document.querySelectorAll('.watch-wait')].map(w => w.innerText.replace(/\\s+/g, ' '))";
+    let line = page.wait("who is waiting", &format!("{waits}[0]"));
+    assert!(
+        line.as_str()
+            .unwrap()
+            .starts_with("builder is waiting for critic ·"),
+        "{line}"
+    );
+    assert_eq!(page.js(&format!("{waits}.length")), json!(1));
+    shoot(&page, "watch-phone-390");
+
+    // A long text is folded, and its toggle stays as it was set when the
+    // page is drawn again.
+    let first = format!("{msgs}[0]");
+    let folded = format!("(m => [m.querySelector('.watch-body').classList.contains('folded'), m.querySelector('.watch-body').scrollHeight > m.querySelector('.watch-body').clientHeight + 1, m.querySelector('.watch-more').hidden, m.querySelector('.watch-more').innerText])({first})");
+    page.js("(t => { t.scrollTop = 0; return true; })(document.querySelector('.watch-thread'))");
+    assert_eq!(page.js(&folded), json!([true, true, false, "more"]));
+    // A short one has no toggle.
+    assert_eq!(
+        page.js(&format!("{msgs}[1].querySelector('.watch-more').hidden")),
+        json!(true)
+    );
+    page.js(&format!(
+        "({first}.querySelector('.watch-more').click(), true)"
+    ));
+    assert_eq!(page.js(&folded), json!([false, false, false, "less"]));
+    page.redraw(&s, &builder);
+    assert_eq!(page.js(&folded), json!([false, false, false, "less"]));
+    shoot(&page, "watch-phone-390-unfolded");
+    if std::env::var_os("SPANDECK_SHOTS").is_some() {
+        s.call(
+            "look.set",
+            json!({"level": "deck", "choice": {"theme": "spandeck-light"}}),
+        );
+        page.wait(
+            "the light theme",
+            "getComputedStyle(document.documentElement).colorScheme === 'light' || document.documentElement.hasAttribute('data-themed')",
+        );
+        shoot(&page, "watch-phone-390-light");
+        s.call(
+            "look.set",
+            json!({"level": "deck", "choice": {"theme": "spandeck-dark"}}),
+        );
+    }
+
+    // Scrolled up to read, the thread stays where it is when a message
+    // arrives. And now the last word is the critic's, which is still at
+    // work: nobody is said to be waiting.
+    let top =
+        page.js("(t => (t.scrollTop = 30, t.scrollTop))(document.querySelector('.watch-thread'))");
+    assert_eq!(top, json!(30));
+    say(&critic, "builder", "note", "Round 2: clean.");
+    page.wait("the new message", &format!("{msgs}.length === 11"));
+    page.wait("nobody waiting", &format!("{waits}.length === 0"));
+    assert_eq!(
+        page.js("document.querySelector('.watch-thread').scrollTop"),
+        top
+    );
+    // At the bottom, it follows the newest.
+    page.js("(t => { t.scrollTop = t.scrollHeight; return true; })(document.querySelector('.watch-thread'))");
+    say(&critic, "builder", "result", "Signed off.");
+    page.wait("the newest", &format!("{msgs}.length === 12"));
+    page.wait("the newest message in view again", &newest_seen);
+    s.wait_state(&builder, "done");
+
+    // Narrower still, and a computer's screen: nothing wider than the page.
+    let tall = page.js("document.querySelector('.watch-thread').clientHeight");
+    page.protocol(
+        "Emulation.setDeviceMetricsOverride",
+        json!({"width": 320, "height": 640, "deviceScaleFactor": 1, "mobile": false}),
+    );
+    page.wait(
+        "320 wide",
+        &format!("innerWidth === 320 && {msgs}.length === 12"),
+    );
+    // A thread that was at its newest message is there still when its room
+    // gets shorter (a phone turned, or its keyboard): the browser keeps the
+    // top where it was, which put the newest messages out of sight.
+    page.wait(
+        "the newest message in view in a shorter thread",
+        &format!("document.querySelector('.watch-thread').clientHeight < {tall} && {newest_seen}"),
+    );
+    assert_eq!(page.js(fits), json!(true));
+    assert_eq!(
+        page.js("[...document.querySelectorAll('.watch *')].filter(e => e.getBoundingClientRect().right > innerWidth + 1).length"),
+        json!(0)
+    );
+    shoot(&page, "watch-phone-320");
+    page.protocol(
+        "Emulation.setDeviceMetricsOverride",
+        json!({"width": 1400, "height": 860, "deviceScaleFactor": 1, "mobile": false}),
+    );
+    // The agents stand beside the thread.
+    page.wait(
+        "a computer's screen",
+        "innerWidth === 1400 && (a => a && a.getBoundingClientRect().right <= document.querySelector('.watch-thread').getBoundingClientRect().left)(document.querySelector('.station-main .watch-strip'))",
+    );
+    assert_eq!(page.js(fits), json!(true));
+    shoot(&page, "watch-desktop");
+
+    // An agent that needs the owner says why, in its row.
+    let asker = agent(
+        &s,
+        "pairtest",
+        &repo,
+        "asker",
+        json!({"steps": [{"prompt": "clean up"}, {"permission": {"name": "Bash", "command": "rm -rf build"}}]}),
+    );
+    let why = s.wait_state(&asker, "needs_you")["needs_reason"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let row = page.wait(
+        "the row that needs the owner",
+        "document.querySelector('.watch-agent.needs_you .watch-does.attn')?.innerText",
+    );
+    assert_eq!(row, json!(format!("Needs you: {why}")));
+    shoot(&page, "watch-desktop-needs-you");
+
+    // An agent of a linked project has a row that says where it is from, and
+    // what it says to an agent here is in the thread under its project's name.
+    let docs = project(&s, "docs", &[], "");
+    let writer = agent(&s, "docs", &docs, "writer", json!({"steps": []}));
+    s.wait_text(&writer, "[fake] session");
+    s.call(
+        "project.link",
+        json!({"project": "pairtest", "with": "docs"}),
+    );
+    say(
+        &writer,
+        "pairtest/builder",
+        "question",
+        "Which flag went away?",
+    );
+    let guest = page.wait(
+        "the linked project's agent",
+        "document.querySelector('.watch-agent.guest')?.innerText",
+    );
+    assert!(
+        guest.as_str().unwrap().contains("writer") && guest.as_str().unwrap().contains("from docs"),
+        "{guest}"
+    );
+    let head = page.wait(
+        "its message",
+        &format!("(m => m.innerText.includes('Which flag went away?') && m.querySelector('.watch-msg-head').innerText.replace(/\\s+/g, ' '))({msgs}.at(-1))"),
+    );
+    assert!(
+        head.as_str()
+            .unwrap()
+            .starts_with("docs/writer → builder question"),
+        "{head}"
+    );
+    shoot(&page, "watch-desktop-linked");
+
+    // Nothing running, nothing said: in words.
+    project(&s, "quiet", &[], "");
+    page.goto("/s/alpha/w/quiet");
+    let words = page.wait(
+        "the empty Watch",
+        "(w => w && w.querySelectorAll('.watch-none').length === 2 ? w.innerText : null)(document.querySelector('.watch'))",
+    );
+    let words = words.as_str().unwrap();
+    assert!(
+        words.contains("No agent is running in quiet.") && words.contains("No messages yet."),
+        "{words}"
+    );
+    shoot(&page, "watch-desktop-empty");
 }
 
 /// Project links (the owner's rules, 14 Nov 2026): only the owner links two
