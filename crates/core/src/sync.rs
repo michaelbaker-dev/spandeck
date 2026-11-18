@@ -1,5 +1,5 @@
 //! What the synced documents share: the deck document, the look document,
-//! the agent setup and the owner's preferences. Each is one document, kept
+//! the agent setup, the owner's preferences and the tools document. Each is one document, kept
 //! whole on every station, and the newer copy wins. This file is what keeps
 //! "newer" honest:
 //!
@@ -30,7 +30,7 @@ use crate::daemon::{invalid, Daemon, Result};
 use crate::paths::now_ms;
 
 /// The documents, by the name each has in `station.info`.
-pub(crate) const DOCS: [&str; 4] = ["deck", "look", "setup", "prefs"];
+pub(crate) const DOCS: [&str; 5] = ["deck", "look", "setup", "prefs", "tools"];
 
 /// A station that looked at the fleet longer ago than this looks again
 /// before a change is taken. A little over the time between two looks.
@@ -64,6 +64,7 @@ fn spoken(doc: &str) -> &'static str {
         "deck" => "the global layouts and pins",
         "look" => "the themes and looks",
         "setup" => "the agent setup",
+        "tools" => "the tools for agents",
         _ => "your preferences",
     }
 }
@@ -74,6 +75,7 @@ impl Daemon {
             "deck" => self.deck().updated_ms,
             "look" => self.look().updated_ms,
             "setup" => self.setup().updated_ms,
+            "tools" => self.tools_doc().updated_ms,
             _ => self.prefs().updated_ms,
         }
     }
@@ -141,6 +143,7 @@ impl Daemon {
             "deck" => json!(self.deck()),
             "look" => json!(self.look()),
             "setup" => json!(self.setup()),
+            "tools" => json!(self.tools_doc()),
             _ => json!(self.prefs()),
         };
         Ok(json!({"doc": doc, "copy": copy}))
@@ -156,8 +159,8 @@ impl Daemon {
             Ok(v) => v["copy"].clone(),
             // A station from before `sync.pull` (0.4.0) has no such call. Its
             // copy is read with the call a Control Deck opened here would
-            // make of it; it has no preferences document.
-            Err(e) if e.contains("not available") && doc != "prefs" => {
+            // make of it; it has no preferences document and no tools one.
+            Err(e) if e.contains("not available") && !matches!(doc, "prefs" | "tools") => {
                 let got = self
                     .fleet
                     .call(
@@ -178,6 +181,7 @@ impl Daemon {
             "deck" => serde_json::from_value(copy).map(|c| self.deck_push(c, station)),
             "look" => serde_json::from_value(copy).map(|c| self.look_push(c, station)),
             "setup" => serde_json::from_value(copy).map(|c| self.setup_push(c, station)),
+            "tools" => serde_json::from_value(copy).map(|c| self.tools_push(c, station)),
             _ => serde_json::from_value(copy).map(|c| self.prefs_push(c, station)),
         };
         if let Ok(Err(e)) = took {

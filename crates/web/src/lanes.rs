@@ -93,8 +93,8 @@ pub enum Scope {
 /// the changes that are this station's alone, so a station that does not
 /// answer delays only what is itself for the fleet.
 const SHARED: &[&str] = &[
-    "deck", "look", "prefs", "setup", "agents", "fleet", "trust", "device", "vault", "msg",
-    "recall", "context", "tailnet", "notify",
+    "deck", "look", "prefs", "setup", "tools", "agents", "fleet", "trust", "device", "vault",
+    "msg", "recall", "context", "tailnet", "notify",
 ];
 
 /// The kind of a change to this station: "" for one that is this

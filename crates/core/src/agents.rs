@@ -190,7 +190,7 @@ fn job_key(kind: AgentKind) -> String {
 }
 
 /// The last line of what a command has printed, for a row on a screen.
-fn last_line(text: &str) -> Option<String> {
+pub(crate) fn last_line(text: &str) -> Option<String> {
     // A progress bar redraws one line with carriage returns: its last state.
     let line = text.lines().rev().map(str::trim).find(|l| !l.is_empty())?;
     Some(line.chars().take(200).collect())
@@ -224,7 +224,7 @@ fn plain(text: &str) -> String {
     out
 }
 
-fn tail(text: &str, max: usize) -> String {
+pub(crate) fn tail(text: &str, max: usize) -> String {
     let text = text.trim();
     let n = text.chars().count();
     if n <= max {
@@ -384,6 +384,21 @@ impl Daemon {
         stop_at_limit: bool,
         watch: &dyn Fn(&str),
     ) -> Ran {
+        self.run_watched_in(argv, limit, stop_at_limit, None, &[], watch)
+    }
+
+    /// `run_watched`, in a folder of the caller's choosing (the home folder
+    /// when none is given) and with these variables added to, or put in
+    /// place of, the ones the command would have (tools.rs).
+    pub(crate) fn run_watched_in(
+        &self,
+        argv: &[String],
+        limit: Duration,
+        stop_at_limit: bool,
+        cwd: Option<&std::path::Path>,
+        env: &[(String, String)],
+        watch: &dyn Fn(&str),
+    ) -> Ran {
         let not_run = |text: String| Ran {
             ended: Ended::NotRun { missing: false },
             text,
@@ -401,7 +416,8 @@ impl Daemon {
         let child = std::process::Command::new(program)
             .args(args)
             .env("PATH", self.agent_path_env())
-            .current_dir(&self.home)
+            .envs(env.iter().map(|(k, v)| (k, v)))
+            .current_dir(cwd.unwrap_or(&self.home))
             .stdin(std::process::Stdio::null())
             .stdout(out)
             .stderr(err)
@@ -589,7 +605,10 @@ impl Daemon {
         }
     }
 
-    fn live_panes_of(&self, kind: AgentKind) -> Vec<std::sync::Arc<crate::daemon::PaneEntry>> {
+    pub(crate) fn live_panes_of(
+        &self,
+        kind: AgentKind,
+    ) -> Vec<std::sync::Arc<crate::daemon::PaneEntry>> {
         self.list_panes()
             .into_iter()
             .filter(|p| {
@@ -795,7 +814,7 @@ impl Daemon {
     }
 
     /// How long an updater or installer may run.
-    fn job_limit(&self) -> Duration {
+    pub(crate) fn job_limit(&self) -> Duration {
         let secs = self
             .flag("agents.job_limit_secs")
             .and_then(|v| v.as_u64())
@@ -1041,22 +1060,11 @@ impl Daemon {
             None => from.clone(),
         };
         let changed = ok && to.is_some() && to != from;
-        let (mut restarted, mut waiting) = (vec![], vec![]);
-        if changed && restart {
-            for p in self.live_panes_of(kind) {
-                if busy(p.meta.lock().unwrap().state) {
-                    // Not interrupted: it restarts when this turn is over.
-                    self.agents
-                        .restart_when_idle
-                        .lock()
-                        .unwrap()
-                        .insert(p.id.clone());
-                    waiting.push(p.id.clone());
-                } else if self.restart_pane(&p.id, false, "agent update").is_ok() {
-                    restarted.push(p.id.clone());
-                }
-            }
-        }
+        let (restarted, waiting) = if changed && restart {
+            self.restart_panes_of(kind, "agent update")
+        } else {
+            (vec![], vec![])
+        };
         let outcome = match (ok, changed) {
             (false, _) => "failed",
             (true, true) => "updated",
@@ -1230,6 +1238,31 @@ impl Daemon {
             }
         });
         Ok(started)
+    }
+
+    /// After a change of version (an agent program's, or a tool's): an
+    /// idle pane of this agent restarts into its conversation now; one in
+    /// a turn, or waiting on the owner, is not interrupted and restarts
+    /// when it is next idle. Returns the panes of each kind.
+    pub(crate) fn restart_panes_of(
+        &self,
+        kind: AgentKind,
+        why: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        let (mut restarted, mut waiting) = (vec![], vec![]);
+        for p in self.live_panes_of(kind) {
+            if busy(p.meta.lock().unwrap().state) {
+                self.agents
+                    .restart_when_idle
+                    .lock()
+                    .unwrap()
+                    .insert(p.id.clone());
+                waiting.push(p.id.clone());
+            } else if self.restart_pane(&p.id, false, why).is_ok() {
+                restarted.push(p.id.clone());
+            }
+        }
+        (restarted, waiting)
     }
 
     /// Restart the panes that were busy when their agent was updated, each
@@ -1537,7 +1570,7 @@ fn blocking<R>(f: impl FnOnce() -> R) -> R {
 }
 
 /// A time limit in words: "15 minutes", "2 seconds".
-fn minutes(limit: Duration) -> String {
+pub(crate) fn minutes(limit: Duration) -> String {
     match limit.as_secs() {
         s if s >= 120 => format!("{} minutes", s / 60),
         s => format!("{s} seconds"),

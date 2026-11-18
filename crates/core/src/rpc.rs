@@ -79,6 +79,10 @@ const PEER_METHODS: &[&str] = &[
     "notify.relay",
     "sync.pull",
     "prefs.push",
+    // A station offering its copy of the tools document (tooldoc.rs).
+    // It is the only `tools.` method a station has: installing, and every
+    // change to the document, are the owner's.
+    "tools.push",
     // The Performance page shows the fleet from any station, and a station
     // says its own Tailscale key's expiry to its fleet. The owner has these
     // too. None is on the agents' list or the read-only one: call timings
@@ -105,6 +109,12 @@ const SYNCED_CHANGES: &[&str] = &[
     "project.layout.remove",
     "setup.set",
     "prefs.set",
+    "tools.add",
+    "tools.remove",
+    "tools.scope",
+    "tools.set",
+    "tools.upgrade",
+    "tools.rollout",
 ];
 
 /// Methods that act from the station the owner is using and are never
@@ -216,6 +226,11 @@ const OWNER_READS: &[&str] = &[
     "pane.conversation.detail",
     "pane.titles",
     "pane.last_session",
+    // The tools for agents (tools.rs): the owner's alone, since a custom
+    // tool's settings can hold credentials. On no other list.
+    "tools.catalogue",
+    "tools.list",
+    "tools.status",
     "perf.get",
     "tailnet.view",
     "tailnet.signin",
@@ -291,6 +306,48 @@ mod agent_program_calls {
         }
         assert!(allowed(Authority::ReadOnly, "agents.status"));
         assert!(!allowed(Authority::Agent, "agents.status"));
+    }
+}
+
+/// Tools for agents (18 Nov 2026): adding one, choosing where it is
+/// installed, installing, upgrading and making a station ask a registry
+/// are the owner's alone (rule 7: an agent never administers a station;
+/// and what is installed is a program this station then runs). No agent,
+/// no read-only caller and no station on its own account has any of them:
+/// a station only offers its copy of the document.
+#[cfg(test)]
+mod tools_calls {
+    use super::*;
+
+    #[test]
+    fn only_the_owner_adds_installs_or_upgrades_a_tool() {
+        for method in [
+            "tools.add",
+            "tools.remove",
+            "tools.scope",
+            "tools.set",
+            "tools.install",
+            "tools.upgrade",
+            "tools.rollout",
+            "tools.check",
+            "tools.catalogue",
+            "tools.list",
+            "tools.status",
+        ] {
+            for authority in [Authority::Agent, Authority::ReadOnly, Authority::Peer] {
+                assert!(!allowed(authority, method), "{method}");
+            }
+            assert!(allowed(Authority::Owner, method), "{method}");
+        }
+        assert!(allowed(Authority::Peer, "tools.push"));
+        assert!(!allowed(Authority::Agent, "tools.push"));
+        assert!(!allowed(Authority::ReadOnly, "tools.push"));
+        // A change is never taken for a read, and never kept by its id:
+        // its parameters and answer can hold a custom tool's credentials.
+        for method in ["tools.add", "tools.set", "tools.scope", "tools.upgrade"] {
+            assert!(!reads(method), "{method}");
+            assert_eq!(class(method, &json!({})), Class::Never, "{method}");
+        }
     }
 }
 
@@ -459,6 +516,13 @@ fn wait_answer(mut view: Value, message: Option<(String, String)>, timed_out: bo
 /// id, to a station of any version. Not the read-only list: `msg.inbox`
 /// marks what it returns as read, so it is done once by its id instead.
 const REPEATABLE: &[&str] = &[
+    "tools.catalogue",
+    "tools.list",
+    "tools.status",
+    // Asking a registry again asks the same question; a second "install
+    // here" while the first runs starts nothing.
+    "tools.check",
+    "tools.install",
     "pane.last_session",
     "pane.conversation",
     "pane.conversation.detail",
@@ -2260,6 +2324,71 @@ impl Daemon {
                     .get("setup")
                     .ok_or_else(|| invalid("missing setup"))?)?;
                 self.setup_push(setup, by)?
+            }
+            // ---------------------------------------------------------- tools
+            // Tools for agents (tooldoc.rs, tools.rs). Every one of these is
+            // the owner's alone, on no list of an agent's, a read-only
+            // caller's or a station's: they change what a station installs
+            // and runs. Another station is reached only as the owner's
+            // forwarded request. A caller names a tool, a catalogue entry
+            // and a version, never a command to install with.
+            "tools.catalogue" => self.tools_catalogue(),
+            "tools.list" => self.tools_list(),
+            "tools.status" => {
+                let d = self.clone();
+                tokio::task::spawn_blocking(move || d.tools_status())
+                    .await
+                    .map_err(|e| invalid(e.to_string()))?
+            }
+            "tools.add" => self.tools_add(p(&params)?, by).await?,
+            "tools.remove" => self.tools_remove(s(&params, "name")?, by).await?,
+            "tools.scope" => {
+                let stations: Vec<String> = match params.get("stations") {
+                    Some(v) if !v.is_null() => p(v)?,
+                    _ => vec![],
+                };
+                self.tools_scope(s(&params, "name")?, flag(&params, "fleet"), stations, by)
+                    .await?
+            }
+            "tools.set" => {
+                let agents: Option<Vec<String>> = match params.get("agents") {
+                    Some(v) if !v.is_null() => Some(p(v)?),
+                    _ => None,
+                };
+                let allow = params.get("allow_without_asking").and_then(|v| v.as_bool());
+                self.tools_set(s(&params, "name")?, agents, allow, by)
+                    .await?
+            }
+            "tools.upgrade" | "tools.rollout" => {
+                let name = s(&params, "name")?;
+                let to = opt(&params, "to");
+                let restart = params
+                    .get("restart")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                if method == "tools.upgrade" {
+                    self.tools_upgrade(name, opt(&params, "station"), to, restart, by)
+                        .await?
+                } else {
+                    self.tools_rollout(name, to, restart, by).await?
+                }
+            }
+            // Try a tool's install again on this station.
+            "tools.install" => {
+                let (d, name) = (self.clone(), s(&params, "name")?.to_string());
+                tokio::task::spawn_blocking(move || d.tools_install(&name))
+                    .await
+                    .map_err(|e| invalid(e.to_string()))??
+            }
+            // Ask the registry whether each tool's version is the newest.
+            // Like `agents.check`: it makes this station call a host outside.
+            "tools.check" => self.tools_check(opt(&params, "name"), flag(&params, "again")),
+            // Another station offering its copy of the document.
+            "tools.push" => {
+                let doc: crate::tooldoc::ToolsDoc = p(params
+                    .get("tools")
+                    .ok_or_else(|| invalid("missing tools"))?)?;
+                self.tools_push(doc, by)?
             }
             // Which agent programs are here, and their versions.
             "agents.status" => {

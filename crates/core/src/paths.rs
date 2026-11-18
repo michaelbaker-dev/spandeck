@@ -196,6 +196,30 @@ pub struct AgentLauncher {
     pub latest_cmd: Option<Vec<String>>,
 }
 
+/// `[tools.<id>]`, for a catalogue tool (tools.rs): for tests and unusual
+/// setups, as `[agents.<name>]` is for an agent program. It is this
+/// station's own file: nothing here comes from a caller or another station.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ToolLauncher {
+    /// The command that installs one version of the tool into its folder,
+    /// instead of spandeck's own Node, npm and the catalogue's steps. It
+    /// is given `SPANDECK_TOOL_NAME`, `SPANDECK_TOOL_VERSION`,
+    /// `SPANDECK_TOOL_DIR` (the folder, which it is run in) and
+    /// `SPANDECK_TOOL_DATA`.
+    pub install_cmd: Option<Vec<String>>,
+    /// The command that starts the tool once as the last step of an
+    /// install, instead of the catalogue's. With `install_cmd` and without
+    /// this, nothing is started.
+    pub check_cmd: Option<Vec<String>>,
+    /// The program the tool is started with, instead of spandeck's own
+    /// Node. Without `install_cmd`, its `npm` is taken from the path.
+    pub runtime: Option<String>,
+    /// Where the newest published version is read, instead of the address
+    /// in the catalogue (for a mirror, and for tests). Read the same way.
+    pub latest_url: Option<String>,
+}
+
 /// `[agents]`: a table per agent (`[agents.claude]`), and beside them the
 /// one switch `check_latest`.
 #[derive(Debug, Clone, Default)]
@@ -295,6 +319,9 @@ pub struct Config {
     pub approval_timeout_secs: u64,
     pub notify: NotifyConfig,
     pub agents: Agents,
+    /// `[tools.<id>]`: how this station installs a catalogue tool, instead
+    /// of what the catalogue says (tools.rs).
+    pub tools: BTreeMap<String, ToolLauncher>,
     /// Find other stations through the local Tailscale client.
     pub discovery: bool,
     /// Extra peers as `host:port` (stations discovery cannot see, and tests).
@@ -440,6 +467,7 @@ impl Default for Config {
             approval_timeout_secs: 300,
             notify: NotifyConfig::default(),
             agents: Agents::default(),
+            tools: BTreeMap::new(),
             discovery: true,
             peers: vec![],
             stuck_same_failure: 3,
