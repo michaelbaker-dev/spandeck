@@ -223,6 +223,9 @@ const OWNER_READS: &[&str] = &[
     "foldertrust.choice",
     "foldertrust.list",
     "hookstrust.choice",
+    // A project's record (record.rs): it only reads, and is the owner's
+    // alone, so it is on this list and on none of the three above.
+    "project.record",
     // Nothing is kept of it: the recording is deleted and the text goes
     // back to the deck. Beside the others, so that a model that takes ten
     // seconds holds up nothing else the page asks of this station.
@@ -304,6 +307,24 @@ mod speech_calls {
     }
 }
 
+/// A project's record (18 Nov 2026) quotes every message and note of the
+/// project and says what the owner did: the owner's alone. No agent, no
+/// station acting for itself and no read-only caller is given it. It
+/// changes nothing, so a deck may ask it beside its other reads.
+#[cfg(test)]
+mod record_calls {
+    use super::*;
+
+    #[test]
+    fn only_the_owner_is_given_a_projects_record() {
+        assert!(allowed(Authority::Owner, "project.record"));
+        for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
+            assert!(!allowed(who, "project.record"), "{who:?}");
+        }
+        assert!(reads("project.record") && repeatable("project.record", &json!({})));
+    }
+}
+
 /// A method that acts from the station the owner is using and is never
 /// passed on to another one.
 pub fn not_forwarded(method: &str) -> bool {
@@ -350,6 +371,7 @@ const REPEATABLE: &[&str] = &[
     "wait",
     "task.wait",
     "context.search",
+    "project.record",
     "recall",
     "recall.local",
     "perf.get",
@@ -1708,6 +1730,13 @@ impl Daemon {
                         .caller_project(caller)
                         .ok_or_else(|| invalid("this pane is not in a project"))?,
                 };
+                // What agents posted, unless activity is asked for: `kind`
+                // (one kind of note, or `activity`), `include: "activity"`
+                // (with the notes). Each result says which it is.
+                let which = crate::memory::Which::parse(
+                    opt(&params, "kind").filter(|k| !k.is_empty()),
+                    opt(&params, "include").filter(|k| !k.is_empty()),
+                )?;
                 json!(
                     self.board_search(
                         &project,
@@ -1716,10 +1745,22 @@ impl Daemon {
                             .get("limit")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(20)
-                            .min(100) as u32
+                            .min(100) as u32,
+                        &which,
                     )
                     .await
                 )
+            }
+            // A project's record, written by the station from what it
+            // holds (record.rs). The owner's alone: it is on no list of an
+            // agent's, a station's or a read-only caller's methods, and it
+            // quotes every message and note of the project.
+            "project.record" => {
+                let d = self.clone();
+                let p = params.clone();
+                tokio::task::spawn_blocking(move || d.project_record(&p))
+                    .await
+                    .map_err(|e| invalid(e.to_string()))??
             }
             "recall" => self.recall(caller, &params).await?,
             "recall.local" => {

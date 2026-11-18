@@ -105,14 +105,25 @@ enum Cmd {
         #[arg(long)]
         project: Option<String>,
     },
-    /// Add a note to the shared project memory.
+    /// Add a note to the shared project memory: what another agent or a
+    /// later session needs (a decision, a finding, a verdict, a pitfall).
+    /// File edits, failed commands and test runs are recorded already.
     Note {
         text: String,
         #[arg(long, default_value = "note")]
         kind: String,
     },
-    /// Search the shared project memory.
-    Context { query: Option<String> },
+    /// Search the shared project memory: the notes agents posted.
+    Context {
+        query: Option<String>,
+        /// Also what spandeck recorded by itself (files edited, commands
+        /// that failed, test runs), each marked as activity.
+        #[arg(long)]
+        activity: bool,
+        /// Only this kind: finding, decision, note, status, or activity.
+        #[arg(long)]
+        kind: Option<String>,
+    },
     /// Wait until a pane is done, needs you, or fails.
     Wait {
         pane: String,
@@ -387,6 +398,48 @@ enum ProjectCmd {
     Remove {
         name: String,
     },
+    /// Write the project's record: its agents, their time in each state,
+    /// their messages and notes, what you did, and a timeline, as one
+    /// Markdown document (with --json, the same as data). All times UTC.
+    Record {
+        name: String,
+        /// From when: how long ago (`90m`, `2h`, `1d`, `45s`) or a time
+        /// (`2026-11-18T12:00:00Z`). Default: the project's first event.
+        #[arg(long)]
+        since: Option<String>,
+        /// Until when, the same way. Default: now.
+        #[arg(long)]
+        until: Option<String>,
+        /// Write the document to this file instead of printing it.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Every message, note and timeline line, however many.
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+/// `--since` and `--until` of `project record`: how long ago (`90m`), or a
+/// time with its zone (`2026-11-18T12:00:00Z`), as milliseconds since 1970.
+fn when_ms(text: &str, now: u64) -> anyhow::Result<u64> {
+    let t = text.trim();
+    if let Some(ms) = spandeck_core::tailnet::parse_rfc3339(t) {
+        return Ok(ms);
+    }
+    let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+    let unit = match t[digits..].trim() {
+        "s" | "sec" => Some(1000),
+        "m" | "min" => Some(60_000),
+        "h" => Some(3_600_000),
+        "d" => Some(86_400_000),
+        _ => None,
+    };
+    match (t[..digits].parse::<u64>(), unit) {
+        (Ok(n), Some(unit)) => Ok(now.saturating_sub(n.saturating_mul(unit))),
+        _ => anyhow::bail!(
+            "`{text}` is not a time: say how long ago (90m, 2h, 1d, 45s) or a time with its zone (2026-11-18T12:00:00Z)"
+        ),
+    }
 }
 
 #[derive(Subcommand)]
@@ -878,6 +931,33 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             ProjectCmd::Remove { name } => {
                 c.call("project.remove", json!({"name": name}))?;
             }
+            ProjectCmd::Record {
+                name,
+                since,
+                until,
+                out,
+                all,
+            } => {
+                let now = spandeck_core::paths::now_ms();
+                let since = since.map(|s| when_ms(&s, now)).transpose()?;
+                let until = until.map(|s| when_ms(&s, now)).transpose()?;
+                let mut v = c.call(
+                    "project.record",
+                    json!({"project": name, "since_ms": since, "until_ms": until, "all": all}),
+                )?;
+                // The document, or the data it was written from: not both.
+                let doc = match v.as_object_mut().and_then(|o| o.remove("markdown")) {
+                    Some(Value::String(doc)) if !j => doc,
+                    _ => serde_json::to_string_pretty(&v)?,
+                };
+                match out {
+                    Some(path) => {
+                        std::fs::write(&path, doc + "\n")?;
+                        println!("wrote {}", path.display());
+                    }
+                    None => println!("{doc}"),
+                }
+            }
         },
         Cmd::Send { to, body, kind } => {
             let v = c.call("msg.send", json!({"to": to, "body": body, "kind": kind}))?;
@@ -1020,10 +1100,15 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Cmd::Note { text, kind } => {
             c.call("note.add", json!({"text": text, "kind": kind}))?;
         }
-        Cmd::Context { query } => {
+        Cmd::Context {
+            query,
+            activity,
+            kind,
+        } => {
             let v = c.call(
                 "context.search",
-                json!({"query": query.unwrap_or_default()}),
+                json!({"query": query.unwrap_or_default(), "kind": kind,
+                       "include": activity.then_some("activity")}),
             )?;
             show(j, &v, |v| {
                 v.as_array()
@@ -1032,7 +1117,11 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     .map(|n| {
                         format!(
                             "[{}{}] {}",
-                            n["kind"].as_str().unwrap_or(""),
+                            // Activity is said as that, not as a kind of note.
+                            match n["class"].as_str() {
+                                Some("activity") => "activity",
+                                _ => n["kind"].as_str().unwrap_or(""),
+                            },
                             n["author"]
                                 .as_str()
                                 .map(|a| format!(" by {a}"))

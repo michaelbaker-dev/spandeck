@@ -248,6 +248,15 @@ const SLOW: Duration = Duration::from_millis(50);
 const STATE_BATCH: usize = 256;
 const LOG_BATCH: usize = 500;
 
+/// The `kind` of a note spandeck wrote by itself from an agent's hooks (a
+/// file edited, a command that failed, a test run): activity, kept apart
+/// from what agents post on purpose (memory.rs).
+pub const ACTIVITY: &str = "auto";
+/// How the text of an edit's row begins.
+pub const EDITED: &str = "edited ";
+/// A pane's edit of a file it edited within this long is the same row.
+pub const ACTIVITY_FOLD_MS: u64 = 10 * 60 * 1000;
+
 /// One entry of the ship's log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogRow {
@@ -285,10 +294,27 @@ impl Best {
                 "INSERT OR IGNORE INTO log(ulid,ts,kind,pane,project,task,actor,data) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![l.ulid, l.ts as i64, l.kind, l.pane, l.project, l.task, l.actor, l.data.to_string()],
             ),
-            Best::Note { ts, project, kind, author, task, text } => c.execute(
-                "INSERT INTO notes(ts,project,kind,author,task,text) VALUES(?1,?2,?3,?4,?5,?6)",
-                params![*ts as i64, project, kind, author, task, text],
-            ),
+            Best::Note { ts, project, kind, author, task, text } => {
+                // The same pane editing the same file again within ten
+                // minutes is the same row, with the time of the last edit
+                // (18 Nov 2026: 14 of a project's 35 notes were one agent
+                // editing one file). Done here, by the one writer, so that
+                // two edits waiting together are folded too.
+                if kind == ACTIVITY && text.starts_with(EDITED) {
+                    let folded = c.execute(
+                        "UPDATE notes SET ts=?1 WHERE id=(SELECT id FROM notes WHERE project=?2 AND kind=?3
+                           AND author IS ?4 AND text=?5 AND ts>=?6 ORDER BY id DESC LIMIT 1)",
+                        params![*ts as i64, project, kind, author, text, ts.saturating_sub(ACTIVITY_FOLD_MS) as i64],
+                    )?;
+                    if folded > 0 {
+                        return Ok(());
+                    }
+                }
+                c.execute(
+                    "INSERT INTO notes(ts,project,kind,author,task,text) VALUES(?1,?2,?3,?4,?5,?6)",
+                    params![*ts as i64, project, kind, author, task, text],
+                )
+            }
         }
         .map(|_| ())
     }
@@ -1238,6 +1264,72 @@ impl Db {
         }
         out.truncate(limit as usize);
         out
+    }
+}
+
+impl Db {
+    /// The ship's log of one project between two times, oldest first, a
+    /// page at a time (record.rs): entries that name the project or one of
+    /// `panes` (a JSON list of pane ids), after the place `after` (the time
+    /// and row of the last entry of the page before; `(since, 0)` to
+    /// begin, which leaves out nothing: no row is 0). Each comes with its
+    /// row, to ask for the next page.
+    pub fn log_between(
+        &self,
+        project: &str,
+        panes: &str,
+        after: (u64, i64),
+        until_ms: u64,
+        limit: u32,
+    ) -> Vec<(i64, LogRow)> {
+        self.read(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id,ulid,ts,kind,pane,project,task,actor,data FROM log
+                 WHERE (ts>?1 OR (ts=?1 AND id>?2)) AND ts<=?3
+                   AND (project=?4 OR pane IN (SELECT value FROM json_each(?5)))
+                 ORDER BY ts, id LIMIT ?6",
+            )?;
+            let rows = stmt.query_map(
+                params![
+                    after.0.min(i64::MAX as u64) as i64,
+                    after.1,
+                    until_ms.min(i64::MAX as u64) as i64,
+                    project,
+                    panes,
+                    limit
+                ],
+                |r| {
+                    let data: String = r.get(8)?;
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        LogRow {
+                            ulid: r.get(1)?,
+                            ts: r.get::<_, i64>(2)? as u64,
+                            kind: r.get(3)?,
+                            pane: r.get(4)?,
+                            project: r.get(5)?,
+                            task: r.get(6)?,
+                            actor: r.get(7)?,
+                            data: serde_json::from_str(&data).unwrap_or(Value::Null),
+                        },
+                    ))
+                },
+            )?;
+            rows.collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Entries of the ship's log that still wait to be written.
+    pub fn log_waiting(&self) -> Vec<LogRow> {
+        let q = self.shared.q.lock().unwrap();
+        q.best
+            .iter()
+            .filter_map(|b| match b {
+                Best::Log(l) => Some(l.clone()),
+                _ => None,
+            })
+            .collect()
     }
 }
 
