@@ -613,6 +613,46 @@ button.quiet { background: none; color: var(--muted); }
 }
 .agent-problem { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 3px; font-size: calc(12px * var(--ui-scale)); }
 
+/* Tools for agents (tools.js): a card for each tool, and in it a row for
+   each station: its name, how the tool stands there in words, what its job
+   is doing or how it ended, and the actions at the right. At a phone's
+   width the row's pieces are one under the other and nothing is a table. */
+.tools-panel [hidden], .tools-add [hidden] { display: none !important; }
+.tools-panel .tl-rule { margin: 0 0 10px; } .tl-empty { margin: 18px 0; overflow-wrap: anywhere; } .tl-bad { color: var(--red); }
+.tl-cards { display: flex; flex-direction: column; gap: 10px; }
+.tl-card { display: flex; flex-direction: column; gap: 6px; min-width: 0; } .tl-card > div { min-width: 0; overflow-wrap: anywhere; }
+.tl-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; } .tl-head h3 { margin: 0; min-width: 0; overflow-wrap: anywhere; text-transform: none; letter-spacing: 0; color: var(--text); font-size: calc(15px * var(--ui-scale)); }
+.tl-command { color: var(--muted); } .tl-mark { font-size: calc(12px * var(--ui-scale)); min-width: 0; overflow-wrap: anywhere; }
+.tl-version { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
+.tl-stations { display: flex; flex-direction: column; border-top: 1px solid var(--line); margin-top: 2px; }
+.tl-st { display: grid; grid-template-columns: minmax(90px, 170px) minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.tl-st-name { display: flex; flex-direction: column; min-width: 0; } .tl-st-name b { overflow-wrap: anywhere; }
+.tl-st-state { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; min-width: 0; }
+.tl-st-status { grid-column: 2 / -1; display: flex; flex-direction: column; gap: 4px; min-width: 0; overflow-wrap: anywhere; } .tl-st-status:empty, .tl-st-acts:empty { display: none; }
+.tl-st-acts { grid-column: 3; grid-row: 1; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.tl-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.tl-matrix { overflow-x: auto; margin-bottom: 10px; } .tl-matrix th, .tl-matrix td { white-space: nowrap; text-align: left; }
+.tl-m-ok { color: var(--green); } .tl-m-bad { color: var(--red); } .tl-m-warn { color: var(--amber); } .tl-m-plain { color: var(--muted); }
+.tools-add fieldset { border: none; padding: 0; margin: 0 0 14px; min-width: 0; } .tools-add legend { font-weight: 600; padding: 0; margin-bottom: 6px; }
+.tl-choice, .tl-check { display: flex; align-items: flex-start; gap: 10px; min-width: 0; cursor: pointer; }
+.tl-choice { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; } .tl-choice:has(input:checked) { border-color: var(--blue); } .tl-choice.off { opacity: .55; cursor: default; }
+.tl-check { padding: 4px 2px; } .tl-tick { margin-bottom: 8px; }
+.tl-choice input, .tl-check input { width: auto; flex: none; margin: 3px 0 0; }
+.tl-choice > span, .tl-check > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; } .tl-choice small, .tl-check small { color: var(--muted); }
+.tl-some { margin: 0 0 6px 28px; } .tl-own { margin: 4px 0 8px; } .tl-says:empty { display: none; } .tl-says { margin: 6px 0; }
+.tl-confirm p { overflow-wrap: anywhere; } .tl-confirm .tl-check { margin-top: 8px; }
+@media (max-width: 760px) {
+  .tl-matrix { display: none; }
+  .tools-panel button, .tools-add button, .tl-confirm button { min-height: 44px; white-space: normal; }
+  .tools-add input:not([type=checkbox]):not([type=radio]) { font-size: 16px; min-height: 44px; }
+  .tl-choice, .tl-check { min-height: 44px; align-items: center; } .tl-choice input, .tl-check input { width: 20px; height: 20px; margin: 0; }
+  .tl-top .ap-fleet-actions { width: 100%; } .tl-top .ap-fleet-actions button { flex: 1 1 auto; justify-content: center; }
+  .tl-acts button, .tl-st-acts button { min-width: 96px; justify-content: center; }
+  .tl-st { grid-template-columns: minmax(0, 1fr); } .tl-st-status, .tl-st-acts { grid-column: 1; grid-row: auto; }
+  .tl-st-name { flex-direction: row; align-items: baseline; gap: 8px; }
+  .tools-panel .ap-output summary { min-height: 44px; display: flex; align-items: center; }
+}
+
 /* Add a machine: the last tile of the fleet, and its dialog. */
 .add-tile { align-items: center; justify-content: center; gap: 4px; min-height: 96px; border-style: dashed; color: var(--muted); cursor: pointer; font: inherit; }
 .add-tile:hover { color: var(--text); }

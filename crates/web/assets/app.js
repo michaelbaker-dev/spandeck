@@ -18,6 +18,7 @@ import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from 
 import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners, termSize } from './look.js';
 import { lookEditor } from './lookedit.js';
 import { phoneLook } from './phonelook.js';
+import { toolsPanel } from './tools.js';
 import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook, refreshAsked, refreshCorrected } from './perf.js';
 import { qrSvg } from './qr.js';
 import { initFailover } from './failover.js';
@@ -1233,6 +1234,7 @@ function palette() {
     { label: `Stop every agent on ${api.station}`, run: () => rpc(api.station, 'stop.all', { scope: 'station' }) },
     { label: `Check ${here} (doctor)`, run: () => doctorPanel(here) },
     { label: 'Agent setup: MCP servers, skills, models', run: setupPanel },
+    { label: 'Tools for agents: add, roll out, upgrade', run: openTools },
     { label: 'Vault: connect stations and set token rotation', run: vaultPanel },
     { label: 'Run a command in every agent…', run: () => commandDialog(api.station, null) },
   ];
@@ -1644,6 +1646,9 @@ const PERMISSION = {
 const SETTING_WORD = /^[A-Za-z0-9._[\]-]+$/;
 const permTyped = new Set();
 
+// Tools for agents (tools.js): added once, set up by each station chosen.
+const openTools = () => toolsPanel({ api, hasCap, stations: () => S.fleet.stations });
+
 async function setupPanel() {
   let view;
   try { view = await api.call('setup.get'); } catch (e) { return toast(e.message, 'error'); }
@@ -1724,6 +1729,8 @@ async function setupPanel() {
       return h('div', {},
         h('p', { class: 'muted' }, `One list for every station${setup.updated_by ? ` · last changed by ${setup.updated_by}` : ''}. New agent panes pick it up when they start.`),
         h('h3', {}, 'MCP servers'),
+        h('p', { class: 'muted small setup-tools' }, 'These are given to every agent on every station, and are listed in Tools too. To have a tool installed for you, kept to some stations, or upgraded: ',
+          h('button', { type: 'button', class: 'mini', onclick: () => { close(); openTools(); } }, 'Open Tools')),
         h('table', { class: 'table' }, h('tbody', {}, Object.entries(setup.mcp_servers).map(([name, sv]) => h('tr', {},
           h('td', {}, h('b', {}, name)), h('td', { class: 'mono' }, sv.url || [sv.command, ...(sv.args || [])].join(' ')), h('td', {}, agentsBox(sv)),
           h('td', {}, h('button', { class: 'mini danger', onclick: () => { delete setup.mcp_servers[name]; draw(); } }, 'Remove')))),
@@ -2084,6 +2091,7 @@ function topbar() {
     isPhone() ? null : h('button', { onclick: fleetUsageDialog, title: 'Tokens and estimated cost, per station, project, pane and model' }, 'Usage'),
     isPhone() ? null : h('button', { class: 'perf-btn', onclick: () => go('#/perf'), 'aria-label': trouble ? 'Performance: something needs a look' : 'Performance', title: 'Where time goes on every station, the links between them, and Tailscale keys' }, 'Performance', trouble ? h('span', { class: 'perf-dot', 'aria-hidden': 'true' }) : null),
     isPhone() ? null : h('button', { onclick: setupPanel, title: 'MCP servers, skills and model defaults for every agent' }, 'Agent setup'),
+    isPhone() ? null : h('button', { class: 'tools-btn', onclick: openTools, title: 'Tools (MCP servers) for your agents: add one once, and each station you choose sets it up' }, 'Tools'),
     isPhone() ? null : h('button', { onclick: () => appearance('deck'), title: 'Themes, colours and fonts for the whole deck' }, 'Appearance'),
     isPhone() || !S.fleet.stations.some(x => x.vault?.found) ? null : h('button', { class: S.fleet.stations.some(x => x.state === 'online' && (['not_connected', 'token_rejected', 'locked'].includes(x.vault?.state) || x.vault?.health === 'problem')) ? 'attn' : '', onclick: vaultPanel, title: 'AgentVault: keys for agents without handing over keys' }, 'Vault'),
     h('button', { class: 'danger', onclick: stopAllMenu, title: 'Interrupt running agent turns' }, 'Stop all'),
@@ -2091,6 +2099,7 @@ function topbar() {
     // A phone's bar has no room for the rest: they are in a menu.
     isPhone() ? h('button', { class: 'top-more', 'aria-label': 'More', title: 'More', 'aria-haspopup': 'menu', onclick: (e) => { const b = e.currentTarget.getBoundingClientRect(); showMenu(b.right, b.bottom + 2, [
       { label: 'Add a machine…', hint: 'to this fleet', action: () => addMachineDialog() },
+      { label: 'Tools', hint: 'for your agents', action: openTools },
       { label: 'Appearance', hint: 'theme and text size', action: () => appearance('deck') },
       { label: 'Usage', hint: 'tokens and cost', action: fleetUsageDialog },
       { label: 'Performance', action: () => go('#/perf') }]); } }, '⋯') : null);
@@ -2221,6 +2230,7 @@ function stationMenu(e, s) {
     hopOrigin(s) && { label: `Open ${s.station}'s own Control Deck`, action: () => hopOpen(s) },
     up && s.https && { label: s.https.on ? 'Secure access (HTTPS)…' : s.https.state === 'needs_operator' ? 'Turn on secure access (HTTPS)…' : 'Secure access (HTTPS)…', action: () => fo.httpsDialog(s) },
     { label: 'Agent programs and versions…', action: agentsPanel },
+    { label: 'Tools for agents…', action: openTools },
     { label: 'Usage: tokens and estimated cost…', action: fleetUsageDialog },
     { label: 'Performance…', action: () => go('#/perf') },
     stationKey(s.station) && { label: `Tailscale key: ${stationKey(s.station).text}…`, action: () => keyDialog(keyName(s.station), stationKey(s.station), stationMore(s.station)) },
