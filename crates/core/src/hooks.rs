@@ -457,12 +457,14 @@ impl Daemon {
             // waiting for the owner after a restart. `mail_notice` looks at
             // the marks as they are now (holds.rs).
             EventKind::PromptSubmit | EventKind::ToolEnd => {
-                decision.context = self.mail_notice(&meta.id);
+                if carries_mail(meta.agent, &ev.raw_event, false) {
+                    decision.context = self.mail_notice(&meta.id);
+                }
             }
             EventKind::TurnEnd => {
                 // Pause: no new work is delivered; the current turn finishes.
                 // And a stopped turn is not continued with mail.
-                if stuck.is_none() {
+                if stuck.is_none() && carries_mail(meta.agent, &ev.raw_event, true) {
                     decision.continue_with = self.mail_notice(&meta.id);
                 }
             }
@@ -746,6 +748,26 @@ impl Daemon {
     pub fn approvals(&self, pending_only: bool) -> Vec<Value> {
         self.approvals.list(pending_only)
     }
+}
+
+/// Does this program's answer to this hook carry a mail notice to its
+/// agent? Asked of the program's own renderer, with a notice that says
+/// nothing. A notice now gives the messages themselves and marks them
+/// read (messages.rs, `mail_notice`), so one must never be made for an
+/// answer that drops it: Claude Code's `PostToolUseFailure` is a tool's
+/// end and its answer has no place for context; Antigravity takes context
+/// at a prompt only. Mail a hook cannot carry waits for one that can, or
+/// for the nudge.
+fn carries_mail(agent: spandeck_agents::AgentKind, raw_event: &str, at_turn_end: bool) -> bool {
+    const PROBE: &str = "spandeck-mail-probe";
+    let mut decision = HookDecision::none();
+    if at_turn_end {
+        decision.continue_with = Some(PROBE.into());
+    } else {
+        decision.context = Some(PROBE.into());
+    }
+    spandeck_agents::adapter(agent)
+        .is_some_and(|a| a.reply(raw_event, &decision).stdout.contains(PROBE))
 }
 
 pub(crate) fn truncate(s: &str, max: usize) -> String {

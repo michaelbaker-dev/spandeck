@@ -167,6 +167,15 @@ pub fn refusal_words(env: &Envelope, why: &str, attempts: u32) -> String {
     words
 }
 
+/// A message its agent has not been told of (or not for a while).
+#[derive(Debug, Clone)]
+pub struct Unannounced {
+    pub id: String,
+    pub sender: String,
+    pub kind: String,
+    pub body: String,
+}
+
 #[derive(Clone)]
 pub struct MessageStore {
     db: Arc<Db>,
@@ -501,23 +510,68 @@ impl MessageStore {
 
     /// Unread messages for these names that the agent has not been told about,
     /// or was told about before `told_before_ms` and still has not read.
-    pub fn unannounced(
-        &self,
-        names: &[String],
-        told_before_ms: u64,
-    ) -> Vec<(String, String, String)> {
+    pub fn unannounced(&self, names: &[String], told_before_ms: u64) -> Vec<Unannounced> {
         let list = json!(names.iter().map(|n| self.qualify(n)).collect::<Vec<_>>()).to_string();
         self.db
             .read(|c| {
                 let mut stmt = c.prepare(
-                    "SELECT id, sender, body FROM messages WHERE recipient IN (SELECT value FROM json_each(?1))
+                    "SELECT id, sender, kind, body FROM messages WHERE recipient IN (SELECT value FROM json_each(?1))
                      AND received IS NOT NULL AND read IS NULL AND status NOT LIKE 'undelivered%'
                      AND (announced=0 OR announced < ?2) ORDER BY received",
                 )?;
-                let rows = stmt.query_map(params![list, told_before_ms as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                let rows = stmt.query_map(params![list, told_before_ms as i64], |r| {
+                    Ok(Unannounced {
+                        id: r.get(0)?,
+                        sender: r.get(1)?,
+                        kind: r.get(2)?,
+                        body: r.get(3)?,
+                    })
+                })?;
                 rows.collect()
             })
             .unwrap_or_default()
+    }
+
+    /// These messages were given to their agent whole, in a hook's notice
+    /// (messages.rs, `mail_quoted`): read, as `inbox` marks what it
+    /// returns. One that was read already keeps its time.
+    pub fn mark_read(&self, ids: &[String], now: u64) {
+        let list = json!(ids).to_string();
+        let _ = self.db.with(|c| {
+            c.execute(
+                "UPDATE messages SET read=?2, status=CASE WHEN status='delivered' THEN 'read' ELSE status END, announced=?3
+                 WHERE id IN (SELECT value FROM json_each(?1)) AND read IS NULL",
+                params![list, now as i64, now.max(1) as i64],
+            )
+        });
+    }
+
+    /// The oldest message for these names that `sender` sent and that is
+    /// unread, or arrived at or after `since`: its id and its kind. For
+    /// `wait` until a message (rpc.rs): it marks nothing as read, and
+    /// never gives what the message says. Why `since`: a message that
+    /// arrives while its agent waits may be given to it, and marked read,
+    /// by a hook's notice before the wait has looked; it still ends the
+    /// wait.
+    pub fn unread_from(
+        &self,
+        names: &[String],
+        sender: &str,
+        since: u64,
+    ) -> Option<(String, String)> {
+        let list = json!(names.iter().map(|n| self.qualify(n)).collect::<Vec<_>>()).to_string();
+        let sender = self.qualify(sender);
+        self.db
+            .read(|c| {
+                c.query_row(
+                    "SELECT id, kind FROM messages WHERE recipient IN (SELECT value FROM json_each(?1))
+                     AND sender=?2 AND received IS NOT NULL AND (read IS NULL OR received>=?3)
+                     AND status NOT LIKE 'undelivered%' ORDER BY received LIMIT 1",
+                    params![list, sender, since as i64],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .ok()
     }
 
     /// Every unread message for these names: its id, its sender, and when

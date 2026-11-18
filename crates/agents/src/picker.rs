@@ -603,6 +603,47 @@ pub fn waiting(agent: crate::AgentKind, lines: &[String]) -> Option<bool> {
     })
 }
 
+/// Is this Codex screen scrolled back in Codex's own history? Then what
+/// is typed into it is not sent: the Enter that should submit a message
+/// only returns Codex to its latest line, and the words sit in its box
+/// (found 18 Nov 2026 with the real 0.169.0: a mail nudge typed into a
+/// Codex in this state stayed unsent). From the two real screens of that
+/// day, at work and idle (in the tests below), either of:
+///
+/// - its bottom row begins `New · ` or `New activity · ` and says
+///   `esc latest` (at work: "New · enter/esc latest"; idle: "New activity
+///   · Earlier messages available.  esc latest");
+/// - the row straight above its message box (the last row that begins
+///   `› ` at the left edge) is "New activity · ↓ Back to bottom · esc".
+///
+/// Both are rows Codex draws in fixed places, so the same words quoted in
+/// its conversation are not taken for them. This only reads: which key
+/// leaves the state, and what else that key does in each state, has not
+/// been verified on a real Codex, so nothing is pressed on its account.
+pub fn codex_scrolled_back(lines: &[String]) -> bool {
+    let rows: Vec<&String> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
+    let Some(last) = rows.last() else {
+        return false;
+    };
+    // What stands at the left of the row: its right end is Codex's
+    // count of warnings.
+    let left = last.trim().split("          ").next().unwrap_or("").trim();
+    if (left.starts_with("New · ") || left.starts_with("New activity · "))
+        && left.ends_with("esc latest")
+    {
+        return true;
+    }
+    let tail = &rows[rows.len().saturating_sub(14)..];
+    tail.iter()
+        .rposition(|l| l.starts_with("› ") || l.as_str() == "›")
+        .filter(|at| *at > 0)
+        .is_some_and(|at| {
+            tail[at - 1]
+                .trim()
+                .starts_with("New activity · ↓ Back to bottom")
+        })
+}
+
 fn class_of(said: &str) -> Class {
     let said = said.to_lowercase();
     if GRANTS.iter().any(|w| said.contains(w)) {
@@ -930,6 +971,65 @@ mod tests {
   New activity · Earlier messages available.  esc latest                                      ⚠ 2 warnings · f2 to view";
         let lines: Vec<String> = idle.lines().map(String::from).collect();
         assert_eq!(read(&lines), None);
+    }
+
+    /// Found on 18 Nov 2026 with the real Codex 0.169.0: a mail nudge was
+    /// typed into a Codex that was scrolled back in its own history, the
+    /// Enter only returned it to its latest line, and the nudge sat unsent
+    /// in its box. The two real screens of that state, at work and idle,
+    /// are read as scrolled back; Codex at its latest line, and the same
+    /// words where Codex only quotes them, are not.
+    #[test]
+    fn codex_scrolled_back_in_its_history_is_told_from_codex_at_its_latest_line() {
+        let lines = |s: &str| -> Vec<String> { s.lines().map(String::from).collect() };
+        let at_work = "\
+• Exited (status 1) python3 reviews/ux_che…
+  └     assert disclosure and not disclosu…
+
+• Working (2m 55s • esc to interrupt)
+
+  New activity · ↓ Back to bottom · esc
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol high · ~/code/pairtest
+  New · enter/esc latest                                  ⚠ 2 · f2";
+        assert!(codex_scrolled_back(&lines(at_work)));
+        let idle = "\
+                                         New activity · ↓ Back to bottom · esc
+
+› You have 1 new spandeck message from you@spark2. Read it with the spandeck inbox tool and act on it: reply if it asks
+  something.
+
+  GPT-6.1-Sol high · ~/code/pairtest
+  New activity · Earlier messages available.  esc latest                                      ⚠ 2 warnings · f2 to view";
+        assert!(codex_scrolled_back(&lines(idle)));
+        // Each sign by itself: the row above the box, the bottom row.
+        let above_only = "\
+  New activity · ↓ Back to bottom · esc
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol high · ~/code/pairtest";
+        assert!(codex_scrolled_back(&lines(above_only)));
+        let bottom_only = "\
+› Ask Codex to do anything
+
+  GPT-6.1-Sol high · ~/code/pairtest
+  New · enter/esc latest                                  ⚠ 2 · f2";
+        assert!(codex_scrolled_back(&lines(bottom_only)));
+        // At its latest line, though it quotes both rows in what it says.
+        let latest = "\
+• The screen said:
+  New activity · ↓ Back to bottom · esc
+  New · enter/esc latest
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol high · ~/code/pairtest
+  ? for shortcuts                                         ⚠ 2 · f2";
+        assert!(!codex_scrolled_back(&lines(latest)));
+        assert!(!codex_scrolled_back(&[]));
     }
 
     #[test]

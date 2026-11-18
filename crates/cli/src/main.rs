@@ -113,11 +113,15 @@ enum Cmd {
     },
     /// Search the shared project memory.
     Context { query: Option<String> },
-    /// Wait until a pane is done, needs you, or fails.
+    /// Wait until a pane is done, needs you, or fails; says which.
     Wait {
         pane: String,
         #[arg(long, default_value_t = 600)]
         timeout: u64,
+        /// What to wait for: any (done, needs you, or failed), done (its
+        /// turn is over), message (it sent the caller a message).
+        #[arg(long, default_value = "any", value_parser = ["any", "done", "message"])]
+        until: String,
     },
     /// Sign off a project's current commit.
     Signoff {
@@ -1155,9 +1159,20 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     .join("\n")
             });
         }
-        Cmd::Wait { pane, timeout } => {
-            let v = c.call("wait", json!({"pane": pane, "timeout_ms": timeout * 1000}))?;
-            show(j, &v, pane_line);
+        Cmd::Wait {
+            pane,
+            timeout,
+            until,
+        } => {
+            let v = c.call(
+                "wait",
+                json!({"pane": pane, "timeout_ms": timeout * 1000, "until": until}),
+            )?;
+            // A station from before says nothing of why: the pane's line.
+            show(j, &v, |v| match v["says"].as_str() {
+                Some(says) => format!("{}\n{says}", pane_line(v)),
+                None => pane_line(v),
+            });
             return Ok(if v["timed_out"] == json!(true) { 2 } else { 0 });
         }
         Cmd::Signoff { project, note } => {

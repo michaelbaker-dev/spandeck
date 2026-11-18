@@ -120,6 +120,32 @@ pub struct Turn {
     pub tries_since_ms: u64,
     /// It was nudged as often as it is going to be, and the owner told.
     pub gave_up: bool,
+    /// When a look last found this pane's mail waiting because its Codex
+    /// is scrolled back in its own history (`SCROLLED_BACK_WORDS`).
+    pub scrolled_back_ms: Option<u64>,
+}
+
+/// A Codex that is scrolled back in its own history is typed nothing: the
+/// Enter that should submit a message only returns it to its latest line,
+/// and the words sit unsent in its box (found 18 Nov 2026 with the real
+/// 0.169.0; the screens are in agents/picker.rs, `codex_scrolled_back`).
+/// Its mail waits as behind any hold: stored, unread, not announced, and
+/// looked at again at the next look. No key is pressed to bring Codex
+/// back: Esc also interrupts a Codex at work, and what each key does in
+/// each state has not been verified on a real one. A Codex in a turn is
+/// told by its hooks, as before. What the pane says meanwhile:
+pub const SCROLLED_BACK_WORDS: &str = "has mail waiting: Codex is scrolled back in its own history, where a message typed now would not be sent; it is told when it is back at its latest line";
+
+/// What a look that found it so is believed for. The look once a second
+/// says it again while it is so; a pane that began a turn, or whose mail
+/// was read by another road, stops saying it by itself.
+pub const SCROLLED_BACK_MS: u64 = 3000;
+
+/// Is this pane's mail waiting for a Codex that is scrolled back, as far
+/// as the last look knows?
+pub fn scrolled_back(turn: &Turn, now: u64) -> bool {
+    turn.scrolled_back_ms
+        .is_some_and(|at| now.saturating_sub(at) <= SCROLLED_BACK_MS)
 }
 
 /// The waits between nudges for mail that is not taken, in units of the

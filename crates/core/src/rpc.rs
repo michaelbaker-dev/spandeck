@@ -340,6 +340,98 @@ pub trait StopLeg: Send + Sync {
 /// By station. Dropping a station's entry gives its place up.
 pub type StopLegs = std::collections::HashMap<String, Box<dyn StopLeg>>;
 
+/// What a `wait` is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Until {
+    /// The pane is done, needs the owner, or failed: what an owner's
+    /// caller wants, and what `wait` always meant.
+    Any,
+    /// The pane's turn is over: done or failed. A pane that only needs
+    /// the owner is waited through.
+    Done,
+    /// The pane sent the caller a message (or a turn of it ended while
+    /// the caller waited, without one).
+    Message,
+}
+
+impl Until {
+    fn states(self) -> Vec<AgentState> {
+        match self {
+            Until::Any => vec![AgentState::Done, AgentState::NeedsYou, AgentState::Error],
+            Until::Done | Until::Message => vec![AgentState::Done, AgentState::Error],
+        }
+    }
+}
+
+/// The answer to `wait`: the pane's view, and what the wait ended on.
+///
+/// Measured on 18 Nov 2026 with a real Claude Code waiting on a real
+/// Codex: `wait` came back at once whenever the other pane needed the
+/// owner (an approval, or a false alarm), with the pane's view and
+/// nothing that said which of "done, needs you, fails" it was, and the
+/// waiting agent "couldn't always tell whether to wait or carry on". So
+/// the answer says it, for a program and for a reader:
+///
+/// - `why`: `message`, `timed_out`, `exited`, or the state the pane was
+///   found in (`done`, `error`, `needs_you`; another when the caller
+///   named its own states);
+/// - `turn_over`: the pane is not in a turn and not held in one by a
+///   question for the owner (done, failed, idle, or ended);
+/// - `needs_owner`: it waits for the owner, with `needs_reason`;
+/// - `message`: `{id, from, kind}` of the message that ended the wait,
+///   never what it says, and the wait reads nothing: its words are the
+///   inbox tool's to give, or the notice's of the caller's next hook;
+/// - `says`: all of that in one sentence, with what to do next.
+fn wait_answer(mut view: Value, message: Option<(String, String)>, timed_out: bool) -> Value {
+    let name = view["name"].as_str().unwrap_or("the pane").to_string();
+    let state = view["state"].as_str().unwrap_or("").to_string();
+    let exited = view["exited"] == json!(true);
+    let because = view["needs_reason"]
+        .as_str()
+        .map(|r| format!(" ({r})"))
+        .unwrap_or_default();
+    let now = match (exited, state.as_str()) {
+        (true, _) => format!("{name}'s program has ended"),
+        (_, "done") => format!("{name} finished its turn"),
+        (_, "error") => format!("{name}'s turn ended in an error{because}"),
+        (_, "needs_you") => format!(
+            "{name} is waiting for the owner{because}; its turn is not over, and only the owner can answer it"
+        ),
+        (_, "working") => format!("{name} is still working"),
+        _ => format!("{name} is idle{because}"),
+    };
+    let (why, says) = if let Some((id, _)) = &message {
+        (
+            "message".to_string(),
+            format!("{name} sent you a message ({id}): read it with the inbox tool, unless a notice has already quoted it to you in full. Now: {now}."),
+        )
+    } else if timed_out {
+        (
+            "timed_out".to_string(),
+            format!("Timed out before what you waited for: {now}."),
+        )
+    } else if exited {
+        ("exited".to_string(), format!("{now}."))
+    } else if state == "needs_you" {
+        (
+            state.clone(),
+            format!("{now}. To wait for its turn to end, wait with until \"done\"; for a message from it, with until \"message\"."),
+        )
+    } else {
+        (state.clone(), format!("{now}."))
+    };
+    view["timed_out"] = json!(timed_out);
+    view["why"] = json!(why);
+    view["turn_over"] = json!(exited || matches!(state.as_str(), "done" | "error" | "idle"));
+    view["needs_owner"] = json!(!exited && state == "needs_you");
+    view["message"] = match message {
+        Some((id, kind)) => json!({"id": id, "from": name, "kind": kind}),
+        None => Value::Null,
+    };
+    view["says"] = json!(says);
+    view
+}
+
 /// Calls that are safe to make a second time when no answer came to the
 /// first: they only read, or set something to what it already is. A
 /// caller that lost its connection sends one of these again without an
@@ -1347,6 +1439,16 @@ impl Daemon {
             }
             "wait" => {
                 let id = self.target_pane(caller, &params)?;
+                let until = match opt(&params, "until") {
+                    None | Some("any") => Until::Any,
+                    Some("done") => Until::Done,
+                    Some("message") => Until::Message,
+                    Some(other) => {
+                        return Err(invalid(format!(
+                            "until is one of any, done, message (not {other})"
+                        )))
+                    }
+                };
                 let states: Vec<AgentState> = params
                     .get("states")
                     .and_then(|v| v.as_array())
@@ -1355,15 +1457,13 @@ impl Daemon {
                             .filter_map(|x| x.as_str().and_then(AgentState::parse))
                             .collect()
                     })
-                    .unwrap_or_else(|| {
-                        vec![AgentState::Done, AgentState::NeedsYou, AgentState::Error]
-                    });
+                    .unwrap_or_else(|| until.states());
                 let timeout = params
                     .get("timeout_ms")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(600_000)
                     .min(3_600_000);
-                self.wait_pane(&id, &states, timeout).await?
+                self.wait_pane(caller, &id, until, &states, timeout).await?
             }
 
             // --------------------------------------------------------- hooks
@@ -2459,25 +2559,52 @@ impl Daemon {
         }
     }
 
-    async fn wait_pane(&self, id: &str, states: &[AgentState], timeout_ms: u64) -> Result<Value> {
+    /// `wait`: until a pane reaches one of `states`, ends, or (until a
+    /// message) has sent the caller something it has not read. The answer
+    /// is the pane's view and what the wait ended on, in fields and in one
+    /// sentence (`wait_answer`).
+    ///
+    /// Until a message, a turn of the pane that ends while the caller
+    /// waits also ends the wait, saying that nothing was sent: the caller
+    /// is not left waiting for a message that is not coming. A turn that
+    /// was over before the wait began does not: the pane may not have
+    /// started on what the caller sent it yet.
+    async fn wait_pane(
+        &self,
+        caller: &Caller,
+        id: &str,
+        until: Until,
+        states: &[AgentState],
+        timeout_ms: u64,
+    ) -> Result<Value> {
         let pane = self.pane(id)?;
         let mut rx = self.bus.subscribe();
+        let began = now_ms();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let mine = match &caller.pane {
+            Some(own) => self.pane_names(own),
+            None => vec!["you".to_string()],
+        };
+        let theirs = self.sender_name_of(&pane.id);
         loop {
-            let (state, exited) = {
+            let (state, exited, since) = {
                 let m = pane.meta.lock().unwrap();
-                (m.state, m.exit.is_some())
+                (m.state, m.exit.is_some(), m.state_since_ms)
             };
-            if exited || states.contains(&state) {
-                let mut v = self.pane_view(&pane);
-                v["timed_out"] = json!(false);
-                return Ok(v);
+            let message = match until {
+                Until::Message => self.mail().unread_from(&mine, &theirs, began),
+                _ => None,
+            };
+            let ended = match until {
+                Until::Message => since >= began && states.contains(&state),
+                _ => states.contains(&state),
+            };
+            if message.is_some() || exited || ended {
+                return Ok(wait_answer(self.pane_view(&pane), message, false));
             }
             // Lagged or an unrelated event: just look again.
             if tokio::time::timeout_at(deadline, rx.recv()).await.is_err() {
-                let mut v = self.pane_view(&pane);
-                v["timed_out"] = json!(true);
-                return Ok(v);
+                return Ok(wait_answer(self.pane_view(&pane), None, true));
             }
         }
     }

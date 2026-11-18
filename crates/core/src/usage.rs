@@ -164,6 +164,15 @@ impl Daemon {
                     v["needs_reason"] = json!(words);
                 }
             }
+            // Mail that waits because its Codex is scrolled back in its
+            // own history, where a nudge typed now would not be sent
+            // (wake.rs): said the same way.
+            if crate::wake::scrolled_back(&turn, crate::paths::now_ms()) && meta.exit.is_none() {
+                v["mail"]["waits_for"] = json!("codex_scrolled_back");
+                if v["needs_reason"].is_null() {
+                    v["needs_reason"] = json!(crate::wake::SCROLLED_BACK_WORDS);
+                }
+            }
         }
         v
     }
