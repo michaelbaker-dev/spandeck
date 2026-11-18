@@ -38,6 +38,12 @@ pub struct Entry {
     /// under spandeck's state directory (Playwright: where its browsers
     /// are kept), so that nothing is shared with what the machine has.
     pub data_env: Option<&'static str>,
+    /// The option that names where the server writes files of its own
+    /// (Playwright: screenshots, traces, its console logs). Given a folder
+    /// under spandeck's state directory: left alone, Playwright makes
+    /// `.playwright-mcp/` in the folder it runs in, which in a pane is the
+    /// agent's working folder and often a repository (seen 18 Nov 2026).
+    pub output_arg: Option<&'static str>,
     /// Run after the package is installed, each with spandeck's Node in the
     /// tool's folder: the arguments after `node`.
     pub after_install: &'static [Step],
@@ -78,6 +84,7 @@ pub const CATALOGUE: &[Entry] = &[Entry {
     // not exist for Linux on arm64 and is not spandeck's to install.
     args: &["--headless", "--isolated", "--browser", "chromium"],
     data_env: Some("PLAYWRIGHT_BROWSERS_PATH"),
+    output_arg: Some("--output-dir"),
     after_install: &[Step {
         label: "Downloading its browser (Chromium)",
         node_args: &["node_modules/playwright/cli.js", "install", "chromium"],

@@ -298,6 +298,10 @@ impl Daemon {
             .display()
             .to_string()];
         args.extend(entry.args.iter().map(|a| a.to_string()));
+        if let Some(arg) = entry.output_arg {
+            args.push(arg.to_string());
+            args.push(self.tool_data(name).join("output").display().to_string());
+        }
         let mut env = BTreeMap::new();
         if let Some(var) = entry.data_env {
             env.insert(var.to_string(), self.tool_data(name).display().to_string());
