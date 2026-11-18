@@ -1,11 +1,13 @@
 //! The pair recipe: a builder and a critic in one project, working through
 //! stages that each end with the critic's written verdict (the owner's test
-//! of 18 Nov 2026, set up by hand then). It writes how the two work
+//! of 18 Nov 2026, set up by hand then). It writes how they work
 //! (`PROCESS.md`, from `pair-process.md` beside this file) and what they
-//! build (`BRIEF.md`), defines the two panes, starts them, and sends each
-//! its role as a message from the owner, once.
+//! build (`BRIEF.md`), defines the panes, starts them, and sends each its
+//! role as a message from the owner, once: the role's prompt from the role
+//! library (roledoc.rs), filled, and after it this recipe's own line. With
+//! `user`, a third pane stands in for the person the thing is made for.
 //!
-//! Both panes work in the project's folder, the same working tree: the
+//! The panes work in the project's folder, the same working tree: the
 //! critic runs what the builder wrote as it stands, and writes only under
 //! `reviews/`. That is a rule of `PROCESS.md`, not something enforced.
 
@@ -16,7 +18,7 @@ use serde_json::{json, Value};
 use spandeck_agents::AgentKind;
 
 use super::ProjectRecipe;
-use crate::daemon::{invalid, Authority, Caller, Daemon, Result};
+use crate::daemon::{invalid, Caller, Daemon, Result};
 use crate::git;
 use crate::paths::now_ms;
 use crate::project::{PaneSlot, ProjectFile, Role};
@@ -34,28 +36,79 @@ const BRIEF_MAX: usize = 256 * 1024;
 
 pub const BUILDER: &str = "builder";
 pub const CRITIC: &str = "critic";
+pub const USER: &str = "user";
+/// Minutes a stage, unless the owner says (`--budget`).
+pub const STAGE_MINUTES: u32 = 20;
 
 pub(super) const RECIPE: ProjectRecipe = ProjectRecipe {
     name: "pair",
-    summary: "A builder and a critic in one folder. The builder writes; the critic reviews \
-              the tools, the design, the plan, each slice of code and the pages, and each \
-              stage ends with its written verdict. Writes PROCESS.md and BRIEF.md.",
+    summary: "A builder and a critic in one folder. The builder writes; the critic uses \
+              each slice as its user would, holds it against the brief and reviews it, and \
+              each stage ends with its written verdict inside a budget. Writes PROCESS.md \
+              and BRIEF.md. With --user [<agent>] a third pane stands in for the person it \
+              is made for; --budget <minutes> is the time a stage gets (default 20).",
     roles: &[(BUILDER, "claude"), (CRITIC, "codex")],
 };
 
-/// What the owner says to each of the two, once.
-pub fn role_message(role: &str) -> String {
-    let other = if role == BUILDER { CRITIC } else { BUILDER };
-    format!(
-        "You are the {role} in this project. Read BRIEF.md and PROCESS.md in this folder, \
-         then start stage 0. The other agent is the pane named {other}: work with it as \
-         PROCESS.md says, without waiting for me."
-    )
+/// What this recipe adds to a pane's role, in the same message.
+pub fn recipe_line(role: &str) -> String {
+    if role == USER {
+        "Read BRIEF.md and PROCESS.md in this folder. Then wait: the builder asks you to \
+         look after each slice is committed. Work as PROCESS.md says, without waiting for me."
+            .to_string()
+    } else {
+        "Read BRIEF.md and PROCESS.md in this folder, then start stage 0. Work with the \
+         other agents as PROCESS.md says, without waiting for me."
+            .to_string()
+    }
 }
 
-/// `PROCESS.md` for this project and these two programs.
-pub fn process_text(project: &str, builder: AgentKind, critic: AgentKind) -> String {
+/// How long one look of the `user` pane gets, for a stage of `minutes`.
+fn look_minutes(minutes: u32) -> u32 {
+    (minutes / 2).clamp(5, 15)
+}
+
+/// The budget line a pair's pane is given in its role, when the owner
+/// named a budget for the pair. Without one, the role's own stands.
+pub fn budget_line(role: &str, minutes: u32) -> String {
+    if role == USER {
+        format!(
+            "About {} minutes a look; three things.",
+            look_minutes(minutes)
+        )
+    } else {
+        format!("One round of review a stage unless there is a blocker; {minutes} minutes a stage.")
+    }
+}
+
+/// `PROCESS.md` for this project, these programs and this budget.
+pub fn process_text(
+    project: &str,
+    builder: AgentKind,
+    critic: AgentKind,
+    user: Option<AgentKind>,
+    minutes: u32,
+) -> String {
+    let (user_line, user_stage) = match user {
+        Some(user) => (
+            format!(
+                "- **user** ({}) stands in for the person this is made for. It uses what was built, never reads\n  the code, and writes `reviews/USER-<n>.md`.",
+                user.display()
+            ),
+            format!(
+                "   After each slice is committed the builder asks the **user** pane to look (about {} minutes). Its\n   three things are answered by the builder by number, like findings: fixed, or declined with the reason.\n",
+                look_minutes(minutes)
+            ),
+        ),
+        None => (
+            "- There is no `user` pane: the critic's first look at each slice stands in for one.".to_string(),
+            String::new(),
+        ),
+    };
     PROCESS
+        .replace("{{user}}", &user_line)
+        .replace("{{user_stage}}\n", &user_stage)
+        .replace("{{stage_minutes}}", &minutes.to_string())
         .replace("{{project}}", project)
         .replace("{{builder}}", builder.display())
         .replace("{{critic}}", critic.display())
@@ -72,6 +125,10 @@ pub struct PairOpts {
     pub name: Option<String>,
     pub builder: Option<String>,
     pub critic: Option<String>,
+    /// A third pane, `user`: `Some("")` for the builder's program.
+    pub user: Option<String>,
+    /// Minutes a stage. None: `STAGE_MINUTES`, and each role's own budget.
+    pub budget: Option<u32>,
     pub brief: Option<String>,
     pub open: bool,
     /// The owner's word on the folder's trust (`--trust-folder`,
@@ -145,6 +202,19 @@ impl Daemon {
         let by = caller.who.as_str();
         let builder = program(BUILDER, opts.builder.as_deref(), "claude")?;
         let critic = program(CRITIC, opts.critic.as_deref(), "codex")?;
+        let user = match opts.user.as_deref() {
+            None => None,
+            Some(named) => Some(program(
+                USER,
+                Some(named).filter(|n| !n.is_empty()),
+                builder.as_str(),
+            )?),
+        };
+        if opts.budget.is_some_and(|m| !(5..=240).contains(&m)) {
+            return Err(invalid(
+                "the budget is the minutes a stage gets: from 5 to 240",
+            ));
+        }
         let brief = opts.brief.filter(|b| !b.trim().is_empty());
         if brief.as_ref().is_some_and(|b| b.len() > BRIEF_MAX) {
             return Err(invalid("a brief is at most 256 KB"));
@@ -169,7 +239,14 @@ impl Daemon {
         let view = self.project_new(
             &opts.path,
             opts.name,
-            vec![slot(BUILDER, builder), slot(CRITIC, critic)],
+            [
+                (BUILDER, Some(builder)),
+                (CRITIC, Some(critic)),
+                (USER, user),
+            ]
+            .into_iter()
+            .filter_map(|(role, agent)| Some(slot(role, agent?)))
+            .collect(),
             by,
         )?;
         let name = view["name"].as_str().unwrap_or_default().to_string();
@@ -180,13 +257,18 @@ impl Daemon {
             }
         }
 
-        // A project that was already defined here keeps its panes; the two
-        // are added if it has none by those names. Both roles are placed in
+        // A project that was already defined here keeps its panes; these
+        // are added if it has none by those names. The roles are placed in
         // the project's own folder: a role with no entry is given a
         // worktree of its own when an agent delegates to it.
         let mut file = ProjectFile::load(&dir)?;
         let before = file.clone();
-        for (role, agent) in [(BUILDER, builder), (CRITIC, critic)] {
+        for (role, agent) in [
+            (BUILDER, Some(builder)),
+            (CRITIC, Some(critic)),
+            (USER, user),
+        ] {
+            let Some(agent) = agent else { continue };
             if !file.panes.iter().any(|p| p.name == role) {
                 file.panes.push(slot(role, agent));
             }
@@ -227,12 +309,14 @@ impl Daemon {
             kind
         };
         let (builder, critic) = (kind(BUILDER, builder), kind(CRITIC, critic));
+        let user = user.map(|u| kind(USER, u));
+        let minutes = opts.budget.unwrap_or(STAGE_MINUTES);
 
         // The two files. One that is there is the owner's, and is kept.
         let mut kept: Vec<&str> = vec![];
         if write_new(
             &dir.join("PROCESS.md"),
-            &process_text(&name, builder, critic),
+            &process_text(&name, builder, critic, user, minutes),
         )? {
             written.push("PROCESS.md");
         } else {
@@ -284,6 +368,23 @@ impl Daemon {
                 rusqlite::params![row_id(&name), now_ms() as i64, name],
             )
         })?;
+        // The third pane and the budget, said now or when it was first run.
+        if user.is_some() {
+            self.db.with(|c| {
+                c.execute(
+                    "UPDATE recipes SET data=json_set(data, '$.user', 1) WHERE id=?1",
+                    [row_id(&name)],
+                )
+            })?;
+        }
+        if let Some(minutes) = opts.budget {
+            self.db.with(|c| {
+                c.execute(
+                    "UPDATE recipes SET data=json_set(data, '$.budget', ?2) WHERE id=?1",
+                    rusqlite::params![row_id(&name), minutes],
+                )
+            })?;
+        }
         self.record(
             "recipe.started",
             None,
@@ -354,7 +455,55 @@ impl Daemon {
         Ok(view)
     }
 
-    /// Send each of a pair's two agents its role, if it has not been sent,
+    /// What a pane of a pair is told beside its role: this recipe's line,
+    /// and the budget the owner named for the pair. None: the pane is not
+    /// one of a pair's.
+    pub(crate) fn recipe_role_words(&self, meta: &crate::daemon::PaneMeta) -> Option<RoleWords> {
+        let project = meta.project.as_deref()?;
+        let role = meta.role.as_deref()?;
+        if meta.name != role || !matches!(role, BUILDER | CRITIC | USER) {
+            return None;
+        }
+        let (user, budget): (bool, Option<u32>) = self
+            .db
+            .read(|c| {
+                c.query_row(
+                    "SELECT json_extract(data, '$.user') IS NOT NULL, json_extract(data, '$.budget') FROM recipes WHERE id=?1 AND kind='pair'",
+                    [row_id(project)],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .ok()?;
+        if role == USER && !user {
+            return None;
+        }
+        Some(RoleWords {
+            line: Some(recipe_line(role)),
+            budget: budget.map(|m| budget_line(role, m)),
+        })
+    }
+
+    /// Is this pane's role still this recipe's to send (a pair's pane that
+    /// has not been told to start: there may be no brief yet)?
+    pub(crate) fn recipe_sends_role(&self, meta: &crate::daemon::PaneMeta) -> bool {
+        if self.recipe_role_words(meta).is_none() {
+            return false;
+        }
+        let (Some(project), Some(role)) = (meta.project.as_deref(), meta.role.as_deref()) else {
+            return false;
+        };
+        self.db
+            .read(|c| {
+                c.query_row(
+                    "SELECT json_extract(data, '$.sent.' || ?2) IS NULL FROM recipes WHERE id=?1 AND kind='pair'",
+                    rusqlite::params![row_id(project), role],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    /// Send each of a pair's agents its role, if it has not been sent,
     /// a brief is written and its pane is running. None: this project is
     /// not a pair. Called when the recipe is run and whenever the project
     /// is opened, so a brief written later starts the work.
@@ -371,8 +520,21 @@ impl Daemon {
                 })
                 .ok()
         };
+        let with_user = self
+            .db
+            .with(|c| {
+                c.query_row(
+                    "SELECT json_extract(data, '$.user') IS NOT NULL FROM recipes WHERE id=?1 AND kind='pair'",
+                    [&id],
+                    |r| r.get::<_, bool>(0),
+                )
+            })
+            .ok()?;
         let mut todo = vec![];
-        for role in [BUILDER, CRITIC] {
+        for role in [BUILDER, CRITIC, USER] {
+            if role == USER && !with_user {
+                continue;
+            }
             if !sent(role)? {
                 todo.push(role);
             }
@@ -384,19 +546,17 @@ impl Daemon {
         if !std::fs::read_to_string(path.join("BRIEF.md")).is_ok_and(|t| is_brief(&t)) {
             return Some("waiting for a brief");
         }
-        // The owner's words, whichever of the owner's programs asked.
-        let owner = Caller {
-            authority: Authority::Owner,
-            pane: None,
-            client: caller.client.clone(),
-            who: caller.who.clone(),
-        };
         let mut waiting = false;
         for role in todo {
             let to = format!("{project}/{role}");
             if self.pane(&to).is_err() {
                 waiting = true;
                 continue;
+            }
+            // The pane is marked first, so that it is not also sent its
+            // role as any pane started with one is (roledoc.rs).
+            if let Ok(pane) = self.pane(&to) {
+                pane.meta.lock().unwrap().role_sent_ms = now_ms();
             }
             // Marked as sent before it is sent, and only by whoever marks
             // it first: two runs at once send one message.
@@ -412,18 +572,17 @@ impl Daemon {
             if !mine {
                 continue;
             }
-            if let Err(e) = self
-                .msg_send(
-                    &owner,
-                    &to,
-                    "note",
-                    &role_message(role),
-                    json!([]),
-                    None,
-                    None,
-                )
+            // The role's prompt from the library and this recipe's line, as
+            // one message from the owner (roledoc.rs).
+            let sent = match self
+                .role_send(&to, &caller.who, crate::roledoc::Send::Recipe)
                 .await
             {
+                Ok(v) if v["sent"] == json!(true) => Ok(()),
+                Ok(v) => Err(v["why"].as_str().unwrap_or("not sent").to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            if let Err(e) = sent {
                 // Not sent: it is tried again at the next opening.
                 tracing::warn!(project, role, "pair: the role was not sent: {e}");
                 let _ = self.db.with(|c| {
@@ -459,6 +618,12 @@ impl Daemon {
     }
 }
 
+/// What a recipe adds to a role's message.
+pub(crate) struct RoleWords {
+    pub line: Option<String>,
+    pub budget: Option<String>,
+}
+
 /// One record a project, under the recipes: its name is its key.
 fn row_id(project: &str) -> String {
     format!("pair:{project}")
@@ -467,6 +632,7 @@ fn row_id(project: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::Authority;
 
     /// Acceptance: the text the two agents work from names the project and
     /// both programs, begins with a stage that finds out what can be run
@@ -474,7 +640,7 @@ mod tests {
     /// and the file that stands in for a brief is not taken for one.
     #[test]
     fn the_process_is_filled_in_and_begins_with_the_tools_stage() {
-        let text = process_text("shop", AgentKind::Claude, AgentKind::Codex);
+        let text = process_text("shop", AgentKind::Claude, AgentKind::Codex, None, 20);
         assert!(!text.contains("{{"), "{text}");
         for want in [
             "project `shop`",
@@ -482,11 +648,29 @@ mod tests {
             "**critic** (Codex)",
             "0. **Tools**",
             "there may be no browser",
-            "5. **Sign-off**",
+            "**20 minutes a stage**",
+            "There is no `user` pane",
+            "4. **Sign-off**",
         ] {
             assert!(text.contains(want), "{want}");
         }
-        assert!(text.find("0. **Tools**") < text.find("1. **Architecture**"));
+        assert!(text.find("0. **Tools**") < text.find("1. **Design**"));
+        // With the third pane and the owner's budget.
+        let three = process_text(
+            "shop",
+            AgentKind::Claude,
+            AgentKind::Codex,
+            Some(AgentKind::Claude),
+            30,
+        );
+        assert!(!three.contains("{{"), "{three}");
+        for want in [
+            "**user** (Claude Code)",
+            "**30 minutes a stage**",
+            "asks the **user** pane to look (about 15 minutes)",
+        ] {
+            assert!(three.contains(want), "{want}");
+        }
         assert!(!is_brief(&NO_BRIEF.replace("{{project}}", "shop")));
         assert!(!NO_BRIEF.replace("{{project}}", "shop").contains("{{"));
         assert!(!is_brief(" \n") && is_brief("# Brief\nA shop.\n"));

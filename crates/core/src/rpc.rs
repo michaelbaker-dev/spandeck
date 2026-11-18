@@ -50,6 +50,10 @@ const AGENT_METHODS: &[&str] = &[
     "orders.view",
     "signoff.status",
     "diff",
+    // An agent reads its own role again, as it was sent (roledoc.rs). It
+    // is the only call about roles an agent has: none lists, changes or
+    // sends one.
+    "role",
 ];
 
 /// Methods another station may call directly. `rpc.forward` carries the
@@ -83,6 +87,10 @@ const PEER_METHODS: &[&str] = &[
     // It is the only `tools.` method a station has: installing, and every
     // change to the document, are the owner's.
     "tools.push",
+    // And of the role library (roledoc.rs): the only `roles.` method a
+    // station has. Every change, and sending a pane its role, are the
+    // owner's.
+    "roles.push",
     // The Performance page shows the fleet from any station, and a station
     // says its own Tailscale key's expiry to its fleet. The owner has these
     // too. None is on the agents' list or the read-only one: call timings
@@ -115,6 +123,9 @@ const SYNCED_CHANGES: &[&str] = &[
     "tools.set",
     "tools.upgrade",
     "tools.rollout",
+    "roles.set",
+    "roles.reset",
+    "roles.remove",
 ];
 
 /// Methods that act from the station the owner is using and are never
@@ -215,6 +226,7 @@ const NEEDS_DATABASE: &[&str] = &[
     "recipe.review",
     "recipe.cancel",
     "note.add",
+    "roles.send",
 ];
 
 /// The owner's calls that change nothing but are not on the read-only list
@@ -231,6 +243,10 @@ const OWNER_READS: &[&str] = &[
     "tools.catalogue",
     "tools.list",
     "tools.status",
+    // The role library (roledoc.rs): a role's prompt is the owner's
+    // instruction to an agent, and is read through these by the owner only.
+    "roles.list",
+    "roles.get",
     "perf.get",
     "tailnet.view",
     "tailnet.signin",
@@ -347,6 +363,42 @@ mod tools_calls {
         for method in ["tools.add", "tools.set", "tools.scope", "tools.upgrade"] {
             assert!(!reads(method), "{method}");
             assert_eq!(class(method, &json!({})), Class::Never, "{method}");
+        }
+    }
+}
+
+/// The role library (18 Nov 2026): a role's prompt is sent to an agent as
+/// the owner's instruction, so reading the library, changing it and
+/// sending a pane its role are the owner's alone (rule 7). An agent has
+/// one call, which reads its own role; a station only offers its copy.
+#[cfg(test)]
+mod roles_calls {
+    use super::*;
+
+    #[test]
+    fn only_the_owner_reads_changes_or_sends_a_role() {
+        for method in [
+            "roles.list",
+            "roles.get",
+            "roles.set",
+            "roles.reset",
+            "roles.remove",
+            "roles.send",
+        ] {
+            for authority in [Authority::Agent, Authority::ReadOnly, Authority::Peer] {
+                assert!(!allowed(authority, method), "{authority:?} {method}");
+            }
+            assert!(allowed(Authority::Owner, method), "{method}");
+        }
+        assert!(allowed(Authority::Peer, "roles.push"));
+        assert!(!allowed(Authority::Agent, "roles.push"));
+        assert!(!allowed(Authority::ReadOnly, "roles.push"));
+        // The one call an agent has, and nobody acting for a station.
+        assert!(allowed(Authority::Agent, "role"));
+        assert!(!allowed(Authority::Peer, "role"));
+        assert!(!allowed(Authority::ReadOnly, "role"));
+        for method in ["roles.set", "roles.reset", "roles.remove", "roles.send"] {
+            assert!(!reads(method), "{method}");
         }
     }
 }
@@ -523,6 +575,10 @@ const REPEATABLE: &[&str] = &[
     // here" while the first runs starts nothing.
     "tools.check",
     "tools.install",
+    // The role library read, and an agent reading its own role.
+    "roles.list",
+    "roles.get",
+    "role",
     "pane.last_session",
     "pane.conversation",
     "pane.conversation.detail",
@@ -1124,6 +1180,16 @@ impl Daemon {
                         );
                         keep = Some((agent, cwd));
                     }
+                }
+                // A role of the library can say which program its pane runs
+                // when the caller names none.
+                if opts.agent.is_none() && opts.program.is_none() {
+                    opts.agent = opts
+                        .role
+                        .as_deref()
+                        .and_then(|r| self.roles_doc().role(r))
+                        .and_then(|(r, _)| r.agent)
+                        .and_then(|a| AgentKind::parse(&a));
                 }
                 let pane = self.spawn_pane(opts)?;
                 // The tick is kept once the pane has started, and well
@@ -2384,6 +2450,45 @@ impl Daemon {
             // Like `agents.check`: it makes this station call a host outside.
             "tools.check" => self.tools_check(opt(&params, "name"), flag(&params, "again")),
             // Another station offering its copy of the document.
+            // ---------------------------------------------------------- roles
+            // The role library (roledoc.rs). Every `roles.` call but
+            // `roles.push` is the owner's alone: on no list of an agent's,
+            // a read-only caller's or a station's. Another station is
+            // reached only as the owner's forwarded request.
+            "roles.list" => self.roles_list(),
+            "roles.get" => self.roles_get(
+                s(&params, "name")?,
+                flag(&params, "filled"),
+                opt(&params, "project"),
+            )?,
+            "roles.set" => self.roles_set(
+                s(&params, "name")?,
+                params.get("role").unwrap_or(&Value::Null),
+                params.get("was").and_then(|v| v.as_u64()),
+                by,
+            )?,
+            "roles.reset" => self.roles_reset(s(&params, "name")?, by)?,
+            "roles.remove" => self.roles_remove(s(&params, "name")?, by)?,
+            // The owner asks for a pane to be sent its role again.
+            "roles.send" => {
+                self.role_send(s(&params, "pane")?, by, crate::roledoc::Send::Again)
+                    .await?
+            }
+            "roles.push" => {
+                let doc: crate::roledoc::RolesDoc = p(params
+                    .get("roles")
+                    .ok_or_else(|| invalid("missing roles"))?)?;
+                self.roles_push(doc, by)?
+            }
+            // An agent's own role, filled as it was sent. An agent is
+            // answered for its own pane whatever it names.
+            "role" => {
+                let pane = match (&caller.pane, caller.authority) {
+                    (Some(own), Authority::Agent) => own.clone(),
+                    _ => self.target_pane(caller, &params)?,
+                };
+                self.role_read(&pane)?
+            }
             "tools.push" => {
                 let doc: crate::tooldoc::ToolsDoc = p(params
                     .get("tools")

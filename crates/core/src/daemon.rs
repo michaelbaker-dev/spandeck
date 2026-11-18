@@ -116,6 +116,11 @@ pub struct PaneMeta {
     pub project: Option<String>,
     #[serde(default)]
     pub role: Option<String>,
+    /// When this pane was sent its role's prompt (roledoc.rs). 0: never.
+    /// Kept through a restart into the same conversation, so a pane is
+    /// sent its role once.
+    #[serde(default)]
+    pub role_sent_ms: u64,
     pub agent: AgentKind,
     pub spec: SpawnSpec,
     pub cwd: String,
@@ -402,6 +407,10 @@ pub struct SpawnOpts {
     pub rows: Option<u16>,
     pub project: Option<String>,
     pub role: Option<String>,
+    /// When the pane this one takes the place of was sent its role: set
+    /// by whoever restarts a pane into its conversation, never by a caller.
+    #[serde(skip)]
+    pub role_sent_ms: u64,
     pub task: Option<String>,
     pub parent_pane: Option<String>,
     pub resume: Option<String>,
@@ -536,6 +545,8 @@ pub struct Inner {
     pub(crate) agents: crate::agents::AgentsState,
     /// Tools: the jobs that install them here (tools.rs).
     pub(crate) tools: crate::tools::ToolsState,
+    /// The role library (roledoc.rs).
+    pub(crate) roles: crate::roledoc::RolesState,
     pub(crate) prices: crate::prices::PricesState,
     /// A machine being added to the fleet from the Control Deck.
     pub(crate) adding: crate::add::AddState,
@@ -702,6 +713,7 @@ impl Daemon {
             resume_lock: Mutex::new(()),
             agents: Default::default(),
             tools: Default::default(),
+            roles: Default::default(),
             prices: Default::default(),
             adding: Default::default(),
             held: Default::default(),
@@ -1156,8 +1168,13 @@ impl Daemon {
                     .get(agent.as_str())
                     .cloned()
                     .unwrap_or_default();
-                let (wiring, env, tools) =
-                    self.integration(agent, &id, &token, opts.project.as_deref());
+                let (wiring, env, tools) = self.integration(
+                    agent,
+                    &id,
+                    &token,
+                    opts.project.as_deref(),
+                    opts.role.as_deref(),
+                );
                 agent_env = env;
                 tools_with = tools.with(agent).into_iter().map(String::from).collect();
                 tools_without = tools.without(agent);
@@ -1369,6 +1386,7 @@ impl Daemon {
             name,
             project: opts.project.clone(),
             role: opts.role.clone(),
+            role_sent_ms: opts.role_sent_ms,
             agent,
             spec,
             cwd: cwd.display().to_string(),
@@ -1458,6 +1476,8 @@ impl Daemon {
                 );
             }
         }
+        // A pane started with a role of the library is sent it, once.
+        self.role_at_start(&m);
         Ok(entry)
     }
 
@@ -1493,9 +1513,13 @@ impl Daemon {
         pane: &str,
         token: &str,
         project: Option<&str>,
+        role: Option<&str>,
     ) -> (Vec<String>, Vec<(String, String)>, crate::tools::Wiring) {
         let bin = self.exe.display().to_string();
         let mut setup = self.setup();
+        // A role of the library may ask for a model, an effort and a
+        // permission mode of its own: over the agent setup's, for this pane.
+        self.role_defaults(role, agent, &mut setup);
         // The servers a pane is given: the agent setup's, the custom tools
         // chosen for this station, and the catalogue tools that are ready
         // here now. One that is still installing is left out, and the
@@ -1985,6 +2009,12 @@ impl Daemon {
                 rows: Some(meta.spec.rows),
                 project: meta.project.clone(),
                 role: meta.role.clone(),
+                // A new conversation has not heard its role.
+                role_sent_ms: if resume.is_some() {
+                    meta.role_sent_ms
+                } else {
+                    0
+                },
                 task: meta.task.clone(),
                 parent_pane: meta.parent_pane.clone(),
                 model_args: meta.model_args.clone(),
@@ -2687,6 +2717,7 @@ impl Daemon {
                 rows: Some(meta.spec.rows),
                 project: meta.project.clone(),
                 role: meta.role.clone(),
+                role_sent_ms: meta.role_sent_ms,
                 task: meta.task.clone(),
                 parent_pane: meta.parent_pane.clone(),
                 model_args: meta.model_args.clone(),
@@ -3007,6 +3038,8 @@ impl Daemon {
         // The tools document, `tools.status` and the jobs that install a
         // tool here: a station without it needs a newer spandeck.
         caps.push(crate::tools::CAP);
+        // The role library, the `roles.` calls, and a pane sent its role.
+        caps.push(crate::roledoc::CAP);
         // The tick for spandeck's own hooks, its switch and the one tap.
         caps.push(crate::hookstrust::CAP);
         // A question and a plan are held for the owner, and
@@ -3118,6 +3151,8 @@ impl Daemon {
             "prefs": {"updated_ms": self.prefs().updated_ms, "format": crate::prefs::FORMAT},
             // And for the tools document (tooldoc.rs).
             "tools": {"updated_ms": self.tools_doc().updated_ms, "format": crate::tooldoc::FORMAT},
+            // And for the role library (roledoc.rs).
+            "roles": {"updated_ms": self.roles_doc().updated_ms, "format": crate::roledoc::FORMAT},
             "vault": self.vault_view(),
         })
     }

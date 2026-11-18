@@ -634,6 +634,11 @@ impl Daemon {
                 cwd: Some(cwd),
                 project: Some(name.to_string()),
                 role: slot.role.clone(),
+                // Back in its conversation, it has heard its role.
+                role_sent_ms: previous
+                    .as_ref()
+                    .filter(|m| resume.is_some() && m.role == slot.role)
+                    .map_or(0, |m| m.role_sent_ms),
                 resume: resume.clone(),
                 slot: Some(slot.name.clone()),
                 ..Default::default()

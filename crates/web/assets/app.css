@@ -641,6 +641,49 @@ button.quiet { background: none; color: var(--muted); }
 .tl-choice > span, .tl-check > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; } .tl-choice small, .tl-check small { color: var(--muted); }
 .tl-some { margin: 0 0 6px 28px; } .tl-own { margin: 4px 0 8px; } .tl-says:empty { display: none; } .tl-says { margin: 6px 0; }
 .tl-confirm p { overflow-wrap: anywhere; } .tl-confirm .tl-check { margin-top: 8px; }
+/* Roles for agents (roles.js): the list, one role with its whole prompt, the editor. */
+.roles-panel [hidden] { display: none !important; }
+.roles-panel { min-width: 0; } .ro-view { min-width: 0; }
+.ro-top { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 10px; } .ro-top .ro-rule { margin: 0; flex: 1 1 auto; min-width: 0; } .ro-top .ro-new { flex: none; }
+.ro-list { display: flex; flex-direction: column; gap: 8px; }
+.ro-row { display: flex; flex-direction: column; align-items: stretch; gap: 4px; text-align: left; white-space: normal; height: auto; padding: 10px 12px; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.ro-row-head, .ro-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; } .ro-row-head b { font-size: calc(14px * var(--ui-scale)); }
+.ro-head h3 { margin: 0; text-transform: none; letter-spacing: 0; color: var(--text); font-size: calc(17px * var(--ui-scale)); min-width: 0; overflow-wrap: anywhere; }
+.ro-name { font-size: calc(12px * var(--ui-scale)); overflow-wrap: anywhere; min-width: 0; }
+.ro-summary { color: var(--muted); overflow-wrap: anywhere; margin: 0; font-weight: normal; } p.ro-summary { margin: 6px 0; color: var(--text); }
+.chip.ro-changed { color: var(--amber); border-color: var(--amber); } .chip.ro-own { color: var(--blue); border-color: var(--blue); }
+.ro-back { padding-left: 0; margin-bottom: 4px; } .ro-by { margin: 4px 0; overflow-wrap: anywhere; }
+.ro-defaults { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 8px 0; } .ro-defaults dt { color: var(--muted); } .ro-defaults dd { margin: 0; overflow-wrap: anywhere; }
+.ro-acts { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; } .ro-acts:empty { display: none; }
+.ro-prompt-head { margin: 14px 0 6px; text-transform: none; letter-spacing: 0; color: var(--text); font-size: calc(13px * var(--ui-scale)); } .ro-prompt-head .muted { font-weight: normal; }
+/* The whole prompt, readable: its own lines kept, long ones wrapped, never wider than the page. */
+.ro-prompt { margin: 0; padding: 10px 12px; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; font-family: var(--mono-font); font-size: calc(12.5px * var(--ui-scale)); line-height: 1.5; max-width: 100%; }
+.ro-builtin { margin-top: 10px; } .ro-builtin summary { cursor: pointer; color: var(--muted); padding: 6px 0; } .ro-builtin h4 { margin: 10px 0 6px; text-transform: none; letter-spacing: 0; }
+.ro-said { margin: 8px 0; } .ro-said:empty { display: none; }
+.ro-ask, .ro-conflict { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--amber); border-radius: 8px; padding: 10px 12px; margin: 10px 0; overflow-wrap: anywhere; min-width: 0; }
+.ro-conflict { border-color: var(--red); } .ro-conflict summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
+.ro-ask-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.ro-editor { min-width: 0; } .ro-editor .field { min-width: 0; }
+.ro-f-prompt { min-height: 320px; height: 46vh; font-size: calc(12.5px * var(--ui-scale)); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 2; }
+.ro-under { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px; font-size: calc(12px * var(--ui-scale)); color: var(--muted); } .ro-count.over { color: var(--red); font-weight: 600; }
+.ro-odd:empty { display: none; } .ro-odd { overflow-wrap: anywhere; }
+.ro-places, .ro-more { margin: 0 0 10px; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; } .ro-places summary, .ro-more summary { cursor: pointer; padding: 8px 0; color: var(--muted); }
+.ro-places dl { margin: 0 0 8px; } .ro-places dt { margin-top: 6px; } .ro-places dd { margin: 0; color: var(--muted); overflow-wrap: anywhere; } .ro-more[open] { padding-bottom: 2px; }
+.ro-copy-note { display: flex; align-items: center; gap: 8px; margin: -4px 0 10px; } .ro-copy-note input { width: auto; flex: none; }
+.ro-moved { margin: 6px 0; } .ro-edit-acts { margin-top: 12px; }
+.role-pick-says { overflow-wrap: anywhere; } .ro-editor .ro-head { margin-bottom: 10px; }
+.roles-panel .ro-back { border-color: transparent; background: none; }
+.roles-panel summary { list-style: none; display: flex; align-items: center; gap: 8px; } .roles-panel summary::-webkit-details-marker { display: none; }
+.roles-panel summary::before { content: "▸"; flex: none; color: var(--muted); } .roles-panel details[open] > summary::before { content: "▾"; }
+@media (max-width: 760px) {
+  .roles-panel button, .roles-panel summary { min-height: 44px; }
+  .roles-panel input, .roles-panel select { font-size: 16px; min-height: 44px; } .ro-f-prompt { font-size: 16px; height: 52vh; min-height: 240px; }
+  .ro-top { flex-direction: column; align-items: stretch; } .ro-top .ro-new { justify-content: center; }
+  .ro-acts button { flex: 1 1 auto; justify-content: center; white-space: normal; } .ro-ask-acts button { flex: 1 1 auto; justify-content: center; }
+  .ro-prompt { font-size: calc(13px * var(--ui-scale)); padding: 10px; }
+  .ro-copy-note { min-height: 44px; } .ro-copy-note input { width: 20px; height: 20px; }
+  .role-pick { min-height: 44px; font-size: 16px; }
+}
 @media (max-width: 760px) {
   .tl-matrix { display: none; }
   .tools-panel button, .tools-add button, .tl-confirm button { min-height: 44px; white-space: normal; }

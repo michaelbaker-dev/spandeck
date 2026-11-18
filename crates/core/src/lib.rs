@@ -85,6 +85,7 @@ pub mod relay;
 pub mod remove;
 pub mod restore;
 pub mod rids;
+pub mod roledoc;
 pub mod rounds;
 pub mod rpc;
 pub mod screentalk;
