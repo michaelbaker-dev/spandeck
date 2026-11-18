@@ -94,18 +94,22 @@ impl Daemon {
 
     fn sender_name(&self, caller: &Caller) -> String {
         match &caller.pane {
-            Some(id) => self
-                .pane(id)
-                .map(|p| {
-                    let m = p.meta.lock().unwrap();
-                    match &m.project {
-                        Some(project) => format!("{project}/{}", m.name),
-                        None => m.name.clone(),
-                    }
-                })
-                .unwrap_or_else(|_| id.clone()),
+            Some(id) => self.sender_name_of(id),
             None => "you".to_string(),
         }
+    }
+
+    /// The name a pane's messages are sent under.
+    pub(crate) fn sender_name_of(&self, pane: &str) -> String {
+        self.pane(pane)
+            .map(|p| {
+                let m = p.meta.lock().unwrap();
+                match &m.project {
+                    Some(project) => format!("{project}/{}", m.name),
+                    None => m.name.clone(),
+                }
+            })
+            .unwrap_or_else(|_| pane.to_string())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -503,6 +507,34 @@ impl Daemon {
         match wakeable() {
             Wake::Now => {}
             other => return other,
+        }
+        // A Codex scrolled back in its own history is typed nothing, not
+        // the nudge and not the one more Enter: the Enter would only
+        // return it to its latest line and leave the words unsent in its
+        // box (wake.rs, `SCROLLED_BACK_WORDS`). Its mail waits as behind
+        // a hold, announced to nobody, and the next look tries again.
+        let scrolled = p.meta.lock().unwrap().agent == spandeck_agents::AgentKind::Codex
+            && spandeck_agents::picker::codex_scrolled_back(&p.term.lines());
+        let waits = scrolled && !self.mail().unread_told(&self.pane_names(&p.id)).is_empty();
+        if waits {
+            let began = !crate::wake::scrolled_back(&turn, now);
+            turn.scrolled_back_ms = Some(now);
+            if began {
+                self.record(
+                    "msg.nudge_held",
+                    Some(&p.id),
+                    None,
+                    None,
+                    None,
+                    json!({"why": "codex_scrolled_back"}),
+                );
+                self.emit("pane.updated", Some(&p.id), None, json!({}));
+            }
+        } else if turn.scrolled_back_ms.take().is_some() {
+            self.emit("pane.updated", Some(&p.id), None, json!({}));
+        }
+        if scrolled {
+            return Wake::Now;
         }
         // The nudge typed last, if nothing shows the agent took it: the
         // pane has not changed state since, and the line is still on its

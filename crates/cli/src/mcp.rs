@@ -54,8 +54,10 @@ fn tools() -> Value {
                    "body": {"description": "JSON body for the request (optional)"}}),
             &["name", "path"],
         ),
-t("wait", "Wait until another pane is done, needs the user, or fails. Never poll.",
-          json!({"pane": str_("Pane name or id"), "timeout_s": {"type": "integer"}}), &["pane"]),
+t("wait", "Wait for another pane instead of polling. Say what you wait for with `until`: \"message\" after you asked it something (returns when it has sent you a message, or when a turn of it ends without one); \"done\" for its turn to be over. Without `until` it also returns the moment the pane needs the user (an approval, a question), which is not its turn ending. The answer's `says` tells you which happened: `why`, `turn_over` and `needs_owner` say the same as fields.",
+          json!({"pane": str_("Pane name or id"), "timeout_s": {"type": "integer"},
+                 "until": {"type": "string", "enum": ["any", "done", "message"],
+                           "description": "any (default): done, needs the user, or failed. done: its turn is over. message: it sent you a message."}}), &["pane"]),
     ])
 }
 
@@ -132,7 +134,8 @@ fn call_tool(paths: &Paths, name: &str, args: &Value) -> Result<Value, String> {
         "crew" => ("pane.list", json!({})),
         "wait" => (
             "wait",
-            json!({"pane": args["pane"], "timeout_ms": args.get("timeout_s").and_then(|t| t.as_u64()).unwrap_or(600) * 1000}),
+            json!({"pane": args["pane"], "until": args.get("until").cloned().unwrap_or(Value::Null),
+                   "timeout_ms": args.get("timeout_s").and_then(|t| t.as_u64()).unwrap_or(600) * 1000}),
         ),
         other => return Err(format!("unknown tool {other}")),
     };
@@ -141,7 +144,8 @@ fn call_tool(paths: &Paths, name: &str, args: &Value) -> Result<Value, String> {
         let limit = std::time::Duration::from_millis(params["timeout_ms"].as_u64().unwrap_or(0));
         let began = std::time::Instant::now();
         client.call_with(method, &mut || {
-            json!({"pane": params["pane"], "timeout_ms": limit.saturating_sub(began.elapsed()).as_millis() as u64})
+            json!({"pane": params["pane"], "until": params["until"],
+                   "timeout_ms": limit.saturating_sub(began.elapsed()).as_millis() as u64})
         })
     } else {
         client.call(method, params)

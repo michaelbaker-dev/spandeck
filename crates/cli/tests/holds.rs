@@ -608,3 +608,75 @@ fn the_deck_and_the_phone_show_a_held_pane_and_release_it() {
         s.call("pane.kill", json!({"pane": deaf}));
     }
 }
+
+/// A bug that happened (the real Codex 0.169.0, 18 Nov 2026): a mail
+/// nudge was typed into a Codex that was scrolled back in its own
+/// history. The Enter that should have submitted it only returned Codex to
+/// its latest line, and the nudge sat unsent in its message box. Now such
+/// a Codex is typed nothing: its mail waits, unread and announced to
+/// nobody, the pane says why, and the nudge is typed at the first look
+/// that finds Codex back at its latest line. Nothing is pressed to bring
+/// it back. The rows drawn are the real program's (agents/picker.rs),
+/// with its empty message box.
+#[test]
+#[ignore = "merge tier: waits for a nudge that must not come"]
+fn a_codex_scrolled_back_in_its_history_is_typed_nothing_until_it_is_back() {
+    let s = Station::start("alpha");
+    let scrolled = "\x1b[2J\x1b[H\
+                                         New activity · ↓ Back to bottom · esc\r\n\
+\r\n\
+› Ask Codex to do anything\r\n\
+\r\n\
+  GPT-6.1-Sol high · ~/code/pairtest\r\n\
+  New activity · Earlier messages available.  esc latest                 ⚠ 2 warnings · f2 to view";
+    let latest = "\x1b[2J\x1b[H\
+› Ask Codex to do anything\r\n\
+\r\n\
+  GPT-6.1-Sol high · ~/code/pairtest\r\n";
+    let script = s.script_file(&json!({
+        "steps": [{"raw": scrolled}, {"wait_file": "at-latest"}, {"raw": latest}],
+        "on_input": [{"rpc": {"method": "msg.inbox"}}, {"turn_end": "read my mail"}]
+    }));
+    let home = s.root.join("home");
+    let pane = s.call(
+        "pane.spawn",
+        json!({"agent": "codex", "program": FAKE, "args": ["--script", script], "cwd": home, "name": "reviewer"}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.wait_text(&pane, "esc latest");
+
+    s.call(
+        "msg.send",
+        json!({"to": "reviewer", "body": "is the heron count right?"}),
+    );
+    a_nudge_would_have_come();
+    assert!(s.log("msg.nudged").is_empty(), "nothing was typed");
+    assert!(s.log("msg.nudge_enter").is_empty(), "and no key pressed");
+    assert!(unread(&s, "is the heron count right?"));
+    let held = s.log("msg.nudge_held");
+    assert_eq!(held.len(), 1, "said once in the ship's log: {held:?}");
+    assert_eq!(held[0]["data"]["why"], json!("codex_scrolled_back"));
+    let view = s.pane(&pane);
+    assert_eq!(view["mail"]["waits_for"], json!("codex_scrolled_back"));
+    assert_eq!(
+        view["needs_reason"],
+        json!("has mail waiting: Codex is scrolled back in its own history, where a message typed now would not be sent; it is told when it is back at its latest line")
+    );
+
+    // Back at its latest line: told at the next look, once.
+    std::fs::write(home.join("at-latest"), "").unwrap();
+    let screen = s.wait_text(&pane, "is the heron count right?");
+    assert_eq!(screen.matches(NUDGE).count(), 1, "{screen}");
+    assert_eq!(s.log("msg.nudged").len(), 1);
+    let view = wait_for("the pane to say it no more", 10, || {
+        Some(s.pane(&pane)).filter(|v| v["mail"]["waits_for"].is_null())
+    });
+    assert_ne!(
+        view["needs_reason"]
+            .as_str()
+            .map(|r| r.contains("scrolled")),
+        Some(true)
+    );
+}

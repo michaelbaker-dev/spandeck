@@ -520,6 +520,25 @@ impl MessageStore {
             .unwrap_or_default()
     }
 
+    /// The oldest unread message for these names that `sender` sent: its
+    /// id and its kind. For `wait` until a message (rpc.rs): it marks
+    /// nothing as read, and never gives what the message says.
+    pub fn unread_from(&self, names: &[String], sender: &str) -> Option<(String, String)> {
+        let list = json!(names.iter().map(|n| self.qualify(n)).collect::<Vec<_>>()).to_string();
+        let sender = self.qualify(sender);
+        self.db
+            .read(|c| {
+                c.query_row(
+                    "SELECT id, kind FROM messages WHERE recipient IN (SELECT value FROM json_each(?1))
+                     AND sender=?2 AND received IS NOT NULL AND read IS NULL
+                     AND status NOT LIKE 'undelivered%' ORDER BY received LIMIT 1",
+                    params![list, sender],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .ok()
+    }
+
     /// Every unread message for these names: its id, its sender, and when
     /// its agent was last told of it (0: never), oldest first.
     pub fn unread_told(&self, names: &[String]) -> Vec<(String, String, u64)> {

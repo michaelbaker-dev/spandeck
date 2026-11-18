@@ -1408,3 +1408,122 @@ fn a_link_between_stations_is_known_on_both_and_carries_messages_and_findings() 
     assert_eq!(found[0]["unreachable"], json!(true), "{found}");
     assert_eq!(found[0]["station"], json!("bravo"));
 }
+
+/// Measured on 18 Nov 2026 with a real Claude Code building and a real
+/// Codex reviewing: the builder's `wait` on the critic came back at once
+/// whenever the critic needed the owner (an approval), saying nothing of
+/// which of "done, needs you, fails" it was, so the builder "couldn't
+/// always tell whether to wait or carry on". Now the answer says which it
+/// is and whether the pane's turn is over, and an agent can wait for what
+/// it wants: the turn to end (`until: done`) or a message from that pane
+/// (`until: message`), which a pane that only needs the owner does not
+/// end. The default is what it was, for the callers there are.
+#[test]
+fn wait_says_what_it_ended_on_and_can_wait_for_a_message_or_the_end_of_the_turn() {
+    let s = Station::start("alpha");
+    let builder = s.fake(json!({"steps": []}), json!({"name": "builder"}));
+    s.wait_text(&builder, "[fake] session");
+    let critic = s.fake(
+        json!({"steps": [
+            {"prompt": "review the diff"},
+            {"permission": {"name": "Bash", "command": "cargo test"}},
+            {"rpc": {"method": "msg.send", "params": {"to": "builder", "kind": "result", "body": "two findings in the heron module"}}},
+            {"wait_file": "go-on"},
+            {"turn_end": "reviewed"}
+        ]}),
+        json!({"name": "critic", "cwd": s.root.join("home")}),
+    );
+    let asked = wait_for("the critic's request for permission", 10, || {
+        s.call("approval.list", json!({}))
+            .as_array()
+            .and_then(|a| a.first().cloned())
+    });
+    s.wait_state(&critic, "needs_you");
+    let wait = |params: Value| s.call_as_pane(&builder, "wait", params).unwrap();
+
+    // As before, it returns for a pane that needs the owner: and says so.
+    let any = wait(json!({"pane": "critic", "timeout_ms": 5000}));
+    assert_eq!(
+        (
+            &any["why"],
+            &any["turn_over"],
+            &any["needs_owner"],
+            &any["timed_out"]
+        ),
+        (
+            &json!("needs_you"),
+            &json!(false),
+            &json!(true),
+            &json!(false)
+        ),
+        "{any}"
+    );
+    let says = any["says"].as_str().unwrap();
+    assert!(
+        says.starts_with("critic is waiting for the owner")
+            && says.contains("its turn is not over")
+            && says.contains("until \"done\"")
+            && says.contains("until \"message\""),
+        "{says}"
+    );
+    // Waiting for the end of its turn does not end on that.
+    let not_yet = wait(json!({"pane": "critic", "until": "done", "timeout_ms": 300}));
+    assert_eq!(
+        (
+            &not_yet["why"],
+            &not_yet["timed_out"],
+            &not_yet["needs_owner"]
+        ),
+        (&json!("timed_out"), &json!(true), &json!(true)),
+        "{not_yet}"
+    );
+    assert!(s
+        .call_as_pane(&builder, "wait", json!({"pane": "critic", "until": "soon"}))
+        .is_err());
+
+    // Nor does waiting for a message: it ends when the message is stored.
+    let got = std::thread::scope(|t| {
+        let waiting =
+            t.spawn(|| wait(json!({"pane": "critic", "until": "message", "timeout_ms": 20_000})));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!waiting.is_finished(), "it waited through \"needs you\"");
+        s.call("approval.answer", json!({"id": asked["id"], "allow": true}));
+        waiting.join().unwrap()
+    });
+    let sent = s.call("msg.recent", json!({}))[0].clone();
+    assert_eq!(
+        (&got["why"], &got["timed_out"], &got["message"]),
+        (
+            &json!("message"),
+            &json!(false),
+            &json!({"id": sent["id"], "from": "critic", "kind": "result"})
+        ),
+        "{got}"
+    );
+    // It names the message and does not read it: the words are the inbox's.
+    assert!(!got.to_string().contains("heron"), "{got}");
+    assert!(sent["read"].is_null(), "{sent}");
+    assert!(got["says"].as_str().unwrap().starts_with(&format!(
+        "critic sent you a message ({}): read it with the inbox tool.",
+        sent["id"].as_str().unwrap()
+    )));
+
+    // And the end of its turn is said as that.
+    std::fs::write(s.root.join("home/go-on"), "").unwrap();
+    let done = wait(json!({"pane": "critic", "until": "done", "timeout_ms": 20_000}));
+    assert_eq!(
+        (
+            &done["why"],
+            &done["turn_over"],
+            &done["needs_owner"],
+            &done["says"]
+        ),
+        (
+            &json!("done"),
+            &json!(true),
+            &json!(false),
+            &json!("critic finished its turn.")
+        ),
+        "{done}"
+    );
+}
