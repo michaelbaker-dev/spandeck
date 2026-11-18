@@ -96,7 +96,7 @@ pub fn process_text(
                 user.display()
             ),
             format!(
-                "   After each slice is committed the builder asks the **user** pane to look (about {} minutes). Its\n   three things are answered by the builder by number, like findings: fixed, or declined with the reason.\n",
+                "   After each slice is committed the builder asks the **user** pane to look (about {} minutes). Its three things are answered by the builder by number, like findings: fixed, or declined with the reason.\n",
                 look_minutes(minutes)
             ),
         ),

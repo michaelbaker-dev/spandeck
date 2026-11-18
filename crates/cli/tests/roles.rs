@@ -265,7 +265,7 @@ fn the_pair_recipe_with_a_user_sends_three_roles() {
         "**user** (Fake agent)",
         "**30 minutes a stage**",
         "asks the **user** pane to look (about 15 minutes)",
-        "one\n   acceptance list",
+        "one acceptance list",
         "begins with using the product",
     ] {
         assert!(process.contains(want), "{want}: {process}");
