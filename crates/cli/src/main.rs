@@ -5,6 +5,7 @@
 
 mod agents_cmd;
 mod mcp;
+mod roles_cmd;
 mod tools_cmd;
 
 use std::io::Read;
@@ -243,6 +244,14 @@ enum Cmd {
         #[arg(long)]
         no_check: bool,
     },
+    /// The role library: what each kind of agent is asked to be (builder,
+    /// critic, user, and short-visit reviewers), the same on every station.
+    /// Without a subcommand: the list. A pane started with a role is sent
+    /// its prompt once, as a message from you.
+    Roles {
+        #[command(subcommand)]
+        cmd: Option<roles_cmd::RolesCmd>,
+    },
     /// Wake a sleeping station on this network (wake-on-LAN).
     Wake { station: String },
     /// Start a station whose daemon is not running, over SSH (needs remote_start = true).
@@ -377,6 +386,11 @@ enum PaneCmd {
         name: Option<String>,
         #[arg(long)]
         project: Option<String>,
+        /// A role of the role library (`spandeck roles`): the agent is sent
+        /// its prompt once it has started. With no --agent, the program
+        /// the role names.
+        #[arg(long)]
+        role: Option<String>,
         #[arg(long)]
         cwd: Option<PathBuf>,
         /// Continue the last conversation the agent saved in the folder; a
@@ -496,6 +510,15 @@ enum ProjectCmd {
         /// With --recipe pair: the critic's agent program (default: codex).
         #[arg(long, requires = "recipe")]
         critic: Option<String>,
+        /// With --recipe pair: a third pane, `user`, that stands in for the
+        /// person the thing is made for. Its agent program; without a
+        /// value, the builder's.
+        #[arg(long, requires = "recipe", num_args = 0..=1, default_missing_value = "")]
+        user: Option<String>,
+        /// With --recipe pair: the minutes a stage gets (default 20). It is
+        /// written into PROCESS.md and into each agent's role.
+        #[arg(long, requires = "recipe", value_name = "MINUTES")]
+        budget: Option<u32>,
         /// With --recipe pair: what is to be built, as a file or as text.
         /// Without it BRIEF.md asks you to write one, and nobody is told to
         /// start until you have.
@@ -880,6 +903,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 agent,
                 name,
                 project,
+                role,
                 cwd,
                 resume_last,
                 trust_folder,
@@ -887,6 +911,13 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 trust_hooks,
                 command,
             } => {
+                // A role is one of the library: a name typed wrong would
+                // otherwise start a pane that is sent nothing.
+                if let Some(role) = &role {
+                    c.call("roles.get", json!({"name": role})).map_err(|e| {
+                        anyhow::anyhow!("{} (`spandeck roles` lists them)", e.message)
+                    })?;
+                }
                 let cwd = cwd.or_else(|| std::env::current_dir().ok());
                 let (program, args) = match command.split_first() {
                     Some((p, rest)) => (Some(p.clone()), rest.to_vec()),
@@ -902,7 +933,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     (_, true) => Some(true),
                     _ => None,
                 };
-                let v = c.call("pane.spawn", json!({"agent": agent, "name": name, "project": project, "cwd": cwd, "program": program, "args": args, "resume_last": resume_last, "trust_folder": trust, "trust_hooks": hooks}))?;
+                let v = c.call("pane.spawn", json!({"agent": agent, "name": name, "project": project, "role": role, "cwd": cwd, "program": program, "args": args, "resume_last": resume_last, "trust_folder": trust, "trust_hooks": hooks}))?;
                 // The id stays alone on standard output, for scripts.
                 if resume_last && v["resumed"] != json!(true) && v["agent"] != json!("shell") {
                     eprintln!("spandeck: no saved conversation to continue in this folder; a new one was started");
@@ -1031,6 +1062,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 recipe,
                 builder,
                 critic,
+                user,
+                budget,
                 brief,
                 trust_folder,
                 no_trust_folder,
@@ -1050,7 +1083,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     let v = c.call(
                         "project.new",
                         json!({"path": path, "name": name, "recipe": recipe, "builder": builder,
-                        "critic": critic, "brief": brief, "open": !no_open,
+                        "critic": critic, "user": user, "budget": budget,
+                        "brief": brief, "open": !no_open,
                         "trust_folder": match (trust_folder, no_trust_folder) {
                             (true, _) => Some(true),
                             (_, true) => Some(false),
@@ -1108,7 +1142,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                                 })
                                 .collect();
                             format!(
-                                "{}\n  {}\n  spandeck project new --recipe {} [--name N] [--path P] {} [--brief <file or text>]",
+                                "{}\n  {}\n  spandeck project new --recipe {} [--name N] [--path P] {} [--user [<agent>]] [--budget <minutes>] [--brief <file or text>]",
                                 r["name"].as_str().unwrap_or(""),
                                 r["summary"].as_str().unwrap_or(""),
                                 r["name"].as_str().unwrap_or(""),
@@ -1691,6 +1725,10 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             Some(ToolsCmd::Install { name, station }) => {
                 tools_cmd::install(&mut c, j, &name, station.as_deref())?
             }
+        },
+        Cmd::Roles { cmd } => match cmd {
+            None => roles_cmd::list(&mut c, j)?,
+            Some(cmd) => roles_cmd::run(&mut c, j, cmd)?,
         },
         Cmd::Wake { station } => {
             let v = c.call("fleet.wake", json!({"station": station}))?;

@@ -1,55 +1,59 @@
 # How this project is worked
 
-Two agents work here, in spandeck panes of the project `{{project}}`:
+These agents work here, in spandeck panes of the project `{{project}}`:
 
-- **builder** ({{builder}}) designs and writes the app. Only the builder edits the app's files.
-- **critic** ({{critic}}) reviews: architecture, plan, code and UX. The critic writes only under `reviews/`
-  and never edits the builder's files. It may run the app and its tests.
+- **builder** ({{builder}}) designs and writes the product. Only the builder edits its files, and only the builder commits.
+- **critic** ({{critic}}) reviews, and writes only under `reviews/`. It may run everything.
+{{user}}
 
-Both work in this folder, in the same working tree. What is to be built is in `BRIEF.md`.
+Each of you was sent your role by the owner; ask spandeck for it again with the `role` tool.
+What is to be built is in `BRIEF.md`. All work in this folder, in one working tree.
+Coordinate through spandeck's messages and shared project notes, not through the owner,
+who is watching and steps in only if you are stuck.
 
-Coordinate with each other through spandeck's own tools (messages, the shared project
-notes, recall), not through the owner. The owner is watching and steps in only if you are stuck.
+## Budget
+- **{{stage_minutes}} minutes a stage**, and each slice of code is a stage. When it is used up,
+  stop polishing: note what is unfinished and go on.
+- **One round of review a stage.** A second only for a blocker, or for a finding the builder
+  declined that the critic still thinks hurts the user. Never a fourth.
+- The time goes to the product first and to proof second. A test, a document or an option
+  that costs more than it gives the user is a finding.
 
 ## Stages
-Each stage ends with the critic's verdict: **approve**, or a numbered list of findings
-with a severity each (blocker, should fix, nit). The builder answers every finding
-(fixed, or declined with the reason) before the next stage starts. At most three rounds
-a stage: after that, record what is still disagreed and move on.
+Each ends with the critic's verdict: **approve**, or at most seven numbered findings with a
+severity each (blocker, should fix, nit). The builder answers each: fixed, or declined with the reason.
 
-0. **Tools**: before anything is designed, each of you finds out what you can really run on
-   this machine, and proves it by doing it once: a browser you can drive headless and take a
-   screenshot with, the test runner, a free port to serve the app on. Record what worked, with
-   the command, in the shared project notes. Nothing is promised here: there may be no browser
-   you can drive. If the builder cannot see its own pages it says so now, and the two of you
-   agree who checks the pages and when (for example: the critic checks each slice's page as
-   it is committed, not only at the UX stage). The stage ends when both lists and that
-   agreement are in the notes and the critic approves them.
-1. **Architecture**: builder writes `docs/DESIGN.md` (one page). Critic reviews it.
-2. **Plan**: builder writes `docs/PLAN.md`: ordered steps, in three slices, with the tests for each. Critic reviews it.
-3. **Code**: for each of the three slices, builder writes it and commits; critic reviews the commit by reading and running it.
-4. **UX**: critic reviews the finished pages: layout, wording, phone width, keyboard use, accessibility.
-5. **Sign-off**: builder makes the last fixes; critic gives a final verdict in `reviews/FINAL.md`.
+0. **Tools**: each of you proves, by doing it once, what you can run here: the test runner, a
+   server on a free port, a browser you can drive and take a screenshot with (spandeck's browser
+   tools if you were given them). Record the commands that worked in the notes. Nothing is
+   promised: there may be no browser. Whoever cannot see the pages says so now, and you agree who looks.
+1. **Design**: the builder writes `docs/DESIGN.md`, one page. The critic reviews it.
+2. **Plan**: the builder writes `docs/PLAN.md`: three slices, most valuable first, and **one
+   acceptance list**: every thing the brief asks for, marked must or nice, with how it will be
+   checked. **Cuts are decided here**, not at the end: what is left out if time runs short, and
+   the critic says whether each cut is worth it. This list is what every later review is held
+   against; no other review document is needed.
+3. **Code**, slice by slice: the builder writes it, looks at it running, commits and hands over.
+   The critic's review **begins with using the product** as its user would, at a computer's
+   width and a phone's, **and holding it against the brief** and the acceptance list. It takes
+   its own numbers for what a user would feel (time until usable, weight, smoothness). Only then the code.
+{{user_stage}}
+4. **Sign-off**: the builder makes the last fixes; the critic's final verdict goes in `reviews/FINAL.md`.
 
 ## Rules that hold at every stage
-- **Agree early on what "done" is.** The critic's verdicts on the architecture and on the plan
-  each list what the critic will verify later. The plan carries a test for every item on those lists.
-- **Say what you know is weak.** Every hand-over message from the builder lists the gaps it
-  knows of and anything it has not run. A gap the builder kept to itself and the critic then
-  found has cost a round.
-- **A finding comes with its evidence**: the file and line, a measurement, or a script that
-  reproduces it.
-- **Hold still when a review needs it.** When the critic says its review needs the code to
-  stay as it is (a review in a browser does, so that page and code stay in step), the builder
-  changes nothing until the critic says it is done. Otherwise the builder may work ahead on
-  the next slice, as long as each fix for a finding is a commit of its own.
-- **A check that found a defect outlives the review.** The critic hands it to the builder,
-  who makes it a test that the test command runs; or the critic says why it cannot be one.
+- **Say what you know is weak.** Every hand-over from the builder names the commit, how to
+  run it, the gaps it knows of and what it has not run. A gap kept quiet costs a round.
+- **A finding comes with its evidence** (file and line, a measurement, or a script) and with
+  who is hurt by it. Findings about the product come before findings about proof.
+- **Hold still when a review needs it.** When the critic says its review needs the code as it
+  is, the builder changes nothing there until the critic says it is done, and may work ahead
+  in a git worktree. Each fix for a finding is a commit of its own.
+- **A check that found a defect becomes a test** the test command runs: the critic hands it
+  over, the builder adds it, or the critic says why it cannot be one.
 
 ## Keep a record
-- Record each decision that the other agent, or a later session, would need, in the shared project notes.
+- Each decision that another agent, or a later session, would need goes in the shared project notes.
 - The builder commits at the end of every stage and slice, with a message that names the stage.
-- Only the builder commits. Its commits take in the critic's files under `reviews/` as they stand, so the critic
-  says when a review file is not finished.
-- When the whole thing is done, each of you writes a short `reviews/RETRO-<your name>.md`:
-  what working with the other agent was like, what helped, what got in the way.
+  Its commits take in the files under `reviews/` as they stand: say when one is not finished.
+- When it is all done, each of you writes a short `reviews/RETRO-<your name>.md`: what working
+  with the others was like, what helped, what got in the way.

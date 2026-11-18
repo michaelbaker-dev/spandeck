@@ -329,7 +329,14 @@ impl Daemon {
                 }
             }
         }
-        let settings = file.role(role);
+        let mut settings = file.role(role);
+        // A role the project's file says nothing of runs the program the
+        // role library names for it, if it names one.
+        if !file.roles.contains_key(role) {
+            if let Some(agent) = self.roles_doc().role(role).and_then(|(r, _)| r.agent) {
+                settings.agent = agent;
+            }
+        }
         let agent = AgentKind::parse(&settings.agent)
             .filter(|a| a.is_agent())
             .ok_or_else(|| {

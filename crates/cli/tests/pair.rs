@@ -152,22 +152,36 @@ fn the_pair_recipe_sets_up_a_builder_and_a_critic_once() {
         );
     }
 
-    // Each was sent its role by the owner, once.
+    // Each was sent its role by the owner, once: the role's prompt from
+    // the role library, filled for this project and naming the other pane,
+    // and after it the recipe's line, in one message.
     let sent = roles_sent(&s, "shop");
     assert_eq!(sent.len(), 2, "{sent:?}");
     assert_eq!(sent[0].0, "shop/builder");
     assert!(
         sent[0]
             .1
-            .starts_with("You are the builder in this project. Read BRIEF.md and PROCESS.md")
-            && sent[0].1.contains("the pane named critic"),
+            .starts_with("Your role in this project, from the owner:\n\n# Role: builder")
+            && sent[0].1.contains("You are the **builder** in the project `shop`")
+            && sent[0].1.contains(
+                "The other agent here: the pane `critic` (role: critic, Fake agent)."
+            )
+            && sent[0].1.ends_with(
+                "Read BRIEF.md and PROCESS.md in this folder, then start stage 0. Work with the other agents as PROCESS.md says, without waiting for me."
+            )
+            && !sent[0].1.contains("{{"),
         "{}",
         sent[0].1
     );
     assert_eq!(sent[1].0, "shop/critic");
     assert!(
-        sent[1].1.starts_with("You are the critic in this project.")
-            && sent[1].1.contains("the pane named builder"),
+        sent[1]
+            .1
+            .contains("You are the **critic** in the project `shop`")
+            && sent[1]
+                .1
+                .contains("the pane `builder` (role: builder, Fake agent)")
+            && sent[1].1.ends_with("without waiting for me."),
         "{}",
         sent[1].1
     );

@@ -1,5 +1,5 @@
 //! What the synced documents share: the deck document, the look document,
-//! the agent setup, the owner's preferences and the tools document. Each is one document, kept
+//! the agent setup, the owner's preferences, the tools document and the role library. Each is one document, kept
 //! whole on every station, and the newer copy wins. This file is what keeps
 //! "newer" honest:
 //!
@@ -30,7 +30,7 @@ use crate::daemon::{invalid, Daemon, Result};
 use crate::paths::now_ms;
 
 /// The documents, by the name each has in `station.info`.
-pub(crate) const DOCS: [&str; 5] = ["deck", "look", "setup", "prefs", "tools"];
+pub(crate) const DOCS: [&str; 6] = ["deck", "look", "setup", "prefs", "tools", "roles"];
 
 /// A station that looked at the fleet longer ago than this looks again
 /// before a change is taken. A little over the time between two looks.
@@ -65,6 +65,7 @@ fn spoken(doc: &str) -> &'static str {
         "look" => "the themes and looks",
         "setup" => "the agent setup",
         "tools" => "the tools for agents",
+        "roles" => "the roles for agents",
         _ => "your preferences",
     }
 }
@@ -76,6 +77,7 @@ impl Daemon {
             "look" => self.look().updated_ms,
             "setup" => self.setup().updated_ms,
             "tools" => self.tools_doc().updated_ms,
+            "roles" => self.roles_doc().updated_ms,
             _ => self.prefs().updated_ms,
         }
     }
@@ -144,6 +146,7 @@ impl Daemon {
             "look" => json!(self.look()),
             "setup" => json!(self.setup()),
             "tools" => json!(self.tools_doc()),
+            "roles" => json!(self.roles_doc()),
             _ => json!(self.prefs()),
         };
         Ok(json!({"doc": doc, "copy": copy}))
@@ -160,7 +163,9 @@ impl Daemon {
             // A station from before `sync.pull` (0.4.0) has no such call. Its
             // copy is read with the call a Control Deck opened here would
             // make of it; it has no preferences document and no tools one.
-            Err(e) if e.contains("not available") && !matches!(doc, "prefs" | "tools") => {
+            Err(e)
+                if e.contains("not available") && !matches!(doc, "prefs" | "tools" | "roles") =>
+            {
                 let got = self
                     .fleet
                     .call(
@@ -182,6 +187,7 @@ impl Daemon {
             "look" => serde_json::from_value(copy).map(|c| self.look_push(c, station)),
             "setup" => serde_json::from_value(copy).map(|c| self.setup_push(c, station)),
             "tools" => serde_json::from_value(copy).map(|c| self.tools_push(c, station)),
+            "roles" => serde_json::from_value(copy).map(|c| self.roles_push(c, station)),
             _ => serde_json::from_value(copy).map(|c| self.prefs_push(c, station)),
         };
         if let Ok(Err(e)) = took {

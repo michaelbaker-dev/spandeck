@@ -105,6 +105,16 @@ impl Daemon {
                         name: text("name"),
                         builder: text(pair::BUILDER),
                         critic: text(pair::CRITIC),
+                        // `user: true` or `""`: the builder's program.
+                        user: match params.get(pair::USER) {
+                            Some(Value::String(s)) => Some(s.clone()),
+                            Some(Value::Bool(true)) => Some(String::new()),
+                            _ => None,
+                        },
+                        budget: params
+                            .get("budget")
+                            .and_then(|v| v.as_u64())
+                            .map(|m| m.min(u32::MAX as u64) as u32),
                         brief: text("brief"),
                         open: params.get("open").and_then(|v| v.as_bool()) == Some(true),
                         trust: params.get("trust_folder").and_then(|v| v.as_bool()),
