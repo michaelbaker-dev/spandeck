@@ -169,6 +169,25 @@ pub fn info(kind: AgentKind) -> Option<&'static Info> {
     }
 }
 
+/// Is the screen one the program shows before its first? Codex's notice of
+/// a newer version, as 0.169.0 draws it (read from a real pane on 18 Nov
+/// 2026): spandeck answers it for nobody, and the folder-trust question
+/// comes after it.
+pub fn before_first(kind: AgentKind, lines: &[String]) -> bool {
+    if kind != AgentKind::Codex {
+        return false;
+    }
+    let rows: Vec<String> = lines
+        .iter()
+        .map(|l| clean(l))
+        .filter(|l| !l.is_empty())
+        .collect();
+    rows.last()
+        .is_some_and(|l| l == "enter continue · esc skip")
+        && rows.iter().any(|r| r.starts_with("Update available · "))
+        && rows.iter().any(|r| r == "2. Skip" || r == "› 2. Skip")
+}
+
 /// Enter: takes the choice the marker is on.
 pub const CONFIRM: &[u8] = b"\r";
 
@@ -610,6 +629,12 @@ mod tests {
         .map(|l| l.to_string())
         .collect();
         assert_eq!(read(AgentKind::Codex, &update, &folders(folder)), None);
+        // It is the screen before the first one (18 Nov 2026: the question
+        // that came after it was past the first-screen time and stood
+        // unanswered in a project whose folder trust was on).
+        assert!(before_first(AgentKind::Codex, &update));
+        assert!(!before_first(AgentKind::Codex, &rows));
+        assert!(!before_first(AgentKind::Claude, &update));
     }
 
     /// Found with the real Antigravity 1.5.9 (16 Nov 2026): a ticked

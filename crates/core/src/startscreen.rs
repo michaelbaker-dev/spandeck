@@ -73,6 +73,10 @@ pub struct Asks {
 pub(crate) struct Watch<S> {
     /// The start of the program this is about.
     started_ms: u64,
+    /// A screen the program shows before its first (Codex's notice of a
+    /// newer version) was up, and when it was last seen: the first screen
+    /// is counted from then.
+    held_ms: Option<u64>,
     pub first_seen_ms: Option<u64>,
     /// The screen as last read, and since when it has read the same.
     same: Option<(S, u64)>,
@@ -92,6 +96,7 @@ impl<S> Watch<S> {
     fn new(started_ms: u64) -> Self {
         Watch {
             started_ms,
+            held_ms: None,
             first_seen_ms: None,
             same: None,
             moved_ms: None,
@@ -125,6 +130,16 @@ pub(crate) enum Moving {
 }
 
 impl<S: PartialEq + Clone> Watch<S> {
+    /// The program shows a screen that comes before its first one, which
+    /// nobody answers through spandeck: the first screen's time does not
+    /// run while it is up.
+    pub fn hold(&mut self, now: u64) {
+        if !self.closed && self.first_seen_ms.is_none() {
+            self.held_ms = Some(now);
+            self.same = None;
+        }
+    }
+
     /// `behind`: the first screen is behind this pane (a hook of the
     /// session, an answer already given, a program that ended).
     /// `carried`: a pane carried through an upgrade was already at the
@@ -143,7 +158,7 @@ impl<S: PartialEq + Clone> Watch<S> {
             self.closed = true;
             return Stood::NotIt;
         }
-        let age = now.saturating_sub(self.started_ms);
+        let age = now.saturating_sub(self.started_ms.max(self.held_ms.unwrap_or(0)));
         let Some(seen) = read() else {
             self.same = None;
             if age > WINDOW_MS {
@@ -231,7 +246,13 @@ impl<S: PartialEq + Clone> Watches<S> {
     /// and nothing is pressed for them after that.
     pub fn owner_typed(&self, pane: &str) {
         if let Some(w) = self.watch.lock().unwrap().get_mut(pane) {
-            w.auto_off = true;
+            // A key typed at the screen before the first one (to skip
+            // Codex's notice of a newer version) answers that screen, not
+            // this one.
+            let before = w.held_ms.is_some() && w.first_seen_ms.is_none() && w.same.is_none();
+            if !before {
+                w.auto_off = true;
+            }
         }
     }
 
@@ -332,5 +353,52 @@ impl Daemon {
             self.save_pane(p);
             self.emit("pane.updated", Some(&p.id), None, json!({}));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 18 Nov 2026, a real Codex 0.169.0 in a project whose folder trust
+    /// was on: its notice of a newer version stood for a minute, the
+    /// folder-trust question came after the first-screen time and nobody
+    /// answered it. The time is counted from when that notice went, and
+    /// the key that skipped it is not the owner answering the question.
+    #[test]
+    fn a_screen_before_the_first_does_not_use_up_the_first_screens_time() {
+        let watches: Watches<u8> = Watches::default();
+        let look = |now: u64, held: bool, screen: Option<u8>| {
+            watches.turn("p", 1_000, |w| {
+                if held {
+                    w.hold(now);
+                    return false;
+                }
+                matches!(w.look(now, false, None, || screen), Stood::Stands(..))
+            })
+        };
+        // The notice is up for a minute; the owner skips it with a key.
+        for s in 1..=60 {
+            assert!(!look(1_000 + s * 1_000, true, None));
+        }
+        watches.owner_typed("p");
+        // The question comes, stands, and is the first screen.
+        assert!(!look(62_000, false, Some(7)));
+        assert!(look(62_000 + SETTLE_MS, false, Some(7)));
+        assert!(!watches.turn("p", 1_000, |w| w.auto_off));
+        // A key typed once the question is up is the owner's own answer.
+        watches.owner_typed("p");
+        assert!(watches.turn("p", 1_000, |w| w.auto_off));
+
+        // Without the notice, a screen that first shows after the time is
+        // not the first, as before.
+        assert!(!look(1_000, false, None) && !watches.past("q", 2_000));
+        let late = watches.turn("q", 2_000, |w| {
+            matches!(
+                w.look(2_000 + WINDOW_MS + 1, false, None, || Some(7u8)),
+                Stood::NotIt
+            )
+        });
+        assert!(late && watches.past("q", 2_000));
     }
 }

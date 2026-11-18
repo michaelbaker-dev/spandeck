@@ -288,6 +288,12 @@ impl Daemon {
     ) -> Option<Act> {
         let behind = m.hooks_seen || m.hooks_trust_answered.is_some() || m.exit.is_some();
         let carried = m.hooks_trust_asks.as_ref().map(|a| a.since_ms);
+        // As for the folder-trust question: Codex's notice of a newer
+        // version comes before the first screen.
+        if !behind && spandeck_agents::foldertrust::before_first(m.agent, &p.term.lines()) {
+            w.hold(now);
+            return None;
+        }
         let read = || screen::read(m.agent, &p.term.lines());
         let (seen, since_ms) = match w.look(now, behind, carried, read) {
             Stood::NotIt => return None,

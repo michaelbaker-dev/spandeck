@@ -452,6 +452,13 @@ impl Daemon {
         // ended: the first screen is behind it.
         let behind = m.hooks_seen || m.trust_answered.is_some() || m.exit.is_some();
         let carried = m.trust_asks.as_ref().map(|a| a.since_ms);
+        // The program's notice of a newer version comes before its first
+        // screen and is the owner's to answer: the question that follows
+        // it is still the first.
+        if !behind && screen::before_first(m.agent, &p.term.lines()) {
+            w.hold(now);
+            return None;
+        }
         let read = || screen::read(m.agent, &p.term.lines(), &self.folder_names(&m.cwd));
         let (seen, since_ms) = match w.look(now, behind, carried, read) {
             Stood::NotIt => return None,
