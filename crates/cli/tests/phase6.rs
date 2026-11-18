@@ -800,6 +800,7 @@ fn md_headings(md: &str) -> (Vec<String>, bool) {
 /// whose numbers are those of the run, whose document cannot be
 /// restructured by what an agent wrote, and which an agent is refused.
 #[test]
+#[ignore = "merge tier: waits out scripted delays between two agents (3 s)"]
 fn a_projects_record_is_written_by_the_station_from_what_it_holds() {
     const READS_AFTER_MS: u64 = 400;
     const ANSWERED_AFTER_MS: u64 = 300;
@@ -2272,6 +2273,7 @@ fn wait_says_what_it_ended_on_and_can_wait_for_a_message_or_the_end_of_the_turn(
 /// order or a copy of spandeck's own rows, stays inside its quoted rows.
 /// And nothing of it is typed: the nudge is as it was.
 #[test]
+#[ignore = "merge tier: waits through a busy agent's turn (3 s)"]
 fn a_busy_agent_is_given_its_messages_in_the_hooks_notice_quoted_and_once() {
     let s = Station::start("alpha");
     let worker = s.fake(
