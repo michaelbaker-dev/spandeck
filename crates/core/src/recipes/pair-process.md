@@ -49,5 +49,7 @@ a stage: after that, record what is still disagreed and move on.
 ## Keep a record
 - Record each decision that the other agent, or a later session, would need, in the shared project notes.
 - The builder commits at the end of every stage and slice, with a message that names the stage.
+- Only the builder commits. Its commits take in the critic's files under `reviews/` as they stand, so the critic
+  says when a review file is not finished.
 - When the whole thing is done, each of you writes a short `reviews/RETRO-<your name>.md`:
   what working with the other agent was like, what helped, what got in the way.
