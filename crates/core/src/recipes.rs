@@ -107,6 +107,7 @@ impl Daemon {
                         critic: text(pair::CRITIC),
                         brief: text("brief"),
                         open: params.get("open").and_then(|v| v.as_bool()) == Some(true),
+                        trust: params.get("trust_folder").and_then(|v| v.as_bool()),
                     },
                 )
                 .await

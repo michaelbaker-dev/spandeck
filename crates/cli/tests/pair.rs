@@ -79,6 +79,13 @@ fn the_pair_recipe_sets_up_a_builder_and_a_critic_once() {
         json!([".spandeck/project.toml", "PROCESS.md", "BRIEF.md"])
     );
     assert_eq!(v["recipe"]["roles"], json!("sent"), "{v}");
+    // The folder was made by the recipe, so the project's folder trust is
+    // on and the owner is told (the owner's request, 18 Nov 2026).
+    assert_eq!(v["recipe"]["folder_trust"], json!(true), "{v}");
+    assert_eq!(
+        s.call("foldertrust.list", json!({}))["projects"][0]["project"],
+        json!("shop")
+    );
 
     // The files: the process names the project and both programs and
     // begins with stage 0; the brief is the owner's.
@@ -203,6 +210,15 @@ fn the_pair_recipe_sets_up_a_builder_and_a_critic_once() {
         json!({"path": own, "recipe": "pair", "builder": "fake", "critic": "fake", "open": true}),
     );
     assert_eq!(v["recipe"]["kept"], json!(["PROCESS.md"]), "{v}");
+    // A folder that was there is trusted only at the owner's word.
+    assert_eq!(v["recipe"]["folder_trust"], json!(false), "{v}");
+    assert_eq!(
+        s.call("foldertrust.list", json!({}))["projects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(v["recipe"]["roles"], json!("waiting for a brief"));
     assert!(v["recipe"]["next"]
         .as_str()

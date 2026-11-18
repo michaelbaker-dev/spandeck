@@ -407,6 +407,16 @@ enum ProjectCmd {
         /// start until you have.
         #[arg(long, requires = "recipe")]
         brief: Option<String>,
+        /// With a recipe: answer yes for you when an agent asks whether to
+        /// trust the project's folder. Already so for a folder the recipe
+        /// makes; say it for a folder that is there, and only for one whose
+        /// contents you know.
+        #[arg(long, requires = "recipe", conflicts_with = "no_trust_folder")]
+        trust_folder: bool,
+        /// With a recipe: leave the folder-trust question to you, also for
+        /// a folder the recipe makes.
+        #[arg(long, requires = "recipe")]
+        no_trust_folder: bool,
     },
     /// The recipes `project new --recipe` takes.
     Recipes,
@@ -928,6 +938,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 builder,
                 critic,
                 brief,
+                trust_folder,
+                no_trust_folder,
             } => {
                 if let Some(recipe) = recipe {
                     // A recipe makes the folder if it is not there.
@@ -944,7 +956,12 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     let v = c.call(
                         "project.new",
                         json!({"path": path, "name": name, "recipe": recipe, "builder": builder,
-                               "critic": critic, "brief": brief, "open": !no_open}),
+                        "critic": critic, "brief": brief, "open": !no_open,
+                        "trust_folder": match (trust_folder, no_trust_folder) {
+                            (true, _) => Some(true),
+                            (_, true) => Some(false),
+                            _ => None,
+                        }}),
                     )?;
                     // A station from before this takes no recipe, and has
                     // made a plain project.

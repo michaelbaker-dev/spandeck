@@ -935,6 +935,7 @@ impl Agent {
                     Value::String(s) => drawn::antigravity_with(&self.cwd, focus, Some(s)),
                     _ => drawn::antigravity(&self.cwd, focus),
                 },
+                "codex" => drawn::codex(&self.cwd, focus, 110),
                 _ => drawn::claude(&self.cwd, focus, 110, &extra),
             };
             if let Some(words) = spec["reword"].as_str() {

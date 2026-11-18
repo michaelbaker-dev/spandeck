@@ -117,7 +117,7 @@ fn a_ticked_folder_is_answered_once_and_an_unticked_one_waits_for_the_owner() {
         .as_str()
         .unwrap()
         .contains("read, edit and run"));
-    for agent in ["shell", "codex", "opencode"] {
+    for agent in ["shell", "opencode"] {
         let c = s.call("foldertrust.choice", json!({"agent": agent, "cwd": yes}));
         assert_eq!(c["asks"], json!(false), "{agent}: no tick box");
     }
@@ -228,6 +228,17 @@ fn a_ticked_folder_is_answered_once_and_an_unticked_one_waits_for_the_owner() {
     assert_eq!(ask(&yes)["on"], json!(false));
     assert_eq!(s.log("foldertrust.removed").len(), 1);
     assert_eq!(s.log("foldertrust.remembered").len(), 2);
+
+    // Codex's question is read since 18 Nov 2026 (its real screen was
+    // captured for the owner's request that a pair starts without asking):
+    // a ticked folder is answered, with the key Codex's own choice takes.
+    let codex_dir = folder(&s, "codex-ticked");
+    let codex = start(&s, "codex", &codex_dir, json!({"trust_folder": true}));
+    s.wait_text(&codex, TRUSTED);
+    let log = wait_for("Codex's answer in the ship's log", 10, || {
+        Some(answers(&s, &codex)).filter(|a| !a.is_empty())
+    });
+    assert_eq!(log[0]["data"]["agent"], json!("codex"), "{log:?}");
 }
 
 /// Claude Code's own choice on its screen is "No, exit" (recorded from

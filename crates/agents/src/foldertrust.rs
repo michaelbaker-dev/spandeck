@@ -32,8 +32,10 @@
 //!   more row straight under its hint: the model and effort, at the right
 //!   edge ("Gemini 4 Carbon · medium"). That one row is allowed for, by
 //!   its shape (`status_row`), and nothing else is.
-//! - Codex (0.169.0) asks "Trust this folder?" too, but its screen has not
-//!   been captured, so it has no shape here: it is only ever `Mentioned`.
+//! - Codex: read from a real 0.169.0 pane on 18 Nov 2026, started in a
+//!   new git repository and not answered (the rows are in this file's
+//!   tests). Its choices are numbered and its own choice is "1. Trust and
+//!   continue". It asks in a git repository; in a plain folder it did not.
 
 use crate::AgentKind;
 
@@ -105,6 +107,19 @@ const ANTIGRAVITY: Shape = Shape {
     status: true,
 };
 
+const CODEX: Shape = Shape {
+    title: "Folder access",
+    body: &[
+        "Trust this folder? Codex can read, edit, and run files here, subject to your permission settings. Folder settings can run code automatically, even without a model request. Continue only if you trust these files. Your trust decision will be saved.",
+    ],
+    trust: "1. Trust and continue",
+    exit: "2. Back to Agent Command Center",
+    marker: '›',
+    trust_first: true,
+    hint: "enter continue · esc back",
+    status: false,
+};
+
 /// What the owner is told a program's folder trust allows, from the
 /// program's own documentation.
 pub struct Info {
@@ -128,10 +143,17 @@ const ANTIGRAVITY_INFO: Info = Info {
     reach: "Antigravity keeps its trust for that exact folder: a subfolder is asked about again.",
 };
 
+const CODEX_INFO: Info = Info {
+    allows: "Codex will read, edit and run files there, subject to its permission settings, and the folder's own Codex settings apply: its project config, hooks and rules, which can run code without a model asking.",
+    source: "https://learn.chatgpt.com/docs/config-file/config-reference",
+    reach: "Codex saves the decision in its own config file (projects.<path>.trust_level).",
+};
+
 fn shape(kind: AgentKind) -> Option<&'static Shape> {
     match kind {
         AgentKind::Claude => Some(&CLAUDE),
         AgentKind::Antigravity => Some(&ANTIGRAVITY),
+        AgentKind::Codex => Some(&CODEX),
         _ => None,
     }
 }
@@ -142,6 +164,7 @@ pub fn info(kind: AgentKind) -> Option<&'static Info> {
     match kind {
         AgentKind::Claude => Some(&CLAUDE_INFO),
         AgentKind::Antigravity => Some(&ANTIGRAVITY_INFO),
+        AgentKind::Codex => Some(&CODEX_INFO),
         _ => None,
     }
 }
@@ -384,6 +407,31 @@ pub mod drawn {
         out
     }
 
+    /// Codex 0.169.0's screen as a real pane showed it (18 Nov 2026), at
+    /// `cols` columns.
+    pub fn codex(folder: &str, focus: Focus, cols: usize) -> Vec<String> {
+        let mut out = vec![String::new(), "  Folder access".into(), String::new()];
+        out.push(format!("  {folder}"));
+        out.push(String::new());
+        out.extend(
+            wrap(super::CODEX.body[0], cols - 4)
+                .into_iter()
+                .map(|l| format!("  {l}")),
+        );
+        out.push(String::new());
+        out.push(format!(
+            "{}1. Trust and continue",
+            mark(focus == Focus::Trust, "›")
+        ));
+        out.push(format!(
+            "{}2. Back to Agent Command Center",
+            mark(focus == Focus::Exit, "›")
+        ));
+        out.push(String::new());
+        out.push("  enter continue · esc back".into());
+        out
+    }
+
     /// Codex's review of new hooks, as a real 0.169.0 drew it
     /// (agents/hookstrust.rs). Not a folder's trust: it is here so that
     /// the tests can show it is never read as one.
@@ -507,6 +555,61 @@ mod tests {
             rows[at] = text.to_string();
         }
         rows
+    }
+
+    /// The owner's request (18 Nov 2026): a pair's agents start without
+    /// asking. Codex's question had no shape here, so it always waited for
+    /// the owner. These are the rows of a real Codex 0.169.0 pane at its
+    /// question (`pane.text`, 120 columns), which nobody answered.
+    #[test]
+    fn the_real_codex_screen_is_read_exactly_and_its_own_choice_is_to_trust() {
+        let folder = "/tmp/claude-1000/-home-mbaker-code-mterm/f79fb1f0-280a-43b3-9357-1471bf3cdc3f/scratchpad/codextrust/fresh-b";
+        let mut rows = vec![String::new(); 32];
+        let path = format!("  {folder}");
+        for (at, text) in [
+            (1, "  Folder access"),
+            (3, path.as_str()),
+            (5, "  Trust this folder? Codex can read, edit, and run files here, subject to your permission settings. Folder settings"),
+            (6, "  can run code automatically, even without a model request. Continue only if you trust these files. Your trust"),
+            (7, "  decision will be saved."),
+            (9, "› 1. Trust and continue"),
+            (10, "  2. Back to Agent Command Center"),
+            (12, "  enter continue · esc back"),
+        ] {
+            rows[at] = text.to_string();
+        }
+        let exact = Some(Seen {
+            level: Level::Exact,
+            focus: Some(Focus::Trust),
+        });
+        assert_eq!(read(AgentKind::Codex, &rows, &folders(folder)), exact);
+        // The stand-in draws the same words, at any width.
+        for cols in [60, 120, 200] {
+            let drawn = drawn::codex(folder, Focus::Trust, cols);
+            assert_eq!(read(AgentKind::Codex, &drawn, &folders(folder)), exact);
+        }
+        // Another folder's question, or a word more, is not that screen.
+        assert_eq!(
+            read(AgentKind::Codex, &rows, &folders("/somewhere/else")).map(|s| s.level),
+            Some(Level::Choices)
+        );
+        let mut more = rows.clone();
+        more[8] = "  This folder's settings run a command at start.".into();
+        assert_eq!(
+            read(AgentKind::Codex, &more, &folders(folder)).map(|s| s.level),
+            Some(Level::Choices)
+        );
+        // Its update notice, which it may show first, is no trust question.
+        let update: Vec<String> = [
+            "  Update available · 0.169.0 → 0.170.0",
+            "› 1. Update now",
+            "  2. Skip",
+            "  enter continue · esc skip",
+        ]
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+        assert_eq!(read(AgentKind::Codex, &update, &folders(folder)), None);
     }
 
     /// Found with the real Antigravity 1.5.9 (16 Nov 2026): a ticked

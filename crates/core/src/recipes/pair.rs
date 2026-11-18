@@ -74,6 +74,9 @@ pub struct PairOpts {
     pub critic: Option<String>,
     pub brief: Option<String>,
     pub open: bool,
+    /// The owner's word on the folder's trust (`--trust-folder`,
+    /// `--no-trust-folder`). None: on for a folder this recipe makes.
+    pub trust: Option<bool>,
 }
 
 fn program(role: &str, named: Option<&str>, default: &str) -> Result<AgentKind> {
@@ -159,6 +162,10 @@ impl Daemon {
             cwd: None,
         };
         let had_file = ProjectFile::load(&self.expand_path(&opts.path)).is_ok();
+        // A folder that is not there, or holds nothing, is made here: it
+        // will hold only what this recipe writes.
+        let fresh = std::fs::read_dir(self.expand_path(&opts.path))
+            .map_or(true, |mut d| d.next().is_none());
         let view = self.project_new(
             &opts.path,
             opts.name,
@@ -286,6 +293,35 @@ impl Daemon {
             json!({"id": row_id(&name), "kind": "pair", "written": written, "kept": kept}),
         );
 
+        // The folder's trust (DECISIONS.md, "A pair's folder is trusted
+        // when the recipe made it"): the project's switch, turned on at
+        // the owner's word, or without it for a folder made here that is
+        // a repository of its own (Claude Code keeps its trust for the
+        // whole repository a folder is in).
+        let own_root = git::toplevel(&dir).is_none_or(|top| {
+            crate::foldertrust::canon(Path::new(&top)) == crate::foldertrust::canon(&dir)
+        });
+        let was_on = self.folder_trust_list()["projects"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|p| p["project"] == json!(name)));
+        let trusted = opts.trust.unwrap_or(was_on || (fresh && own_root));
+        if trusted != was_on {
+            self.folder_trust_project(&name, trusted, by)?;
+        }
+        match (opts.trust, trusted, was_on) {
+            (Some(true), ..) => notes.push("Folder trust is on for this project, as you asked: an agent that asks whether to trust this folder is answered yes.".into()),
+            (None, true, false) => notes.push("This folder was made now and holds only what was written here, so folder trust is on for this project: an agent that asks whether to trust it is answered yes (--no-trust-folder leaves it to you).".into()),
+            (None, false, _) => notes.push(
+                if fresh {
+                    "This folder is inside another git repository, which an agent's trust would cover, so each agent will ask you whether to trust it (--trust-folder answers for you)."
+                } else {
+                    "This folder was already there, so each agent will ask you whether to trust it (--trust-folder answers for you)."
+                }
+                .into(),
+            ),
+            _ => {}
+        }
+
         let mut view = if opts.open {
             self.project_open(&name, by).map_err(|e| {
                 invalid(format!(
@@ -313,6 +349,7 @@ impl Daemon {
         view["recipe"] = json!({
             "name": "pair", "written": written, "kept": kept, "commit": commit,
             "brief": has_brief, "roles": roles, "notes": notes, "next": next,
+            "folder_trust": trusted,
         });
         Ok(view)
     }

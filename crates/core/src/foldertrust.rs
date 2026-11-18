@@ -633,7 +633,7 @@ enum Act {
 /// The programs the tick box is offered for, and what each one's trust
 /// allows, for the list in Agent setup.
 fn programs() -> Vec<Value> {
-    [AgentKind::Claude, AgentKind::Antigravity]
+    [AgentKind::Claude, AgentKind::Antigravity, AgentKind::Codex]
         .into_iter()
         .filter_map(|k| {
             screen::info(k).map(|i| {
