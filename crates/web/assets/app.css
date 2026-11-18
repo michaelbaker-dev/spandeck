@@ -426,18 +426,55 @@ button.agent-row:hover { border-color: var(--blue); }
 .agent-row .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .strip .mini.on { border-color: var(--blue); color: var(--text); }
 
-/* Watch and the lines between panes that are talking */
-.workspace, .watch-map { position: relative; }
-.watch { flex: 1; min-height: 0; display: flex; gap: 12px; padding: 12px; }
-.watch-map { flex: 3; min-width: 0; display: flex; flex-direction: column; justify-content: space-evenly; gap: 110px; padding: 20px 20px 44px; background: var(--well2); border: 1px solid var(--line); border-radius: 12px; overflow: auto; }
-.watch-row { display: flex; justify-content: space-evenly; gap: 40px; flex-wrap: wrap; }
-.watch-card { width: 300px; max-width: 100%; position: relative; z-index: 2; }
-.watch-card .tile { display: block; }
-.watch-feed { flex: 1; min-width: 240px; max-width: 360px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
-.watch-key { position: absolute; left: 14px; bottom: 10px; display: flex; flex-wrap: wrap; gap: 14px; color: var(--muted); }
-.watch-key .key { display: inline-block; width: 22px; margin-right: 6px; vertical-align: middle; border-top: 2px solid var(--link); }
-.watch-key .key.task { border-top: 3px solid var(--blue); }
-.watch-key .key.message.live { border-top: 3px dashed var(--green); }
+/* Watch: a row for each agent, who waits for whom, and their messages as one
+   thread. One column on a phone; on a wide screen the agents stand beside
+   the thread. Only the thread scrolls. */
+.watch { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+.watch-side { display: contents; }
+.watch-strip { flex: none; max-height: 40%; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.watch-agent { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 7px 10px; background: var(--panel); border: 1px solid var(--line); border-left-width: 3px; border-radius: 8px; color: var(--text); text-decoration: none; }
+.watch-agent:hover { border-color: var(--blue); }
+.watch-agent.needs_you { border-color: var(--amber); background: var(--needs-bg); } .watch-agent.error { border-color: var(--red); background: var(--err-bg); }
+.watch-agent-head { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 8px; min-width: 0; }
+.watch-agent-name { min-width: 0; overflow-wrap: anywhere; color: var(--strong); }
+.watch-does { padding-left: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Why it needs the owner is said whole. */
+.watch-does.attn { color: var(--amber); white-space: normal; overflow-wrap: anywhere; } .watch-agent.error .watch-does.attn { color: var(--red); }
+.watch-open { order: 3; flex: none; display: flex; gap: 8px; overflow-x: auto; }
+.watch-open .btn { flex: 1 0 auto; justify-content: center; text-decoration: none; color: var(--text); }
+.watch-talk { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.watch-waits { flex: none; display: flex; flex-direction: column; gap: 4px; }
+.watch-wait { padding: 5px 10px; border: 1px dashed var(--dash); border-radius: 8px; background: var(--work-bg); text-align: center; overflow-wrap: anywhere; font-size: calc(13px * var(--ui-scale)); }
+.watch-wait.attn { border-color: var(--amber); background: var(--needs-bg); }
+.watch-thread { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; padding: 10px; background: var(--well2); border: 1px solid var(--line); border-radius: 10px; }
+.watch-thread > :first-child { margin-top: auto; }
+.watch-none { margin: auto; padding: 16px; text-align: center; max-width: 46ch; } .watch-none p { margin: 0 0 10px; }
+.watch-earlier { align-self: center; flex: none; } .watch-first { align-self: center; margin: 0; }
+/* Who said it: its side, its name, and the colour its row above has. */
+.watch-msg { flex: none; display: flex; flex-direction: column; gap: 3px; width: fit-content; max-width: min(92%, 720px); min-width: min(60%, 260px); }
+.watch-msg.left { align-self: flex-start; } .watch-msg.right { align-self: flex-end; }
+.watch-msg-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 6px; padding: 0 4px; min-width: 0; }
+.watch-msg-head b { min-width: 0; overflow-wrap: anywhere; } .watch-time { margin-left: auto; padding-left: 8px; white-space: nowrap; }
+.watch-bubble { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 7px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
+.watch-msg.left .watch-bubble { border-left-width: 3px; border-top-left-radius: 3px; } .watch-msg.right .watch-bubble { border-right-width: 3px; border-top-right-radius: 3px; }
+.watch-agent.c0, .watch-msg.c0.left .watch-bubble { border-left-color: var(--blue); } .watch-msg.c0.right .watch-bubble { border-right-color: var(--blue); }
+.watch-agent.c1, .watch-msg.c1.left .watch-bubble { border-left-color: var(--green); } .watch-msg.c1.right .watch-bubble { border-right-color: var(--green); }
+.watch-agent.c2, .watch-msg.c2.left .watch-bubble { border-left-color: var(--violet); } .watch-msg.c2.right .watch-bubble { border-right-color: var(--violet); }
+.watch-agent.c3, .watch-msg.c3.left .watch-bubble { border-left-color: var(--muted); } .watch-msg.c3.right .watch-bubble { border-right-color: var(--muted); }
+/* The owner's own words, and words for the owner. */
+.watch-msg.you .watch-bubble { background: var(--sel-bg); border-color: var(--blue-line); border-style: dashed; }
+.watch-msg.to-you .watch-bubble { border-style: dashed; }
+.watch-body { align-self: stretch; min-width: 0; overflow-wrap: anywhere; font-size: calc(13px * var(--ui-scale)); line-height: 1.4; }
+.watch-body.folded { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
+.watch-more[hidden] { display: none; }
+@media (min-width: 1000px) {
+  .watch { flex-direction: row; gap: 12px; }
+  .watch-side { display: flex; flex-direction: column; gap: 8px; flex: 0 0 320px; min-width: 0; min-height: 0; }
+  .watch-strip { flex: 0 1 auto; max-height: none; min-height: 0; }
+  .watch-open { display: none; }
+}
+/* The lines between panes of a layout that are talking */
+.workspace { position: relative; }
 .links { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; overflow: visible; }
 .workspace > .links { z-index: 4; }
 .link { fill: none; stroke: var(--link); stroke-width: 1.5; }
@@ -457,8 +494,6 @@ button.agent-row:hover { border-color: var(--blue); }
 .side-section b { text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
 .side-hint { padding: 2px 8px; }
 .link-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; }
-.watch-card.guest .tile { border-color: var(--violet-line); }
-.watch-from { position: absolute; top: -9px; right: 10px; z-index: 1; background: var(--panel2); }
 
 /* Phone: a layout, one pane at a time. The pane is the pane as it is when
    opened by itself (its bar, then its conversation or its terminal); the
@@ -505,9 +540,8 @@ button.agent-row:hover { border-color: var(--blue); }
 .phone-project { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
 .phone-project-head { color: var(--muted); padding: 0 2px; } .phone-project-head b { color: var(--text); }
 .phone-row .ico-wrap .ico { width: 20px; height: 20px; }
-.phone-watch .watch { flex-direction: column; padding: 0; flex: none; }
-.phone-watch .watch-map { flex: none; gap: 60px; padding: 14px 10px 64px; }
-.phone-watch .watch-feed { max-width: none; overflow: visible; }
+/* Watch on a phone: the page stands still and the thread scrolls. */
+.phone-watch { overflow: hidden; gap: 10px; } .phone-watch > .row { flex: none; flex-wrap: wrap; } .phone-watch .watch { padding: 0; }
 #app.kbd .phone-layout > .lay-strip, #app.kbd .lay-term > .row { display: none; }
 #app.kbd .lay-term { padding-top: 4px; gap: 6px; overflow: hidden; }
 .lay-title select { font-size: calc(14px * var(--ui-scale)); min-height: 44px; }

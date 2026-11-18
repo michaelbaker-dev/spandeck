@@ -2717,37 +2717,186 @@ function drawLinks(box, links) {
 const findPaneAny = (id) => { for (const list of S.panes.values()) { const p = list.find(x => x.id === id); if (p) return p; } return null; };
 let pendingLinks = null; // { selector, links } drawn after the next render
 
-// Watch: every agent in a project as a small live card, laid out by who works
-// for whom, with the lines, and the messages between them at the side.
+// ---- Watch: a project's agents, and what they say to each other ----
+// (The owner, 18 Nov 2026, of the map of cards and lines this replaced: "Hard
+// to tell what's really happening between agents".) At the top a row for
+// each agent: its state and one sentence of what it is doing. Then who is
+// waiting for whom, where that can be told. Then the messages as one
+// thread, the newest at the bottom.
+const watchOpen = new Set(); // messages whose long text is shown whole
+// What the Watch on screen holds: every message seen while it is open (the
+// station's own list is its newest 60, of all its projects) and what
+// "Earlier messages" asked for.
+let watchHeld = { key: '' };
+let watchScroll = null; // where the thread was, for after the draw
+const WATCH_FIRST = 60; // what the refresh asks for (`msg.recent`, `deck.snapshot`)
+
+function watchHold(st, key) {
+  if (watchHeld.key !== key) watchHeld = { key, byId: new Map(), slots: new Map(), limit: 0, more: null, asking: false, prepend: false, atEnd: true };
+  for (const m of S.msgs.get(st) || []) if (m && m.id) watchHeld.byId.set(m.id, m);
+  return watchHeld;
+}
+// The station is asked for more of its newest messages (it has no "before
+// this one"): of every project, since what the owner sent is in none.
+async function watchEarlier(st) {
+  const k = watchHeld;
+  if (k.asking) return;
+  k.asking = true;
+  update();
+  const limit = k.limit ? k.limit * 2 : WATCH_FIRST * 4;
+  try {
+    const rows = await api.on(st, 'msg.recent', { limit }, { within: 10000 });
+    for (const m of Array.isArray(rows) ? rows : []) if (m && m.id) k.byId.set(m.id, m);
+    k.limit = limit;
+    k.more = Array.isArray(rows) && rows.length >= limit;
+    k.prepend = true;
+  } catch (e) { toast(`${st} did not give its earlier messages: ${e.message}`, 'error'); }
+  k.asking = false;
+  if (watchHeld === k) update();
+}
+
+const watchClock = (ts) => {
+  const d = new Date(Number(ts) || 0), t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return d.toDateString() === new Date().toDateString() ? t : `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${t}`;
+};
+// One sentence of what an agent is doing, from what its pane says of itself.
+function watchDoes(st, p) {
+  const s = stateOf(p), one = (t) => String(t).trim().split('\n')[0].slice(0, 200);
+  if (s === 'needs_you') return 'Needs you: ' + (p.needs_reason || 'it is waiting for you');
+  if (s === 'error') return 'Stopped on an error' + (p.needs_reason ? ': ' + p.needs_reason : '');
+  if (p.paused) return 'Paused';
+  const now = s !== 'working' ? '' : p.tool ? `Using ${p.tool} · ${ago(p.tool_since_ms)}` : (p.subagents || []).length ? `Running ${p.subagents.length === 1 ? 'a sub-agent' : p.subagents.length + ' sub-agents'} of its own` : '';
+  const task = p.task ? (S.tasks.get(st) || []).find(t => t.id === p.task) : null, boss = p.parent_pane ? panesOf(st).find(x => x.id === p.parent_pane) : null;
+  // After a turn that ended by itself the pane holds the agent's last words;
+  // during one, or after one that was stopped, it may hold what it was asked.
+  const what = task ? `${p.role || 'helper'}${boss ? ' for ' + boss.name : ''}: ${one(task.goal)}` : s === 'done' && p.last_message ?'Last said: ' + one(p.last_message) : p.title && p.title !== p.name ? one(p.title) : '';
+  return [now, what].filter(Boolean).join(' · ');
+}
+
 function watchView(st, project) {
   const live = panesOf(st).filter(p => !p.exited);
-  const mine = live.filter(p => p.project === project);
   // Projects linked with this one on the same station: their agents are shown
-  // too, marked with their project, so the lines between the two are drawn.
+  // too, marked with their project, since the two message each other.
   const pr = (S.projects.get(st) || []).find(x => x.name === project);
   const linked = [...new Set(linksOf(pr).filter(l => (!l.station || l.station === st) && l.with !== project).map(l => l.with))];
-  const theirs = live.filter(p => linked.includes(p.project));
-  const all = [...mine, ...theirs];
-  const rowsOf = (set) => {
-    const depth = (p, n = 0) => { const up = set.find(x => x.id === p.parent_pane); return up && n < 6 ? depth(up, n + 1) : n; };
-    const rows = [];
-    for (const p of set) (rows[depth(p)] ||= []).push(p);
-    return rows.filter(Boolean).map(r => r.sort((a, b) => a.name.localeCompare(b.name)));
+  const among = new Set([project, ...linked]);
+  const byName = (name) => live.filter(p => p.project === name && p.agent !== 'shell').sort((a, b) => a.name.localeCompare(b.name));
+  const agents = [project, ...linked].flatMap(byName);
+  const k = watchHold(st, `${st}/${project}`);
+  // An agent keeps its side and its colour while this Watch is open, whoever
+  // starts or ends beside it.
+  for (const p of agents) if (!k.slots.has(p.id)) k.slots.set(p.id, k.slots.size);
+  const nth = new Map(agents.map(p => [p.id, k.slots.get(p.id)]));
+  const label = (p) => (p.project !== project ? `${p.project}/${p.name}` : p.name);
+  // Who an address in a message is: an agent on screen, the owner, or the
+  // words as they are. A bare name or an id that two panes could be is nobody.
+  const who = (addr, m) => {
+    const raw = String(addr ?? ''), a = raw.replace(/@[^@]*$/, '');
+    if (a === 'you') return { you: true, name: 'you' };
+    const p = m.project ? paneAt(st, raw, m.project, among)
+      : (c => (c.length === 1 ? c[0] : null))(live.filter(x => x.id === a || x.name === a || (x.project && `${x.project}/${x.name}` === a)));
+    if (p && nth.has(p.id)) return { pane: p, name: label(p) };
+    const shown = raw.endsWith('@' + st) ? a : raw;
+    return { name: (shown.startsWith(project + '/') ? shown.slice(project.length + 1) : shown) || '?' };
   };
-  loadThumbs(st, all);
-  pendingLinks = { selector: '.watch-map', links: linksFor(st, all) };
-  const msgs = (S.msgs.get(st) || []).filter(m => m.project === project || linked.includes(m.project)).slice(0, 14);
-  const card = (p) => h('div', { class: 'watch-card' + (p.project !== project ? ' guest' : ''), dataset: { pane: p.id } },
-    p.project !== project ? h('span', { class: 'chip guest watch-from', title: `This agent is in ${p.project}, which is linked with ${project}` }, 'from ' + p.project) : null, paneTile(st, p));
+  const msgs = [...k.byId.values()].map(m => ({ m, from: who(m.from ?? m.sender, m), to: who(m.to ?? m.recipient, m) }))
+    .filter(x => (x.m.project ? among.has(x.m.project) : !!(x.from.pane || x.to.pane)))
+    .sort((a, b) => (a.m.ts - b.m.ts) || ((a.m.seq || 0) - (b.m.seq || 0)));
+  // More may be held by the station when its list came back full.
+  const more = k.more ?? (S.msgs.get(st) || []).length >= WATCH_FIRST;
+
+  // Who waits for whom, said only where it is known: the last word between
+  // two agents was A's, A has stopped, and B is at work (or waits for the
+  // owner). A result ends a job and waits for nothing.
+  const last = new Map();
+  for (const x of msgs) if (x.from.pane && x.to.pane && x.from.pane.id !== x.to.pane.id) last.set([x.from.pane.id, x.to.pane.id].sort().join('|'), x);
+  const waits = [...last.values()].map(({ m, from, to }) => {
+    const a = stateOf(from.pane), b = stateOf(to.pane);
+    if (m.kind === 'result' || (a !== 'idle' && a !== 'done') || (b !== 'working' && b !== 'needs_you')) return null;
+    return h('div', { class: 'watch-wait' + (b === 'needs_you' ? ' attn' : ''), title: `${from.name}'s last message to ${to.name} was ${ago(m.ts)} ago and has no answer yet; ${from.name} has stopped and ${to.name} ${b === 'working' ? 'is working' : 'needs you'}.` },
+      h('b', {}, from.name), ' is waiting for ', h('b', {}, to.name), b === 'needs_you' ? ', which needs you' : '', h('span', { class: 'muted' }, ` · ${ago(m.ts)}`));
+  }).filter(Boolean);
+
+  const row = (p) => {
+    const s = stateOf(p), u = p.usage, does = watchDoes(st, p);
+    const cost = u && u.cost_estimate !== null && u.cost_estimate !== undefined ? 'est. ' + fmtCost(u.cost_estimate) : u && u.total_tokens ? fmtTokens(u.total_tokens) + ' tokens' : '';
+    return h('a', { class: `watch-agent ${s} c${nth.get(p.id) % 4}` + (p.project !== project ? ' guest' : ''), href: paneUrl(st, p.id), role: 'listitem', dataset: { pane: p.id }, 'aria-label': `Open ${paneSays(p)}`, oncontextmenu: (e) => { e.preventDefault(); paneMenu(e, st, p, 'tile'); } },
+      h('div', { class: 'watch-agent-head' }, dot(p), h('b', { class: 'watch-agent-name' }, p.name),
+        h('span', { class: 'muted small' }, `${p.agent_name || p.agent} · ${STATE_LABEL[s] || s} ${ago(p.state_since_ms)}`),
+        p.project !== project ? h('span', { class: 'chip guest', title: `This agent is in ${p.project}, which is linked with ${project}` }, 'from ' + p.project) : null),
+      does || cost ? h('div', { class: 'watch-does small' + (s === 'needs_you' || s === 'error' ? ' attn' : ' muted') }, h('span', { class: 'watch-does-text' }, does), cost ? h('span', { class: 'watch-cost', title: usageTitle(u) }, does ? ' · ' + cost : cost) : null) : null);
+  };
+
+  // Whether the thread is at its newest message is known from the owner's
+  // own scrolling, not measured at a draw: a screen that got shorter (the
+  // keyboard, the phone turned) has moved nothing.
+  // And a scroll that comes with a change of room (the browser keeping its
+  // place in a thread that shrank) is not the owner's.
+  const atEnd = (e, sure) => {
+    const t = document.querySelector('.watch-thread');
+    if (!t || t.dataset.key !== k.key) return;
+    if (sure || k.room === watchRoomOf(t)) k.atEnd = t.scrollHeight - t.scrollTop - t.clientHeight < 48;
+    else if (k.atEnd) t.scrollTop = t.scrollHeight;
+    k.room = watchRoomOf(t);
+  };
+  const msg = ({ m, from, to }) => {
+    const i = from.pane ? nth.get(from.pane.id) : -1, open = watchOpen.has(m.id);
+    const body = h('div', { class: 'watch-body pre' + (open ? '' : ' folded') }, String(m.body ?? ''));
+    // Shown after the draw, if the text is longer than the fold (watchAfterRender).
+    const fold = h('button', { type: 'button', class: 'mini watch-more', hidden: !open, 'aria-expanded': String(open), onclick: () => {
+      const now = !watchOpen.has(m.id);
+      if (now) watchOpen.add(m.id); else watchOpen.delete(m.id);
+      body.classList.toggle('folded', !now);
+      fold.textContent = now ? 'less' : 'more';
+      fold.setAttribute('aria-expanded', String(now));
+      atEnd(null, true);
+    } }, open ? 'less' : 'more');
+    return h('div', { class: 'watch-msg ' + (from.you ? 'you right' : i < 0 ? 'left' : `c${i % 4} ${i % 2 ? 'right' : 'left'}`) + (to.you ? ' to-you' : ''), dataset: { msg: m.id } },
+      h('div', { class: 'watch-msg-head small' }, h('b', {}, from.name), h('span', { class: 'muted', 'aria-label': 'to' }, '→'), h('b', {}, to.name),
+        m.kind && m.kind !== 'note' ? h('span', { class: 'chip' }, m.kind) : null,
+        h('span', { class: 'muted watch-time', title: new Date(Number(m.ts) || 0).toLocaleString() }, watchClock(m.ts))),
+      h('div', { class: 'watch-bubble' }, body, fold));
+  };
+
+  const old = document.querySelector('.watch-thread'), same = old && old.dataset.key === k.key;
+  watchScroll = { atEnd: k.atEnd, fromEnd: same ? old.scrollHeight - old.scrollTop : 0, prepend: k.prepend };
+  k.prepend = false;
+  const where = linked.length ? `${project} or ${linked.join(', ')}` : project;
+  const earlier = (words) => h('button', { type: 'button', class: 'watch-earlier', disabled: k.asking, onclick: () => watchEarlier(st) }, k.asking ? 'Asking…' : words);
   return h('div', { class: 'watch' },
-    h('div', { class: 'watch-map' }, all.length
-      ? [rowsOf(mine).map(r => h('div', { class: 'watch-row' }, r.map(card))),
-        linked.map(name => rowsOf(theirs.filter(p => p.project === name)).map(r => h('div', { class: 'watch-row' }, r.map(card))))]
-      : h('div', { class: 'empty' }, `Nothing is running in ${project}.`),
-      h('div', { class: 'watch-key' }, h('span', {}, h('i', { class: 'key task' }), 'task given'), h('span', {}, h('i', { class: 'key message live' }), 'message, moving now'), h('span', {}, h('i', { class: 'key message' }), 'message in the last 10 minutes'))),
-    h('aside', { class: 'watch-feed' }, h('h3', {}, 'Messages between agents'),
-      msgs.length ? msgs.map(m => h('div', { class: 'note' }, h('div', {}, h('b', {}, String(m.from ?? m.sender).replace(/@.*$/, '')), ' → ', h('b', {}, String(m.to ?? m.recipient).replace(/@.*$/, '')), h('span', { class: 'muted' }, ` · ${m.kind} · ${ago(m.ts)} ago`)), h('div', { class: 'pre' }, String(m.body || '').slice(0, 280))))
-        : h('p', { class: 'muted' }, linked.length ? `No messages yet. When agents in ${project} or ${linked.join(', ')} message each other, they appear here and as lines on the left.` : 'No messages yet. When agents in this project message each other, they appear here and as lines on the left.')));
+    h('div', { class: 'watch-side' },
+      h('div', { class: 'watch-strip', role: 'list', 'aria-label': `Agents in ${project}` }, agents.length ? agents.map(row) : h('p', { class: 'muted watch-none' }, `No agent is running in ${where}.`)),
+      agents.length ? h('div', { class: 'watch-open' }, agents.map(p => h('a', { class: 'btn', href: paneUrl(st, p.id) }, 'Open ' + p.name))) : null),
+    h('div', { class: 'watch-talk' },
+      waits.length ? h('div', { class: 'watch-waits', role: 'status' }, waits) : null,
+      h('div', { class: 'watch-thread', dataset: { key: k.key }, onscroll: atEnd, role: 'log', 'aria-label': `Messages between the agents in ${project}`, tabindex: '0' },
+        msgs.length && more ? earlier('Earlier messages') : null,
+        msgs.length && !more && k.limit ? h('p', { class: 'muted small watch-first' }, `These are all the messages ${st} holds.`) : null,
+        msgs.length ? msgs.map(msg)
+          : h('div', { class: 'muted watch-none' }, h('p', {}, `No messages yet. What the agents in ${where} say to each other, and what you and they say to one another, is shown here.`), more ? earlier('Look further back') : null))));
+}
+// After the draw: "more" where a text is longer than its fold, and the thread
+// at its newest message unless the owner has scrolled up to read.
+// A thread whose room changed (the keyboard, the phone turned, the bar above
+// it wrapping) is put back at its newest message if that is where it was.
+const watchRoomOf = (t) => `${t.clientHeight}/${t.scrollHeight}`;
+const watchRoom = typeof ResizeObserver === 'function' ? new ResizeObserver((all) => {
+  for (const { target: t } of all) {
+    if (t.dataset.key !== watchHeld.key) continue;
+    if (watchHeld.atEnd) t.scrollTop = t.scrollHeight;
+    watchHeld.room = watchRoomOf(t);
+  }
+}) : null;
+function watchAfterRender() {
+  const w = watchScroll, box = document.querySelector('.watch-thread');
+  watchScroll = null;
+  watchRoom?.disconnect();
+  if (!w || !box) return;
+  watchRoom?.observe(box);
+  for (const b of box.querySelectorAll('.watch-body.folded')) b.nextSibling.hidden = b.scrollHeight <= b.clientHeight + 1;
+  if (w.prepend) box.scrollTop = box.scrollHeight - w.fromEnd;
+  else if (w.atEnd) box.scrollTop = box.scrollHeight;
+  watchHeld.room = watchRoomOf(box);
 }
 
 // ---- layouts ----
@@ -3432,7 +3581,7 @@ function watchPage(st, project) {
   const info = S.fleet.stations.find(s => s.station === st);
   const pr = (S.projects.get(st) || []).find(x => x.name === project);
   const head = h('div', { class: 'lay-head' }, h('span', { class: 'ico-wrap' }, watchIcon()), h('b', { class: 'lay-name' }, 'Watch'),
-    h('span', { class: 'muted lay-saved' }, `Every agent in ${project} on ${st}, and who is talking to whom`), linkedChip(st, pr));
+    h('span', { class: 'muted lay-saved' }, `The agents in ${project} on ${st}, and what they say to each other`), linkedChip(st, pr));
   const body = info && info.state !== 'online' ? h('div', { class: 'empty' }, awayText(st, info))
     : !pr ? h('div', { class: 'empty' }, S.loaded && heard(st) ? `There is no project ${project} on ${st}.` : waitWords(st)) : watchView(st, project);
   return shell(h('main', { class: 'station-main' }, head, body));
@@ -4218,6 +4367,7 @@ function render() {
   // A conversation that left the page stops being watched; one still on it
   // is where it was scrolled to.
   chatAfterRender();
+  watchAfterRender();
   // Each terminal has its look before it is first drawn.
   applyLook();
   for (const t of S.terms.values()) {
