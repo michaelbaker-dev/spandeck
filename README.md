@@ -16,7 +16,7 @@ Read `DECISIONS.md` before changing anything. It wins over every other document.
 
 ## Status
 
-Version 0.4.14. It is built on one Linux arm64 machine and tested there and in CI on
+Version 0.4.15. It is built on one Linux arm64 machine and tested there and in CI on
 macOS, Linux and Windows, and runs on real Macs and one real Windows 11 PC. Windows is
 new since 0.3.0 and its programs are not code-signed yet: where Smart App Control is
 on, Windows blocks them. It is young: see "Not verified" below before you rely on it.

@@ -3759,7 +3759,7 @@ mod in_a_browser {
             "bmluZSBoZXJvbnM=",
         ));
         page.js(&give("drop", "tally.csv", "text/csv", "YSxiCjEsMg=="));
-        let chips = page.wait("three chips, arrived", "(r => r && r.querySelectorAll('.att-chip.done').length === 3 && [[...r.querySelectorAll('.att-chip')].map(c => [c.dataset.name, c.classList.contains('pic'), !!c.querySelector('img.att-thumb'), c.querySelector('.att-what')?.innerText.replace(/\\s+/g, ' ') || '', Math.round(c.getBoundingClientRect().height)]), window.__dropping, document.querySelector('.phone-chat .chat-send').disabled, r.nextSibling.className])(document.querySelector('.phone-chat .chat-atts'))");
+        let chips = page.wait("three chips, arrived", "(r => r && r.querySelectorAll('.att-chip.done').length === 3 && r.querySelector('.att-chip').getBoundingClientRect().height > 0 && [[...r.querySelectorAll('.att-chip')].map(c => [c.dataset.name, c.classList.contains('pic'), !!c.querySelector('img.att-thumb'), c.querySelector('.att-what')?.innerText.replace(/\\s+/g, ' ') || '', Math.round(c.getBoundingClientRect().height)]), window.__dropping, document.querySelector('.phone-chat .chat-send').disabled, r.nextSibling.className])(document.querySelector('.phone-chat .chat-atts'))");
         assert_eq!(
             chips[0],
             json!([
@@ -3837,7 +3837,13 @@ mod in_a_browser {
         );
         page.js("document.querySelector('.dialog .icon-btn').click()");
         // After a reload, from the station.
-        page.js("(location.reload(), true)");
+        // (Marked, so that what is read next is the page that came back
+        // and not the one that is going: the reload is not at once.)
+        page.js("(window.__going = true, location.reload(), true)");
+        page.wait(
+            "the page back",
+            "!window.__going && !!document.querySelector('.phone-chat .chat-box')",
+        );
         assert_eq!(page.wait("the same after a reload", bubble), shown);
         // Files alone are a message too.
         s.wait_state(&lead, "done");
