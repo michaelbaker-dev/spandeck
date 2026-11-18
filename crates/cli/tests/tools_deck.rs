@@ -584,6 +584,19 @@ fn a_failure(phone: bool) {
     );
     assert_eq!(runs(&b), 2, "two presses started one install");
 
+    // Escape closes the dialog on top and leaves the one behind it (found
+    // while this screen was built: one press closed Tools as well).
+    page.js("document.querySelector('.tl-add').click()");
+    page.wait(
+        "the add dialog over Tools",
+        "document.querySelectorAll('.backdrop').length === 2",
+    );
+    page.js("(dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true})), true)");
+    page.wait(
+        "Tools still open after Escape",
+        "document.querySelectorAll('.backdrop').length === 1 && !document.querySelector('.tools-add') && !!document.querySelector('.tl-top')",
+    );
+
     // Remove asks once, and says what it does and does not do.
     page.js("document.querySelector('.tl-card[data-tool=playwright] .tl-remove').click()");
     page.wait(

@@ -88,7 +88,9 @@ export async function copyText(text, said = 'Copied') {
 // on the page does not close it: for the dialog whose changes show on the page.
 export function dialog(title, build, opts = {}) {
   const close = () => { back.remove(); removeEventListener('keydown', onKey, true); opts.onClose && opts.onClose(); };
-  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  // Escape closes the dialog on top only: each dialog listens, and one press
+  // used to close every dialog that was open, the one behind included.
+  const onKey = (e) => { if (e.key === 'Escape' && [...document.querySelectorAll('.backdrop')].pop() === back) { e.stopImmediatePropagation(); close(); } };
   const box = h('div', { class: 'dialog' + (opts.wide ? ' wide' : ''), role: 'dialog', 'aria-label': title },
     h('div', { class: 'dialog-head' }, h('h2', {}, title), h('button', { class: 'icon-btn', title: 'Close', onclick: close }, '✕')));
   const body = h('div', { class: 'dialog-body' });
