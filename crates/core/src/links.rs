@@ -14,6 +14,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::daemon::{invalid, Daemon, Error, Result};
+use crate::memory::Which;
 use crate::paths::now_ms;
 
 /// How long a search waits for another station's findings.
@@ -224,8 +225,14 @@ impl Daemon {
             .and_then(|v| v.as_u64())
             .unwrap_or(20)
             .min(100) as u32;
+        // Posted notes only (of one kind when asked): a linked project is
+        // never shown this project's activity, whatever it asks for.
+        let which = match Which::parse(params.get("kind").and_then(|v| v.as_str()), None) {
+            Ok(Which::Kind(k)) => Which::Kind(k),
+            _ => Which::Notes,
+        };
         Ok(json!(self.label(
-            self.notes_search(project, get("query"), limit, true),
+            self.context_search(project, get("query"), limit, &which),
             project,
             &self.station,
         )))
@@ -242,21 +249,38 @@ impl Daemon {
     /// The findings board as a project sees it: its own memory, plus what
     /// linked projects posted. Each row says which project it is from. A
     /// station that cannot be reached is named in a row of kind `unreachable`.
-    pub async fn board_search(&self, project: &str, query: &str, limit: u32) -> Vec<Value> {
+    /// `which`: posted notes unless activity is asked for (memory.rs);
+    /// activity is this project's own, never a linked project's.
+    pub async fn board_search(
+        &self,
+        project: &str,
+        query: &str,
+        limit: u32,
+        which: &Which,
+    ) -> Vec<Value> {
         let mut rows = self.label(
-            self.context_search(project, query, limit),
+            self.context_search(project, query, limit, which),
             project,
             &self.station,
         );
+        let theirs = match which {
+            Which::Activity => return rows,
+            Which::Kind(k) => Which::Kind(k.clone()),
+            Which::Notes | Which::All => Which::Notes,
+        };
         let links = self.links_of(project);
         if links.is_empty() {
             return rows;
         }
+        let kind = match &theirs {
+            Which::Kind(k) => Some(k.as_str()),
+            _ => None,
+        };
         let mut missing = Vec::new();
         for (other, station) in links {
             if station == self.station {
                 rows.extend(self.label(
-                    self.notes_search(&other, query, limit, true),
+                    self.context_search(&other, query, limit, &theirs),
                     &other,
                     &station,
                 ));
@@ -265,12 +289,12 @@ impl Daemon {
             let call = self.fleet.call(
                 &station,
                 "project.link.findings",
-                json!({"project": other, "for": project, "query": query, "limit": limit}),
+                json!({"project": other, "for": project, "query": query, "limit": limit, "kind": kind}),
             );
             match tokio::time::timeout(PEER_WAIT, call).await {
                 Ok(Ok(Value::Array(theirs))) => rows.extend(theirs),
                 _ => missing.push(json!({
-                    "id": null, "ts": now_ms(), "kind": "unreachable", "author": null, "task": null,
+                    "id": null, "ts": now_ms(), "kind": "unreachable", "class": "note", "author": null, "task": null,
                     "project": other, "station": station, "unreachable": true,
                     "text": format!("Station {station} could not be reached, so the findings of linked project {other} are missing here."),
                 })),

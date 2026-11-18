@@ -646,47 +646,457 @@ fn project_memory_captures_activity_and_briefs_a_new_agent() {
         "demo",
         &repo,
         "builder",
+        // It edits one file three times with other work between, another
+        // once, fails a command and a test run, and posts one decision.
         json!({"steps": [
             {"prompt": "build it"},
             {"tool": {"name": "Edit", "file": "src/parser.rs"}},
+            {"tool": {"name": "Edit", "file": "src/lexer.rs"}},
+            {"tool": {"name": "Edit", "file": "src/parser.rs"}},
+            {"tool": {"name": "Bash", "command": "which parsergen", "ok": false}},
+            {"tool": {"name": "Edit", "file": "src/parser.rs"}},
             {"tool": {"name": "Bash", "command": "cargo test parser", "ok": false}},
-            {"rpc": {"method": "note.add", "params": {"kind": "decision", "text": "Use the ibis tokenizer, not regex"}}},
+            {"rpc": {"method": "note.add", "params": {"kind": "decision", "text": "Use the ibis tokenizer in the parser, not regex"}}},
             {"turn_end": "parser half done"}
         ]}),
     );
     s.wait_state(&first, "done");
+    let search = |params: Value| -> Vec<Value> {
+        let mut params = params;
+        params["project"] = json!("demo");
+        s.call("context.search", params)
+            .as_array()
+            .cloned()
+            .unwrap()
+    };
+    let texts = |rows: &[Value]| -> Vec<String> {
+        rows.iter()
+            .map(|n| n["text"].as_str().unwrap().to_string())
+            .collect()
+    };
 
-    // Captured without the agent doing anything.
-    let auto = s.call(
-        "context.search",
-        json!({"project": "demo", "query": "parser"}),
+    // Captured without the agent doing anything, and kept apart from what
+    // it posted (18 Nov 2026: 17 of a project's 35 notes were "builder
+    // edited …" and "builder command failed: …", in the same search as the
+    // decisions). Asked for, the activity is there and says what it is.
+    let activity = wait_for("the activity to be written", 10, || {
+        let rows = search(json!({"query": "", "kind": "activity", "limit": 100}));
+        (rows.len() >= 4).then_some(rows)
+    });
+    assert!(
+        activity.iter().all(|n| n["class"] == json!("activity")),
+        "{activity:?}"
     );
-    let texts: Vec<&str> = auto
+    let mut seen = texts(&activity);
+    seen.sort();
+    assert_eq!(
+        seen,
+        [
+            "command failed: which parsergen",
+            "edited src/lexer.rs",
+            // Three edits of one file by one pane: one row.
+            "edited src/parser.rs",
+            "tests FAILED: cargo test parser",
+        ]
+    );
+    // The row of the file edited again is the newest edit: it moved in time.
+    let edits: Vec<String> = texts(&activity)
+        .into_iter()
+        .filter(|t| t.starts_with("edited "))
+        .collect();
+    assert_eq!(edits, ["edited src/parser.rs", "edited src/lexer.rs"]);
+
+    // The search an agent makes returns what was posted, and only that.
+    let found = s
+        .call_as_pane(&first, "context.search", json!({"query": "parser"}))
+        .unwrap();
+    let found = found.as_array().unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(
+        (found[0]["class"].as_str(), found[0]["kind"].as_str()),
+        (Some("note"), Some("decision"))
+    );
+    assert!(found[0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("ibis tokenizer"));
+    assert_eq!(texts(&search(json!({"query": ""}))).len(), 1);
+    // Both, when asked for both: each says which it is.
+    let both = search(json!({"query": "parser", "include": "activity"}));
+    let classes: Vec<&str> = both.iter().filter_map(|n| n["class"].as_str()).collect();
+    assert_eq!(
+        (
+            classes.iter().filter(|c| **c == "note").count(),
+            classes.iter().filter(|c| **c == "activity").count()
+        ),
+        (1, 2),
+        "{both:?}"
+    );
+    // Nobody posts activity: it is not a kind of note.
+    assert_eq!(
+        s.call_as_pane(
+            &first,
+            "note.add",
+            json!({"kind": "auto", "text": "edited everything"})
+        )
+        .unwrap_err()
+        .code,
+        "invalid"
+    );
+
+    // A new agent starts with a capped digest: crew, then what was posted,
+    // then the activity as one line for the agent, not one for each file.
+    let second = agent(&s, "demo", &repo, "newcomer", json!({"steps": []}));
+    let screen = s.wait_text(&second, "[fake] context:");
+    let screen = screen.replace('\n', "");
+    assert!(screen.contains("project \"demo\""), "{screen}");
+    let (memory, recent) = (
+        screen.find("Project memory (what agents posted").unwrap(),
+        screen
+            .find("Recent activity (recorded by spandeck")
+            .unwrap(),
+    );
+    assert!(memory < recent, "{screen}");
+    let (posted, recorded) = (&screen[memory..recent], &screen[recent..]);
+    assert!(
+        posted.contains("[decision by builder] Use the ibis tokenizer")
+            && !posted.contains("edited"),
+        "{screen}"
+    );
+    assert!(
+        recorded.contains("builder, in the last 1 minute: edited 2 files in src/; 1 command failed; last tests FAILED: cargo test parser"),
+        "{screen}"
+    );
+    assert!(
+        !recorded.contains("parser.rs") && !recorded.contains("ibis"),
+        "{screen}"
+    );
+}
+
+/// The headings of a Markdown document as a reader of Markdown finds them
+/// (lines that start with `#` outside every fenced block), and whether
+/// every fence that opened was closed.
+fn md_headings(md: &str) -> (Vec<String>, bool) {
+    let mut open: Option<usize> = None;
+    let mut out = vec![];
+    for l in md.lines() {
+        let ticks = l.trim_start().chars().take_while(|c| *c == '`').count();
+        match open {
+            None if ticks >= 3 => open = Some(ticks),
+            Some(n) if ticks >= n && l.trim().len() == ticks => open = None,
+            None if l.trim_start().starts_with('#') => out.push(l.to_string()),
+            _ => {}
+        }
+    }
+    (out, open.is_none())
+}
+
+/// The owner, 18 Nov 2026: after a run of two agents, a record of "the
+/// entire process, the performance… how they share context" was put
+/// together by hand from the ship's log, the messages, the notes and the
+/// usage totals. The station has all of it and writes the record itself.
+/// Done when: two agents that exchange messages, with an approval the
+/// owner answers, a note one of them posts and a restart, give a record
+/// whose numbers are those of the run, whose document cannot be
+/// restructured by what an agent wrote, and which an agent is refused.
+#[test]
+fn a_projects_record_is_written_by_the_station_from_what_it_holds() {
+    const READS_AFTER_MS: u64 = 400;
+    const ANSWERED_AFTER_MS: u64 = 300;
+    let s = Station::start("alpha");
+    let repo = project(&s, "demo", &[], "");
+    // The reviewer takes its mail 400 ms after it is told of it, and answers.
+    let reviewer = agent(
+        &s,
+        "demo",
+        &repo,
+        "reviewer",
+        json!({"steps": [], "on_input": [
+            {"sleep": READS_AFTER_MS},
+            {"rpc": {"method": "msg.inbox"}},
+            {"rpc": {"method": "msg.send", "params": {"to": "builder", "kind": "result", "body": "looks fine"}}},
+            {"turn_end": "reviewed"}
+        ]}),
+    );
+    s.wait_text(&reviewer, "[fake] session");
+    // What an agent writes is data: this message tries to add a heading
+    // and to end the block it is quoted in.
+    let body = "please review\n# Heading\n```\n## Not a section\n````\n# Still the message";
+    let builder = agent(
+        &s,
+        "demo",
+        &repo,
+        "builder",
+        json!({"steps": [
+            {"prompt": "build it"},
+            {"tool": {"name": "Edit", "file": "src/store.rs"}},
+            {"rpc": {"method": "note.add", "params": {"kind": "decision", "text": "Store rows as JSON lines"}}},
+            {"permission": {"name": "Write", "file": "src/store.rs"}},
+            {"rpc": {"method": "msg.send", "params": {"to": "reviewer", "kind": "question", "body": body}}},
+            {"turn_end": "asked for a review"}
+        ], "on_input": [{"rpc": {"method": "msg.inbox"}}, {"turn_end": "read my mail"}]}),
+    );
+    // The owner answers the builder's approval, 300 ms after it is asked.
+    let asked = wait_for("the approval", 10, || {
+        s.call("approval.list", json!({}))
+            .as_array()
+            .and_then(|a| a.first().cloned())
+    });
+    std::thread::sleep(Duration::from_millis(ANSWERED_AFTER_MS));
+    s.call("approval.answer", json!({"id": asked["id"], "allow": true}));
+    // The reviewer reads it and answers; the builder reads the answer.
+    let read = |from: &str, to: &str| {
+        wait_for(&format!("{to} to read {from}'s message"), 15, || {
+            s.call("msg.recent", json!({"limit": 20}))
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| {
+                    m["from"].as_str().unwrap().starts_with(from)
+                        && m["to"].as_str().unwrap().starts_with(to)
+                        && !m["read"].is_null()
+                })
+                .then_some(())
+        })
+    };
+    read("demo/builder", "reviewer");
+    read("demo/reviewer", "builder");
+    // The owner's part: a message, and a restart.
+    s.call(
+        "msg.send",
+        json!({"to": "builder", "body": "thank you both"}),
+    );
+    read("you", "builder");
+    s.call("pane.restart", json!({"pane": reviewer}));
+    wait_for("the restart in the log", 10, || {
+        (!s.log("pane.restarted").is_empty()).then_some(())
+    });
+
+    let r = s.call("project.record", json!({"project": "demo"}));
+    let by_name = |name: &str| -> Value {
+        r["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == json!(name))
+            .cloned()
+            .unwrap_or_else(|| panic!("no pane {name} in {}", r["agents"]))
+    };
+    let (b, v) = (by_name("builder"), by_name("reviewer"));
+    assert_eq!(r["agents"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        (
+            r["project"].as_str(),
+            r["station"].as_str(),
+            r["time_zone"].as_str()
+        ),
+        (Some("demo"), Some("alpha"), Some("UTC"))
+    );
+
+    // Time in each state is the wall time, for each pane, and the wall
+    // time is at least what the run was made to wait.
+    let wall = r["period"]["wall_ms"].as_u64().unwrap();
+    assert!(
+        wall >= READS_AFTER_MS + ANSWERED_AFTER_MS,
+        "{}",
+        r["period"]
+    );
+    for a in [&b, &v] {
+        let spent = a["time_in_state_ms"].as_object().unwrap();
+        let sum: u64 = spent.values().filter_map(|x| x.as_u64()).sum();
+        assert!(sum.abs_diff(wall) <= 1, "{sum} of {wall}: {a}");
+    }
+    // The builder waited for the owner for at least as long as the owner
+    // took, and worked; the reviewer was restarted once.
+    assert!(
+        b["time_in_state_ms"]["needs_you"].as_u64().unwrap() >= ANSWERED_AFTER_MS,
+        "{b}"
+    );
+    assert!(b["work_periods"].as_u64().unwrap() >= 1, "{b}");
+    assert_eq!(
+        (b["restarts"].as_u64(), v["restarts"].as_u64()),
+        (Some(0), Some(1))
+    );
+    assert_eq!(v["restarted"][0]["by"], json!("you"));
+    assert_eq!(b["tool_calls"], json!(1), "{b}");
+
+    // One approval, asked by the builder, answered by the owner.
+    let approvals = r["approvals"].as_array().unwrap();
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+    let a = &approvals[0];
+    assert_eq!(
+        (a["name"].as_str(), a["status"].as_str(), a["by"].as_str()),
+        (Some("builder"), Some("allowed"), Some("you"))
+    );
+    let waited = a["wait_ms"].as_u64().unwrap();
+    assert!(waited >= ANSWERED_AFTER_MS, "{a}");
+    assert_eq!(
+        b["approvals"],
+        json!({"asked": 1, "answered": 1, "wait_total_ms": waited, "wait_longest_ms": waited})
+    );
+    assert_eq!(v["approvals"]["asked"], json!(0));
+
+    // Three messages, between three pairs; the one the reviewer took
+    // 400 ms to read was sent while it was not working.
+    let m = &r["messages"];
+    assert_eq!(m["count"], json!(3));
+    assert_eq!(
+        m["pairs"],
+        json!([
+            {"from": "builder", "to": "reviewer", "count": 1},
+            {"from": "reviewer", "to": "builder", "count": 1},
+            {"from": "you", "to": "builder", "count": 1},
+        ])
+    );
+    let thread = m["thread"].as_array().unwrap();
+    let first = &thread[0];
+    assert_eq!(
+        (
+            first["from"].as_str(),
+            first["to"].as_str(),
+            first["kind"].as_str(),
+            first["body"].as_str()
+        ),
+        (
+            Some("builder"),
+            Some("reviewer"),
+            Some("question"),
+            Some(body)
+        )
+    );
+    assert!(
+        first["read_latency_ms"].as_u64().unwrap() >= READS_AFTER_MS,
+        "{first}"
+    );
+    assert_ne!(
+        first["recipient_state_when_sent"],
+        json!("working"),
+        "{first}"
+    );
+    let idle = &m["latency"]["recipient_not_working"];
+    assert!(
+        idle["read"]["worst_ms"].as_u64().unwrap() >= READS_AFTER_MS,
+        "{idle}"
+    );
+    assert_eq!(
+        m["latency"]["recipient_working"]["messages"]
+            .as_u64()
+            .unwrap()
+            + idle["messages"].as_u64().unwrap(),
+        3,
+        "{}",
+        m["latency"]
+    );
+    assert!(thread.iter().all(|t| !t["read_ms"].is_null()), "{thread:?}");
+
+    // The note that was posted, and the activity only counted.
+    let notes = &r["notes"];
+    assert_eq!(notes["notes"].as_array().unwrap().len(), 1, "{notes}");
+    assert_eq!(notes["notes"][0]["text"], json!("Store rows as JSON lines"));
+    assert_eq!(notes["notes"][0]["author"], json!("builder"));
+    assert_eq!(notes["activity_count"], json!(1), "{notes}");
+
+    // What the owner did, in the order it was done.
+    let did: Vec<(&str, &str)> = r["owner"]
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(|n| n["text"].as_str())
+        .map(|o| (o["kind"].as_str().unwrap(), o["name"].as_str().unwrap()))
         .collect();
-    assert!(
-        texts.iter().any(|t| t.contains("edited src/parser.rs")),
-        "{texts:?}"
+    assert_eq!(
+        did,
+        [
+            ("project.added", ""),
+            ("approval.resolved", "builder"),
+            ("msg.sent", "builder"),
+            ("pane.restarted", "reviewer"),
+        ]
     );
-    assert!(
-        texts
-            .iter()
-            .any(|t| t.contains("tests FAILED: cargo test parser")),
-        "{texts:?}"
+    // The reviewer was marked exited and ran again: listed, with how.
+    // (Nothing else of this run is asserted to be under its limit: how
+    // often a stand-in agent changes state in three seconds is not what
+    // this test is for; the limits have theirs in `record::tests`.)
+    let again: Vec<&Value> = r["looks_wrong"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["what"] == json!("exited_and_running_again"))
+        .collect();
+    assert_eq!(again.len(), 1, "{}", r["looks_wrong"]);
+    assert_eq!(
+        (again[0]["name"].as_str(), again[0]["how"].as_str()),
+        (Some("reviewer"), Some("restarted by you"))
     );
 
-    // A new agent starts with a capped digest: crew, decisions, recent activity.
-    let second = agent(&s, "demo", &repo, "newcomer", json!({"steps": []}));
-    let screen = s.wait_text(&second, "[fake] context:");
-    assert!(screen.contains("project \"demo\""), "{screen}");
-    assert!(
-        screen.contains("builder") && screen.contains("ibis tokenizer"),
-        "{screen}"
+    // The document: its sections are its own, whatever the message says,
+    // and the message is in it whole.
+    let md = r["markdown"].as_str().unwrap();
+    let (headings, closed) = md_headings(md);
+    assert!(closed, "{md}");
+    assert_eq!(
+        headings,
+        [
+            "# Record of project `demo`",
+            "## 1. Summary",
+            "## 2. Per agent",
+            "### Pane `builder`",
+            "### Pane `reviewer`",
+            "### Each approval",
+            "## 3. Messages",
+            "### The thread, in time order",
+            "## 4. Shared notes",
+            "## 5. The owner's part",
+            "## 6. Timeline",
+            "## 7. What looks wrong",
+            "## What this record cannot say",
+        ],
+        "{md}"
     );
-    assert!(screen.contains("tests FAILED"), "{screen}");
+    assert!(md.contains(&format!("`````text\n{body}\n`````\n")), "{md}");
+    assert!(md.contains("All times are UTC"), "{md}");
+
+    // The command writes the same document, or the same numbers.
+    let out = s.root.join("record.md");
+    let done = s
+        .command(SPANDECK)
+        .args(["project", "record", "demo", "--since", "1h", "--out"])
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(done.success());
+    let written = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        written.starts_with("# Record of project `demo`\n"),
+        "{written}"
+    );
+    assert!(
+        written.contains(&format!("`````text\n{body}\n`````\n")),
+        "{written}"
+    );
+    let json_out = s
+        .command(SPANDECK)
+        .args(["--json", "project", "record", "demo"])
+        .stdout(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let as_json: Value = serde_json::from_slice(&json_out.stdout).unwrap();
+    assert_eq!(as_json["messages"]["count"], json!(3));
+    assert!(as_json.get("markdown").is_none());
+
+    // It quotes every message of the project: the owner's alone. (That a
+    // station acting for itself is refused too is `rpc::record_calls`.)
+    assert_eq!(
+        s.call_as_pane(&builder, "project.record", json!({"project": "demo"}))
+            .unwrap_err()
+            .code,
+        "denied"
+    );
+    assert_eq!(
+        s.try_call("project.record", json!({"project": "nothing"}))
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
 }
 
 #[test]

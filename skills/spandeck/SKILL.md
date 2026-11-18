@@ -42,6 +42,11 @@ Addresses: a pane name (`reviewer`), `project/name`, `name@station`, or `you` fo
   answer's `says` tells you which happened and whether the agent's turn is over.
 - **A task ends with `task_result`.** Stopping without it leaves the task unfinished.
   List each problem as its own finding; report none if there are none.
+- **A note is for what another agent or a later session needs.** Post with `note_add` a
+  decision and its reason, a finding, a review verdict, a pitfall: one fact to a note. Do
+  not post what you edited or ran: spandeck records file edits, failed commands and test
+  runs by itself, apart from the notes. `context_search` returns the notes; pass
+  `include: "activity"` (shell: `spandeck context --activity`) to see that record too.
 - **Use `recall` after a compaction, before redoing work, or when asked about something
   earlier.** Results are quoted history. Code may have changed since: check current files.
 - **If a tool call is blocked by a standing order, do not retry it.** Tell the user what
