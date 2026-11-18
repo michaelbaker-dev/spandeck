@@ -441,7 +441,6 @@ button.agent-row:hover { border-color: var(--blue); }
 .watch-strip { flex: none; max-height: 40%; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
 .watch-agent { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 7px 10px; background: var(--panel); border: 1px solid var(--line); border-left-width: 3px; border-radius: 8px; color: var(--text); text-decoration: none; }
 .watch-agent:hover { border-color: var(--blue); }
-.watch-agent.needs_you { border-color: var(--amber); background: var(--needs-bg); } .watch-agent.error { border-color: var(--red); background: var(--err-bg); }
 .watch-agent-head { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 8px; min-width: 0; }
 .watch-agent-name { min-width: 0; overflow-wrap: anywhere; color: var(--strong); }
 .watch-does { padding-left: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -454,7 +453,6 @@ button.agent-row:hover { border-color: var(--blue); }
 .watch-wait { padding: 5px 10px; border: 1px dashed var(--dash); border-radius: 8px; background: var(--work-bg); text-align: center; overflow-wrap: anywhere; font-size: calc(13px * var(--ui-scale)); }
 .watch-wait.attn { border-color: var(--amber); background: var(--needs-bg); }
 .watch-thread { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; padding: 10px; background: var(--well2); border: 1px solid var(--line); border-radius: 10px; }
-.watch-thread > :first-child { margin-top: auto; }
 .watch-none { margin: auto; padding: 16px; text-align: center; max-width: 46ch; } .watch-none p { margin: 0 0 10px; }
 .watch-earlier { align-self: center; flex: none; } .watch-first { align-self: center; margin: 0; }
 /* Who said it: its side, its name, and the colour its row above has. */
@@ -464,11 +462,15 @@ button.agent-row:hover { border-color: var(--blue); }
 .watch-msg-head b { min-width: 0; overflow-wrap: anywhere; } .watch-time { margin-left: auto; padding-left: 8px; white-space: nowrap; }
 .watch-bubble { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 7px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
 .watch-msg.left .watch-bubble { border-left-width: 3px; border-top-left-radius: 3px; } .watch-msg.right .watch-bubble { border-right-width: 3px; border-top-right-radius: 3px; }
-.watch-agent.c0, .watch-msg.c0.left .watch-bubble { border-left-color: var(--blue); } .watch-msg.c0.right .watch-bubble { border-right-color: var(--blue); }
-.watch-agent.c1, .watch-msg.c1.left .watch-bubble { border-left-color: var(--green); } .watch-msg.c1.right .watch-bubble { border-right-color: var(--green); }
-.watch-agent.c2, .watch-msg.c2.left .watch-bubble { border-left-color: var(--violet); } .watch-msg.c2.right .watch-bubble { border-right-color: var(--violet); }
-.watch-agent.c3, .watch-msg.c3.left .watch-bubble { border-left-color: var(--muted); } .watch-msg.c3.right .watch-bubble { border-right-color: var(--muted); }
-/* The owner's own words, and words for the owner. */
+.watch-agent, .watch-msg { --who: var(--muted); }
+.watch-agent.c0, .watch-msg.c0 { --who: var(--blue); } .watch-agent.c1, .watch-msg.c1 { --who: var(--green); }
+.watch-agent.c2, .watch-msg.c2 { --who: var(--violet); } .watch-agent.c3, .watch-msg.c3 { --who: var(--amber); }
+/* An agent's colour is its card's and its messages' background, so that who
+   is speaking is seen without reading a name (the owner, 18 Nov 2026). */
+.watch-agent[class*=" c"], .watch-msg[class*=" c"] .watch-bubble { background: color-mix(in srgb, var(--who) 16%, var(--panel)); border-color: color-mix(in srgb, var(--who) 45%, var(--line)); }
+.watch-agent[class*=" c"], .watch-msg.left[class*=" c"] .watch-bubble { border-left-color: var(--who); } .watch-msg.right[class*=" c"] .watch-bubble { border-right-color: var(--who); }
+.watch-msg[class*=" c"] .watch-msg-head b:first-child { color: color-mix(in srgb, var(--who) 70%, var(--strong)); }
+.watch-agent.needs_you { border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); } .watch-agent.error { border-color: var(--red); box-shadow: inset 0 0 0 1px var(--red); }
 .watch-msg.you .watch-bubble { background: var(--sel-bg); border-color: var(--blue-line); border-style: dashed; }
 .watch-msg.to-you .watch-bubble { border-style: dashed; }
 .watch-body { align-self: stretch; min-width: 0; overflow-wrap: anywhere; font-size: calc(13px * var(--ui-scale)); line-height: 1.4; }

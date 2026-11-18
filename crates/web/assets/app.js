@@ -2975,6 +2975,9 @@ function watchView(st, project) {
   const msgs = [...k.byId.values()].map(m => ({ m, from: who(m.from ?? m.sender, m), to: who(m.to ?? m.recipient, m) }))
     .filter(x => (x.m.project ? among.has(x.m.project) : !!(x.from.pane || x.to.pane)))
     .sort((a, b) => (a.m.ts - b.m.ts) || ((a.m.seq || 0) - (b.m.seq || 0)));
+  // Drawn newest first (the owner, 18 Nov 2026): the latest message is at the
+  // top, where the eye is, and earlier ones are below it.
+  const shown = [...msgs].reverse();
   // More may be held by the station when its list came back full.
   const more = k.more ?? (S.msgs.get(st) || []).length >= WATCH_FIRST;
 
@@ -3008,8 +3011,8 @@ function watchView(st, project) {
   const atEnd = (e, sure) => {
     const t = document.querySelector('.watch-thread');
     if (!t || t.dataset.key !== k.key) return;
-    if (sure || k.room === watchRoomOf(t)) k.atEnd = t.scrollHeight - t.scrollTop - t.clientHeight < 48;
-    else if (k.atEnd) t.scrollTop = t.scrollHeight;
+    if (sure || k.room === watchRoomOf(t)) k.atEnd = t.scrollTop < 48;
+    else if (k.atEnd) t.scrollTop = 0;
     k.room = watchRoomOf(t);
   };
   const msg = ({ m, from, to }) => {
@@ -3043,10 +3046,10 @@ function watchView(st, project) {
     h('div', { class: 'watch-talk' },
       waits.length ? h('div', { class: 'watch-waits', role: 'status' }, waits) : null,
       h('div', { class: 'watch-thread', dataset: { key: k.key }, onscroll: atEnd, role: 'log', 'aria-label': `Messages between the agents in ${project}`, tabindex: '0' },
+        msgs.length ? shown.map(msg)
+          : h('div', { class: 'muted watch-none' }, h('p', {}, `No messages yet. What the agents in ${where} say to each other, and what you and they say to one another, is shown here.`), more ? earlier('Look further back') : null),
         msgs.length && more ? earlier('Earlier messages') : null,
-        msgs.length && !more && k.limit ? h('p', { class: 'muted small watch-first' }, `These are all the messages ${st} holds.`) : null,
-        msgs.length ? msgs.map(msg)
-          : h('div', { class: 'muted watch-none' }, h('p', {}, `No messages yet. What the agents in ${where} say to each other, and what you and they say to one another, is shown here.`), more ? earlier('Look further back') : null))));
+        msgs.length && !more && k.limit ? h('p', { class: 'muted small watch-first' }, `These are all the messages ${st} holds.`) : null)));
 }
 // After the draw: "more" where a text is longer than its fold, and the thread
 // at its newest message unless the owner has scrolled up to read.
@@ -3056,7 +3059,7 @@ const watchRoomOf = (t) => `${t.clientHeight}/${t.scrollHeight}`;
 const watchRoom = typeof ResizeObserver === 'function' ? new ResizeObserver((all) => {
   for (const { target: t } of all) {
     if (t.dataset.key !== watchHeld.key) continue;
-    if (watchHeld.atEnd) t.scrollTop = t.scrollHeight;
+    if (watchHeld.atEnd) t.scrollTop = 0;
     watchHeld.room = watchRoomOf(t);
   }
 }) : null;
@@ -3067,8 +3070,12 @@ function watchAfterRender() {
   if (!w || !box) return;
   watchRoom?.observe(box);
   for (const b of box.querySelectorAll('.watch-body.folded')) b.nextSibling.hidden = b.scrollHeight <= b.clientHeight + 1;
-  if (w.prepend) box.scrollTop = box.scrollHeight - w.fromEnd;
-  else if (w.atEnd) box.scrollTop = box.scrollHeight;
+  // At the newest message it stays there. Reading further down, a message
+  // that arrives above must not move what is being read: the distance from
+  // the end is kept (Safari does not anchor a scroll by itself). Earlier
+  // messages are added below, which moves nothing.
+  if (w.atEnd) box.scrollTop = 0;
+  else if (!w.prepend && w.fromEnd) box.scrollTop = box.scrollHeight - w.fromEnd;
   watchHeld.room = watchRoomOf(box);
 }
 

@@ -1612,7 +1612,9 @@ fn the_watch_view_is_a_conversation() {
     page.phone_screen();
     page.goto("/s/alpha/w/pairtest");
     let fits = "document.documentElement.scrollWidth <= innerWidth && document.body.scrollWidth <= innerWidth";
-    let msgs = "[...document.querySelectorAll('.watch-thread .watch-msg')]";
+    // In the order they were said. On the page the newest is at the top
+    // (the owner, 18 Nov 2026), which is checked below.
+    let msgs = "[...document.querySelectorAll('.watch-thread .watch-msg')].reverse()";
     page.wait(
         "the thread",
         &format!("{msgs}.length === 10 && document.querySelectorAll('.watch-strip .watch-agent').length === 2"),
@@ -1681,6 +1683,21 @@ fn the_watch_view_is_a_conversation() {
     // The newest message is in view, in a thread longer than its room.
     let newest_seen = format!("(t => (r => t.scrollHeight > t.clientHeight && r.top >= t.getBoundingClientRect().top && r.bottom <= t.getBoundingClientRect().bottom + 1)({msgs}.at(-1).getBoundingClientRect()))(document.querySelector('.watch-thread'))");
     page.wait("the newest message in view", &newest_seen);
+    // It is the first in the thread, at the top, and each agent's messages
+    // have the background of that agent's card, unlike the other's.
+    assert_eq!(
+        page.js(&format!("(t => [t.querySelector('.watch-msg') === {msgs}.at(-1), t.scrollTop])(document.querySelector('.watch-thread'))")),
+        json!([true, 0])
+    );
+    let tint = |sel: &str| {
+        page.js(&format!(
+            "getComputedStyle(document.querySelector('{sel}')).backgroundColor"
+        ))
+    };
+    let (a, b) = (tint(".watch-agent.c0"), tint(".watch-agent.c1"));
+    assert_ne!(a, b);
+    assert_eq!(tint(".watch-msg.c0 .watch-bubble"), a);
+    assert_eq!(tint(".watch-msg.c1 .watch-bubble"), b);
     assert_eq!(page.js(fits), json!(true));
 
     // Waiting: the last word between the two was the builder's, the builder
@@ -1701,7 +1718,7 @@ fn the_watch_view_is_a_conversation() {
     // page is drawn again.
     let first = format!("{msgs}[0]");
     let folded = format!("(m => [m.querySelector('.watch-body').classList.contains('folded'), m.querySelector('.watch-body').scrollHeight > m.querySelector('.watch-body').clientHeight + 1, m.querySelector('.watch-more').hidden, m.querySelector('.watch-more').innerText])({first})");
-    page.js("(t => { t.scrollTop = 0; return true; })(document.querySelector('.watch-thread'))");
+    page.js("(t => { t.scrollTop = t.scrollHeight; return true; })(document.querySelector('.watch-thread'))");
     assert_eq!(page.js(&folded), json!([true, true, false, "more"]));
     // A short one has no toggle.
     assert_eq!(
@@ -1731,21 +1748,21 @@ fn the_watch_view_is_a_conversation() {
         );
     }
 
-    // Scrolled up to read, the thread stays where it is when a message
-    // arrives. And now the last word is the critic's, which is still at
-    // work: nobody is said to be waiting.
-    let top =
-        page.js("(t => (t.scrollTop = 30, t.scrollTop))(document.querySelector('.watch-thread'))");
-    assert_eq!(top, json!(30));
+    // Scrolled down to read earlier messages, what is being read stays
+    // where it is when a message arrives above it. And now the last word is
+    // the critic's, which is still at work: nobody is said to be waiting.
+    let reading = format!("Math.round({msgs}[3].getBoundingClientRect().top - document.querySelector('.watch-thread').getBoundingClientRect().top)");
+    page.js("(t => (t.scrollTop = 120, t.scrollTop))(document.querySelector('.watch-thread'))");
+    let was = page.wait(
+        "scrolled away from the newest",
+        &format!("document.querySelector('.watch-thread').scrollTop >= 100 && {reading}"),
+    );
     say(&critic, "builder", "note", "Round 2: clean.");
     page.wait("the new message", &format!("{msgs}.length === 11"));
     page.wait("nobody waiting", &format!("{waits}.length === 0"));
-    assert_eq!(
-        page.js("document.querySelector('.watch-thread').scrollTop"),
-        top
-    );
-    // At the bottom, it follows the newest.
-    page.js("(t => { t.scrollTop = t.scrollHeight; return true; })(document.querySelector('.watch-thread'))");
+    assert_eq!(page.js(&reading), was);
+    // At the top, it follows the newest.
+    page.js("(t => { t.scrollTop = 0; return true; })(document.querySelector('.watch-thread'))");
     say(&critic, "builder", "result", "Signed off.");
     page.wait("the newest", &format!("{msgs}.length === 12"));
     page.wait("the newest message in view again", &newest_seen);
