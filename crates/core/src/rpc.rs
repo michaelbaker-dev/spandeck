@@ -376,7 +376,8 @@ impl Until {
 ///   question for the owner (done, failed, idle, or ended);
 /// - `needs_owner`: it waits for the owner, with `needs_reason`;
 /// - `message`: `{id, from, kind}` of the message that ended the wait,
-///   never what it says: it is read with the inbox tool, and stays unread;
+///   never what it says, and the wait reads nothing: its words are the
+///   inbox tool's to give, or the notice's of the caller's next hook;
 /// - `says`: all of that in one sentence, with what to do next.
 fn wait_answer(mut view: Value, message: Option<(String, String)>, timed_out: bool) -> Value {
     let name = view["name"].as_str().unwrap_or("the pane").to_string();
@@ -399,7 +400,7 @@ fn wait_answer(mut view: Value, message: Option<(String, String)>, timed_out: bo
     let (why, says) = if let Some((id, _)) = &message {
         (
             "message".to_string(),
-            format!("{name} sent you a message ({id}): read it with the inbox tool. Now: {now}."),
+            format!("{name} sent you a message ({id}): read it with the inbox tool, unless a notice has already quoted it to you in full. Now: {now}."),
         )
     } else if timed_out {
         (
@@ -2571,7 +2572,7 @@ impl Daemon {
                 (m.state, m.exit.is_some(), m.state_since_ms)
             };
             let message = match until {
-                Until::Message => self.mail().unread_from(&mine, &theirs),
+                Until::Message => self.mail().unread_from(&mine, &theirs, began),
                 _ => None,
             };
             let ended = match until {
