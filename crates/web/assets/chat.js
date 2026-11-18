@@ -1407,9 +1407,10 @@ class Conv {
   madeView(m, url) {
     const big = h('img', { class: 'att-large made-large', alt: String(m.name || ''), src: url, title: 'Tap to look closer' });
     big.onclick = () => big.classList.toggle('close');
-    const box = dialog(String(m.name || 'Picture'), () => h('div', { class: 'att-view made-view' }, h('div', { class: 'made-zoom' }, big),
+    const box = dialog(String(m.name || 'Picture'), (close) => h('div', { class: 'att-view made-view' }, h('div', { class: 'made-zoom' }, big),
       h('p', { class: 'muted small' }, `${fileSize(Number(m.size) || 0)}${m.w && m.h ? ` · ${m.w} × ${m.h}` : ''} · where the agent saved it on ${this.st}`),
-      this.madeActs(m, url)));
+      this.madeActs(m, url),
+      h('div', { class: 'row made-acts' }, h('button', { type: 'button', class: 'made-close', onclick: close }, 'Back to the chat'))));
     box.body.parentNode.classList.add('sheet', 'chat-sheet');
     this.madeBox = box;
   }

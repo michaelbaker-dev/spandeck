@@ -3936,9 +3936,26 @@ mod in_a_browser {
         let acts = page.wait("it large", "(d => d && d.querySelector('.made-large').naturalWidth === 640 && [...d.querySelectorAll('.made-acts button')].map(b => b.innerText))(document.querySelector('.dialog .made-view'))");
         assert_eq!(
             acts,
-            json!(["Save", "Copy path", "Attach to my next message"])
+            json!([
+                "Save",
+                "Copy path",
+                "Attach to my next message",
+                "Back to the chat"
+            ])
         );
         shoot(&page, "made-viewer-phone");
+        // A bug that happened (a real iPhone, 18 Nov 2026): the only way
+        // out was a Close under the phone's clock. There is a way out
+        // among the buttons, and it is on the screen.
+        let out = page.wait("a way out in sight", "(b => b && (r => r.top >= 0 && r.bottom <= innerHeight && r.height >= 40)(b.getBoundingClientRect()))(document.querySelector('.dialog .made-close'))");
+        assert_eq!(out, json!(true));
+        page.js("document.querySelector('.dialog .made-close').click()");
+        page.wait("the chat again", "!document.querySelector('.dialog .made-view') && !!document.querySelector('.chat-made .made-pic')");
+        page.js("document.querySelector('.chat-made .made-pic').click()");
+        page.wait(
+            "it large again",
+            "!!document.querySelector('.dialog .made-view .made-large')",
+        );
         // Back with the next message, from the station.
         page.js("document.querySelector('.dialog .made-attach').click()");
         page.wait("a chip, with nothing sent up", "(c => c && c.dataset.name === 'heron.png' && !!c.querySelector('img.att-thumb') && !document.querySelector('.dialog .made-view'))(document.querySelector('.phone-chat .att-chip.done.pic'))");
