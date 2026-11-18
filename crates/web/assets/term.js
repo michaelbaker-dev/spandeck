@@ -14,7 +14,7 @@
 // symbols font) is the same case: the terminal measured its cells with the
 // font that stood in for it, so it measures again and then does as above.
 
-import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge, heldWords, RELEASE_SAYS, trustAsksWords, trustAnsweredWords, hooksAsksWords, hooksAnsweredWords } from './ui.js';
+import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge, heldWords, rapidLine, RELEASE_SAYS, trustAsksWords, trustAnsweredWords, hooksAsksWords, hooksAnsweredWords } from './ui.js';
 import { paneIcon, iconName, hideIcon } from './icons.js';
 import { keyTyped, paneWrote, keysNotSent } from './perf.js';
 import { HOLD_MS, isTyping, isPaste, holdTake, heldTooLong, keysWords, wasWere, offWords, droppedWords, sendAct } from './typed.js';
@@ -1053,7 +1053,7 @@ export class PaneTerm {
           : h('p', { class: 'muted' }, 'No agents are working under this one. Helpers it gives tasks to, and its own sub-agents, appear here.'));
     }
     // replaceChildren would print a missing piece as the word "null".
-    this.strip.replaceChildren(...[
+    const kids = [
       dot(p),
       h('span', { class: 'ico-wrap', title: iconName(p.icon) }, paneIcon(p.icon)),
       h('span', { class: 'strip-name', title: p.address }, p.name),
@@ -1061,6 +1061,7 @@ export class PaneTerm {
       p.role ? h('span', { class: 'chip' }, p.role) : null,
       this.guest ? h('span', { class: 'chip guest', title: `A guest in this layout: this pane is ${this.guest}` }, this.guest) : null,
       h('span', { class: 'strip-activity' }, activity),
+      p.rapid ? h('span', { class: 'strip-note rapid-line', title: p.rapid.more }, p.rapid.says) : null,
       p.needs_reason && s === 'needs_you' ? h('span', { class: 'strip-reason', title: trustAsksWords(p) || hooksAsksWords(p) || p.needs_reason }, p.needs_reason) : null,
       // The program asks whether to trust the folder, and spandeck can
       // read its choices: the owner's one tap answers it.
@@ -1088,7 +1089,15 @@ export class PaneTerm {
         ? h('button', { class: 'mini danger', title: 'Stop: interrupt this turn. The process stays.', onclick: () => rpc('pane.stop') }, 'Stop') : null,
       this.onHide ? h('button', { class: 'icon-btn strip-hide', title: 'Hide this pane. It keeps running, and stays as a chip beside the layout\'s name.', 'aria-label': `Hide ${p.name}`, onclick: () => this.onHide && this.onHide() }, hideIcon()) : null,
       h('button', { class: 'icon-btn', title: 'Pane menu', 'aria-label': 'Pane menu', onclick: (e) => this._menu(e) }, '⋮'),
-    ].filter(Boolean));
+    ].filter(Boolean);
+    // The page is drawn again for every change on the station, whichever
+    // pane it is about: a strip that would say what it says already is left
+    // as it is, with whatever is under a finger or has the keyboard. (What
+    // its buttons do is by the pane's id and by `this`, which stay.)
+    const sig = h('div', { class: this.strip.className }, kids).outerHTML;
+    if (sig === this._stripSig) return;
+    this._stripSig = sig;
+    this.strip.replaceChildren(...kids);
   }
 
   _menu(e) {

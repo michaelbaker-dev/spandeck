@@ -35,7 +35,7 @@
 // - Times are the station's: an elapsed time is worked out from the clock the
 //   station sent with its answer, plus the time since that answer arrived.
 
-import { h, showMenu, toast, dialog, copyText, dot, stateOf, STATE_LABEL, fmtTokens, fmtCost, exact, modelShort, heldWords, RELEASE_SAYS, trustAnsweredWords, trustTick, trustCard, hooksTick } from './ui.js';
+import { h, showMenu, toast, dialog, copyText, dot, stateOf, STATE_LABEL, fmtTokens, fmtCost, exact, modelShort, heldWords, rapidLine, RELEASE_SAYS, trustAnsweredWords, trustTick, trustCard, hooksTick } from './ui.js';
 import { renderMarkdown } from './md.js';
 import { sendAct } from './typed.js';
 import { micFor } from './mic.js';
@@ -482,7 +482,7 @@ class Conv {
     const sub = [p.agent === 'shell' ? 'shell' : p.agent_name, this.st, p.project].filter(Boolean).join(' · ');
     const state = stateOf(p);
     const pct = [p.usage ? 1 : 0, p.usage?.context_pct ?? null, p.usage?.context_tokens ?? null];
-    const sig = JSON.stringify([phone, title, sub, state, p.needs_reason, face, this.available, this.available === false ? this.reason : '', next.length, next[0] && keyOf(next[0].st, next[0].p), this.where, p.name, pct]);
+    const sig = JSON.stringify([phone, title, sub, state, p.needs_reason, face, this.available, this.available === false ? this.reason : '', next.length, next[0] && keyOf(next[0].st, next[0].p), this.where, p.name, pct, p.rapid?.says]);
     if (sig === this.barSig) return;
     this.barSig = sig;
     const pick = (to) => h('button', { type: 'button', class: face === to ? 'on' : '', 'aria-pressed': String(face === to), onclick: (e) => { e.currentTarget.blur(); if (face !== to) setFace(this.st, p, to); } }, to === 'chat' ? 'Chat' : 'Terminal');
@@ -502,6 +502,7 @@ class Conv {
         onclick: () => env.go(env.paneUrl(next[0].st, next[0].p.id)) }, 'Next ›', h('span', { class: 'count' }, next.length)) : null,
       this.ringEl(),
       h('button', { type: 'button', class: 'icon-btn chat-more', 'aria-label': 'Pane menu', title: 'Pane menu', 'aria-haspopup': 'menu', onclick: menu }, '⋯'),
+      rapidLine(p),
     ].filter(Boolean));
   }
 
@@ -2211,7 +2212,7 @@ export function sessionRow(st, p) {
   return h('a', { class: 'phone-row session-row' + (p.unread ? ' unread' : ''), href: env.paneUrl(st, p.id), dataset: { pane: p.id },
     'aria-label': `${title}, ${p.agent_name || p.agent}, ${where}${p.unread ? ', not read' : ''}` },
     dot(p), env.paneMark(p),
-    h('div', { class: 'grow session-text' }, h('b', {}, title), h('div', { class: 'muted small' }, where)),
+    h('div', { class: 'grow session-text' }, h('b', {}, title), h('div', { class: 'muted small' }, where), rapidLine(p)),
     p.unread ? h('span', { class: 'unread-dot', title: 'It has said something you have not read' }) : null,
     h('span', { 'aria-hidden': 'true' }, '›'));
 }
