@@ -376,7 +376,25 @@ enum ProjectCmd {
         panes: Vec<String>,
         #[arg(long)]
         no_open: bool,
+        /// Set the project up by a recipe (see `spandeck project recipes`).
+        /// `pair`: a builder and a critic in this folder, with PROCESS.md
+        /// (how they work) and BRIEF.md (what they build), each sent its role.
+        #[arg(long, conflicts_with = "panes")]
+        recipe: Option<String>,
+        /// With --recipe pair: the builder's agent program (default: claude).
+        #[arg(long, requires = "recipe")]
+        builder: Option<String>,
+        /// With --recipe pair: the critic's agent program (default: codex).
+        #[arg(long, requires = "recipe")]
+        critic: Option<String>,
+        /// With --recipe pair: what is to be built, as a file or as text.
+        /// Without it BRIEF.md asks you to write one, and nobody is told to
+        /// start until you have.
+        #[arg(long, requires = "recipe")]
+        brief: Option<String>,
     },
+    /// The recipes `project new --recipe` takes.
+    Recipes,
     List,
     Open {
         name: String,
@@ -509,6 +527,36 @@ fn show(json_out: bool, v: &Value, summary: impl FnOnce(&Value) -> String) {
             println!("{s}");
         }
     }
+}
+
+/// What a recipe did, for `project new --recipe`.
+fn recipe_summary(v: &Value) -> String {
+    let r = &v["recipe"];
+    let list = |key: &str| {
+        r[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| f.as_str())
+            .collect::<Vec<_>>()
+    };
+    let mut out = vec![format!(
+        "project {} at {}",
+        v["address"].as_str().unwrap_or(""),
+        v["path"].as_str().unwrap_or("")
+    )];
+    if !list("written").is_empty() {
+        out.push(format!("wrote: {}", list("written").join(", ")));
+    }
+    if let Some(commit) = r["commit"].as_str() {
+        out.push(format!("committed as {}", &commit[..commit.len().min(12)]));
+    }
+    out.extend(list("notes").iter().map(|n| n.to_string()));
+    out.push(format!("roles: {}", r["roles"].as_str().unwrap_or("")));
+    if let Some(next) = r["next"].as_str() {
+        out.push(next.to_string());
+    }
+    out.join("\n")
 }
 
 fn pane_line(p: &Value) -> String {
@@ -819,7 +867,39 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 path,
                 panes,
                 no_open,
+                recipe,
+                builder,
+                critic,
+                brief,
             } => {
+                if let Some(recipe) = recipe {
+                    // A recipe makes the folder if it is not there.
+                    let path = path
+                        .canonicalize()
+                        .or_else(|_| std::path::absolute(&path))?;
+                    // A brief is a file's contents, or the words themselves.
+                    let brief = match brief {
+                        Some(b) if std::path::Path::new(&b).is_file() => {
+                            Some(std::fs::read_to_string(&b)?)
+                        }
+                        b => b,
+                    };
+                    let v = c.call(
+                        "project.new",
+                        json!({"path": path, "name": name, "recipe": recipe, "builder": builder,
+                               "critic": critic, "brief": brief, "open": !no_open}),
+                    )?;
+                    // A station from before this takes no recipe, and has
+                    // made a plain project.
+                    if v["recipe"].is_null() {
+                        anyhow::bail!(
+                            "project {} was made, but this station's spandeckd does not know recipes: update it",
+                            v["name"].as_str().unwrap_or("")
+                        );
+                    }
+                    show(j, &v, recipe_summary);
+                    return Ok(0);
+                }
                 let path = path.canonicalize()?;
                 let panes: Vec<Value> = panes
                     .iter()
@@ -838,6 +918,37 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                         v["address"].as_str().unwrap_or(""),
                         v["path"].as_str().unwrap_or("")
                     )
+                });
+            }
+            ProjectCmd::Recipes => {
+                let v = c.call("project.recipes", json!({}))?;
+                show(j, &v, |v| {
+                    v.as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|r| {
+                            let roles: Vec<String> = r["roles"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .map(|x| {
+                                    format!(
+                                        "[--{} <agent>] (default: {})",
+                                        x["role"].as_str().unwrap_or(""),
+                                        x["agent"].as_str().unwrap_or("")
+                                    )
+                                })
+                                .collect();
+                            format!(
+                                "{}\n  {}\n  spandeck project new --recipe {} [--name N] [--path P] {} [--brief <file or text>]",
+                                r["name"].as_str().unwrap_or(""),
+                                r["summary"].as_str().unwrap_or(""),
+                                r["name"].as_str().unwrap_or(""),
+                                roles.join(" ")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 });
             }
             ProjectCmd::List => {

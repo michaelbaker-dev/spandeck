@@ -76,6 +76,42 @@ To update a station without losing its terminals: install the new release, then
 `spandeck upgrade ~/.local/bin/spandeck`. If the new version does not start properly,
 the station goes back to the one it was running and keeps every terminal.
 
+## A builder and a critic
+
+`spandeck project new` can set a project up by a recipe. There is one, `pair`: two agents
+in one folder, a builder that writes and a critic that reviews, working through stages
+that each end with the critic's written verdict.
+
+```sh
+spandeck project new --recipe pair --path ~/code/shop --brief brief.md
+spandeck project new --recipe pair --builder codex --critic claude --brief "A page that tells the time."
+spandeck project recipes      # what recipes there are
+```
+
+`--builder` and `--critic` name agent programs (default: claude and codex; they may be the
+same). `--brief` is a file or the words themselves. `--name`, `--path` and `--no-open` are
+as for any project. The recipe:
+
+- makes the folder if it is not there, and a git repository if it is not one. A
+  repository with no commit gets its first: the files written here and no others. If no
+  author is configured the commit is by `spandeck <spandeck@localhost>`; your git
+  settings are not changed.
+- writes `PROCESS.md` (how the two work: who edits what, the stages from 0, Tools, to
+  sign-off, what a finding needs, what is recorded) and `BRIEF.md` (what to build). A
+  file of either name that is already there is yours and is kept as it is.
+- defines two panes, `builder` and `critic`, both in the project's folder, and starts them.
+- sends each its role as a message from you, once. Running the recipe again, or opening
+  the project again, does not send it twice.
+
+Without `--brief`, `BRIEF.md` asks you to write one, and nobody is told to start. Write
+it, then run `spandeck project open <name>`: the roles are sent then.
+
+The recipe answers no question an agent program asks: a pane that waits for you to trust
+the folder, or to review hooks, waits as any pane does, and reads its role afterwards.
+`PROCESS.md` is the agents' agreement, not something spandeck enforces: both work in the
+same tree, and the critic keeps to `reviews/` because the file says so. Edit the file to
+change how they work. Its text is `crates/core/src/recipes/pair-process.md`.
+
 ## Layouts
 
 A project can have named layouts: which of its panes are on screen and how they are

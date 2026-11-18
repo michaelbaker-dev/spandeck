@@ -9,7 +9,7 @@
 //!   relay     message records and the station-to-station relay (transport-agnostic)
 //!   messages  agent mail: addressing, route approval, nudges
 //!   tasks     task records, delegation, workspaces, checkpoints, sign-offs
-//!   recipes   the review loop
+//!   recipes   the review loop, and the builder and critic pair
 //!   memory    shared project memory and the start digest
 //!   links     project links: two projects whose agents message each other and share findings
 //!   orders    standing orders at five layers

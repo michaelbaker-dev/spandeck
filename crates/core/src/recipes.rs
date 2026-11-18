@@ -1,6 +1,9 @@
 //! Recipes: named multi-agent patterns. The first is the review loop: one
 //! agent writes, another reviews a snapshot, and they repeat until the review
 //! is clean, a limit is hit, or the reviewer repeats itself.
+//!
+//! A project recipe is a named way to set a project up (`project.new` with
+//! `recipe`). There is one, the pair of a builder and a critic (`pair.rs`).
 
 use std::path::Path;
 
@@ -11,6 +14,35 @@ use crate::daemon::{invalid, Caller, Daemon, Error, Result};
 use crate::git::head;
 use crate::paths::{new_id, now_ms};
 use crate::tasks::NewTask;
+
+mod pair;
+
+/// A named way to set a project up: its panes, and the files they work from.
+pub struct ProjectRecipe {
+    pub name: &'static str,
+    pub summary: &'static str,
+    /// Each role's pane, and the agent program it runs unless another is named.
+    pub roles: &'static [(&'static str, &'static str)],
+}
+
+/// Every project recipe there is. A new one is a line here and an arm in
+/// `project_recipe`.
+pub const PROJECT_RECIPES: &[ProjectRecipe] = &[pair::RECIPE];
+
+/// The list, as `project.recipes` answers it.
+pub fn project_recipes() -> Value {
+    PROJECT_RECIPES
+        .iter()
+        .map(|r| {
+            let roles: Vec<Value> = r
+                .roles
+                .iter()
+                .map(|(role, agent)| json!({"role": role, "agent": agent}))
+                .collect();
+            json!({"name": r.name, "summary": r.summary, "roles": roles})
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewLoop {
@@ -55,6 +87,41 @@ pub fn repeated(history: &[Vec<String>], findings: &[String]) -> Option<String> 
 }
 
 impl Daemon {
+    /// Set a project up by a recipe: `project.new` with `recipe`.
+    pub async fn project_recipe(
+        &self,
+        caller: &Caller,
+        recipe: &str,
+        params: &Value,
+    ) -> Result<Value> {
+        let text = |key: &str| params.get(key).and_then(|v| v.as_str()).map(String::from);
+        match recipe {
+            "pair" => {
+                let path = text("path").ok_or_else(|| invalid("missing parameter: path"))?;
+                self.pair_setup(
+                    caller,
+                    pair::PairOpts {
+                        path: path.into(),
+                        name: text("name"),
+                        builder: text(pair::BUILDER),
+                        critic: text(pair::CRITIC),
+                        brief: text("brief"),
+                        open: params.get("open").and_then(|v| v.as_bool()) == Some(true),
+                    },
+                )
+                .await
+            }
+            _ => Err(invalid(format!(
+                "there is no recipe called {recipe:?}; there is: {}",
+                PROJECT_RECIPES
+                    .iter()
+                    .map(|r| r.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        }
+    }
+
     fn recipe_save(&self, id: &str, r: &ReviewLoop) {
         let active = matches!(
             r.phase.as_str(),
@@ -79,10 +146,12 @@ impl Daemon {
         );
     }
 
+    /// The review loops (`recipe.list`). A pair's record is not among them:
+    /// the Control Deck draws every row here as a loop with rounds.
     pub fn recipes(&self, project: Option<&str>) -> Vec<Value> {
         self.db
             .read(|c| {
-                let mut stmt = c.prepare("SELECT id,kind,created,updated,state,data FROM recipes WHERE (?1 IS NULL OR project=?1) ORDER BY created DESC LIMIT 50")?;
+                let mut stmt = c.prepare("SELECT id,kind,created,updated,state,data FROM recipes WHERE kind='review_loop' AND (?1 IS NULL OR project=?1) ORDER BY created DESC LIMIT 50")?;
                 let rows = stmt.query_map([project], |r| {
                     let data: String = r.get(5)?;
                     Ok(json!({
