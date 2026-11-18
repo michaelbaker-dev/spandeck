@@ -105,6 +105,9 @@ pub struct PaneWake {
     /// starts again. Set without the turn (typing waits for nothing), and
     /// read at the next look.
     pub(crate) owner_acted: std::sync::atomic::AtomicBool,
+    /// When the pane's program last said, by its hook, that its session
+    /// has started: it is past whatever it asks before that (0: not yet).
+    pub(crate) greeted_ms: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default, Clone)]

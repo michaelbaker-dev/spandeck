@@ -203,6 +203,10 @@ pub fn mail_quoted(waiting: &[crate::relay::Unannounced]) -> (String, Vec<String
     (out.trim_end().to_string(), whole)
 }
 
+/// How long a program is left alone after it starts before a nudge may
+/// be typed into it (see `nudge_pane`).
+const START_MS: u64 = 8_000;
+
 impl Daemon {
     pub fn mail(&self) -> MessageStore {
         MessageStore::new(self.db.clone(), &self.station)
@@ -663,6 +667,31 @@ impl Daemon {
         match wakeable() {
             Wake::Now => {}
             other => return other,
+        }
+        // A program that has only just started is typed nothing: for its
+        // first eight seconds, and after that while its first screen is
+        // still being drawn (to half a minute). What it shows first may be
+        // a question of its own, which is known for one only once it is
+        // drawn and read, and a nudge's Enter answers a question. (The
+        // real Claude Code, 18 Nov 2026: a pane's role was sent as it was
+        // started, the nudge was typed one second on into "Is this a
+        // project you trust?", its Enter chose "No, exit", and the program
+        // ended. Had the first choice been Yes, the station would have
+        // trusted the folder for the owner.)
+        {
+            let started = {
+                let m = p.meta.lock().unwrap();
+                m.proc_started_ms.unwrap_or(m.created_ms)
+            };
+            // A program that has said its session started is past its
+            // first questions (Claude Code and Codex say so only after
+            // the folder is trusted), and is not kept waiting.
+            let greeted = p.wake.greeted_ms.load(std::sync::atomic::Ordering::Relaxed) >= started;
+            let age = now.saturating_sub(started);
+            let drawing = now.saturating_sub(p.term.last_output_ms()) < 1_500;
+            if !greeted && (age < START_MS || (age < 30_000 && drawing)) {
+                return Wake::At(now + 1_000);
+            }
         }
         // A Codex scrolled back in its own history is typed nothing, not
         // the nudge and not the one more Enter: the Enter would only

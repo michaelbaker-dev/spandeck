@@ -970,3 +970,25 @@ fn the_deck_has_the_tick_the_note_the_one_tap_and_the_list() {
     phone.js("document.querySelector('.trust-tap').click()");
     s.wait_text(&claude, TRUSTED);
 }
+
+/// A bug that happened (the real Claude Code, 18 Nov 2026): a pane's first
+/// message was sent as the pane was started; the nudge was typed one
+/// second on, into "Is this a project you trust?", before that screen had
+/// been read for what it is; its Enter chose "No, exit" and the program
+/// ended. A program that has only just started, and has not said its
+/// session began, is typed nothing.
+#[test]
+#[ignore = "merge tier: waits five seconds for a nudge that must not come"]
+fn a_message_sent_as_a_pane_starts_is_not_typed_into_its_first_question() {
+    let s = Station::start("alpha");
+    let dir = folder(&s, "fresh");
+    let pane = start(&s, "claude", &dir, json!({"name": "early"}));
+    // At once: before the station can have read the screen.
+    s.call("msg.send", json!({"to": "early", "body": "your role"}));
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    assert!(s.log("msg.nudged").is_empty(), "{:?}", s.log("msg.nudged"));
+    let p = s.pane(&pane);
+    assert_eq!(p["exited"], json!(false), "{p}");
+    assert_eq!(p["state"], json!("needs_you"), "{p}");
+    assert!(trust(&s, &pane)["asks"].is_object(), "{p}");
+}

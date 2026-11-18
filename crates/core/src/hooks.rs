@@ -440,6 +440,9 @@ impl Daemon {
                 };
             }
             EventKind::SessionStart => {
+                p.wake
+                    .greeted_ms
+                    .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
                 let mut parts: Vec<String> = vec![];
                 if let Some(d) = self.start_digest(&meta, ev.source.as_deref()) {
                     parts.push(d);
