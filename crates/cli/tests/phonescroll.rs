@@ -217,6 +217,204 @@ fn the_rest_of_a_terminals_history_on_a_phone() {
     );
 }
 
+/// A pane that changes state over and over does not take the page from the
+/// owner. What happened, 18 Nov 2026, on the owner's iPhone: a fault on the
+/// station flipped one pane between "working" and "needs you" about once a
+/// second for minutes; every flip was followed by a drawing of the whole page
+/// and a toast whose words differed only by a timer, and "trying to scroll
+/// doesn't always respond".
+///
+/// Here the flips are the station's own (`pane.report_agent`, as the pane),
+/// ten a second for four seconds, on a phone's list long enough to scroll.
+#[test]
+#[ignore = "merge tier: a station and a browser (about ten seconds)"]
+fn a_pane_that_flips_its_state_over_and_over_does_not_take_the_page() {
+    use spandeck_core::client::Client;
+    let s = Station::start("alpha");
+    let critic = s.fake(json!({"steps": []}), json!({"name": "critic"}));
+    let others: Vec<String> = (0..15)
+        .map(|i| s.fake(json!({"steps": []}), json!({"name": format!("crew{i}")})))
+        .collect();
+    s.wait_text(&critic, "[fake] session");
+    s.wait_text(others.last().unwrap(), "[fake] session");
+
+    let page = phone_of(&s);
+    page.wait(
+        "the list, with every session",
+        "document.querySelectorAll('.phone-recents .session-row').length === 16 && (m => m.scrollHeight > m.clientHeight + 400)(document.querySelector('main.phone-home'))",
+    );
+    // From now on: every toast about the pane, and every drawing of the page.
+    page.js(
+        "(() => { window.flood = { toasts: [] };
+            new MutationObserver(l => { for (const m of l) for (const n of m.addedNodes) if (n.classList?.contains('toast') && /critic/.test(n.textContent)) flood.toasts.push(n.textContent); })
+              .observe(document.getElementById('overlays'), { childList: true, subtree: true });
+            return true; })()",
+    );
+    let draws = || {
+        page.js("Number(document.getElementById('app').dataset.draws || 0)")
+            .as_u64()
+            .unwrap()
+    };
+    let top = || {
+        page.js("document.querySelector('main.phone-home').scrollTop")
+            .as_f64()
+            .unwrap()
+    };
+    // (What the page drew for the panes that were started has been drawn.)
+    std::thread::sleep(Duration::from_millis(1200));
+
+    // The flood, as the pane itself: the words differ only by their timer.
+    let mut as_pane = Client::connect(&s.paths().socket(), &s.pane_token(&critic)).unwrap();
+    let pane = critic.clone();
+    const FLIPS: u64 = 40;
+    let began = std::time::Instant::now();
+    let before = draws();
+    let flood = std::thread::spawn(move || {
+        for i in 0..FLIPS {
+            let params = if i % 2 == 0 {
+                json!({"pane": pane, "state": "needs_you",
+                    "reason": format!("shows something in its terminal: • Working (1m {}s • esc to interrupt)", 10 + i / 2)})
+            } else {
+                json!({"pane": pane, "state": "working"})
+            };
+            as_pane.call("pane.report_agent", params).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        as_pane
+    });
+
+    // A finger on the list, a second into it: it moves the list, and stays
+    // on the glass. Nothing is drawn under it, though the flips go on and
+    // the page's own round (2.5 s) comes by.
+    std::thread::sleep(Duration::from_millis(1000));
+    let touch = |kind: &str, y: f64| {
+        let points = if kind == "touchEnd" {
+            json!([])
+        } else {
+            json!([{"x": 195.0, "y": y}])
+        };
+        page.protocol(
+            "Input.dispatchTouchEvent",
+            json!({"type": kind, "touchPoints": points}),
+        );
+    };
+    touch("touchStart", 700.0);
+    for i in 1..=10 {
+        touch("touchMove", 700.0 - 30.0 * f64::from(i));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let under = draws();
+    for _ in 0..12 {
+        std::thread::sleep(Duration::from_millis(100));
+        touch("touchMove", 400.0);
+    }
+    let put = top();
+    assert!(put > 200.0, "the finger moved the list: {put}");
+    assert_eq!(
+        draws(),
+        under,
+        "the page was drawn under a finger that was scrolling it"
+    );
+    touch("touchEnd", 0.0);
+    // The finger lifted: what waited is drawn, and the list is where the
+    // finger put it.
+    page.wait(
+        "the page drawn once the finger lifted",
+        &format!("Number(document.getElementById('app').dataset.draws) > {under}"),
+    );
+    assert!(
+        (top() - put).abs() <= 2.0,
+        "the list was at {put} and is at {}",
+        top()
+    );
+
+    // The pane says, in one line where it is listed, that its state is
+    // changing rapidly; and in its own bar when it is opened.
+    let lines = page.wait(
+        "the line on the pane",
+        &format!("(rows => rows.length && rows.every(r => r.querySelectorAll('.rapid-line').length === 1) && [rows.length, document.querySelectorAll('.rapid-line').length, rows[0].querySelector('.rapid-line').textContent])([...document.querySelectorAll('.session-row[data-pane=\"{critic}\"]')])"),
+    );
+    assert_eq!(lines[0], lines[1], "only that pane says so: {lines}");
+    assert_eq!(
+        lines[2],
+        json!("state is changing rapidly (needs you ⇄ working)")
+    );
+    let pane_view = std::time::Instant::now();
+    page.goto(&format!("#/s/alpha/p/{critic}"));
+    page.wait(
+        "the line in the pane's bar",
+        "document.querySelectorAll('.chat-bar .rapid-line').length === 1 && document.querySelectorAll('.rapid-line').length === 1",
+    );
+
+    let mut as_pane = flood.join().unwrap();
+    let took = began.elapsed().as_secs_f64();
+    let drawn = draws() - before;
+    // Two a second kept up (and four at once), and fewer once the pane is known to flip
+    // (it is then looked at by the round). Before: one for every flip.
+    assert!(
+        drawn as f64 <= took * 2.0 + 4.0 && drawn < FLIPS / 2,
+        "{drawn} drawings of the page in {took:.1} s of {FLIPS} flips"
+    );
+    assert!(
+        pane_view.elapsed() < Duration::from_secs(3),
+        "opening the pane was not slow"
+    );
+
+    // Where the pane ends is what the page shows: nothing was lost with
+    // the changes that were not followed one by one.
+    as_pane
+        .call(
+            "pane.report_agent",
+            json!({"pane": critic, "state": "done"}),
+        )
+        .unwrap();
+    page.wait(
+        "the pane's last state",
+        "document.querySelector('.chat-bar > .dot').classList.contains('done')",
+    );
+    page.goto("#/fleet");
+    page.wait(
+        "the pane's last state in the list",
+        &format!("(r => !!r && !!r.querySelector('.dot.done'))(document.querySelector('.phone-recents .session-row[data-pane=\"{critic}\"]'))"),
+    );
+
+    // Twenty times "critic needs you", said once: one toast, and one unread
+    // notice in the Inbox.
+    let said = page.js("flood.toasts");
+    assert_eq!(said.as_array().unwrap().len(), 1, "{said}");
+    assert!(
+        said[0].as_str().unwrap().starts_with("critic needs you"),
+        "{said}"
+    );
+    assert_eq!(
+        page.js("[...document.querySelectorAll('.topbar button')].find(b => b.innerText.startsWith('Inbox')).querySelector('.count')?.textContent"),
+        json!("1")
+    );
+    // And the station's log was told, once, with the pane, the rate and the
+    // two states.
+    let told: Vec<Value> = wait_for("the report in the station's log", 10, || {
+        let all: Vec<Value> = s
+            .log("client.report")
+            .into_iter()
+            .map(|r| r["data"]["report"].clone())
+            .filter(|r| r["what"] == "state-flood")
+            .collect();
+        (!all.is_empty()).then_some(all)
+    });
+    assert_eq!(told.len(), 1, "{told:?}");
+    let t = &told[0];
+    assert_eq!((&t["pane"], &t["name"]), (&json!(critic), &json!("critic")));
+    assert!(t["per_min"].as_u64().unwrap() > 120, "{t}");
+    let mut states: Vec<&str> = t["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    states.sort();
+    assert_eq!(states, ["needs_you", "working"], "{t}");
+}
+
 /// A measure for docs/measurements.md: three quick drags over 3,000 lines of
 /// history, with the page's processor slowed (`SPANDECK_THROTTLE`, 6 times
 /// unless set), and what the page's own thread had to do meanwhile. It uses

@@ -322,6 +322,116 @@ fn the_control_deck_edits_the_setup_and_runs_a_command_in_an_agent() {
     page.wait("the agent's terminal", &format!("location.hash === '#/s/alpha/p/{pane}' && !!document.querySelector('.pane .xterm-rows')"));
 }
 
+/// The permission mode of each program is set in Agent setup (until 18 Nov
+/// 2026 only a raw call could set it, and for Codex it was dropped). Codex
+/// is given its own three, each with what it means; nothing is set until
+/// the owner chooses; a program whose modes spandeck does not know is given
+/// no list, and a word the station would refuse is not sent.
+#[test]
+#[ignore = "merge tier: a station and a browser (about five seconds)"]
+fn the_permission_mode_is_chosen_in_agent_setup() {
+    use common::browser::Page;
+    let s = Station::start("alpha");
+    let page = Page::open(&s, 1400, 900);
+    let open = |page: &Page| {
+        page.wait(
+            "Agent setup",
+            "(b => b ? (b.click(), true) : false)([...document.querySelectorAll('.topbar button')].find(b => b.innerText === 'Agent setup'))",
+        );
+        page.wait(
+            "Codex's permission mode",
+            "!!document.querySelector('.dialog .perm-row[data-agent=\"codex\"] select')",
+        );
+    };
+    const CODEX: &str = "document.querySelector('.dialog .perm-row[data-agent=\"codex\"] select')";
+    const CLAUDE: &str = "document.querySelector('.dialog .perm-row[data-agent=\"claude\"]')";
+    open(&page);
+    // Nothing is set, and that is what is chosen; the screen says whom it
+    // applies to.
+    assert_eq!(
+        page.js(&format!(
+            "[{CODEX}.value, [...{CODEX}.options].map(o => o.textContent)]"
+        )),
+        json!([
+            "",
+            [
+                "Not set (Codex's own setting)",
+                "Ask me",
+                "Review for itself",
+                "Never ask"
+            ]
+        ])
+    );
+    let rule = page.js("document.querySelector('.dialog .perm-rule').textContent");
+    let rule = rule.as_str().unwrap();
+    assert!(
+        rule.contains("panes started from now on, on every station of the fleet")
+            && rule.contains("A station running an older spandeck may ignore it"),
+        "{rule}"
+    );
+    // Claude Code: its own setting, or a word typed; a word the station
+    // would refuse is marked, and is not sent.
+    assert_eq!(
+        page.js(&format!(
+            "[...{CLAUDE}.querySelectorAll('option')].map(o => o.textContent)"
+        )),
+        json!(["Not set (Claude Code's own setting)", "A mode I type"])
+    );
+    page.js(&format!(
+        "(() => {{ const row = {CLAUDE}, pick = row.querySelector('select'), box = row.querySelector('input'); \
+           pick.value = 'typed'; pick.dispatchEvent(new Event('change', {{bubbles: true}})); \
+           box.value = 'two words'; box.dispatchEvent(new Event('input', {{bubbles: true}})); \
+           [...document.querySelectorAll('.dialog button')].find(b => b.innerText === 'Save for every station').click(); return true; }})()"
+    ));
+    page.wait(
+        "the word refused on the page",
+        &format!("{CLAUDE}.querySelector('input').getAttribute('aria-invalid') === 'true' && [...document.querySelectorAll('.toast.error')].some(t => t.textContent.includes('two words'))"),
+    );
+    assert_eq!(
+        s.call("setup.get", json!({}))["setup"]["updated_ms"],
+        json!(0)
+    );
+    page.js(&format!(
+        "(() => {{ const pick = {CLAUDE}.querySelector('select'); pick.value = ''; pick.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }})()"
+    ));
+
+    // Codex reviews for itself.
+    page.js(&format!(
+        "(() => {{ const pick = {CODEX}; pick.value = [...pick.options].find(o => o.textContent === 'Review for itself').value; pick.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }})()"
+    ));
+    let on = page.js(
+        "document.querySelector('.dialog .perm-row[data-agent=\"codex\"] .perm-says .on').textContent",
+    );
+    assert!(
+        on.as_str()
+            .unwrap()
+            .starts_with("Review for itself: Codex's own reviewer decides"),
+        "{on}"
+    );
+    page.js("[...document.querySelectorAll('.dialog button')].find(b => b.innerText === 'Save for every station').click()");
+    let saved = wait_for("the setup to be saved", 10, || {
+        let v = s.call("setup.get", json!({}));
+        (v["setup"]["updated_ms"] != json!(0)).then_some(v)
+    });
+    assert_eq!(
+        saved["setup"]["defaults"]["codex"]["permission_mode"],
+        json!("auto")
+    );
+    assert_eq!(
+        saved["setup"]["defaults"]["claude"]["permission_mode"],
+        json!(null)
+    );
+    // And it is what the screen shows when it is opened again.
+    page.reload();
+    open(&page);
+    assert_eq!(
+        page.js(&format!(
+            "[{CODEX}.value, {CODEX}.selectedOptions[0].textContent, {CLAUDE}.querySelector('select').value]"
+        )),
+        json!(["auto", "Review for itself", ""])
+    );
+}
+
 // ---------------------------------------------------------------- the deck
 // The owner's rule (14 Nov 2026): "every station has the exact same left
 // window". Global layouts and pins are one document on every station, kept

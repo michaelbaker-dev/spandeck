@@ -142,6 +142,10 @@ export function ago(ms) {
 
 export const STATE_LABEL = { idle: 'idle', working: 'working', needs_you: 'needs you', done: 'done', error: 'error' };
 export function stateOf(p) { return p.exited ? 'exited' : p.state; }
+// The one line a pane carries while its state changes more often than a
+// program changes it (`p.rapid`, set by the page: app.js, `stateFlood`).
+// Quiet: it is not announced, and its words do not change while it shows.
+export const rapidLine = (p, tag = 'div') => (p?.rapid ? h(tag, { class: 'rapid-line', title: p.rapid.more }, p.rapid.says) : null);
 // A pane that is held (`held` in its view): stopped and staying stopped, or
 // started again after a restart and waiting for the owner. It takes no mail
 // until it is released. What the station says is put on the page as text.

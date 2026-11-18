@@ -13,7 +13,7 @@
 
 import { Api } from './api.js';
 import { PaneTerm } from './term.js';
-import { h, showMenu, closeMenu, toast, dialog, confirmBox, keepInView, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText, heldWords, hooksTick, hooksCard, hooksAnsweredWords, trustTick, trustCard, trustAnsweredWords, TRUST_WARNING } from './ui.js';
+import { h, showMenu, closeMenu, toast, dialog, confirmBox, keepInView, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText, heldWords, rapidLine, hooksTick, hooksCard, hooksAnsweredWords, trustTick, trustCard, trustAnsweredWords, TRUST_WARNING } from './ui.js';
 import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
 import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners, termSize } from './look.js';
 import { lookEditor } from './lookedit.js';
@@ -248,6 +248,9 @@ function merged() {
     const live = s.state === 'online' && S.panes.has(s.station) ? liveAgents(s.station) : null;
     if (live) Object.assign(s, { working: live.filter(p => p.state === 'working').length, needs_you: live.filter(p => p.state === 'needs_you').length });
   }
+  // A pane whose state changes more often than a program changes it says so
+  // in one line, wherever it is drawn (`stateFlood`).
+  for (const p of panesOf(api.station)) { const f = flooding.get(`${api.station}/${p.id}`); if (f) p.rapid = f.line; else delete p.rapid; }
   const of = (st, name) => held.get(st)?.raw[name] || [];
   S.approvals = on.flatMap(st => of(st, 'approvals'));
   mergeNotes(on);
@@ -271,7 +274,7 @@ function settled() {
     // The page has loaded when the station serving it has answered. A view
     // of another station says "Loading…" until that station has (`heard`).
     if (held.get(api.station)?.at) S.loaded = true;
-    update();
+    updateSoon();
     // What follows new data, once the serving station's documents are here:
     // at once the first time, then at most every 200 ms.
     if (!S.loaded) return;
@@ -316,7 +319,7 @@ async function loadPerf(now) {
     // station from before this has no such call: then nothing is shown.
     try { S.tailnet = await api.call('tailnet.view'); } catch (e) { S.tailnet = null; }
   } finally { perfAsking = false; }
-  if (S.route.view === 'perf' || now) update();
+  if (S.route.view === 'perf' || now) updateSoon();
 }
 // A station's Tailscale key in words, or null when nothing is known of it.
 const stationKey = (st) => keyInfo(S.tailnet?.stations?.[st]);
@@ -351,7 +354,7 @@ async function loadSignIn() {
   signAsked = Date.now();
   const was = JSON.stringify(S.signin || null);
   try { S.signin = await api.call('tailnet.signin'); } catch (e) { S.signin = null; signRefused = true; }
-  if (JSON.stringify(S.signin || null) !== was) update();
+  if (JSON.stringify(S.signin || null) !== was) updateSoon();
 }
 let signBox = null, signKey = '';
 function signInBar() {
@@ -398,9 +401,20 @@ function mergeNotes(stations) {
   // failed: what it last said is kept on screen; it is named as not counted.
   const failed = stations.filter(st => !held.get(st)?.raw.notes || held.get(st).failed || S.busy.has(st));
   const lists = stations.map(st => (held.get(st)?.raw.notes || []).map(n => ({ ...n, station: st })));
-  const merged = new Map();
+  // A pane's notice raised again for the same reason within a few seconds
+  // of the last (`sameNotice`; a state that flips raises one at each flip)
+  // is one entry: the newest, which is read, and counted as unread, once.
+  const merged = new Map(), chain = new Map();
   for (const n of lists.flat().sort((a, b) => b.ts - a.ts)) {
-    const key = n.pane ? `${n.station}/${n.id}` : `${n.kind}\n${n.title}\n${n.body}`;
+    if (n.pane) {
+      const same = sameNotice(n), last = chain.get(same);
+      if (last && last.ts - n.ts < NOTE_QUIET) { last.ts = n.ts; last.n.at.push({ station: n.station, id: n.id }); last.n.read = last.n.read && n.read; continue; }
+      const one = { ...n, at: [{ station: n.station, id: n.id }] };
+      chain.set(same, { ts: n.ts, n: one });
+      merged.set(`${n.station}/${n.id}`, one);
+      continue;
+    }
+    const key = `${n.kind}\n${n.title}\n${n.body}`;
     const had = merged.get(key);
     if (had) { if (!had.at.some(a => a.station === n.station)) had.at.push({ station: n.station, id: n.id }); had.read = had.read && n.read; }
     else merged.set(key, { ...n, at: [{ station: n.station, id: n.id }] });
@@ -510,7 +524,15 @@ api.onEvent((ev) => {
   // A line from a machine being added: shown as it arrives, nothing re-read.
   if (ev.kind === 'fleet.add.output') { if (addDlg) addDlg.line(ev.data); return; }
   // Raised here, or at another station of the fleet, which told this one.
-  if (ev.kind === 'notify.new') { announced.add(`${ev.data.station}/${ev.data.id}`); notifyBrowser(ev.data); }
+  if (ev.kind === 'notify.new') {
+    announced.add(`${ev.data.station}/${ev.data.id}`);
+    notifyBrowser({ pane: ev.pane, ...ev.data });
+    // (One more of a pane whose state is flipping: the round shows it.)
+    if (ev.pane && flooding.has(`${api.station}/${ev.pane}`)) return;
+  }
+  // A pane's state changed. One that changes it over and over is no longer
+  // followed change by change (`stateFlood`).
+  if (ev.kind === 'pane.state' && ev.pane && stateFlood(ev)) return;
   if (ev.kind === 'connection.restored') { for (const t of S.terms.values()) t.reattach(); }
   // The page is looked at again (it was in the background, or the machine
   // slept): what it shows is brought up to date now, not at the next round.
@@ -535,12 +557,101 @@ api.onEvent((ev) => {
   }
 });
 
+// ---- a pane that changes state over and over ----
+//
+// What happened (18 Nov 2026, the owner's iPhone): a fault on the station
+// flipped one pane between "working" and "needs you" about once a second for
+// minutes (55 to 63 `pane.state` a minute in its log, against 0 to 10). Each
+// flip was followed by a question to the station, a drawing of the whole
+// page and a toast whose words differed only by a timer; the owner: "trying
+// to scroll doesn't always respond… the terminal here is flashing every
+// second". The station was idle: the page was what was slow. So:
+//   - the page is drawn for new data twice a second at most, kept up, and
+//     not under a finger that is scrolling (`updateSoon`, by `update`);
+//   - a notice for the same pane and reason that repeats is said once
+//     (`sameNotice`);
+//   - a pane with FLOOD_N changes or more in FLOOD_MS is not followed
+//     change by change: the round (2.5 s) shows where it is, the pane says
+//     in one line that its state is changing rapidly, and the station's log
+//     is told once (`client.report`, `what: "state-flood"`), to be read with
+//     spandeck rpc log.query '{"kind":"client.report"}'.
+// Six in ten seconds: the busiest minute of the log without the fault had
+// ten changes for the whole station, under two in any ten seconds; an agent
+// whose prompts are answered as fast as a person can makes two changes per
+// answer, so six in ten seconds is three answers in ten seconds, kept up.
+// The fault made nine or ten. The line goes when two or fewer are left in
+// the ten seconds, so that it does not come and go at the edge. Only the
+// panes of the station serving the page are counted: its events are the
+// ones a page hears, and another station's pane is looked at by the round.
+const FLOOD_N = 6, FLOOD_MS = 10000, FLOOD_OVER = 2, FLOOD_TELL_MS = 5 * 60000;
+const stateTimes = new Map(); // station/pane -> when its state changed, the last ten seconds
+const flooding = new Map();   // station/pane -> { line: { says, more } }
+const floodTold = new Map();  // station/pane -> when the station's log was told
+let floodTimer = null;
+const lately = (key, now) => (stateTimes.get(key) || []).filter(t => now - t < FLOOD_MS);
+// True while the pane is not to be followed change by change.
+function stateFlood(ev) {
+  const key = `${api.station}/${ev.pane}`, now = Date.now(), at = lately(key, now);
+  at.push(now);
+  stateTimes.set(key, at);
+  if (stateTimes.size > 400) for (const [k, v] of stateTimes) if (!v.some(t => now - t < FLOOD_MS)) stateTimes.delete(k);
+  const was = flooding.get(key);
+  if (at.length < FLOOD_N) return !!was;
+  const word = (s) => STATE_LABEL[s] || String(s || 'unknown').slice(0, 20);
+  const pair = [...new Set([ev.data?.from, ev.data?.state].map(word))].sort();
+  const name = String(ev.data?.name || findPane(api.station, ev.pane)?.name || ev.pane).slice(0, 60);
+  const line = { says: `state is changing rapidly (${pair.join(' ⇄ ')})`,
+    more: `${name} changed state ${FLOOD_N} times or more in ten seconds. A program does not do that by itself: something on ${api.station} keeps flipping it. This page looks at it every few seconds instead of at every change, and ${api.station}'s log was told (client.report, "state-flood").` };
+  if (was && was.line.says === line.says) return true;
+  flooding.set(key, { line });
+  floodTimer ||= setInterval(floodWatch, 1000);
+  if (now - (floodTold.get(key) || 0) > FLOOD_TELL_MS) {
+    floodTold.set(key, now);
+    api.call('client.report', { what: 'state-flood', build: api.build, station: api.station, pane: ev.pane, name, changes: at.length, span_ms: now - at[0],
+      per_min: Math.round((at.length - 1) * 60000 / Math.max(1, now - at[0])), states: [ev.data?.from ?? null, ev.data?.state ?? null],
+      reason: String(ev.data?.reason || '').slice(0, 200), route: location.hash.slice(0, 80), phone: isPhone() }).catch(() => {});
+  }
+  settled();
+  return true;
+}
+// The flipping stopped: the pane is followed again, and asked for now.
+function floodWatch() {
+  const now = Date.now();
+  for (const key of [...flooding.keys()]) {
+    if (lately(key, now).length > FLOOD_OVER) continue;
+    flooding.delete(key);
+    stationSoon(api.station, 0);
+    settled();
+  }
+  if (!flooding.size) { clearInterval(floodTimer); floodTimer = null; }
+}
+
+// Whether two notices of a pane say the same thing: the same pane, kind
+// and words, with every number and length of time in the words read as one
+// ("Working (1m 50s • esc to interrupt)" and "(52s • …)" are the same;
+// "asks to run Bash" and "asks to edit a file" are not). One that repeats
+// within NOTE_QUIET of the last, said or not, is not said again: no toast,
+// no browser notification, no second entry or count in the Inbox. Eight
+// seconds: longer than a state that flickers, shorter than it takes the
+// owner to answer a prompt and the agent to reach its next.
+const NOTE_QUIET = 8000;
+const TIMES = /\d[\d.,:]*(?:\s*(?:ms|hrs?|h|mins?|secs?|m|s)\b)?(?:\s+\d[\d.,:]*\s*(?:ms|hrs?|h|mins?|secs?|m|s)\b)*/gi;
+const paneOfNote = (n) => n.pane || (typeof n.url === 'string' ? (n.url.match(/\/p\/([^/?#]+)/) || [])[1] : '') || '';
+const sameNotice = (n) => `${n.station || api.station}\n${paneOfNote(n)}\n${n.kind}\n${`${n.title} — ${n.body || ''}`.toLowerCase().replace(TIMES, '#').replace(/\s+/g, ' ')}`;
+const lastOfPane = new Map(); // sameNotice -> when it was last raised
+
 const lastSaid = new Map(); // what was announced -> when, so one thing every station raised is said once
 function notifyBrowser(n) {
   const same = `${n.kind}\n${n.title}\n${n.body}`, now = Date.now();
   for (const [k, at] of lastSaid) if (now - at > 15000) lastSaid.delete(k);
   if (lastSaid.has(same)) return;
   lastSaid.set(same, now);
+  if (paneOfNote(n)) {
+    for (const [k, at] of lastOfPane) if (now - at > NOTE_QUIET) lastOfPane.delete(k);
+    const key = sameNotice(n), again = lastOfPane.has(key);
+    lastOfPane.set(key, now);
+    if (again) return;
+  }
   const from = n.station && n.station !== api.station ? ` · ${n.station}` : '';
   toast(n.title + from + (n.body ? ' — ' + n.body : ''), n.kind === 'error' ? 'error' : 'info');
   if (document.visibilityState !== 'visible' && 'Notification' in window && Notification.permission === 'granted') {
@@ -1059,7 +1170,7 @@ async function inboxPanel() {
     S.notes.length ? h('div', { class: 'list' }, S.notes.map(n => {
       const read = () => readNote(n).then(() => refreshSoon(0));
       return entry('inbox-note', !n.read, n.kind === 'approval' ? 'needs_you' : n.kind, String(n.title), String(n.body ?? ''),
-        [n.at.map(a => a.station).join(', '), n.pushed === 2 ? 'held (you were here)' : n.pushed === 1 ? 'pushed' : '', ago(n.ts)].filter(Boolean).join(' · '), [
+        [[...new Set(n.at.map(a => a.station))].join(', '), n.pushed === 2 ? 'held (you were here)' : n.pushed === 1 ? 'pushed' : '', ago(n.ts)].filter(Boolean).join(' · '), [
           n.url ? h('button', { class: 'mini', title: 'Open the pane this is about', onclick: () => { read(); close(); location.hash = n.url.replace(/^\/#/, '#'); } }, 'Open') : null,
           // The recovery notice carries the one action that lets the restarted sessions take mail again.
           ...(n.kind === 'station.recovered' ? n.at.map(a => a.station).filter(st => (S.fleet.stations.find(s => s.station === st)?.caps || []).includes('holds'))
@@ -1514,6 +1625,25 @@ function agentsPanel() {
   return close;
 }
 
+// The permission mode of each program, in Agent setup: how far it goes
+// without asking the owner (`permission_mode` of the station's setup.rs,
+// which passes it when a pane starts). Codex's three are the ones the
+// station takes for it (`validate`), with what each means (`launch_args`).
+// Claude Code and Antigravity are passed the word as it is
+// (`--permission-mode`, `--mode`) and nothing in spandeck lists their
+// modes: none is made up here, the owner types the program's own word.
+const PERMISSION = {
+  codex: { choices: [
+    ['on-request', 'Ask me', 'Codex asks you before a step that needs your say.'],
+    ['auto', 'Review for itself', 'Codex\'s own reviewer decides what it would otherwise ask you, inside its sandbox for the folder. You are not asked.'],
+    ['never', 'Never ask', 'Codex never asks you: a step that fails or is not allowed goes back to the model, which carries on by itself.']] },
+  claude: { flag: '--permission-mode' },
+  antigravity: { flag: '--mode' },
+};
+// What the station takes as a setting's value (setup.rs, `validate`).
+const SETTING_WORD = /^[A-Za-z0-9._[\]-]+$/;
+const permTyped = new Set();
+
 async function setupPanel() {
   let view;
   try { view = await api.call('setup.get'); } catch (e) { return toast(e.message, 'error'); }
@@ -1531,7 +1661,46 @@ async function setupPanel() {
   setup.mcp_servers ||= {}; setup.skills ||= {}; setup.defaults ||= {};
   dialog('Agent setup', (close, body) => {
     const draw = () => body.replaceChildren(content());
+    // The permission mode of one program (PERMISSION). A program whose
+    // modes spandeck knows is given them as a choice, each with what it
+    // means; another is given its own setting or a word typed as the
+    // program spells it, checked as the station checks it. `permTyped`:
+    // the programs whose box is open, kept while the dialog is drawn again.
+    const permRow = (a) => {
+      const known = PERMISSION[a.agent];
+      if (!known) return null;
+      const now = () => setup.defaults[a.agent]?.permission_mode || '';
+      const put = (v) => { setup.defaults[a.agent] ||= {}; setup.defaults[a.agent].permission_mode = v || null; };
+      const says = h('small', { class: 'perm-says' });
+      const NOT_SET = `Not set (${a.name}'s own setting)`;
+      if (known.choices) {
+        // (A word kept from before, which is none of the program's: shown, so that it can be changed.)
+        const odd = now() && !known.choices.some(c => c[0] === now()) ? [[now(), `${now()} (set before; not one of ${a.name}'s)`, `The station refuses this word for ${a.name}: choose another.`]] : [];
+        const all = [['', NOT_SET, `spandeck passes nothing: ${a.name} uses its own setting.`], ...known.choices, ...odd];
+        const tell = () => says.replaceChildren(...all.map(c => h('span', { class: c[0] === now() ? 'on' : '' }, h('b', {}, c[1] + ': '), c[2])));
+        tell();
+        return h('div', { class: 'perm-row', dataset: { agent: a.agent } }, h('label', { class: 'field' }, h('span', {}, a.name),
+          h('select', { 'aria-label': `${a.name} permission mode`, onchange: (e) => { put(e.target.value); tell(); } }, all.map(c => h('option', { value: c[0], selected: c[0] === now() }, c[1])))), says);
+      }
+      const box = h('input', { 'aria-label': `${a.name} permission mode, as ${a.name} spells it`, placeholder: `a mode, as ${a.name} spells it`, value: now(), autocapitalize: 'off', spellcheck: false,
+        oninput: (e) => { put(e.target.value.trim()); tell(); } });
+      const pick = h('select', { 'aria-label': `${a.name} permission mode`, onchange: (e) => { if (e.target.value) permTyped.add(a.agent); else { permTyped.delete(a.agent); box.value = ''; put(''); } tell(); } },
+        [['', NOT_SET], ['typed', 'A mode I type']].map(([v, l]) => h('option', { value: v, selected: (v === 'typed') === (!!now() || permTyped.has(a.agent)) }, l)));
+      const tell = () => {
+        const typed = pick.value === 'typed', bad = typed && now() && !SETTING_WORD.test(now());
+        box.hidden = !typed;
+        box.setAttribute('aria-invalid', String(!!bad));
+        says.className = 'perm-says' + (bad ? ' warn-text' : '');
+        says.textContent = bad ? 'Letters, digits and - _ . [ ] only: the station refuses anything else.'
+          : !typed ? `spandeck passes nothing: ${a.name} uses its own setting.`
+            : `Passed to ${a.name} as "${known.flag} ${now() || '…'}" when a pane starts. spandeck does not know ${a.name}'s list of modes: type one exactly as ${a.name} names it. A word it does not know may stop it from starting.`;
+      };
+      tell();
+      return h('div', { class: 'perm-row', dataset: { agent: a.agent } }, h('label', { class: 'field' }, h('span', {}, a.name), pick), box, says);
+    };
     const save = async () => {
+      const badMode = Object.entries(setup.defaults).find(([, d]) => d?.permission_mode && !SETTING_WORD.test(d.permission_mode));
+      if (badMode) return toast(`${badMode[0]}: "${badMode[1].permission_mode}" is not a permission mode the station takes (letters, digits and - _ . [ ] only)`, 'error');
       const out = await rpc(api.station, 'setup.set', { setup, fleet: true });
       // A station that kept its own, newer setup did not take this one, and
       // its copy replaces it everywhere: that is not "Saved".
@@ -1582,6 +1751,9 @@ async function setupPanel() {
             h('td', { class: 'muted' }, a.installed_version || ({ missing: 'not installed', broken: 'installed but not working', no_answer: 'installed, version not known' })[a.health] || 'installed, version not read'),
             h('td', {}, a.running.length ? a.running.map(r => h('span', { class: 'chip ' + (r.state === 'needs_you' ? 'warn' : ''), title: r.needs_reason || '' }, r.name)) : h('span', { class: 'muted' }, 'none')))))),
         h('p', { class: 'muted small' }, 'Agents that are already running keep their settings. To change them now, use "Run a command in agents" (for example /model opus).'),
+        h('h3', {}, 'Permission mode for new agent panes'),
+        h('p', { class: 'muted small perm-rule' }, 'How far each program goes without asking you. It applies to panes started from now on, on every station of the fleet; panes that are running keep what they were started with. A station running an older spandeck may ignore it.'),
+        h('div', { class: 'perm-all' }, view.agents.map(permRow)),
         h('h3', {}, 'Folders trusted for agents'),
         h('p', { class: 'muted small' }, 'Where you ticked "Trust this folder" when starting a pane: if that program asks about that folder again, spandeck answers yes for you. Each station has its own list. Removing one stops spandeck answering; what the program recorded for itself is its own.'),
         h('div', { class: 'trusted-all' }, [...trustLists].map(([st, list]) => h('div', {},
@@ -2470,6 +2642,7 @@ function paneTile(st, p) {
     h('div', { class: 'tile-head' }, dot(p), paneMark(p), h('b', {}, p.name), p.agent !== 'shell' ? h('span', { class: 'chip' }, p.agent_name) : null, h('span', { class: 'grow' }),
       h('span', { class: 'muted' }, p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}` : `${STATE_LABEL[stateOf(p)] || stateOf(p)} · ${ago(p.state_since_ms)}`)),
     p.needs_reason ? h('div', { class: 'needs-line' }, p.needs_reason) : null,
+    rapidLine(p),
     usageBrief(p.usage) ? h('div', { class: 'muted small tile-usage', title: usageTitle(p.usage) }, [usageBrief(p.usage), p.usage.total_tokens ? fmtTokens(p.usage.total_tokens) + ' tokens' : '', p.usage.cost_estimate !== null && p.usage.cost_estimate !== undefined ? 'est. ' + fmtCost(p.usage.cost_estimate) : ''].filter(Boolean).join(' · ')) : null,
     h('pre', { class: 'thumb', dataset: { key } }, thumbText(thumbs.get(key) || [])));
 }
@@ -3955,7 +4128,7 @@ function phoneList() {
   const whereOf = (st, p) => `${st}${p.project ? ' · ' + p.project : ''}`;
   const line = (st, p, where) => h('a', { class: 'phone-row', href: paneUrl(st, p.id), 'aria-label': paneSays(p) }, dot(p), paneMark(p),
     h('div', { class: 'grow' }, h('b', {}, p.name), where ? h('span', { class: 'muted' }, ' · ' + where) : null,
-      h('div', { class: 'muted small' }, p.needs_reason || (p.exited ? 'ended' : p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}` : `${STATE_LABEL[stateOf(p)]} · ${ago(p.state_since_ms)}`))), '›');
+      h('div', { class: 'muted small' }, p.needs_reason || (p.exited ? 'ended' : p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}` : `${STATE_LABEL[stateOf(p)]} · ${ago(p.state_since_ms)}`)), rapidLine(p)), '›');
   // A layout is opened as a map you step through, one pane at a time.
   const layRow = (x, where) => { const n = leaves(x.cache.tree).length, hid = leaves(x.cache.tree).filter(y => y.hidden).length; return h('a', { class: 'phone-row lay-row', href: layUrl(x), 'aria-label': `${x.name}, layout` }, h('span', { class: 'ico-wrap' }, layoutIcon()),
     h('div', { class: 'grow' }, h('b', {}, x.name), where ? h('span', { class: 'muted' }, ' · ' + where) : null, h('div', { class: 'muted small' }, `${n} pane${n === 1 ? '' : 's'}, one at a time${hid ? ` · ${hid} hidden` : ''}`)), '›'); };
@@ -4141,7 +4314,7 @@ function linkTick() {
   }
   // The marks on the tiles are part of the page's drawing: drawn again when
   // the level changes, as soon as nothing forbids it.
-  if (l.level !== linkDrawn && !document.querySelector('.menu') && !document.body.classList.contains('dragging')) { linkDrawn = l.level; update(); }
+  if (l.level !== linkDrawn && !document.querySelector('.menu') && !document.body.classList.contains('dragging')) { linkDrawn = l.level; updateSoon(); }
 }
 const linkPaneWords = (l) => (l.level >= 2 ? `Not connected to ${api.station}: typing is off. What is shown is as of ${clockOf(l.asOf)}.` : null);
 setInterval(linkTick, 250);
@@ -4238,7 +4411,7 @@ let draws = 0;
 function update() {
   // Do not redraw under an open dialog's feet, while a menu is open, or in
   // the middle of dragging a pane or the line between two.
-  if (document.querySelector('.menu') || document.body.classList.contains('dragging')) return;
+  if (document.querySelector('.menu') || document.body.classList.contains('dragging')) return false;
   const active = document.activeElement;
   const typing = active && active.closest && active.closest('.dialog');
   const focusedTerm = [...S.terms.values()].find(t => t.el.contains(active));
@@ -4252,6 +4425,92 @@ function update() {
   // How many times the page was redrawn for new data. Nothing in the deck
   // reads it; a test waits on it instead of sleeping through a redraw.
   root.dataset.draws = String(++draws);
+  return true;
+}
+
+// New data arrived, which nobody on this page asked for just now: the page
+// is drawn with it soon. `update` is for what the owner did here (a tap on
+// this page, a face chosen), and draws at once, as it always did.
+//   - However many answers and events arrive, one drawing a frame.
+//   - Two a second, kept up (DRAW_RATE): what the page already allowed
+//     itself for an agent's numbers (`pane.usage`, above). Up to DRAW_BURST
+//     that come close together are each drawn as they come, the first at
+//     once, as before: a page that opens hears from every station within
+//     a moment, and one change is shown as fast as it was. So in any t
+//     seconds there are at most 4 + 2t; what comes faster waits for its
+//     turn, half a second at most. Drawing the page makes every row of it
+//     again, and a phone that does that at every event does nothing else.
+//   - Data that follows the owner's own tap, choice or Enter within
+//     ACTED_MS is their answer: it is drawn at the next frame, whatever
+//     was drawn before it.
+//   - Not while a finger is on the page or it is being scrolled (a touch
+//     that moves, the wheel, and the scrolling that goes on after a finger
+//     lifts): a list made again under a finger loses the finger's scroll,
+//     and a row made again under it loses the tap. It is drawn SCROLL_REST
+//     after the last movement; and after SCROLL_CAP whatever happens, so
+//     that a finger that rests on the glass, or a lift the browser never
+//     told the page of, does not leave the page as it was.
+// What is to be drawn is whatever the page holds when it is drawn: nothing
+// is queued, so the last state is the one shown. What does not go through
+// here, and waits for none of this: what a terminal shows and its echo
+// (term.js, on the pane's own channel), a conversation's thread, cards and
+// message box (chat.js, the same), a view opened (`render`, on the
+// address), dialogs, menus and toasts.
+const DRAW_RATE = 2, DRAW_BURST = 4, FRAME_MS = 16, ACTED_MS = 2000, SCROLL_REST = 200, SCROLL_CAP = 5000;
+let drawWanted = 0, drawTimer = null, drawFrame = false, lastDraw = -1000, actedAt = -ACTED_MS;
+let drawsLeft = DRAW_BURST, leftAt = 0;
+let finger = false, fingerAt = 0, movedAt = -SCROLL_REST;
+const scrolling = (now = performance.now()) => (finger && now - fingerAt < SCROLL_CAP) || now - movedAt < SCROLL_REST;
+// How many drawings may be made now: DRAW_RATE more each second, DRAW_BURST at most.
+const drawsNow = (now) => { drawsLeft = Math.min(DRAW_BURST, drawsLeft + (now - leftAt) * DRAW_RATE / 1000); leftAt = now; return drawsLeft; };
+const drew = () => { drawsLeft = Math.max(0, drawsLeft - 1); lastDraw = performance.now(); };
+function updateSoon() {
+  const now = performance.now();
+  // Nothing is waiting, nothing is in the way and none was drawn in this
+  // frame: now, as before, so that what follows the data finds the page
+  // drawn with it.
+  if (!drawWanted && !scrolling(now) && drawsNow(now) >= 1 && now - lastDraw >= FRAME_MS && update() !== false) return drew();
+  if (!drawWanted) drawWanted = now;
+  drawPlan();
+}
+function drawPlan() {
+  if (drawFrame || !drawWanted) return;
+  clearTimeout(drawTimer);
+  const now = performance.now(), waited = now - drawWanted, left = drawsNow(now);
+  let wait = now - actedAt < ACTED_MS || left >= 1 ? 0 : Math.ceil((1 - left) * 1000 / DRAW_RATE);
+  if (scrolling(now) && waited < SCROLL_CAP) wait = Math.max(wait, Math.min(SCROLL_REST, SCROLL_CAP - waited));
+  if (wait > 0) { drawTimer = setTimeout(drawPlan, wait); return; }
+  // (A page that is not in front is given no frame: the timer draws it.)
+  drawFrame = true;
+  let done = false;
+  const run = () => {
+    if (done) return;
+    done = true;
+    drawFrame = false;
+    const at = performance.now();
+    if (scrolling(at) && at - drawWanted < SCROLL_CAP) return drawPlan();
+    // A menu is open, or a pane is being dragged: when it is over.
+    if (update() === false) { drawTimer = setTimeout(drawPlan, 300); return; }
+    drawWanted = 0;
+    drew();
+  };
+  requestAnimationFrame(run);
+  setTimeout(run, 100);
+}
+{
+  const opt = { capture: true, passive: true };
+  const acted = () => { actedAt = performance.now(); };
+  for (const kind of ['click', 'submit', 'change']) addEventListener(kind, acted, opt);
+  addEventListener('keydown', (e) => { if (e.key === 'Enter') acted(); }, opt);
+  addEventListener('touchstart', () => { finger = true; fingerAt = performance.now(); }, opt);
+  addEventListener('touchmove', () => { fingerAt = movedAt = performance.now(); }, opt);
+  const lifted = (e) => { finger = (e.touches?.length || 0) > 0; if (drawWanted) drawPlan(); };
+  addEventListener('touchend', lifted, opt);
+  addEventListener('touchcancel', lifted, opt);
+  addEventListener('wheel', () => { movedAt = performance.now(); }, opt);
+  // What goes on scrolling after the finger lifts. (A scroll the page made
+  // itself, with nothing of the owner's just before it, is not one.)
+  document.addEventListener('scroll', () => { const now = performance.now(); if (finger || now - movedAt < SCROLL_REST) movedAt = now; }, opt);
 }
 
 addEventListener('hashchange', render);
