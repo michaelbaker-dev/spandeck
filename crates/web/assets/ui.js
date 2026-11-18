@@ -87,7 +87,13 @@ export async function copyText(text, said = 'Copied') {
 // `beside` puts it at the right with the page left clear to see, and a click
 // on the page does not close it: for the dialog whose changes show on the page.
 export function dialog(title, build, opts = {}) {
-  const close = () => { back.remove(); removeEventListener('keydown', onKey, true); opts.onClose && opts.onClose(); };
+  // `opts.mayClose`: a dialog with something unsaved in it can refuse to be
+  // closed by its ✕, Escape or a press beside it, and ask first; it closes
+  // itself with `close(true)`.
+  const close = (sure) => {
+    if (sure !== true && opts.mayClose && !opts.mayClose()) return;
+    back.remove(); removeEventListener('keydown', onKey, true); opts.onClose && opts.onClose();
+  };
   // Escape closes the dialog on top only: each dialog listens, and one press
   // used to close every dialog that was open, the one behind included.
   const onKey = (e) => { if (e.key === 'Escape' && [...document.querySelectorAll('.backdrop')].pop() === back) { e.stopImmediatePropagation(); close(); } };

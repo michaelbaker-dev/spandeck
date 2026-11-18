@@ -575,6 +575,10 @@ const REPEATABLE: &[&str] = &[
     // here" while the first runs starts nothing.
     "tools.check",
     "tools.install",
+    // The role library read, and an agent reading its own role.
+    "roles.list",
+    "roles.get",
+    "role",
     "pane.last_session",
     "pane.conversation",
     "pane.conversation.detail",

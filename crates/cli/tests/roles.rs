@@ -429,3 +429,492 @@ fn two_stations_converge_on_an_edited_role() {
         at(&b, "copy-editor").is_none().then_some(())
     });
 }
+
+/// The Control Deck's Roles dialog, in a real browser. With
+/// `SPANDECK_SHOTS` set, pictures are written there:
+/// `SPANDECK_SHOTS=/some/dir cargo test --test roles -- --ignored`
+#[cfg(unix)]
+mod deck {
+    use super::*;
+    use common::browser::Page;
+    use std::path::PathBuf;
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Size {
+        Phone,
+        Small,
+        Desktop,
+    }
+
+    fn open(s: &Station, size: Size) -> Page {
+        match size {
+            Size::Desktop => Page::open(s, 1200, 800),
+            Size::Phone => {
+                let p = Page::open(s, 390, 844);
+                p.phone_screen();
+                p
+            }
+            Size::Small => {
+                let p = Page::open(s, 390, 700);
+                p.protocol(
+                    "Emulation.setDeviceMetricsOverride",
+                    json!({"width": 320, "height": 640, "deviceScaleFactor": 1, "mobile": false}),
+                );
+                p.wait("a small phone's screen", "innerWidth === 320");
+                p
+            }
+        }
+    }
+
+    fn shot(page: &Page, name: &str) {
+        use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png;
+        if let Some(out) = std::env::var_os("SPANDECK_SHOTS").map(PathBuf::from) {
+            std::fs::create_dir_all(&out).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(350));
+            let png = page.tab.capture_screenshot(Png, None, None, true).unwrap();
+            std::fs::write(out.join(format!("roles-{name}.png")), png).unwrap();
+        }
+    }
+
+    /// Open the Roles dialog the way the owner does: the top bar's button
+    /// on a desktop, the top bar's menu on a phone.
+    fn open_roles(page: &Page, phone: bool) {
+        if phone {
+            page.wait(
+                "Roles in the top bar's menu",
+                "(i => i ? (i.click(), true) : (document.querySelector('.top-more')?.click(), false))([...document.querySelectorAll('.menu-item')].find(i => i.innerText.startsWith('Roles')))",
+            );
+        } else {
+            page.wait(
+                "the Roles button, beside Tools",
+                "(b => b && b.previousElementSibling?.classList.contains('tools-btn') ? (b.click(), true) : false)(document.querySelector('.topbar .roles-btn'))",
+            );
+        }
+        page.wait(
+            "the seven roles",
+            "document.querySelectorAll('.roles-panel .ro-row').length >= 7",
+        );
+    }
+
+    fn click(page: &Page, what: &str, sel: &str) {
+        page.wait(
+            what,
+            &format!(
+                "(b => b && !b.disabled ? (b.click(), true) : false)(document.querySelector({}))",
+                json!(sel)
+            ),
+        );
+    }
+
+    /// Put text in a box as typing does: the box's own value, then `input`.
+    fn set(page: &Page, sel: &str, value: &str) {
+        page.js(&format!(
+            "(el => {{ el.focus(); el.value = {}; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }})(document.querySelector({}))",
+            json!(value),
+            json!(sel)
+        ));
+    }
+
+    /// 44 px targets and nothing off the side, in every dialog that is open.
+    const FITS: &str = "[...document.querySelectorAll('.dialog')].every(d => { const b = d.querySelector('.dialog-body'); return b.scrollWidth <= b.clientWidth && d.getBoundingClientRect().right <= innerWidth + 0.5 && [...d.querySelectorAll('*')].every(x => !x.offsetParent || x.getBoundingClientRect().right <= innerWidth + 0.5) && [...d.querySelectorAll('button, summary, select, input:not([type=checkbox])')].filter(x => x.offsetParent).every(x => x.getBoundingClientRect().height >= 43.5); }) && document.documentElement.scrollWidth <= innerWidth";
+    const MISFITS: &str = "JSON.stringify([innerWidth, document.documentElement.scrollWidth, ...[...document.querySelectorAll('.dialog *')].filter(x => x.offsetParent && (x.getBoundingClientRect().right > innerWidth + 0.5 || (x.matches('button, summary, select, input:not([type=checkbox])') && x.getBoundingClientRect().height < 43.5))).slice(0, 8).map(x => [x.tagName, x.className, x.innerText.slice(0, 40), Math.round(x.getBoundingClientRect().right), Math.round(x.getBoundingClientRect().height)])])";
+
+    fn fits(page: &Page, size: Size, what: &str) {
+        if size != Size::Desktop {
+            assert_eq!(page.js(FITS), json!(true), "{what}: {}", page.js(MISFITS));
+        }
+    }
+
+    /// The owner's request, start to end: see the roles, read one's whole
+    /// prompt, change it and save, see "changed by you", reset it, make a
+    /// role by copying one, start a pane with a role and see it sent. What
+    /// is typed and not saved survives the dialog being drawn again and a
+    /// save that lost to a newer copy, and the dialog asks before it is
+    /// closed over it.
+    fn the_owners_request(size: Size) {
+        let phone = size != Size::Desktop;
+        let tag = match size {
+            Size::Phone => "phone",
+            Size::Small => "320",
+            Size::Desktop => "desktop",
+        };
+        let scripts = tempfile::tempdir().unwrap();
+        let script = scripts.path().join("idle.json");
+        std::fs::write(
+            &script,
+            json!({"steps": [], "on_input": [{"turn_end": "ok"}]}).to_string(),
+        )
+        .unwrap();
+        let s = Station::start_with(
+            "alpha",
+            &format!(
+                "[agents.claude]\nprogram = '{FAKE}'\nargs = [\"--script\", '{}']\n",
+                script.display()
+            ),
+            &[],
+        );
+        let builtin = s.call("roles.get", json!({"name": "critic"}))["role"]["prompt"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let page = open(&s, size);
+        open_roles(&page, phone);
+
+        // The list: title, name, kind, summary; nothing changed yet.
+        let rows = page.js("JSON.stringify([...document.querySelectorAll('.ro-row')].map(r => [r.dataset.role, r.querySelector('b').innerText, r.querySelector('.ro-kind').innerText, !!r.querySelector('.ro-changed'), r.querySelector('.ro-summary').innerText.length > 20]))");
+        let rows: Value = serde_json::from_str(rows.as_str().unwrap()).unwrap();
+        assert_eq!(
+            rows[0],
+            json!(["builder", "Builder", "on the team", false, true])
+        );
+        assert_eq!(
+            rows[1],
+            json!(["critic", "Critic", "on the team", false, true])
+        );
+        assert_eq!(
+            rows[6],
+            json!([
+                "security",
+                "Security reviewer",
+                "a short visit",
+                false,
+                true
+            ])
+        );
+        fits(&page, size, "the list");
+        shot(&page, &format!("{tag}-1-list"));
+
+        // One role: its whole prompt, as text, wrapped, with its defaults.
+        click(&page, "the critic", ".ro-row[data-role=critic]");
+        page.wait(
+            "the critic's prompt",
+            "!!document.querySelector('.ro-role-view .ro-prompt')",
+        );
+        assert_eq!(
+            page.js("document.querySelector('.ro-role-view .ro-prompt').textContent"),
+            json!(builtin),
+            "the whole prompt, as it is stored"
+        );
+        assert_eq!(
+            page.js("(p => p.children.length === 0 && getComputedStyle(p).whiteSpace === 'pre-wrap' && p.scrollWidth <= p.clientWidth)(document.querySelector('.ro-role-view .ro-prompt'))"),
+            json!(true),
+            "text and never HTML, wrapped, not wider than its box"
+        );
+        assert_eq!(
+            page.js("(d => d.includes('Budget') && d.includes('One round a stage unless there is a blocker'))(document.querySelector('.ro-defaults').innerText)"),
+            json!(true)
+        );
+        fits(&page, size, "one role");
+        shot(&page, &format!("{tag}-2-role"));
+
+        // Edit: the prompt in a large box, the count, the placeholders.
+        click(&page, "Edit", ".ro-edit");
+        page.wait(
+            "the editor",
+            "document.querySelector('.ro-f-prompt')?.value.length > 100",
+        );
+        assert_eq!(
+            page.js("document.querySelector('.ro-f-prompt').value"),
+            json!(builtin)
+        );
+        let n = builtin.len().to_string();
+        assert_eq!(
+            page.js("document.querySelector('.ro-count').innerText"),
+            json!(format!(
+                "{},{} of 16,384 bytes",
+                &n[..n.len() - 3],
+                &n[n.len() - 3..]
+            ))
+        );
+        assert_eq!(
+            page.js("(t => ['{{project}}', '{{others}}', '{{budget}}', 'the other agent panes'].every(w => t.includes(w)))(document.querySelector('.ro-places').textContent)"),
+            json!(true)
+        );
+        assert_eq!(
+            page.js("!document.querySelector('.ro-reset') && !!document.querySelector('.ro-show-builtin') && !!document.querySelector('.ro-save') && !!document.querySelector('.ro-cancel')"),
+            json!(true),
+            "nothing to reset until it is changed"
+        );
+        let mine = format!("{builtin}\nAlso read the changelog. <b>not html</b> {{{{mine}}}}\n");
+        set(&page, ".ro-f-prompt", &mine);
+        page.js("document.querySelector('.ro-f-prompt').dataset.same = 'yes'");
+        page.wait(
+            "it says it is not saved",
+            "document.querySelector('.ro-state').innerText === 'Not saved yet' && document.querySelector('.ro-odd').innerText.includes('{{mine}}')",
+        );
+        fits(&page, size, "the editor");
+        shot(&page, &format!("{tag}-3-editor"));
+
+        // The dialog is drawn again (another role changes somewhere, and
+        // the page hears of a pane): the box and its words are the same.
+        let other = s.fake(json!({"steps": []}), json!({"name": "other"}));
+        s.call(
+            "roles.set",
+            json!({"name": "security", "role": {"budget": "Ten minutes."}}),
+        );
+        page.redraw(&s, &other);
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        assert_eq!(
+            page.js("document.querySelector('.ro-f-prompt').value"),
+            json!(mine)
+        );
+        assert_eq!(
+            page.js("document.querySelector('.ro-f-prompt').dataset.same"),
+            json!("yes"),
+            "the same box, not another with the same words"
+        );
+
+        // Closing over it asks first, and keeps it.
+        page.js("document.querySelector('.roles-sheet .dialog-head .icon-btn').click()");
+        page.wait(
+            "the question",
+            "document.querySelector('.ro-ask')?.innerText.includes('Discard what you changed?')",
+        );
+        fits(&page, size, "the question");
+        click(&page, "Keep editing", ".ro-keep");
+        assert_eq!(
+            page.js("!document.querySelector('.ro-ask') && document.querySelector('.ro-f-prompt').value.length"),
+            json!(mine.chars().count())
+        );
+
+        // The same role is changed somewhere else first: the save says so,
+        // and the owner's text is still in the box.
+        s.call(
+            "roles.set",
+            json!({"name": "critic", "role": {"budget": "Theirs."}}),
+        );
+        page.wait(
+            "it says the role moved",
+            "!!document.querySelector('.ro-moved')",
+        );
+        click(&page, "Save", ".ro-save");
+        page.wait(
+            "not saved, and why",
+            "(c => c && c.innerText.includes('Not saved: this role was changed by you at alpha after you opened it') && c.innerText.includes('Your text is still in the box'))(document.querySelector('.ro-conflict'))",
+        );
+        assert_eq!(
+            page.js("document.querySelector('.ro-f-prompt').value"),
+            json!(mine)
+        );
+        assert_eq!(
+            s.call("roles.get", json!({"name": "critic"}))["role"]["prompt"],
+            json!(builtin)
+        );
+        page.js("document.querySelector('.ro-conflict').scrollIntoView({block: 'center'})");
+        fits(&page, size, "the save that lost");
+        shot(&page, &format!("{tag}-4-newer"));
+        click(&page, "Save mine over it", ".ro-over");
+        page.wait(
+            "saved, and said",
+            "document.querySelector('.ro-role-view .ro-said')?.innerText.startsWith('Saved on alpha') && !!document.querySelector('.ro-role-view .ro-changed')",
+        );
+        let saved = s.call("roles.get", json!({"name": "critic"}))["role"].clone();
+        assert_eq!(saved["prompt"], json!(mine));
+        assert_eq!(saved["changed"], json!(true));
+        // What was typed is shown as text.
+        assert_eq!(
+            page.js("(p => p.children.length === 0 && p.textContent.includes('<b>not html</b>'))(document.querySelector('.ro-role-view .ro-prompt'))"),
+            json!(true)
+        );
+        assert_eq!(
+            page.js("document.querySelector('.ro-builtin .ro-prompt').textContent"),
+            json!(builtin),
+            "the built-in text is still there to compare"
+        );
+        click(&page, "back to the list", ".ro-back");
+        page.wait(
+            "changed by you, in the list",
+            "document.querySelector('.ro-row[data-role=critic] .ro-changed')?.innerText === 'changed by you' && !document.querySelector('.ro-row[data-role=builder] .ro-changed')",
+        );
+        shot(&page, &format!("{tag}-5-changed"));
+
+        // Reset: asked once, then the built-in text again.
+        click(&page, "the critic", ".ro-row[data-role=critic]");
+        click(&page, "Reset", ".ro-role-view .ro-reset");
+        page.wait(
+            "the question",
+            "document.querySelector('.ro-ask')?.innerText.includes('Go back to the built-in text of critic?')",
+        );
+        click(&page, "Reset, said twice", ".ro-discard");
+        page.wait(
+            "the built-in text again",
+            "document.querySelector('.ro-said')?.innerText.includes('built-in text again') && !document.querySelector('.ro-role-view .ro-changed')",
+        );
+        assert_eq!(
+            page.js("document.querySelector('.ro-role-view .ro-prompt').textContent"),
+            json!(builtin)
+        );
+        assert_eq!(
+            s.call("roles.get", json!({"name": "critic"}))["role"]["changed"],
+            json!(false)
+        );
+
+        // A new role, copied from the critic.
+        click(&page, "Copy to a new role", ".ro-copy");
+        page.wait(
+            "the new role's form, with the critic's text",
+            "document.querySelector('.ro-f-copy')?.value === 'critic' && document.querySelector('.ro-f-prompt').value.startsWith('# Role: critic') && document.querySelector('.ro-f-name').value === ''",
+        );
+        click(&page, "Save, with no name", ".ro-save");
+        page.wait(
+            "it asks for a name",
+            "document.querySelector('.ro-said')?.innerText.includes('Give the role a name')",
+        );
+        set(&page, ".ro-f-name", "copy-editor");
+        set(&page, ".ro-f-title", "Copy editor");
+        set(&page, ".ro-f-summary", "Reads every word a user will see.");
+        set(&page, ".ro-f-kind", "visit");
+        fits(&page, size, "a new role");
+        page.js("document.querySelector('.dialog-body:has(.roles-panel)').scrollTop = 0");
+        shot(&page, &format!("{tag}-6-new"));
+        click(&page, "Save", ".ro-save");
+        page.wait(
+            "the new role, marked as the owner's",
+            "document.querySelector('.ro-role-view')?.dataset.role === 'copy-editor' && !!document.querySelector('.ro-role-view .ro-own') && document.querySelector('.ro-role-view .ro-kind').innerText === 'a short visit'",
+        );
+        let made = s.call("roles.get", json!({"name": "copy-editor"}))["role"].clone();
+        assert_eq!(made["prompt"], json!(builtin));
+        assert_eq!(made["source"], json!("own"));
+        assert_eq!(made["title"], json!("Copy editor"));
+
+        // Closed by its own control.
+        fits(&page, size, "the new role, saved");
+        click(&page, "Close", ".ro-close");
+        page.wait("the dialog gone", "!document.querySelector('.roles-panel')");
+
+        // Where a role is chosen: none by default, its summary under it;
+        // the pane is started with it, and is sent it.
+        if phone {
+            page.wait(
+                "New session, and its sheet",
+                "!!document.querySelector('.sheet .tile-pick') || (document.querySelector('.new-session')?.click(), false)",
+            );
+            page.js("[...document.querySelectorAll('.sheet .tile-pick')].find(b => b.innerText.includes('Claude Code')).click()");
+        } else {
+            page.wait(
+                "New pane, and its dialog",
+                "!!document.querySelector('.dialog .role-pick') || ([...document.querySelectorAll('.side-actions button')].find(b => b.innerText.includes('Pane'))?.click(), false)",
+            );
+        }
+        page.wait(
+            "the role choice, none chosen, with the owner's own role in it",
+            "(p => p && p.offsetParent && p.value === '' && [...p.options].some(o => o.value === 'copy-editor') && p.closest('.role-pick-row').innerText.includes('No role'))(document.querySelector('.dialog .role-pick'))",
+        );
+        set(&page, ".dialog .role-pick", "copy-editor");
+        page.wait(
+            "the role's summary under it",
+            "document.querySelector('.dialog .role-pick-says').innerText.startsWith('Reads every word a user will see.')",
+        );
+        page.js(
+            "document.querySelector('.dialog .role-pick-row').scrollIntoView({block: 'center'})",
+        );
+        // The sheet's other boxes are as they were before roles; the role's
+        // own is a full target, and nothing is wider than the page.
+        if phone {
+            assert_eq!(
+                page.js("document.querySelector('.dialog .role-pick').getBoundingClientRect().height >= 43.5 && [...document.querySelectorAll('.dialog *')].every(x => !x.offsetParent || x.getBoundingClientRect().right <= innerWidth + 0.5) && document.documentElement.scrollWidth <= innerWidth"),
+                json!(true),
+                "{}",
+                page.js(MISFITS)
+            );
+        }
+        shot(&page, &format!("{tag}-7-new-pane"));
+        page.js("[...document.querySelectorAll('.dialog')].pop().querySelector('button[type=submit]').click()");
+        let pane = wait_for("the pane with its role", 20, || {
+            s.call("pane.list", json!({}))
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["role"] == json!("copy-editor"))
+                .cloned()
+        });
+        page.wait(
+            "it says the role is being sent",
+            "[...document.querySelectorAll('.toast')].some(t => t.innerText.includes('It is being sent its role: Copy editor'))",
+        );
+        let name = pane["name"].as_str().unwrap();
+        let body = wait_for("the role, sent", 20, || sent_to(&s, name).pop());
+        assert!(
+            body.starts_with(&format!("{HEADER}\n\n# Role: critic")),
+            "{body}"
+        );
+        assert!(
+            body.contains("You are working alone in this project."),
+            "{body}"
+        );
+        // And the pane's record says its role.
+        page.wait(
+            "the pane says its role",
+            "[...document.querySelectorAll('.chat-title, .chip')].some(e => e.innerText.includes('copy-editor'))",
+        );
+        shot(&page, &format!("{tag}-8-pane"));
+
+        // Its menu sends the role again, and says so.
+        if !phone {
+            let id = pane["id"].as_str().unwrap();
+            page.right_click(&format!(
+                "document.querySelector('.side-pane[data-id=\"{id}\"]')"
+            ));
+            page.choose("Send its role again");
+            page.wait(
+                "it says what it sent",
+                &format!(
+                    "[...document.querySelectorAll('.toast')].some(t => t.innerText.includes({}))",
+                    json!(format!(
+                        "Sent {name} its role (copy-editor, the owner's text)"
+                    ))
+                ),
+            );
+            assert_eq!(sent_to(&s, name).len(), 2);
+            // A pane with no role has no such item.
+            page.right_click(&format!(
+                "document.querySelector('.side-pane[data-id=\"{other}\"]')"
+            ));
+            assert_eq!(
+                page.js("[...document.querySelectorAll('.menu-item')].some(i => i.innerText.startsWith('Send its role again'))"),
+                json!(false)
+            );
+        }
+
+        if std::env::var_os("SPANDECK_SHOTS").is_some() && size == Size::Phone {
+            s.call(
+                "look.set",
+                json!({"level": "deck", "choice": {"theme": "spandeck-light"}}),
+            );
+            page.wait(
+                "the light theme",
+                "getComputedStyle(document.documentElement).colorScheme === 'light' || document.documentElement.hasAttribute('data-themed')",
+            );
+            page.goto("#/fleet");
+            open_roles(&page, true);
+            shot(&page, "phone-light-1-list");
+            click(&page, "the critic", ".ro-row[data-role=critic]");
+            page.wait(
+                "the prompt",
+                "!!document.querySelector('.ro-role-view .ro-prompt')",
+            );
+            shot(&page, "phone-light-2-role");
+            click(&page, "Edit", ".ro-edit");
+            page.wait("the editor", "!!document.querySelector('.ro-f-prompt')");
+            shot(&page, "phone-light-3-editor");
+        }
+    }
+
+    #[test]
+    #[ignore = "merge tier: a browser at a phone's size"]
+    fn roles_are_viewed_changed_and_chosen_on_a_phone() {
+        the_owners_request(Size::Phone);
+    }
+
+    #[test]
+    #[ignore = "merge tier: a browser at the narrowest phone's size"]
+    fn roles_are_viewed_changed_and_chosen_at_320_px() {
+        the_owners_request(Size::Small);
+    }
+
+    #[test]
+    #[ignore = "merge tier: a browser at a desktop's size"]
+    fn roles_are_viewed_changed_and_chosen_on_a_desktop() {
+        the_owners_request(Size::Desktop);
+    }
+}

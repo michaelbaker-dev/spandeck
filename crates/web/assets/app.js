@@ -19,6 +19,7 @@ import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, reme
 import { lookEditor } from './lookedit.js';
 import { phoneLook } from './phonelook.js';
 import { toolsPanel } from './tools.js';
+import { rolesPanel, rolePick } from './roles.js';
 import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook, refreshAsked, refreshCorrected } from './perf.js';
 import { qrSvg } from './qr.js';
 import { initFailover } from './failover.js';
@@ -776,6 +777,10 @@ function paneMenu(e, st, p, where, term) {
     agent && p.project && alive && { label: 'Start a review loop on its work', action: () => rpc(st, 'recipe.review', { pane: p.id }).then(() => toast('Review loop started')) },
     agent && alive && { label: 'Run a command in it…', action: () => commandDialog(st, p) },
     { label: 'Send it a message', action: () => messageDialog(st, p) },
+    // Its role's prompt, again (after a compaction, or after the owner
+    // changed the role): only where the station sends roles.
+    agent && alive && p.role && hasCap(st, 'roles') && { label: 'Send its role again', hint: p.role, action: () => rpc(st, 'roles.send', { pane: p.id })
+      .then(r => toast(r.sent ? `Sent ${p.name} its role (${r.role}, the ${r.text} text)` : `Nothing was sent to ${p.name}: ${r.why}`, r.sent ? 'info' : 'error')) },
     { label: 'Rename', action: () => renameDialog(st, p) },
     { label: 'Appearance…', hint: lookState.doc.panes[paneLookKey(st, p)] ? 'its own' : undefined, action: () => appearance('pane', { key: paneLookKey(st, p), name: p.name }) },
     { label: 'Copy address', action: () => copyText(p.address, 'Copied ' + p.address) },
@@ -874,12 +879,16 @@ function newPaneDialog(st, project, then) {
     // "Trust spandeck's own hooks in <agent> if it asks": on unless the
     // owner turned it off on that station.
     const hooks = hooksTick((q) => api.on(st, 'hookstrust.choice', q), () => ({ agent: agent.value }));
+    // "Role": none unless chosen. The agent is sent the role's prompt once
+    // it has started (roles.js).
+    const role = rolePick({ api, hasCap, station: () => st, isAgent: () => agent.value !== 'shell' });
     let canContinue = true, asked = 0, askTimer = null;
     const ask = async () => {
       const n = ++asked;
       const isAgent = agent.value !== 'shell';
       trust.refresh();
       hooks.refresh();
+      role.refresh();
       lastRow.style.display = isAgent && canContinue ? '' : 'none';
       if (!isAgent || !canContinue) return;
       lastNote.textContent = '';
@@ -900,14 +909,15 @@ function newPaneDialog(st, project, then) {
     const submit = async () => {
       clearTimeout(askTimer);
       const resumeLast = agent.value !== 'shell' && canContinue && last.checked;
-      const params = { agent: agent.value, name: name.value.trim() || undefined, project: proj.value || undefined, cwd: cwd.value || undefined, resume_last: resumeLast || undefined, trust_folder: trust.value(), trust_hooks: hooks.value() };
+      const params = { agent: agent.value, name: name.value.trim() || undefined, project: proj.value || undefined, cwd: cwd.value || undefined, resume_last: resumeLast || undefined, trust_folder: trust.value(), trust_hooks: hooks.value(), role: role.value() };
       const pane = await rpc(st, 'pane.spawn', params);
       close();
+      if (params.role) toast(`Started ${pane.name}. It is being sent its role: ${role.title() || params.role}`);
       if (resumeLast && !pane.resumed) toast('No saved conversation to continue here: a new one was started');
       then ? then(pane.id) : go(paneUrl(st, pane.id));
     };
     return h('form', { onsubmit: (e) => { e.preventDefault(); submit(); } },
-      field('Run', agent), field('Name', name, 'A name is used once in a project.'), field('Project', proj), field('Folder', cwd), lastRow, trust.row, hooks.row,
+      field('Run', agent), field('Name', name, 'A name is used once in a project.'), field('Project', proj), field('Folder', cwd), role.row, lastRow, trust.row, hooks.row,
       h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel'), h('button', { class: 'primary', type: 'submit' }, 'Start')));
   });
 }
@@ -1235,6 +1245,7 @@ function palette() {
     { label: `Check ${here} (doctor)`, run: () => doctorPanel(here) },
     { label: 'Agent setup: MCP servers, skills, models', run: setupPanel },
     { label: 'Tools for agents: add, roll out, upgrade', run: openTools },
+    { label: 'Roles for agents: view and change each role\'s prompt', run: openRoles },
     { label: 'Vault: connect stations and set token rotation', run: vaultPanel },
     { label: 'Run a command in every agent…', run: () => commandDialog(api.station, null) },
   ];
@@ -1648,6 +1659,8 @@ const permTyped = new Set();
 
 // Tools for agents (tools.js): added once, set up by each station chosen.
 const openTools = () => toolsPanel({ api, hasCap, stations: () => S.fleet.stations });
+// Roles for agents (roles.js): what each kind of agent is asked to be.
+const openRoles = () => rolesPanel({ api, hasCap });
 
 async function setupPanel() {
   let view;
@@ -2092,6 +2105,7 @@ function topbar() {
     isPhone() ? null : h('button', { class: 'perf-btn', onclick: () => go('#/perf'), 'aria-label': trouble ? 'Performance: something needs a look' : 'Performance', title: 'Where time goes on every station, the links between them, and Tailscale keys' }, 'Performance', trouble ? h('span', { class: 'perf-dot', 'aria-hidden': 'true' }) : null),
     isPhone() ? null : h('button', { onclick: setupPanel, title: 'MCP servers, skills and model defaults for every agent' }, 'Agent setup'),
     isPhone() ? null : h('button', { class: 'tools-btn', onclick: openTools, title: 'Tools (MCP servers) for your agents: add one once, and each station you choose sets it up' }, 'Tools'),
+    isPhone() ? null : h('button', { class: 'roles-btn', onclick: openRoles, title: 'Roles for your agents: what a builder, a critic or a reviewer is asked to be. View and change each prompt' }, 'Roles'),
     isPhone() ? null : h('button', { onclick: () => appearance('deck'), title: 'Themes, colours and fonts for the whole deck' }, 'Appearance'),
     isPhone() || !S.fleet.stations.some(x => x.vault?.found) ? null : h('button', { class: S.fleet.stations.some(x => x.state === 'online' && (['not_connected', 'token_rejected', 'locked'].includes(x.vault?.state) || x.vault?.health === 'problem')) ? 'attn' : '', onclick: vaultPanel, title: 'AgentVault: keys for agents without handing over keys' }, 'Vault'),
     h('button', { class: 'danger', onclick: stopAllMenu, title: 'Interrupt running agent turns' }, 'Stop all'),
@@ -2100,6 +2114,7 @@ function topbar() {
     isPhone() ? h('button', { class: 'top-more', 'aria-label': 'More', title: 'More', 'aria-haspopup': 'menu', onclick: (e) => { const b = e.currentTarget.getBoundingClientRect(); showMenu(b.right, b.bottom + 2, [
       { label: 'Add a machine…', hint: 'to this fleet', action: () => addMachineDialog() },
       { label: 'Tools', hint: 'for your agents', action: openTools },
+      { label: 'Roles', hint: 'what each agent is asked to be', action: openRoles },
       { label: 'Appearance', hint: 'theme and text size', action: () => appearance('deck') },
       { label: 'Usage', hint: 'tokens and cost', action: fleetUsageDialog },
       { label: 'Performance', action: () => go('#/perf') }]); } }, '⋯') : null);
@@ -4762,7 +4777,7 @@ initMic({
   secureDeck: () => { const me = S.fleet.stations.find(s => s.self), t = me?.https; return t && t.on && t.name ? { origin: `https://${t.name}:${t.port}`, what: `${me.station}'s secure deck` } : null; },
 });
 initChat({
-  api, isPhone, update, go, paneUrl, rpc, findPane, paneMenu, usage: usageDialog, online, onlineStations, panesOf, freeName, lastSessionNote, pref, setPref,
+  api, hasCap, isPhone, update, go, paneUrl, rpc, findPane, paneMenu, usage: usageDialog, online, onlineStations, panesOf, freeName, lastSessionNote, pref, setPref,
   AGENTS: AGENT_CHOICES,
   approvals: () => S.approvals,
   stations: () => stationsByName(),

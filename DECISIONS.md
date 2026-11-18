@@ -1688,7 +1688,9 @@ instruction to build what the report recommended.
   `same-tree`: both work in one tree, and the critic keeps to `reviews/` by the process, not
   by enforcement), starts them, and sends each its role as one message from the owner. With
   no brief nobody is told to start; the roles are sent when the project is next opened with
-  a brief written. It answers none of an agent program's prompts. A first commit is made
+  a brief written. (That message is now the role's prompt from the role library, and a
+  third pane, `user`, can be added: see Roles for agents.) It answers none of an agent
+  program's prompts. A first commit is made
   only in a repository with none, of the files written, as `spandeck <spandeck@localhost>`
   when no author is configured; no git configuration is written. `recipe.list` is the
   review loops.
@@ -1722,6 +1724,52 @@ instruction to build what the report recommended.
   permission mode `auto`) is not held for the owner by the station's hook. The permission
   mode set for an agent reaches Codex as it reaches Claude Code and Antigravity, and is
   chosen in Agent setup.
+
+## Roles for agents (18 Nov 2026, the owner's request)
+
+The owner: "I wonder if we should have roles defined when we start a agent. So a critic has a defined role it should perform across UX design, architecture, system design, performance, code review etc." And then: "Ok be detailed on the prompt for the role, I should be able to view and change the role prompt".
+
+What was there before: a pane could carry a role's name (`pane.spawn` with `role`, a project's pane slot, `delegate`), which chose a helper's placement and which standing orders applied, and said nothing to the agent. The pair recipe sent each of its two agents one sentence. The second run of a pair (`herotest-report/REPORT.md`, 18 Nov 2026) found that the critic "reviewed evidence, not the product".
+
+**Built**: the station side (the calls are `docs/roles-api.md`), the command line (`spandeck roles`, `pane new --role`), the Control Deck's Roles dialog, and the pair recipe's use of it.
+
+- **A role library, the same on every station** (`crates/core/src/roledoc.rs`). A role has a name (letters, digits, `-`, `_`; 32 at most), a title, a one-line summary, a prompt (markdown, 16 KB at most), a kind (`standing`: on the team for the whole job; `visit`: one review, then done), an optional budget line, and optional defaults: the program, the model, the effort and the permission mode of a pane started with it.
+- **Seven roles are built in**, their prompts the files in `crates/core/src/roles/`: builder, critic, user (standing), and architect, performance, accessibility, security (a visit). The critic's begins with using the product as its user would and holding it against the brief, before any code.
+- **The document holds only what the owner changed or added** (`roles.json`, by the rules of the other synced documents: The same view from every station). A built-in role nobody changed is not in it, so **an unchanged built-in role follows the release**: a later spandeck that improves the text improves it on every station at that station's update. A built-in role the owner changed is in it whole and marked changed; it no longer follows the release, the built-in text stays readable beside it, and "reset to the built-in text" takes the owner's out. A built-in role saved exactly as the release has it is not kept. A built-in role cannot be removed, only reset; a role of the owner's own can be removed.
+- **It is a document of its own**, for the reason the tools document is (Tools for agents): a field added to the agent setup would be dropped by every station on 0.4.15 and by every station that took its copy from one.
+- **A prompt comes from the station's library and from nowhere else.** A role's prompt is sent to an agent as the owner's instruction. A project's file (`.spandeck/project.toml`) travels with a repository, so it may **name** a role and can never supply a role's prompt, title or budget: the file has no place for them, and what it writes under a role's name is not read. What is put into a prompt when it is sent is checked to be a name and no more: a pane's name or a role's name from a project's file that is anything but letters, digits, `-`, `_` (and `.` in a pane's name) is left out of the sentence.
+- **Placeholders are filled when the prompt is sent, and shown as written when it is viewed**: `{{project}}`; `{{others}}`, a short paragraph naming the project's other agent panes and the role of each, or "You are working alone in this project."; `{{budget}}`, the role's budget or the one given at the start. An unknown `{{…}}` is left as written, and what is put in is not read for placeholders again.
+- **A pane started with a role is sent that role's prompt once**, when the role's name is in the library: `pane.spawn` with `role`, a project's pane slot (`project.open`), a helper started by `delegate`, a recipe. It is a message from the owner that begins "Your role in this project, from the owner:", by the road every message takes and under its rules (never typed into a program's own question; held while the pane has only just started). A name the library does not have sends nothing, as before. Restarted into its conversation, restored after the station's restart, or reopened by its project into the conversation it had, a pane is not sent it again; started on a new conversation, it is. The owner sends it again with `roles.send` ("Send its role again" in the pane's menu). The ship's log records `role.sent` with the pane, the role and whether the text was the built-in or the owner's.
+- **A role's defaults.** Its model, effort and permission mode are laid over Agent setup's for a pane started with the role; its program is used when a pane is started with the role and no program is named, and by `delegate` for a role the project's file says nothing of.
+- **An agent can read its own role again** (`role`, and the MCP tool of that name): the filled prompt of the calling pane's role, or that it has none. An agent has no call that lists, changes or sends roles, and is answered for its own pane whatever it names.
+- **Every `roles.` call is the owner's alone** (rule 7): `roles.list`, `roles.get`, `roles.set`, `roles.reset`, `roles.remove`, `roles.send` are on no list of an agent's, a read-only caller's or a station's. A station has one, `roles.push`, to offer its copy of the document. Another station is reached as the owner's forwarded request.
+- **A save made to an older copy says so.** `roles.set` carries the stamp of the role as the caller read it; when the role was changed since, nothing is saved and the answer says who changed it. The dialog keeps the owner's text in the box, says "Not saved", and offers to save it over the other.
+- **The pair recipe uses the library.** Its builder and critic are sent their library role (filled, naming the others) followed by the recipe's line ("Read BRIEF.md and PROCESS.md in this folder, then start stage 0…"), in one message each. `--user [<agent>]` adds a third pane, `user`, with the role `user` (its program: the builder's, unless named). `--budget <minutes>` (5 to 240; 20 unless said) is the time a stage gets, written into `PROCESS.md` and into each agent's role. `PROCESS.md` was rewritten to the lessons of the second run: the critic's review begins with using the product and holding it against the brief; one round a stage unless there is a blocker; the plan carries one acceptance list, and cuts are decided there; with a `user` pane, it looks at each slice after it is committed and the builder answers its three things like findings. The separate UX stage is gone: the critic uses the product at every slice.
+
+### The Roles dialog (18 Nov 2026)
+
+The screen for the above (`crates/web/assets/roles.js`), built on `docs/roles-api.md`. It is reached from the top bar ("Roles", beside Tools), the command palette and, on a phone, the top bar's menu.
+
+- **The list**: each role's title, name, kind ("on the team", "a short visit"), summary, and "changed by you" or "yours" where it is.
+- **A role opened** shows its whole prompt as preformatted text that wraps (text, never HTML), its budget and defaults, Edit, "Copy to a new role", and for a changed built-in "Reset to the built-in text" and "Show the built-in text".
+- **Edit**: a large box with the prompt, the title, the summary, the kind, the budget and the defaults; which words are filled in and what each becomes; a count against the 16 KB limit; a word in `{{…}}` that will not be filled in is said. Save and Cancel; on a phone they stay at the foot.
+- **What is typed is kept apart from what is drawn**: the dialog being drawn again (the list read again, another station's change arriving) never replaces the box being typed in, and closing the dialog over unsaved text asks first, inside the dialog.
+- **New role**: empty, or "Copy from" another role.
+- **Where a role is chosen**: the New pane dialog and the phone's New session sheet have "Role" (none unless chosen) for an agent, with the role's summary under it; the pane's own line says its role beside its program; the pane's menu has "Send its role again" when it has one.
+- **Every action says what it did**, and a button that asks the station is greyed until it answers.
+- **On a phone** the dialog is a sheet, every target is 44 px, and nothing is wider than the page at 320 px.
+
+**What an older station does.** A station from before this (0.4.15) has no `roles` in `caps`: it is never offered the document and cannot erase it; it sends no pane a role's prompt, and a pair it sets up gets the one sentence it always sent; it knows none of the `roles.` calls. A deck does not offer "Role" for a pane on such a station, nor "Send its role again". A later format of the document is not taken by a station that does not read it (`format`), as with preferences and tools.
+
+**Not known.**
+
+- **Whether the roles make a pair's product better.** No run was made with them. The prompts and the process answer what the second run's report found; that they do so in practice is not established.
+- **Real agent programs.** Nothing here was run with a real Claude Code or Codex: that a 4 KB role arriving as a message is read in full after the program's first screen, and that the `role` tool is used after a compaction, were not seen.
+- **A role's defaults and each program's words.** A model, an effort or a permission mode is passed as Agent setup's is; a word the program does not know may stop it from starting, exactly as there. For Codex a permission mode that is not auto, on-request or never is not passed.
+- **A helper and its role.** A helper started by `delegate` begins on its brief and is told of its role as mail, which it reads at its first hook. Whether the role should instead be part of the brief was not decided.
+- **The built-in prompts on a phone.** Their lines are broken at about 90 characters in the files, so on a narrow screen a line wraps and then breaks again. They are shown and sent exactly as stored; whether to store them one paragraph a line was left to the owner.
+
+**Tests** (`crates/core/src/roledoc.rs`, `rpc.rs`, `crates/cli/tests/roles.rs`, `pair.rs`). The document's rules (a changed built-in is kept and marked, reset restores it, a role of the owner's own can be removed and a built-in cannot, limits refused); placeholders filled, an unknown one left; a project's file cannot supply a prompt, nor put more than a name into one; no agent, read-only caller or station has a `roles.` call, and an agent reads only its own role. Merge tier: a pane started with a role is sent it once and not into its first question, and again when the owner asks; the pair recipe with `--user` makes three panes, each sent its own role naming the others; two stations converge on an edited role and a save made to an older copy is refused; in a real browser at 390 px, 320 px and a desktop's width: the list, a role's whole prompt, edit and save, "changed by you", reset, a new role by copying, a role chosen where a pane is started and the pane sent it, and unsaved text surviving a redraw, the Close and a save that lost.
 
 ## Guarantees (contracts the build must meet)
 
@@ -1769,6 +1817,7 @@ instruction to build what the report recommended.
 - No station is the master: every station serves the same deck, accepts the same browsers and keeps the same rules, and a device's list of the fleet's stations has no first among them (17 Nov 2026; see HTTPS on every station, the app saved on the device, and carrying on through another station).
 - A station accepts a page from another origin only when that origin is exactly the deck of a member of its own roster, only on the deck's own socket and the socket that measures how far away it is, and only with a signed-in browser's own token: never the station's local token, a pane's, or a signature. Everything else refuses other origins. A station that left the fleet is no deck's origin, and its own calls and the tokens made with the old key are refused as above (17 Nov 2026).
 - A station that serves no HTTPS is reached exactly as before: nothing is redirected and no browser is told to insist on HTTPS unless the owner turns that on. The certificate's key never leaves its station (17 Nov 2026).
+- A role's prompt, which an agent is sent as the owner's instruction, comes only from the station's role library: never from a project's file or anything else that travels with a repository, which can name a role and no more. Only the owner reads, changes or sends a role; an agent can read its own (18 Nov 2026; see Roles for agents).
 - A password typed into the deck (for Add a machine's connection, or to let a station's user fetch its Tailscale certificate) is used for that one connection or that one fixed command, at the station it is for, and is never logged, never stored and never passed from one station to another. Only the owner can make such a call (17 Nov 2026).
 - The copy of the deck a device keeps holds the page's own files and nothing else: never an answer of the API, what a terminal shows, or a token. A page never runs files of two builds (17 Nov 2026).
 
