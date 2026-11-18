@@ -1596,6 +1596,54 @@ About updating a station that cannot reach the release host: "I think updating, 
 - Prices and context windows come from a public list (models.dev) that spandeckd fetches by itself once a day and keeps. The request carries nothing about the owner or a project. No price or window size is written into the code; a model the list does not name has no price. `[prices]` in the config is an optional override, never needed.
 - The context gauge uses the window the session data states (Codex), else the list's.
 
+## Two agents on one project (18 Nov 2026, from a real run of a builder and a critic)
+
+Decided after the owner's test of Claude Code as builder and Codex as critic, and their
+instruction to build what the report recommended.
+
+- **The pair is the second recipe, and sets a project up.** `spandeck project new --recipe
+  pair` (`project.new` with `recipe`, the owner's; no agent, station or read-only caller has
+  it) makes the folder and its git repository, writes `PROCESS.md` (from
+  `crates/core/src/recipes/pair-process.md`) and `BRIEF.md`, never over a file that is
+  there, defines the panes `builder` and `critic` in the project's own folder (roles placed
+  `same-tree`: both work in one tree, and the critic keeps to `reviews/` by the process, not
+  by enforcement), starts them, and sends each its role as one message from the owner. With
+  no brief nobody is told to start; the roles are sent when the project is next opened with
+  a brief written. It answers none of an agent program's prompts. A first commit is made
+  only in a repository with none, of the files written, as `spandeck <spandeck@localhost>`
+  when no author is configured; no git configuration is written. `recipe.list` is the
+  review loops.
+- **Activity is not a note.** What agents post on purpose (finding, decision, note, status)
+  and what spandeck captures from hooks (kind `auto`: a file edited, a command that failed,
+  a test run) are kept apart end to end. `context_search` returns posted notes unless
+  activity is asked for, and every result says which it is. The start digest gives the
+  notes first and the activity as one line for each agent. A pane's edit of a file it edited
+  within ten minutes is one row. Nobody posts activity. A linked project is never shown
+  another project's activity. No migration: old rows are read as they are.
+- **A project's record is written by the station.** `project.record`, the owner's alone,
+  and `spandeck project record`: one Markdown document, and the same as data, built only
+  from the ship's log, the messages, the notes, the approvals and the usage totals. Times
+  are UTC. Text from agents is only ever in a fenced block or a code span. "What looks
+  wrong" lists counts against stated limits and no opinion. What the station does not record
+  is said in the document, never filled in.
+- **Watch is the conversation.** A project's Watch shows its agents as a strip (state, how
+  long, one line of what each is doing; no terminal thumbnail), who is waiting for whom
+  when that can be told from the messages and the states and never otherwise, and the
+  messages between them as one thread, newest last. (The owner, of the map of cards and
+  lines it replaces: "Hard to tell what's really happening between agents".)
+- **The page is not taken by a flood.** Whole-page redraws from the station's news are at
+  most two a second with a burst of four, and wait while the owner is scrolling. A notice
+  that repeats for the same pane and reason within eight seconds, whatever its timer says,
+  is one notice. A pane whose state changes six times in ten seconds says so in one line and
+  is reported once (`client.report`, `state-flood`). What the owner did, and what they are
+  reading or typing, is never held back. (A pane's state flipped each second for minutes
+  and the owner's phone could not be scrolled.)
+- **A program's own review is its own.** A pane whose program was started to review for
+  itself what it would otherwise ask the owner (Codex's `--approve-for-me`, set by the
+  permission mode `auto`) is not held for the owner by the station's hook. The permission
+  mode set for an agent reaches Codex as it reaches Claude Code and Antigravity, and is
+  chosen in Agent setup.
+
 ## Guarantees (contracts the build must meet)
 
 ### Tasks
