@@ -595,10 +595,24 @@ pub fn waiting(agent: crate::AgentKind, lines: &[String]) -> Option<bool> {
                         .is_some_and(|open| open + 1 < close && tail[open + 1].starts_with('❯'))
             })
         }
-        AgentKind::Codex => tail
+        // (The real 0.169.0, 18 Nov 2026: a message of three rows waiting
+        // in its box was taken for something it shows, and the Enter that
+        // would have sent it was held back. Words in the box wrap onto
+        // rows set in by two blanks, over its row of model and folder.)
+        AgentKind::Codex => rows
             .iter()
             .rposition(|l| l.starts_with("› ") || l.as_str() == "›")
-            .is_some_and(|at| tail.len() - at - 1 <= 3),
+            .is_some_and(|at| {
+                let under = &rows[at + 1..];
+                under.len() <= 3
+                    || (under.len() <= 40
+                        && under.iter().all(|l| l.starts_with("  "))
+                        && under
+                            .iter()
+                            .rev()
+                            .take(2)
+                            .any(|l| l.contains(" · ~") || l.contains(" · /")))
+            }),
         _ => return None,
     })
 }
@@ -937,6 +951,29 @@ mod tests {
     use super::*;
 
     /// The real Antigravity 1.5.10 at the start of a turn (17 Nov 2026).
+    #[test]
+    fn codex_with_a_long_message_waiting_in_its_box_is_waiting_for_a_message() {
+        // The real 0.169.0 on 18 Nov 2026.
+        let screen = "\
+  >_ OpenAI Codex (v0.169.0)
+     ~/code/mterm/target/model-work
+
+› Do exactly this and nothing else. First run the shell command: sleep 20. Then run the shell command: echo done. Then
+  answer in one sentence: were you given any spandeck message while you worked, and if so quote its exact words. Do not
+  call any spandeck tool at any point.
+  and a fourth row of it.
+
+  GPT-6.1-Sol high · ~/code/mterm/target/model-work
+                                                                                              ⚠ 2 warnings · f2 to view";
+        let lines: Vec<String> = screen.lines().map(String::from).collect();
+        assert_eq!(waiting(crate::AgentKind::Codex, &lines), Some(true));
+        assert_eq!(read(&lines), None);
+        // Rows of something else under its box are not its wait.
+        let mut other = lines.clone();
+        other.insert(lines.len() - 2, "• Something it shows".into());
+        assert_eq!(waiting(crate::AgentKind::Codex, &other), Some(false));
+    }
+
     #[test]
     fn codex_scrolled_back_in_its_history_shows_nothing() {
         // The real 0.169.0 on 18 Nov 2026, at work, after its terminal
