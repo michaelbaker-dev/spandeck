@@ -1297,6 +1297,7 @@ impl Daemon {
         self.deck_offer(peer, &self.deck(), true).await;
         self.look_offer(peer, &self.look(), true).await;
         self.prefs_offer(peer, &self.prefs(), true).await;
+        self.tools_offer(peer, &self.tools_doc(), true).await;
         // A station that was away when a request arrived here hears of it.
         self.trust_relay_to(peer).await;
         self.trust_sync_with(peer).await;

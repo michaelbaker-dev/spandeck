@@ -751,7 +751,11 @@ impl Daemon {
             .path
             .is_some()
         {
-            if let Some(problem) = self.antigravity_plugin(&self.setup()).into_iter().next() {
+            if let Some(problem) = self
+                .antigravity_plugin(&self.with_tools(self.setup()))
+                .into_iter()
+                .next()
+            {
                 return Err(format!(
                     "Antigravity panes have no vault tools: {problem}. Move that folder away, then check again."
                 ));

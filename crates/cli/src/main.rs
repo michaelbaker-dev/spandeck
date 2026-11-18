@@ -5,6 +5,7 @@
 
 mod agents_cmd;
 mod mcp;
+mod tools_cmd;
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -230,6 +231,18 @@ enum Cmd {
         #[arg(long)]
         no_check: bool,
     },
+    /// The tools the fleet's agents have (a browser, an MCP server of your
+    /// own): tool by station, where each is chosen, its state and version.
+    /// A tool from spandeck's catalogue is installed by each station it is
+    /// chosen for, pinned to a version, and upgraded one station first or
+    /// across the fleet.
+    Tools {
+        #[command(subcommand)]
+        cmd: Option<ToolsCmd>,
+        /// Do not ask the registry: show what is already known.
+        #[arg(long)]
+        no_check: bool,
+    },
     /// Wake a sleeping station on this network (wake-on-LAN).
     Wake { station: String },
     /// Start a station whose daemon is not running, over SSH (needs remote_start = true).
@@ -271,6 +284,87 @@ enum AgentsCmd {
         #[arg(long)]
         no_restart: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ToolsCmd {
+    /// Add a tool: one of spandeck's catalogue by its name (playwright),
+    /// or with --command or --url one of your own. For this station, for
+    /// the stations named with --station, or with --fleet for every
+    /// station, including one that joins later.
+    Add {
+        name: String,
+        /// A station it is for, by name. May be given several times.
+        #[arg(long)]
+        station: Vec<String>,
+        /// Every station of the fleet.
+        #[arg(long)]
+        fleet: bool,
+        /// The catalogue entry, when the tool is to have another name.
+        #[arg(long)]
+        catalogue: Option<String>,
+        /// The version to pin. Default: the newest published.
+        #[arg(long)]
+        version: Option<String>,
+        /// A tool of your own: the program that is its MCP server.
+        #[arg(long)]
+        command: Option<String>,
+        /// An argument of that program. May be given several times.
+        #[arg(long, allow_hyphen_values = true)]
+        arg: Vec<String>,
+        /// A tool of your own: the address of its MCP server.
+        #[arg(long)]
+        url: Option<String>,
+        /// An agent it is for (claude, codex, opencode, antigravity).
+        /// Default: all of them.
+        #[arg(long)]
+        agent: Vec<String>,
+        /// Agents may use it without asking you about each call.
+        #[arg(long)]
+        allow: bool,
+    },
+    /// Where a tool is installed: --fleet, or the stations named.
+    Scope {
+        name: String,
+        #[arg(long)]
+        station: Vec<String>,
+        #[arg(long)]
+        fleet: bool,
+    },
+    /// Change the version one station runs (this one, or --station), to
+    /// the newest published or the one named with --to; an earlier one
+    /// goes back to it. Its idle panes restart on it, and a pane in a turn
+    /// when the turn ends.
+    Upgrade {
+        name: String,
+        #[arg(long)]
+        station: Option<String>,
+        #[arg(long)]
+        to: Option<String>,
+        /// Leave running panes as they are.
+        #[arg(long)]
+        no_restart: bool,
+    },
+    /// Every station runs the version one station was upgraded to (or the
+    /// one named with --to).
+    Rollout {
+        name: String,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        no_restart: bool,
+    },
+    /// Remove a tool: no agent started from now is given it.
+    Remove { name: String },
+    /// Try a tool's install again, on this station or the one named.
+    Install {
+        name: String,
+        #[arg(long)]
+        station: Option<String>,
+    },
+    /// Ask the registry again whether each tool is the newest, and show
+    /// the grid.
+    Check,
 }
 
 #[derive(Subcommand)]
@@ -1516,6 +1610,88 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 }
             }
         }
+        Cmd::Tools { cmd, no_check } => match cmd {
+            None => tools_cmd::grid(&mut c, j, !no_check, false)?,
+            Some(ToolsCmd::Check) => tools_cmd::grid(&mut c, j, true, true)?,
+            Some(ToolsCmd::Add {
+                name,
+                station,
+                fleet,
+                catalogue,
+                version,
+                command,
+                arg,
+                url,
+                agent,
+                allow,
+            }) => {
+                if fleet && !station.is_empty() {
+                    anyhow::bail!("--fleet is every station: leave out --station");
+                }
+                // Neither said: this station.
+                let stations = if fleet || !station.is_empty() {
+                    station
+                } else {
+                    vec![c.call("station.info", json!({}))?["station"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string()]
+                };
+                let custom = command.is_some() || url.is_some();
+                let catalogue = match (catalogue, custom) {
+                    (Some(id), _) => Some(id),
+                    (None, false) => Some(name.clone()),
+                    (None, true) => None,
+                };
+                tools_cmd::change(
+                    &mut c,
+                    j,
+                    "tools.add",
+                    json!({
+                        "name": name, "catalogue": catalogue, "version": version,
+                        "command": command, "args": arg, "url": url, "agents": agent,
+                        "fleet": fleet, "stations": stations, "allow_without_asking": allow,
+                    }),
+                )?
+            }
+            Some(ToolsCmd::Scope {
+                name,
+                station,
+                fleet,
+            }) => tools_cmd::change(
+                &mut c,
+                j,
+                "tools.scope",
+                json!({"name": name, "fleet": fleet, "stations": station}),
+            )?,
+            Some(ToolsCmd::Upgrade {
+                name,
+                station,
+                to,
+                no_restart,
+            }) => tools_cmd::change(
+                &mut c,
+                j,
+                "tools.upgrade",
+                json!({"name": name, "station": station, "to": to, "restart": !no_restart}),
+            )?,
+            Some(ToolsCmd::Rollout {
+                name,
+                to,
+                no_restart,
+            }) => tools_cmd::change(
+                &mut c,
+                j,
+                "tools.rollout",
+                json!({"name": name, "to": to, "restart": !no_restart}),
+            )?,
+            Some(ToolsCmd::Remove { name }) => {
+                tools_cmd::change(&mut c, j, "tools.remove", json!({"name": name}))?
+            }
+            Some(ToolsCmd::Install { name, station }) => {
+                tools_cmd::install(&mut c, j, &name, station.as_deref())?
+            }
+        },
         Cmd::Wake { station } => {
             let v = c.call("fleet.wake", json!({"station": station}))?;
             show(j, &v, |v| {

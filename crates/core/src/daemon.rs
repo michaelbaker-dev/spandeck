@@ -534,6 +534,8 @@ pub struct Inner {
     pub(crate) resume_lock: Mutex<()>,
     /// Agent programs: versions read, updates running, restarts owed.
     pub(crate) agents: crate::agents::AgentsState,
+    /// Tools: the jobs that install them here (tools.rs).
+    pub(crate) tools: crate::tools::ToolsState,
     pub(crate) prices: crate::prices::PricesState,
     /// A machine being added to the fleet from the Control Deck.
     pub(crate) adding: crate::add::AddState,
@@ -699,6 +701,7 @@ impl Daemon {
             sync: Default::default(),
             resume_lock: Mutex::new(()),
             agents: Default::default(),
+            tools: Default::default(),
             prices: Default::default(),
             adding: Default::default(),
             held: Default::default(),
@@ -738,6 +741,9 @@ impl Daemon {
             }
         }
         daemon.spawn_tasks(msg_rx);
+        // What the tools document names for this station and is not here
+        // yet is installed, off to one side: nothing waits for it.
+        daemon.tools_start();
         Ok(daemon)
     }
 
@@ -1138,6 +1144,9 @@ impl Daemon {
         let mut resume = opts.resume.clone();
         let mut new_session = None;
         let mut agent_env = vec![];
+        // The tools it is started with, and those chosen for this station
+        // that it is started without, with why (tools.rs).
+        let (mut tools_with, mut tools_without) = (vec![], vec![]);
         let mut own_review = false;
         let (program, args) = match (adapter(agent), &opts.program) {
             (Some(a), _) => {
@@ -1147,8 +1156,11 @@ impl Daemon {
                     .get(agent.as_str())
                     .cloned()
                     .unwrap_or_default();
-                let (wiring, env) = self.integration(agent, &id, &token, opts.project.as_deref());
+                let (wiring, env, tools) =
+                    self.integration(agent, &id, &token, opts.project.as_deref());
                 agent_env = env;
+                tools_with = tools.with(agent).into_iter().map(String::from).collect();
+                tools_without = tools.without(agent);
                 let mut extra = cfg.args.clone();
                 extra.extend(wiring);
                 extra.extend(opts.extra_args.iter().cloned());
@@ -1433,7 +1445,7 @@ impl Daemon {
             m.project.as_deref(),
             m.task.as_deref(),
             None,
-            json!({"name": m.name, "agent": m.agent, "resumed": resume.is_some(), "resume_last": opts.resume_last}),
+            json!({"name": m.name, "agent": m.agent, "resumed": resume.is_some(), "resume_last": opts.resume_last, "tools": tools_with, "tools_without": tools_without}),
         );
         if m.agent == AgentKind::Antigravity {
             if let Some(words) = self.antigravity_without_tools() {
@@ -1481,9 +1493,15 @@ impl Daemon {
         pane: &str,
         token: &str,
         project: Option<&str>,
-    ) -> (Vec<String>, Vec<(String, String)>) {
+    ) -> (Vec<String>, Vec<(String, String)>, crate::tools::Wiring) {
         let bin = self.exe.display().to_string();
-        let setup = self.setup();
+        let mut setup = self.setup();
+        // The servers a pane is given: the agent setup's, the custom tools
+        // chosen for this station, and the catalogue tools that are ready
+        // here now. One that is still installing is left out, and the
+        // pane's record says so.
+        let tools = self.tools_wiring(&setup);
+        setup.mcp_servers = tools.servers.clone();
         // The fleet-wide agent setup: model defaults and shared MCP servers.
         let mut args = setup.launch_args(agent);
         let mut env = vec![];
@@ -1504,6 +1522,11 @@ impl Daemon {
                 // agent may do with them is decided by spandeck, and logged.
                 args.push("--allowedTools".to_string());
                 args.push("mcp__spandeck".to_string());
+                // A tool the owner ticked "without asking": the same rule,
+                // for that one server and no other.
+                for name in tools.allowed(agent) {
+                    args.push(format!("mcp__{name}"));
+                }
                 // Files the owner attaches to a message are kept by the
                 // station outside the pane's folder. Found with the real
                 // Claude Code, 17 Nov 2026: it stopped to ask "Allow this
@@ -1529,6 +1552,19 @@ impl Daemon {
                 "-c".to_string(),
                 "mcp_servers.spandeck.env_vars=[\"SPANDECK_PANE\",\"SPANDECK_TOKEN\",\"SPANDECK_SOCKET\",\"SPANDECK_STATE_DIR\",\"SPANDECK_CONFIG_DIR\",\"SPANDECK_STATION\",\"SPANDECK_PROJECT\"]".to_string(),
             ]),
+            _ => {}
+        }
+        match agent {
+            // A tool the owner ticked "without asking": the setting
+            // spandeck's own server has, for that one server and no other.
+            AgentKind::Codex => {
+                for name in tools.allowed(agent) {
+                    args.extend([
+                        "-c".to_string(),
+                        format!("mcp_servers.{name}.default_tools_approval_mode=\"approve\""),
+                    ]);
+                }
+            }
             AgentKind::OpenCode => {
                 // OpenCode takes settings for one process from its
                 // environment, and only a private server reads them: its
@@ -1559,7 +1595,7 @@ impl Daemon {
             }
             _ => {}
         }
-        (args, env)
+        (args, env, tools)
     }
 
     /// Is this pane's record written? Waits for the database for at most a
@@ -2968,6 +3004,9 @@ impl Daemon {
         // keeps (`agents.status` rows carry `job` and `latest`), and
         // `agents.check` asks whether each is the newest.
         caps.push(crate::agents::CAP);
+        // The tools document, `tools.status` and the jobs that install a
+        // tool here: a station without it needs a newer spandeck.
+        caps.push(crate::tools::CAP);
         // The tick for spandeck's own hooks, its switch and the one tap.
         caps.push(crate::hookstrust::CAP);
         // A question and a plan are held for the owner, and
@@ -3077,6 +3116,8 @@ impl Daemon {
             "look": {"updated_ms": self.look().updated_ms, "format": crate::look::FORMAT},
             // The same for the owner's preferences.
             "prefs": {"updated_ms": self.prefs().updated_ms, "format": crate::prefs::FORMAT},
+            // And for the tools document (tooldoc.rs).
+            "tools": {"updated_ms": self.tools_doc().updated_ms, "format": crate::tooldoc::FORMAT},
             "vault": self.vault_view(),
         })
     }

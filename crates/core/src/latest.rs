@@ -35,9 +35,9 @@ use crate::daemon::{shell_join, Daemon};
 use crate::paths::now_ms;
 
 /// How long an answer is reused before the dialog's opening asks again.
-const KEEP_MS: u64 = 3 * 3600 * 1000;
+pub(crate) const KEEP_MS: u64 = 3 * 3600 * 1000;
 /// A check that failed is tried again by the next look after this.
-const RETRY_MS: u64 = 60 * 1000;
+pub(crate) const RETRY_MS: u64 = 60 * 1000;
 const CONNECT_LIMIT: Duration = Duration::from_secs(3);
 const ANSWER_LIMIT: Duration = Duration::from_secs(8);
 /// A package manager asked what it would install (it makes its own call).
@@ -79,7 +79,7 @@ fn key(kind: AgentKind) -> String {
 }
 
 /// The host of an address, for a line the owner reads.
-fn host_of(url: &str) -> String {
+pub(crate) fn host_of(url: &str) -> String {
     reqwest::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(String::from))
@@ -362,7 +362,7 @@ impl Daemon {
 
 /// One GET, with short limits, and what went wrong in a line that names
 /// the host.
-async fn get(url: &str) -> Result<String, String> {
+pub(crate) async fn get(url: &str) -> Result<String, String> {
     let host = host_of(url);
     let http = crate::http::builder()
         .connect_timeout(CONNECT_LIMIT)

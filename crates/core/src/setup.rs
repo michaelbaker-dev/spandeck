@@ -461,6 +461,17 @@ impl Daemon {
         problems
     }
 
+    /// The tools ready on this station changed: Antigravity's plugin, which
+    /// is where it reads its servers from, is written again. Only where
+    /// the plugin is this station's to write and is already there.
+    pub(crate) fn antigravity_refresh(&self) {
+        if self.owns_agent_home() && self.antigravity_plugin_dir().join(MARKER).exists() {
+            for problem in self.antigravity_plugin(&self.with_tools(self.setup())) {
+                tracing::warn!(%problem, "antigravity plugin");
+            }
+        }
+    }
+
     /// Write the setup's skills where each agent finds them, and remove the
     /// ones spandeck wrote earlier that are no longer listed. Skills the user
     /// installed some other way are never touched.
@@ -545,7 +556,7 @@ impl Daemon {
         let mut problems = self.apply_skills(setup);
         // Antigravity reads the shared MCP servers from spandeck's plugin.
         if self.owns_agent_home() && self.antigravity_plugin_dir().join(MARKER).exists() {
-            problems.extend(self.antigravity_plugin(setup));
+            problems.extend(self.antigravity_plugin(&self.with_tools(setup.clone())));
             problems.sort();
             problems.dedup();
         }
