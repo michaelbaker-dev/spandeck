@@ -70,6 +70,25 @@ jobs:
           subject-path: |
             dist/*.tar.gz
             dist/*.zip
+      # Kept for the last job: a release that is published while some
+      # targets are still building is "the newest release" with files
+      # missing, and a machine added in those minutes finds nothing to
+      # install (it happened with v0.4.17 on Apple silicon).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
