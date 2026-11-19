@@ -886,6 +886,49 @@ impl Archive {
         .map(|rows| rows.filter_map(Result::ok).collect())
         .unwrap_or_default()
     }
+
+    /// Every conversation's totals per model within the whole hours that
+    /// `from_ms..=to_ms` touches: tokens are counted by the hour, so that
+    /// is as near as a time can be cut to. They are in `all` and
+    /// `all_turns` of each row; `today` is left empty. A conversation with
+    /// nothing in those hours has no row.
+    pub fn usage_rows_between(&self, from_ms: u64, to_ms: u64) -> Vec<UsageRow> {
+        let conn = self.conn.lock().unwrap();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT h.session, s.agent, s.pane, s.project, s.provider, h.model, h.side,
+                    SUM(h.input), SUM(h.output), SUM(h.cache_read), SUM(h.cache_write), SUM(h.turns)
+             FROM usage_hours h JOIN usage_sessions s ON s.session = h.session
+             WHERE h.hour >= ?1 AND h.hour <= ?2
+             GROUP BY h.session, h.model, h.side ORDER BY s.rowid, h.model, h.side",
+        ) else {
+            return vec![];
+        };
+        stmt.query_map(
+            [(from_ms / HOUR_MS) as i64, (to_ms / HOUR_MS) as i64],
+            |r| {
+                Ok(UsageRow {
+                    session: r.get(0)?,
+                    agent: r.get(1)?,
+                    pane: r.get(2)?,
+                    project: r.get(3)?,
+                    provider: r.get(4)?,
+                    model: r.get(5)?,
+                    side: r.get::<_, i64>(6)? != 0,
+                    today: Tally::default(),
+                    today_turns: 0,
+                    all: Tally {
+                        input: r.get(7)?,
+                        output: r.get(8)?,
+                        cache_read: r.get(9)?,
+                        cache_write: r.get(10)?,
+                    },
+                    all_turns: r.get(11)?,
+                })
+            },
+        )
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -992,6 +1035,24 @@ mod tests {
         assert_eq!(row("claude-haiku-5-5", false).today, tally(3, 20, 500, 0));
         assert_eq!(row("claude-haiku-5-5", true).today, tally(2, 40, 100, 50));
         assert_eq!(rows.len(), 3);
+        // Between two times, to the hour (a project's record gave each
+        // pane's tokens for its whole life: 19 Nov 2026): the first turn
+        // was in the hour from 23:00, the second in the hour after.
+        let at = |t: &str| iso_ms(t).unwrap();
+        let first = a.usage_rows_between(at("2026-11-13T23:10:00Z"), at("2026-11-13T23:20:00Z"));
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert_eq!(
+            (first[0].model.as_str(), first[0].all, first[0].all_turns),
+            ("claude-opus-5-5", tally(10, 170, 2200, 230), 1)
+        );
+        let second = a.usage_rows_between(at("2026-11-14T00:00:00Z"), at("2026-11-14T00:59:59Z"));
+        assert!(second.iter().all(|r| r.model == "claude-haiku-5-5"));
+        assert_eq!(second.len(), 2, "{second:?}");
+        let both = a.usage_rows_between(at("2026-11-13T23:59:00Z"), at("2026-11-14T00:00:00Z"));
+        assert_eq!(both.len(), 3, "{both:?}");
+        assert!(a
+            .usage_rows_between(0, at("2026-11-13T22:59:59Z"))
+            .is_empty());
 
         // After compaction the context is what the file says is left.
         append(&file, COMPACTION);

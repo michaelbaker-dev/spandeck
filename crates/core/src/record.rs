@@ -97,8 +97,27 @@ pub(crate) struct Pane {
     pub live: bool,
     /// Its state now, for a pane whose state did not change in the period.
     pub state_now: Option<String>,
-    /// Its row of `usage.summary`, or null.
+    /// What it used in the hours the period touches (`usage_between`), or
+    /// null.
     pub usage: Value,
+}
+
+const HOUR: u64 = 3_600_000;
+
+/// The first and the last time of what a record is made from: its period.
+fn span(log: &[LogRow], messages: &[Msg], notes: &[Note]) -> Option<(u64, u64)> {
+    let times = log
+        .iter()
+        .map(|l| l.ts)
+        .chain(messages.iter().map(|m| m.ts))
+        .chain(notes.iter().map(|n| n.ts));
+    Some((times.clone().min()?, times.max()?))
+}
+
+/// The whole hours a period touches, first millisecond to last: tokens
+/// are counted by the hour, so a period's are those of its hours.
+fn hours(first: u64, last: u64) -> (u64, u64) {
+    (first - first % HOUR, last - last % HOUR + HOUR - 1)
 }
 
 pub(crate) struct Msg {
@@ -334,19 +353,15 @@ pub(crate) fn build(inp: &Input) -> Value {
     };
 
     // ----------------------------------------------------------- period
-    let times = inp
-        .log
-        .iter()
-        .map(|l| l.ts)
-        .chain(inp.messages.iter().map(|m| m.ts))
-        .chain(inp.notes.iter().map(|n| n.ts));
-    let first = times.clone().min();
-    let last = times.max();
-    let (first, last) = match (first, last) {
-        (Some(f), Some(l)) => (f, l),
-        _ => (0, 0),
-    };
+    let (first, last) = span(&inp.log, &inp.messages, &inp.notes).unwrap_or((0, 0));
     let empty = first == 0 && last == 0;
+    // Tokens are counted by the hour: the hours the period touches.
+    let (usage_from, usage_until) = hours(first, last);
+    let covers = format!(
+        "counted by the hour: the whole hours from {} to {}, which hold the period",
+        rfc3339(usage_from),
+        rfc3339(usage_until)
+    );
     // What "still" means for something unanswered: the end of the period.
     let end = inp.until_ms.unwrap_or(last).max(last);
     let wall = last - first;
@@ -529,7 +544,7 @@ pub(crate) fn build(inp: &Input) -> Value {
                 .filter(|a| a["pane"].as_str() == Some(p.id.as_str()))
                 .collect();
             let waits: Vec<u64> = mine.iter().filter_map(|a| a["wait_ms"].as_u64()).collect();
-            let all = &p.usage["all"];
+            let all = &p.usage;
             let reported = all["total_tokens"].as_i64().is_some_and(|t| t > 0);
             let (tools, failed) = inp.tools.get(&p.id).copied().unwrap_or((0, 0));
             json!({
@@ -549,7 +564,7 @@ pub(crate) fn build(inp: &Input) -> Value {
                     "total_tokens": all["total_tokens"],
                     "cost_estimate_usd": all["cost_estimate"],
                     "unpriced_models": all["unpriced_models"],
-                    "covers": "the pane's whole time on this station, not only the period",
+                    "covers": covers, "from_ms": usage_from, "until_ms": usage_until,
                 },
                 "restarts": restarts.len(), "restarted": restarts,
                 "resumed_after_station_restart": resumed,
@@ -747,7 +762,7 @@ pub(crate) fn build(inp: &Input) -> Value {
 
     // ------------------------------------------- what is not recorded
     let mut missing = vec![
-        "Tokens and cost are each pane's totals for its whole time on this station: the station keeps no count of tokens between two times, so they are not cut to the period.".to_string(),
+        format!("Tokens, cost and turns are counted by the hour, so each pane's are those of the whole hours that hold the period ({} to {}): what it used in those hours before the first event and after the last is in them, and what it used in other hours is not.", rfc3339(usage_from), rfc3339(usage_until)),
         "The model is the one last known for each pane: the ship's log does not keep which model a pane ran at an earlier time.".to_string(),
         "A nudge's log entry does not name the messages it was for. \"Typed again\" in section 7 means: typed again with no new mail, no change of the pane's state and no typing by the owner since the nudge before.".to_string(),
         "What was typed into a pane is not recorded, only that someone typed: once when they start, and again after five quiet minutes.".to_string(),
@@ -993,7 +1008,7 @@ pub fn markdown(v: &Value) -> String {
         ));
         let u = &a["usage"];
         line(format!(
-            "- Turns, as its session data counts them: {}",
+            "- Turns, as its session data counts them (in the hours its tokens are counted for): {}",
             a["turns"]
                 .as_i64()
                 .map(|t| t.to_string())
@@ -1025,7 +1040,7 @@ pub fn markdown(v: &Value) -> String {
                 if unpriced.is_empty() { String::new() } else { format!("; no price is listed for {}, which is not in the estimate", unpriced.join(", ")) }
             ));
         } else {
-            line("- Tokens and cost: not reported (this pane's session data gave the station no token counts)".into());
+            line("- Tokens and cost: none counted in the hours that hold the period (this pane's session data gave the station no token counts for them)".into());
         }
         let restarted: Vec<String> = a["restarted"]
             .as_array()
@@ -1373,22 +1388,15 @@ impl Daemon {
         if metas.is_empty() && self.project_path(project).is_none() {
             return Err(Error::NotFound(format!("project {project}")));
         }
-        let usage = self.usage_summary(None);
         let mut panes: Vec<Pane> = metas
             .into_iter()
             .map(|(id, (meta, live))| {
-                let row = usage["panes"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .find(|r| r["pane"].as_str() == Some(id.as_str()))
-                    .cloned()
-                    .unwrap_or(Value::Null);
                 let model = serde_json::from_value::<PaneMeta>(meta.clone())
                     .ok()
                     .and_then(|m| self.pane_usage(&m)["model"].as_str().map(String::from))
                     .or_else(|| {
-                        row["all"]["by_model"][0]["model"]
+                        // The model it used most, of all it ever used.
+                        self.usage_between(&[id.as_str()], 0, far)["by_model"][0]["model"]
                             .as_str()
                             .map(String::from)
                     });
@@ -1406,7 +1414,8 @@ impl Daemon {
                     model,
                     live,
                     state_now: live.then(|| text(&meta["state"])).flatten(),
-                    usage: row,
+                    // Known once the period is: below.
+                    usage: Value::Null,
                     id,
                 }
             })
@@ -1580,6 +1589,15 @@ impl Daemon {
                 rows.collect()
             })
             .unwrap_or_default();
+        // ------------------------------------------------------ usage
+        // What each pane used in the period, as near as the station
+        // counts it: by the hour.
+        if let Some((first, last)) = span(&log, &messages, &notes) {
+            let (a, b) = hours(first, last);
+            for p in &mut panes {
+                p.usage = self.usage_between(&[p.id.as_str()], a, b);
+            }
+        }
         Ok(Input {
             project: project.to_string(),
             station: self.station.clone(),

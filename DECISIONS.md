@@ -1714,6 +1714,11 @@ instruction to build what the report recommended.
     stored with a bare name, as they were until the station wrote the project into the
     address, counts only when a pane of the project had the name at that time and no other
     pane did; where two had it, the message is left out and the document says how many.
+  - **Tokens, cost and turns are the period's, to the hour.** The station counts each
+    conversation's tokens by the hour (the archive's `usage_hours`), so a pane's are those
+    of the whole hours that hold the period, first event to last, and the document names
+    the hours. (They were the pane's whole life, and the document said so.) No migration:
+    a cut finer than the hour would need the time of each model call kept.
 - **Watch is the conversation.** A project's Watch shows its agents as a strip (state, how
   long, one line of what each is doing; no terminal thumbnail), who is waiting for whom
   when that can be told from the messages and the states and never otherwise, and the

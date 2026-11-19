@@ -291,6 +291,30 @@ impl Daemon {
             .flatten()
     }
 
+    /// What these panes' agents used between two times, added up: the
+    /// totals of the whole hours `from_ms..=to_ms` touches, since tokens
+    /// are counted by the hour. For a project's record (record.rs).
+    pub(crate) fn usage_between(&self, panes: &[&str], from_ms: u64, to_ms: u64) -> Value {
+        // Make sure a live pane's conversation is being counted.
+        for p in self.list_panes() {
+            let meta = p.meta();
+            if panes.contains(&meta.id.as_str())
+                && meta.agent.is_agent()
+                && source_of(meta.agent).is_some()
+            {
+                let _ = self.usage_of(&meta);
+            }
+        }
+        let mut by = ByModel::default();
+        for r in self.archive.usage_rows_between(from_ms, to_ms) {
+            if r.pane.as_deref().is_some_and(|p| panes.contains(&p)) {
+                let turns = if r.side { 0 } else { r.all_turns };
+                by.add(&r.provider, &r.model, &r.all, r.side, turns);
+            }
+        }
+        by.json(&self.prices(), true)
+    }
+
     /// Station totals from the same data: per pane, per project and per
     /// model, for today and for all time. "Today" starts at `today_from_ms`
     /// (the caller's local midnight; default: midnight UTC), rounded down to

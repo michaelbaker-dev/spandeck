@@ -844,6 +844,19 @@ fn a_projects_record_is_written_by_the_station_from_what_it_holds() {
     // What an agent writes is data: this message tries to add a heading
     // and to end the block it is quoted in.
     let body = "please review\n# Heading\n```\n## Not a section\n````\n# Still the message";
+    // The builder's conversation is older than this run: three hours ago
+    // it used 3000 tokens, and in this run 30. (The record gave a pane's
+    // tokens for its whole life, and said so: 19 Nov 2026.)
+    let model_call = |id: &str, input: u64, output: u64, at: Option<u64>| {
+        let mut line = json!({"type": "assistant", "message": {
+            "id": id, "model": "claude-opus-5-5",
+            "usage": {"input_tokens": input, "output_tokens": output,
+                      "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}});
+        if let Some(at) = at {
+            line["timestamp"] = json!(spandeck_core::tailnet::rfc3339(at));
+        }
+        json!({ "transcript": line })
+    };
     let builder = agent(
         &s,
         "demo",
@@ -851,6 +864,8 @@ fn a_projects_record_is_written_by_the_station_from_what_it_holds() {
         "builder",
         json!({"steps": [
             {"prompt": "build it"},
+            model_call("msg_old", 1000, 2000, Some(began - 3 * 3_600_000)),
+            model_call("msg_now", 10, 20, None),
             {"tool": {"name": "Edit", "file": "src/store.rs"}},
             {"rpc": {"method": "note.add", "params": {"kind": "decision", "text": "Store rows as JSON lines"}}},
             {"permission": {"name": "Write", "file": "src/store.rs"}},
@@ -892,6 +907,9 @@ fn a_projects_record_is_written_by_the_station_from_what_it_holds() {
     s.call("pane.restart", json!({"pane": reviewer}));
     wait_for("the restart in the log", 10, || {
         (!s.log("pane.restarted").is_empty()).then_some(())
+    });
+    wait_for("the builder's tokens, all it ever used", 15, || {
+        (s.pane(&builder)["usage"]["total_tokens"] == json!(3030)).then_some(())
     });
 
     let r = s.call("project.record", json!({"project": "demo"}));
@@ -941,6 +959,24 @@ fn a_projects_record_is_written_by_the_station_from_what_it_holds() {
     );
     assert_eq!(v["restarted"][0]["by"], json!("you"));
     assert_eq!(b["tool_calls"], json!(1), "{b}");
+    // Its tokens are those of the hours that hold the period, not of the
+    // conversation's whole life, and the record says which hours.
+    let u = &b["usage"];
+    assert_eq!(
+        (u["total_tokens"].as_u64(), u["output_tokens"].as_u64()),
+        (Some(30), Some(20)),
+        "{u}"
+    );
+    let (from, until) = (
+        u["from_ms"].as_u64().unwrap(),
+        u["until_ms"].as_u64().unwrap(),
+    );
+    let first = r["period"]["first_event_ms"].as_u64().unwrap();
+    assert!(
+        from <= first && first - from < 3_600_000 && until >= first + wall,
+        "{u}"
+    );
+    assert_eq!(v["usage"]["reported"], json!(false), "{v}");
 
     // One approval, asked by the builder, answered by the owner.
     let approvals = r["approvals"].as_array().unwrap();
