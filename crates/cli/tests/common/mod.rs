@@ -368,15 +368,26 @@ impl Station {
         } else {
             r#"["sleep", "300"]"#
         };
+        // No test asks a release host whether a newer spandeck is
+        // published, and never the real one: a test of that names a local
+        // host and says `check = true` under `[update]` itself.
+        let tables = tables.join("");
+        let (newer, tables) = if extra.contains("\ncheck = ") {
+            ("", tables)
+        } else if tables.contains("[update]\n") {
+            (
+                "",
+                tables.replacen("[update]\n", "[update]\ncheck = false\n", 1),
+            )
+        } else {
+            ("update.check = false\n", tables)
+        };
         std::fs::write(
             root.join("config/config.toml"),
             format!(
-                "station = \"{name}\"\nweb_port = {port}\n{bind}{discovery}keep_awake_cmd = {wait}\n{prices}{}\n[agents.fake]\nprogram = '{FAKE}'\n{}\n",
+                "station = \"{name}\"\nweb_port = {port}\n{bind}{discovery}keep_awake_cmd = {wait}\n{prices}{newer}{}\n[agents.fake]\nprogram = '{FAKE}'\n{}\n",
                 top.join(""),
-                tables
-                    .join("")
-                    .strip_prefix("[agents.fake]\n")
-                    .unwrap_or(&tables.join(""))
+                tables.strip_prefix("[agents.fake]\n").unwrap_or(&tables)
             ),
         )
         .unwrap();

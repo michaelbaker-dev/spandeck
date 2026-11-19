@@ -71,6 +71,7 @@ pub mod manage;
 pub mod memory;
 pub mod messages;
 pub mod modelswitch;
+pub mod newrelease;
 pub mod notify;
 pub mod orders;
 pub mod paths;

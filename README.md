@@ -16,7 +16,7 @@ Read `DECISIONS.md` before changing anything. It wins over every other document.
 
 ## Status
 
-Version 0.4.17. It is built on one Linux arm64 machine and tested there and in CI on
+Version 0.4.18. It is built on one Linux arm64 machine and tested there and in CI on
 macOS, Linux and Windows, and runs on real Macs and one real Windows 11 PC. Windows is
 new since 0.3.0 and its programs are not code-signed yet: where Smart App Control is
 on, Windows blocks them. It is young: see "Not verified" below before you rely on it.
@@ -148,6 +148,7 @@ From the Control Deck, right-click a station (or use the commands on any station
 | --- | --- | --- |
 | Restart spandeck, keeping every terminal | Restart spandeck here | `spandeck restart [--station NAME]` |
 | Update to the latest release | Update to the latest release | `spandeck update [--station NAME]` |
+| Ask whether a newer spandeck is published (stations also ask once a day; `[update] check = false` turns that off) | Check for a newer spandeck now | `spandeck update --check` |
 | Wake a sleeping machine | Wake it | `spandeck wake NAME` |
 | Start spandeck where it is not running | Start spandeck there | `spandeck start NAME` |
 | End every pane on a station | Close all panes here… | `spandeck pane close --all [--station NAME]` |

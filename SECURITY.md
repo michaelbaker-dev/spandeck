@@ -296,6 +296,25 @@ days, not hours.
   is made from what the station already holds; a header never makes a station ask a
   release host.
 
+- **Asking whether a newer spandeck is published** (19 Nov 2026). About once a day, and
+  when you choose "Check for a newer spandeck now" or run `spandeck update --check`,
+  each station asks its release host (GitHub, or `[update] url` in its config) for the
+  newest release's name: one GET of `<releases>/latest`. The answer is a redirect, which
+  is read and not followed. The request carries nothing about you, the station or a
+  project, and not the version the station runs; what the host learns is that a machine
+  at that address asked for a public version number. Unlike the check of agent programs,
+  this one is made in the background. Nothing is downloaded or installed by asking: an
+  update is still your act, and still checked against its published SHA-256. What comes
+  back is read as a version number or thrown away, and is shown as text. The link to the
+  release's page is made by the station from its own release address and that version,
+  never from an address in the answer or one another station gives. What another station
+  says it learned is read the same way. `[update] check = false` in a station's
+  `config.toml`, or the switch `update_check = false`, turns it off on that station.
+  Only you can make a station ask now (`update.check`): an agent, a read-only caller and
+  another station cannot. A station's `station.info`, which an agent in a pane may read,
+  says what was learned: the public version number, or that the host could not be
+  reached and its name.
+
 ## Known limits
 
 - Turning HTTPS on at a station publishes its name, `<machine>.<tailnet>.ts.net`, in

@@ -1872,26 +1872,69 @@ function vaultPrompt(stations, url) {
 // the update each station already offers in its menu.
 const versionOf = (v) => String(v || '').split(/[.+-]/).slice(0, 3).map(n => parseInt(n, 10) || 0);
 const olderThan = (a, b) => { const x = versionOf(a), y = versionOf(b); for (let i = 0; i < 3; i += 1) if (x[i] !== y[i]) return x[i] < y[i]; return false; };
-let versionBox = null, versionKey = '', versionLater = '';
+let versionBox = null, versionKey = '', versionLater = '', releaseLater = '';
+// A newer spandeck than a station runs is published (newrelease.rs): the
+// newest release any station of the fleet learned of, as the serving station
+// says it. What it says is data: the version is shown, as text, only if it
+// is one, and the link is used only if it is a web address (the station
+// made it from its own release address, never from an answer).
+const RELEASE_LATER = 'spandeck.update.later';
+function releaseOut() {
+  const u = S.fleet.update || {};
+  if (u.state !== 'available' || !/^\d{1,5}(\.\d{1,5}){1,3}(-[0-9A-Za-z.]{1,20})?$/.test(u.version || '')) return null;
+  return { version: u.version, url: /^https?:\/\/[^\s"'<>]+$/.test(u.url || '') ? u.url : '', behind: Array.isArray(u.behind) ? u.behind.map(String) : [] };
+}
+const releaseLink = (out) => out.url ? h('a', { class: 'out', href: out.url, target: '_blank', rel: 'noopener' }, `spandeck ${out.version}`) : `spandeck ${out.version}`;
+const releaseLaterIs = (version) => { if (releaseLater === version) return true; try { return localStorage.getItem(RELEASE_LATER) === version; } catch (e) { return false; } };
+const updateStations = (can) => Promise.all(can.map(s => api.on(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : r.fleet ? r.note : `${s.station} is updating to ${r.release}`)).catch(e => toast(`${s.station}: ${e.message}`, 'error')))).then(() => refreshSoon(1500));
+const askUpdate = (can) => confirmBox(`Update ${can.map(s => s.station).join(', ')}?`, `The latest release is downloaded on ${can.length === 1 ? 'that station' : 'each of them'} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => updateStations(can), false);
+// "Check for a newer spandeck now": every station that answers asks its
+// own release host, and the fleet's list is read again when they have.
+function checkReleaseNow() {
+  const on = S.fleet.stations.filter(s => s.state === 'online' && s.update);
+  if (!on.length) return toast('No station here can ask: update spandeck on one of them first.');
+  toast('Asking whether a newer spandeck is published…');
+  const said = () => { const u = S.fleet.update || {}, out = releaseOut(); toast(out ? `spandeck ${out.version} is available` : u.state === 'latest' ? 'Every station runs the latest release' : `Whether a newer spandeck is published: ${String(u.says || 'not known yet').slice(0, 240)}`); render(); };
+  return Promise.all(on.map(s => api.on(s.station, 'update.check', { again: true }).catch(() => null)))
+    .then(() => setTimeout(() => api.on(api.station, 'fleet.refresh', {}).catch(() => null).then(() => askFleet()).then(said, said), 3000));
+}
 function versionBar() {
   const all = S.fleet.stations.filter(s => s.state !== 'not_linked' && s.version && s.version !== '?');
   const newest = all.reduce((n, s) => olderThan(n, s.version) ? s.version : n, '0');
   const behind = all.filter(s => olderThan(s.version, newest));
-  const key = behind.map(s => `${s.station}=${s.version}/${s.state}`).join(' ') + '>' + newest + '@' + api.station;
-  if (!behind.length || key === versionLater) { versionBox = null; versionKey = ''; return null; }
+  const out = releaseOut(), outKey = out ? `+${out.version}|${out.url}|${out.behind.join(',')}` : '';
+  const differ = behind.map(s => `${s.station}=${s.version}/${s.state}`).join(' ') + '>' + newest + '@' + api.station + outKey;
+  if (behind.length && differ !== versionLater) {
+    if (differ === versionKey) return versionBox;
+    // The stations that are behind the newest in the fleet, and with a
+    // newer release out, every station that is behind that.
+    const me = behind.find(s => s.self), can = all.filter(s => s.state === 'online' && (behind.includes(s) || (out && out.behind.includes(s.station)))), names = (list) => list.map(s => `${s.station} (${s.version})`).join(', ');
+    const on = all.filter(s => s.version === newest).map(s => s.station).join(', ');
+    versionKey = differ;
+    versionBox = h('div', { class: 'vault-prompt version-bar', role: 'region', 'aria-label': 'Stations on different versions' },
+      h('div', { class: 'grow' },
+        h('b', {}, me ? `This deck is ${api.target ? 'working through' : 'served by'} ${api.station}, which runs an older spandeck (${me.version})` : `${behind.length === 1 ? 'A station runs' : 'Some stations run'} an older spandeck`),
+        h('div', { class: 'muted' }, `${on} ${on.includes(',') ? 'run' : 'runs'} ${newest}. Older: ${names(behind)}. `,
+          me ? `What you see here can differ from the deck ${on.includes(',') ? 'those stations serve' : on + ' serves'}, and newer things may be missing. ` : 'A deck served by an older station can look different, and what the fleet keeps the same may not be kept there. ',
+          behind.some(s => s.state !== 'online') ? 'A station that is off or cannot be controlled from here is updated at that machine. ' : '',
+          out ? h('span', { class: 'release-out' }, releaseLink(out), ' is available: an update takes every station to it.') : null)),
+      can.length ? h('button', { class: 'primary', onclick: () => askUpdate(can) }, can.length === 1 ? `Update ${can[0].station}` : `Update ${can.length} stations`) : null,
+      h('button', { onclick: () => { versionLater = differ; render(); } }, 'Not now'));
+    return versionBox;
+  }
+  // Every station runs the same version (or that bar was put away), and a
+  // newer release is out: one quiet line. On a phone it is not drawn over
+  // an open pane, so a conversation is never moved by it.
+  const phone = isPhone();
+  if (!out || releaseLaterIs(out.version) || (phone && S.route && S.route.view === 'pane')) { versionBox = null; versionKey = ''; return null; }
+  const can = all.filter(s => s.state === 'online' && out.behind.includes(s.station));
+  const key = `release${outKey}:${can.map(s => s.station).join(',')}:${phone}`;
   if (key === versionKey) return versionBox;
-  const me = behind.find(s => s.self), can = behind.filter(s => s.state === 'online'), names = (list) => list.map(s => `${s.station} (${s.version})`).join(', ');
-  const on = all.filter(s => s.version === newest).map(s => s.station).join(', ');
-  const update = () => Promise.all(can.map(s => api.on(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : r.fleet ? r.note : `${s.station} is updating to ${r.release}`)).catch(e => toast(`${s.station}: ${e.message}`, 'error')))).then(() => refreshSoon(1500));
   versionKey = key;
-  versionBox = h('div', { class: 'vault-prompt version-bar', role: 'region', 'aria-label': 'Stations on different versions' },
-    h('div', { class: 'grow' },
-      h('b', {}, me ? `This deck is ${api.target ? 'working through' : 'served by'} ${api.station}, which runs an older spandeck (${me.version})` : `${behind.length === 1 ? 'A station runs' : 'Some stations run'} an older spandeck`),
-      h('div', { class: 'muted' }, `${on} ${on.includes(',') ? 'run' : 'runs'} ${newest}. Older: ${names(behind)}. `,
-        me ? `What you see here can differ from the deck ${on.includes(',') ? 'those stations serve' : on + ' serves'}, and newer things may be missing. ` : 'A deck served by an older station can look different, and what the fleet keeps the same may not be kept there. ',
-        behind.some(s => s.state !== 'online') ? 'A station that is off or cannot be controlled from here is updated at that machine.' : '')),
-    can.length ? h('button', { class: 'primary', onclick: () => confirmBox(`Update ${can.map(s => s.station).join(', ')}?`, `The latest release is downloaded on ${can.length === 1 ? 'that station' : 'each of them'} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', update, false) }, can.length === 1 ? `Update ${can[0].station}` : `Update ${can.length} stations`) : null,
-    h('button', { onclick: () => { versionLater = key; render(); } }, 'Not now'));
+  versionBox = h('div', { class: 'vault-prompt version-bar update-line', role: 'region', 'aria-label': 'A newer spandeck is available' },
+    h('div', { class: 'grow', title: can.length < out.behind.length ? 'A station that is off or cannot be controlled from here is updated at that machine.' : null }, releaseLink(out), ' is available.'),
+    can.length ? h('button', { class: 'primary update-all', onclick: () => askUpdate(can) }, phone ? 'Update' : can.length === 1 ? `Update ${can[0].station}` : 'Update all stations') : null,
+    h('button', { class: 'update-later', onclick: () => { releaseLater = out.version; try { localStorage.setItem(RELEASE_LATER, out.version); } catch (e) { /* held in this page, then */ } render(); } }, 'Not now'));
   return versionBox;
 }
 
@@ -2263,6 +2306,7 @@ function stationMenu(e, s) {
     stationKey(s.station) && { label: `Tailscale key: ${stationKey(s.station).text}…`, action: () => keyDialog(keyName(s.station), stationKey(s.station), stationMore(s.station)) },
     s.state === 'not_linked' && { label: `Add ${s.station} to this fleet…`, action: () => addMachineDialog({ station: s.station, kind: 'join' }) },
     up && { label: 'Restart spandeck here (keeps terminals)', action: () => confirmBox(`Restart spandeck on ${s.station}?`, 'Every terminal and agent keeps running. If it does not come back healthy, the restart is undone.', 'Restart', () => rpc(s.station, 'station.restart', {}).then(() => toast(`${s.station} is restarting`))) },
+    up && { label: 'Check for a newer spandeck now', action: checkReleaseNow },
     up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : r.fleet ? r.note : `${s.station} is updating to ${r.release}`))) },
     // A station that is on, and refused for its clock or its Tailscale key,
     // is not helped by waking or starting it.
@@ -2388,7 +2432,7 @@ function stationTile(s) {
   const agents = liveAgents(s.station).filter(p => p.agent !== 'shell').sort(byState);
   const up = s.state === 'online';
   return h('a', { class: 'tile station ' + s.state, href: stationUrl(s.station), oncontextmenu: (e) => stationMenu(e, s) },
-    h('div', { class: 'tile-head' }, h('span', { class: 'dot ' + (up ? (s.needs_you ? 'needs_you' : s.working ? 'working' : 'idle') : 'unreachable') }), h('b', {}, s.station), s.self ? h('span', { class: 'chip' }, 'this station') : null, h('span', { class: 'grow' }), h('span', { class: 'muted' }, s.version || '')),
+    h('div', { class: 'tile-head' }, h('span', { class: 'dot ' + (up ? (s.needs_you ? 'needs_you' : s.working ? 'working' : 'idle') : 'unreachable') }), h('b', {}, s.station), s.self ? h('span', { class: 'chip' }, 'this station') : null, h('span', { class: 'grow' }), h('span', { class: 'muted tile-version', title: s.update && s.update.says ? `spandeck ${s.version || ''}: ${String(s.update.says).slice(0, 240)}` : null }, [s.version, s.update && s.update.says ? String(s.update.says).slice(0, 48) : ''].filter(Boolean).join(' · '))),
     up ? h('div', { class: 'tile-stats' },
       h('span', {}, h('b', {}, s.working ?? 0), ' working'), h('span', { class: s.needs_you ? 'needs' : '' }, h('b', {}, s.needs_you ?? 0), ' need you'),
       s.load != null ? h('span', { class: 'muted' }, 'load ' + Number(s.load).toFixed(1)) : null, s.keep_awake ? h('span', { class: 'chip' }, 'kept awake') : null,

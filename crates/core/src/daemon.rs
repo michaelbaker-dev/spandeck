@@ -550,6 +550,8 @@ pub struct Inner {
     /// The role library (roledoc.rs).
     pub(crate) roles: crate::roledoc::RolesState,
     pub(crate) prices: crate::prices::PricesState,
+    /// What the release host last said of the newest spandeck (newrelease.rs).
+    pub(crate) newrelease: Arc<crate::newrelease::State>,
     /// A machine being added to the fleet from the Control Deck.
     pub(crate) adding: crate::add::AddState,
     /// A release being supplied to, or taken from, another station.
@@ -786,6 +788,7 @@ impl Daemon {
             tools: Default::default(),
             roles: Default::default(),
             prices: Default::default(),
+            newrelease: Default::default(),
             adding: Default::default(),
             held: Default::default(),
             quit: tokio::sync::Notify::new(),
@@ -984,6 +987,12 @@ impl Daemon {
             if n % 60 == 3 {
                 d.prune_ended();
             }
+            // Is a newer spandeck published? Looked at five minutes after
+            // the start and then every hour; asked when the last answer
+            // is a day old (newrelease.rs).
+            if n % 360 == 30 {
+                d.update_check(false);
+            }
             // The explorer's leftovers (files.rs): finished jobs and
             // unread zips every minute; old trash and part files nothing
             // writes to at the start and every ten minutes.
@@ -1072,6 +1081,9 @@ impl Daemon {
         }
         if n % 1200 == 40 {
             self.prune_ended();
+        }
+        if n % 7200 == 600 {
+            self.update_check(false);
         }
         // Answers kept for a second try go after two minutes.
         if n % 20 == 7 {
@@ -3378,6 +3390,9 @@ impl Daemon {
             "service": crate::doctor::service_installed(&self.home),
             "codex_sandbox_blocked": crate::doctor::codex_sandbox_blocked(&self.home),
             "agents": self.agents_brief(),
+            // What this station's release host said of the newest spandeck
+            // (newrelease.rs): a public version number, or why not.
+            "update": self.update_brief(),
             "setup": {"updated_ms": self.setup().updated_ms},
             "deck": {"updated_ms": self.deck().updated_ms},
             // Said only by a station that keeps the look document: one that
