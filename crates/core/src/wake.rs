@@ -108,6 +108,74 @@ pub struct PaneWake {
     /// When the pane's program last said, by its hook, that its session
     /// has started: it is past whatever it asks before that (0: not yet).
     pub(crate) greeted_ms: std::sync::atomic::AtomicU64,
+    /// When a look last found the pane at a screen of its program's that
+    /// asks something (the notice of a newer version, the folder-trust
+    /// question, the review of hooks, a list to choose from), or one was
+    /// answered (0: never).
+    pub(crate) screen_ms: std::sync::atomic::AtomicU64,
+}
+
+impl PaneWake {
+    /// The pane is at a screen that asks something, or one was just
+    /// answered: what comes after it is given time to be drawn.
+    pub(crate) fn at_screen(&self, now: u64) {
+        self.screen_ms
+            .fetch_max(now, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// How long a program is left alone after it starts before a nudge may be
+/// typed into it.
+pub const START_MS: u64 = 8_000;
+
+/// How long it is left alone after a screen of its own that asks something
+/// was last seen or answered: the next one may be about to be drawn.
+pub const AFTER_SCREEN_MS: u64 = 2_500;
+
+/// A screen that changed less than this long ago is still being drawn.
+pub const DRAWN_MS: u64 = 1_500;
+
+/// A program that keeps drawing is waited for this long and no longer.
+pub const DRAWING_MS: u64 = 30_000;
+
+/// What is known of a program that may still be starting.
+#[derive(Debug, Clone, Copy)]
+pub struct Starting {
+    /// Its hook said its session started: it is past what it asks first.
+    pub greeted: bool,
+    /// Since the program started.
+    pub age_ms: u64,
+    /// Since it was last seen at a screen that asks something, or one was
+    /// answered.
+    pub screen_ago_ms: Option<u64>,
+    /// Since its screen last changed.
+    pub quiet_ms: u64,
+    /// Its screen is empty: it has drawn nothing to type into, and what
+    /// is typed now waits in its terminal for whatever it asks first.
+    pub blank: bool,
+}
+
+/// Is the program still starting, so that nothing is typed into it? What
+/// it shows first may be a question of its own, which is known for one
+/// only once it is drawn and read, and a nudge's Enter answers a question.
+/// So: its first eight seconds; a moment after each such screen, since
+/// another may follow it (Codex: the notice of a newer version, then the
+/// folder-trust question, then the review of hooks); and, to half a
+/// minute from either, while its screen is still being drawn; and for as
+/// long as it has drawn nothing at all (a nudge typed at an empty screen
+/// was kept by the terminal and answered the question the program drew
+/// thirteen seconds later, in a scenario of 19 Nov 2026). A screen
+/// that is read as one of those questions is not typed into at all,
+/// whatever this says (`Daemon::start_question`).
+pub fn starting(s: Starting) -> bool {
+    if s.greeted {
+        return false;
+    }
+    let since = s.age_ms.min(s.screen_ago_ms.unwrap_or(u64::MAX));
+    s.blank
+        || s.age_ms < START_MS
+        || s.screen_ago_ms.is_some_and(|ago| ago < AFTER_SCREEN_MS)
+        || (since < DRAWING_MS && s.quiet_ms < DRAWN_MS)
 }
 
 #[derive(Default, Clone)]
@@ -416,6 +484,56 @@ mod tests {
             why: "crash".into(),
         });
         assert_eq!(decide(&Seen::of(&m, all), None, now), Wake::No);
+    }
+
+    /// A bug that happened (a real Codex 0.169.0, 18 Nov 2026, in the
+    /// station's own log): its notice of a newer version stood for 40
+    /// seconds, the owner pressed Escape, and the pane's role was typed
+    /// 1.2 seconds later, into the folder-trust question that came next.
+    /// Its Enter trusted the folder for the owner, the question swallowed
+    /// the words, and the agent heard of its mail a minute later. The
+    /// program was "past its start" because only its age was counted.
+    /// Now the time is also counted from the last such screen.
+    #[test]
+    fn a_program_is_still_starting_just_after_a_screen_that_asks_something() {
+        let at = |age_ms, screen_ago_ms, quiet_ms| {
+            starting(Starting {
+                greeted: false,
+                age_ms,
+                screen_ago_ms,
+                quiet_ms,
+                blank: false,
+            })
+        };
+        // The fault: 40 s old, the notice gone 1.2 s ago, a quiet screen.
+        assert!(at(40_000, Some(1_200), 1_200));
+        // And while what follows is being drawn, however old the program.
+        assert!(at(90_000, Some(5_000), 300));
+        // Promptly once that is over: not a minute, and not at the next
+        // of anything.
+        assert!(!at(40_000, Some(AFTER_SCREEN_MS), DRAWN_MS));
+        // A program that never stops drawing is not waited for for ever.
+        assert!(!at(90_000, Some(DRAWING_MS), 0));
+        // As before: its first eight seconds, and no such screen at all.
+        assert!(at(START_MS - 1, None, 60_000));
+        assert!(!at(START_MS, None, DRAWN_MS));
+        assert!(at(20_000, None, 100) && !at(DRAWING_MS, None, 100));
+        // A program whose session has started is past all of it.
+        assert!(!starting(Starting {
+            greeted: true,
+            age_ms: 100,
+            screen_ago_ms: Some(0),
+            quiet_ms: 0,
+            blank: true,
+        }));
+        // One that has drawn nothing is not typed into, however old.
+        assert!(starting(Starting {
+            greeted: false,
+            age_ms: 600_000,
+            screen_ago_ms: None,
+            quiet_ms: 600_000,
+            blank: true,
+        }));
     }
 
     /// The look once a second never typed two nudges into a pane within a

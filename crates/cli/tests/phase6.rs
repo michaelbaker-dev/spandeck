@@ -1395,12 +1395,25 @@ fn the_mcp_server_gives_an_agent_the_spandeck_tools() {
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
-    let mut out = BufReader::new(child.stdout.take().unwrap());
+    // (Its answers, read on a thread: one that never comes fails the test
+    // instead of holding it.)
+    let out = BufReader::new(child.stdout.take().unwrap());
+    let (heard, answers) = std::sync::mpsc::channel::<Value>();
+    std::thread::spawn(move || {
+        for line in out.lines().map_while(Result::ok) {
+            if heard.send(serde_json::from_str(&line).unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let hear = || {
+        answers
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("an answer from spandeck mcp within ten seconds")
+    };
     let mut ask = |req: Value| -> Value {
         writeln!(stdin, "{req}").unwrap();
-        let mut line = String::new();
-        out.read_line(&mut line).unwrap();
-        serde_json::from_str(&line).unwrap()
+        hear()
     };
     let init = ask(
         json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}}),
@@ -1437,6 +1450,58 @@ fn the_mcp_server_gives_an_agent_the_spandeck_tools() {
         .as_str()
         .unwrap()
         .contains("hello over mcp"));
+    // A bug that happened (seven agents on one station, 18 Nov 2026):
+    // calls were answered one at a time, so while an agent's own `wait`
+    // was still running, its `inbox`, `ack` and `reply` sat unread; Claude
+    // Code gave each up as "still running after 120s". They are answered
+    // while the wait goes on, and what is asked to be changed is done in
+    // the order it was asked.
+    let busy = agent(
+        &s,
+        "demo",
+        &repo,
+        "busy",
+        json!({"steps": [{"prompt": "x"}, {"sleep": 600_000}]}),
+    );
+    s.wait_state(&busy, "working");
+    let id = inbox["result"]["content"][0]["text"]
+        .as_str()
+        .and_then(|t| serde_json::from_str::<Value>(t).ok())
+        .map(|v| v[0]["id"].clone())
+        .unwrap();
+    let call = |n: u64, name: &str, args: Value| json!({"jsonrpc": "2.0", "id": n, "method": "tools/call", "params": {"name": name, "arguments": args}});
+    let began = std::time::Instant::now();
+    for req in [
+        call(
+            10,
+            "wait",
+            json!({"pane": "busy", "until": "done", "timeout_s": 600}),
+        ),
+        call(11, "reply", json!({"id": id, "body": "first"})),
+        call(12, "send", json!({"to": "you", "body": "second"})),
+        call(13, "ack", json!({"id": id})),
+        call(14, "inbox", json!({})),
+    ] {
+        writeln!(stdin, "{req}").unwrap();
+    }
+    let mut answered = vec![];
+    for _ in 0..4 {
+        let v = hear();
+        assert_eq!(v["result"]["isError"], json!(false), "{v}");
+        answered.push(v["id"].as_u64().unwrap());
+    }
+    let took = began.elapsed();
+    assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+    answered.retain(|n| *n != 14);
+    assert_eq!(
+        answered,
+        [11, 12, 13],
+        "in the order asked, the wait still running"
+    );
+    let mut ask = |req: Value| -> Value {
+        writeln!(stdin, "{req}").unwrap();
+        hear()
+    };
     // A tool the agent may not use comes back as a tool error, not a crash.
     let bad = ask(
         json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "wait", "arguments": {"pane": "nobody"}}}),

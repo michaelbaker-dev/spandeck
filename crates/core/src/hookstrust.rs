@@ -292,6 +292,7 @@ impl Daemon {
         // version comes before the first screen.
         if !behind && spandeck_agents::foldertrust::before_first(m.agent, &p.term.lines()) {
             w.hold(now);
+            p.wake.at_screen(now);
             return None;
         }
         let read = || screen::read(m.agent, &p.term.lines());

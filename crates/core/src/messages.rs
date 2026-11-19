@@ -203,10 +203,6 @@ pub fn mail_quoted(waiting: &[crate::relay::Unannounced]) -> (String, Vec<String
     (out.trim_end().to_string(), whole)
 }
 
-/// How long a program is left alone after it starts before a nudge may
-/// be typed into it (see `nudge_pane`).
-const START_MS: u64 = 8_000;
-
 impl Daemon {
     pub fn mail(&self) -> MessageStore {
         MessageStore::new(self.db.clone(), &self.station)
@@ -684,31 +680,53 @@ impl Daemon {
             Wake::Now => {}
             other => return other,
         }
-        // A program that has only just started is typed nothing: for its
-        // first eight seconds, and after that while its first screen is
-        // still being drawn (to half a minute). What it shows first may be
-        // a question of its own, which is known for one only once it is
-        // drawn and read, and a nudge's Enter answers a question. (The
-        // real Claude Code, 18 Nov 2026: a pane's role was sent as it was
-        // started, the nudge was typed one second on into "Is this a
-        // project you trust?", its Enter chose "No, exit", and the program
-        // ended. Had the first choice been Yes, the station would have
-        // trusted the folder for the owner.)
-        {
-            let started = {
-                let m = p.meta.lock().unwrap();
-                m.proc_started_ms.unwrap_or(m.created_ms)
-            };
-            // A program that has said its session started is past its
-            // first questions (Claude Code and Codex say so only after
-            // the folder is trusted), and is not kept waiting.
-            let greeted = p.wake.greeted_ms.load(std::sync::atomic::Ordering::Relaxed) >= started;
-            let age = now.saturating_sub(started);
-            let drawing = now.saturating_sub(p.term.last_output_ms()) < 1_500;
-            if !greeted && (age < START_MS || (age < 30_000 && drawing)) {
-                return Wake::At(now + 1_000);
-            }
+        // A program that is still starting is typed nothing, and a screen
+        // that is read as one of its own questions is never typed into
+        // (wake.rs, `starting`; `start_question`). (The real Claude Code,
+        // 18 Nov 2026: a pane's role was sent as it was started, the nudge
+        // was typed one second on into "Is this a project you trust?",
+        // its Enter chose "No, exit", and the program ended. The real
+        // Codex, the same day: the nudge was typed into "Trust this
+        // folder?" 1.2 seconds after the owner skipped the notice before
+        // it, and its Enter trusted the folder for the owner.)
+        let (started, agent, hooks_seen) = {
+            let m = p.meta.lock().unwrap();
+            (
+                m.proc_started_ms.unwrap_or(m.created_ms),
+                m.agent,
+                m.hooks_seen,
+            )
+        };
+        // A program that has said its session started is past its first
+        // questions (Claude Code and Codex say so only after the folder
+        // is trusted), and is not kept waiting; so is one a hook of whose
+        // session has run.
+        let greeted =
+            hooks_seen || p.wake.greeted_ms.load(std::sync::atomic::Ordering::Relaxed) >= started;
+        let asks = || self.start_question(p, agent, greeted);
+        // Looked at again soon, when there is mail to tell it of (the
+        // look once a second comes anyway).
+        let later = || match self.mail().unread_told(&self.pane_names(&p.id)).is_empty() {
+            true => Wake::Now,
+            false => Wake::At(now + 500),
+        };
+        if asks() {
+            p.wake.at_screen(now);
+            return later();
         }
+        let screen_ms = p.wake.screen_ms.load(std::sync::atomic::Ordering::Relaxed);
+        if crate::wake::starting(crate::wake::Starting {
+            greeted,
+            age_ms: now.saturating_sub(started),
+            screen_ago_ms: (screen_ms >= started).then(|| now.saturating_sub(screen_ms)),
+            quiet_ms: now.saturating_sub(p.term.last_output_ms()),
+            blank: !greeted && p.term.lines().iter().all(|l| l.trim().is_empty()),
+        }) {
+            return later();
+        }
+        // Looked at once more with the pane's input locked, with the
+        // marks: the question may have been drawn since.
+        let wakeable = || wakeable() == Wake::Now && !asks();
         // A Codex scrolled back in its own history is typed nothing, not
         // the nudge and not the one more Enter: the Enter would only
         // return it to its latest line and leave the words unsent in its
@@ -755,7 +773,7 @@ impl Daemon {
                     enter_after: None,
                     from: None,
                 },
-                || wakeable() == Wake::Now,
+                wakeable,
             );
             matches!(sent, Ok(Some(_)))
         };
@@ -815,7 +833,7 @@ impl Daemon {
                         enter_after: Some(crate::daemon::PASTE_ENTER),
                         from: None,
                     },
-                    || wakeable() == Wake::Now,
+                    wakeable,
                 );
                 typed_now = matches!(sent, Ok(Some(_)));
                 typed_now

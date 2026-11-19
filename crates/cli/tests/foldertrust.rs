@@ -380,13 +380,16 @@ fn nothing_but_the_first_screen_of_a_chosen_folder_is_answered() {
     );
     // The known screen for a chosen folder, with no hook before it, but
     // first shown 21 seconds after the program started: not its first
-    // screen, so it is not read at all.
+    // screen, so it is not answered. It has mail waiting, and the nudge
+    // for it is not typed into the question either (its Enter would
+    // answer it): that is read from the screen, whenever it shows.
     let late = spawn(
         "antigravity",
         &dir,
         json!({"trust_screen": {"as": "antigravity", "after_ms": 21000}, "steps": []}),
-        json!({}),
+        json!({"name": "late"}),
     );
+    s.call("msg.send", json!({"to": "late", "body": "for later"}));
     // No hooks at all (a program that reports nothing), the screen as its
     // only content, well inside the first 20 seconds.
     let hooks = spawn(
@@ -483,6 +486,11 @@ fn nothing_but_the_first_screen_of_a_chosen_folder_is_answered() {
     });
     a_key_would_have_come();
     assert!(!s.text(&late).contains(TRUSTED), "{}", s.text(&late));
+    let nudged = s.log("msg.nudged");
+    assert!(
+        nudged.iter().all(|e| e["pane"] != json!(late)),
+        "{nudged:?}"
+    );
     assert!(trust(&s, &late)["asks"].is_null(), "{}", s.pane(&late));
     assert_eq!(
         s.log("pane.trust_answered").len(),
@@ -1002,4 +1010,87 @@ fn a_message_sent_as_a_pane_starts_is_not_typed_into_its_first_question() {
     assert_eq!(p["exited"], json!(false), "{p}");
     assert_eq!(p["state"], json!("needs_you"), "{p}");
     assert!(trust(&s, &pane)["asks"].is_object(), "{p}");
+}
+
+/// A bug that happened (a real Codex 0.169.0, 18 Nov 2026; the times are
+/// the station's own log's): the pane's role was stored as it started, at
+/// 20:14:13; Codex's notice of a newer version stood until the owner
+/// pressed Escape at 20:14:53; the nudge was typed 1.2 seconds later, into
+/// the folder-trust question that came next. Its Enter chose "Trust and
+/// continue" for the owner, the question swallowed the words, and the
+/// agent was told of its mail a minute later, at the next message. Codex
+/// asks up to three things one after another (the notice, the folder, its
+/// hooks), and says its session started only with its first message.
+///
+/// Now: nothing is typed into any of the three, however long each stands
+/// and whoever answers it; the folder's question is answered by the
+/// station's own road, on the owner's tick; and the message is typed a
+/// moment after the last one is answered, not a minute.
+#[test]
+#[ignore = "merge tier: the notice stands for half a minute"]
+fn a_message_waits_through_codexs_notice_and_questions_and_then_comes_promptly() {
+    let s = Station::start("alpha");
+    let dir = folder(&s, "ticked");
+    let script = s.script_file(&json!({
+        "update_notice": true,
+        "trust_screen": [{"as": "codex"}, {"as": "codex-hooks"}],
+        // As a Codex whose hooks are not trusted yet: none runs.
+        "no_hooks": true,
+        "steps": [], "on_input": [{"turn_end": "ok"}],
+    }));
+    let pane = s.call(
+        "pane.spawn",
+        json!({"agent": "codex", "program": FAKE, "args": ["--script", script],
+               "cwd": dir, "name": "late", "trust_folder": true}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.call("msg.send", json!({"to": "late", "body": "your role"}));
+    let nudged = || s.log("msg.nudged");
+    let quiet = |what: &str| {
+        assert!(nudged().is_empty(), "{what}: {:?}", nudged());
+        let p = s.pane(&pane);
+        assert_eq!(p["exited"], json!(false), "{what}: {p}\n{}", s.text(&pane));
+    };
+
+    // The notice, for longer than a program is given to start in by its
+    // age alone (half a minute; the real one stood for forty seconds).
+    s.wait_text(&pane, "Update available");
+    std::thread::sleep(std::time::Duration::from_secs(31));
+    quiet("at the notice");
+    assert!(answers(&s, &pane).is_empty());
+
+    // The owner skips it. The folder's question is answered on the tick,
+    // by the station; the review of hooks follows, and is nobody's here
+    // (this station's Codex has no hooks of spandeck's installed).
+    s.call("pane.input", json!({"pane": pane, "data": "\u{1b}"}));
+    s.wait_text(&pane, TRUSTED);
+    assert_eq!(answers(&s, &pane).len(), 1, "answered by the station");
+    wait_for_or(
+        "the pane to say it asks about hooks",
+        20,
+        || format!("{:?}\n{}", nudged(), s.text(&pane)),
+        || (!s.pane(&pane)["hooks_trust"]["asks"].is_null()).then_some(()),
+    );
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    quiet("at the review of hooks");
+    let text = s.text(&pane);
+    assert!(
+        !text.contains("[fake] hooks:"),
+        "nothing answered it: {text}"
+    );
+
+    // The owner answers it. The message comes within seconds.
+    let answered = std::time::Instant::now();
+    s.call("pane.input", json!({"pane": pane, "data": "\u{1b}[B\r"}));
+    s.wait_text(&pane, "[fake] hooks: trusted all");
+    s.wait_text(&pane, "[fake] got: You have 1 new spandeck message");
+    let took = answered.elapsed();
+    eprintln!("typed {took:?} after the last question was answered");
+    assert!(
+        took < std::time::Duration::from_secs(8),
+        "typed {took:?} after the last question was answered"
+    );
+    assert_eq!(nudged().len(), 1, "{:?}", nudged());
 }
