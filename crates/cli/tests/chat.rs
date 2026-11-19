@@ -4021,3 +4021,7 @@ mod in_a_browser {
         shoot(&wide, "desktop-layout");
     }
 }
+
+/// A pane's look in both of its faces (`look/mod.rs`).
+#[cfg(unix)]
+mod look;

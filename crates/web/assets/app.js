@@ -15,7 +15,7 @@ import { Api } from './api.js';
 import { PaneTerm } from './term.js';
 import { h, showMenu, closeMenu, toast, dialog, confirmBox, keepInView, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText, heldWords, rapidLine, hooksTick, hooksCard, hooksAnsweredWords, trustTick, trustCard, trustAnsweredWords, TRUST_WARNING } from './ui.js';
 import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
-import { lookState, setDoc, pageLook, paneLook, applyPage, applyRemembered, rememberPage, loadFonts, fontListeners, termSize } from './look.js';
+import { lookState, setDoc, pageLook, paneLook, applyPage, applyChatFrame, applyRemembered, rememberPage, loadFonts, fontListeners, termSize } from './look.js';
 import { lookEditor } from './lookedit.js';
 import { phoneLook } from './phonelook.js';
 import { toolsPanel } from './tools.js';
@@ -25,7 +25,7 @@ import { qrSvg } from './qr.js';
 import { initFailover } from './failover.js';
 import { sendAct } from './typed.js';
 import { initMic, micFor } from './mic.js';
-import { initChat, chatMenu, draftCount, conversation, faceOf, setFace, chatToggle, termBox, chatBeforeRender, chatAfterRender, chatPark, chatResized, sync as syncKids, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
+import { initChat, chatMenu, chatLooks, draftCount, conversation, faceOf, setFace, chatToggle, termBox, chatBeforeRender, chatAfterRender, chatPark, chatResized, sync as syncKids, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
 
 // The page opens in the look this browser last had, before anything is asked.
 applyRemembered();
@@ -466,8 +466,9 @@ function lookTaken(doc) {
 fontListeners.add(() => { for (const t of S.terms.values()) t.remeasure(); });
 
 // Show every look again: the page's (the deck's, or the layout's on screen)
-// and each terminal's. Called on every redraw and by the Appearance editor
-// as a value changes.
+// and each pane's, in whichever face the pane is shown: its terminal, its
+// conversation, or its picture on a tile. Called on every redraw and by the
+// Appearance editor as a value changes.
 function applyLook() {
   const layout = S.route.view === 'layout' ? S.route.layout : null;
   const page = pageLook(layout);
@@ -476,6 +477,8 @@ function applyLook() {
     const { look, own } = paneLook(layout, `${t.station}/${t.pane.id}`);
     t.setLook(look, own ? page : null);
   }
+  chatLooks((st, p) => ({ look: paneLook(layout, paneLookKey(st, p)).look, page }));
+  for (const el of document.querySelectorAll('.thumb[data-key]')) applyChatFrame(el, paneLook(layout, el.dataset.key).look, page);
 }
 // The editor for the deck, a layout ({key, name}) or a pane ({key, name}).
 // At a phone's width it is a sheet (phonelook.js): the deck's theme and font,

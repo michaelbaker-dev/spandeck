@@ -390,7 +390,7 @@ export function lookEditor(env, scope) {
       h('div', { class: 'look-form' },
         h('p', { class: 'muted' }, level === 'deck' ? 'The look of the whole Control Deck, on every station and in every browser.'
           : level === 'layout' ? `Used while ${scope.name} is on screen, in place of the deck's. What you do not change here follows the deck.`
-            : `Only ${scope.name}: its terminal and its bar. What you do not change here follows the layout it is shown in, or the deck.`,
+            : `Only ${scope.name}: its terminal, its conversation (Chat) and its bar. What you do not change here follows the layout it is shown in, or the deck.`,
         ' The page shows each change as you make it; nothing is saved until you press Save.'),
         h('div', { class: 'look-theme' }, h('label', { class: 'look-label', htmlFor: 'look-theme' }, 'Theme'), Object.assign(select, { id: 'look-theme' }),
           h('div', { class: 'row look-theme-buttons' }, dup, ren, del, exp, imp, file)),
