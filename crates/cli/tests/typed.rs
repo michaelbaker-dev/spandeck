@@ -770,6 +770,10 @@ fn a_duplicated_tab_and_its_original_both_work() {
     // it works, and the original still shows what it prints.
     type_in(&dup, "echo copy-$((2+2))\n");
     a.wait_text(&pane, "copy-4");
+    // The copy opened in front. A tab behind another is not drawn by the
+    // browser (the nightly run on a hosted machine waited for it in vain),
+    // so the original is looked at again, as its owner would.
+    page.tab.bring_to_front().unwrap();
     wait_for("the original to show it too", 10, || {
         page.term_text().contains("copy-4").then_some(())
     });

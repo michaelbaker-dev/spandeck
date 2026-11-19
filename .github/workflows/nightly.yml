@@ -9,7 +9,7 @@ on:
 jobs:
   soak:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -17,23 +17,28 @@ jobs:
       - name: Relay simulation, many seeds
         run: SPANDECK_SIM_SEEDS=500 cargo test -p spandeck-core --test relay_sim --release
       - name: 50-pane soak
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test soak --release -- --ignored
       # Scenario tests that kill and start a station several times: too slow
       # for the every-change check, so they are ignored there.
       - name: After a restart (crash, restart in place, Tailscale address)
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test restore -- --ignored
       # The same for a database another program holds locked: each holds it
       # for 12 to 35 seconds.
       - name: Nothing waits for the database (locked 12 s, at an upgrade, 30 s)
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test dblock -- --ignored
       # A stopped or restarted agent stays put: each waits whole seconds to
       # see that no mail arrives, one kills two stations, one drives browsers.
       - name: Holds (a stopped agent stays stopped, not reading, after a restart, the deck)
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test holds -- --ignored
       # The deck's socket: a channel number from before a reconnect, at a
       # station and through one; and a timing: four answers together arrive
       # within 10 ms (they took 42 ms while each waited to be acknowledged).
       - name: The deck's socket (a stale channel number reaches no pane; answers are not held back)
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test socket -- --ignored
       # What is typed from a deck. Names the page chooses, a page that comes
       # back replacing only its own connection, a duplicated tab in a real
@@ -41,26 +46,31 @@ jobs:
       # station, through another, and in a real page at two widths: on time,
       # or refused with the count, never late. About three minutes.
       - name: What is typed (names, fencing, a duplicated tab; on time or refused, never late)
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test typed -- --ignored --nocapture
       # Four stations, one frozen and one behind a slow link: the local
       # mail wake-up and the healthy station's sync are timed against all
       # four healthy, and printed.
       - name: A frozen station and a slow one delay nobody else
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test isolation -- --ignored --nocapture
       # An idle agent is woken when its mail arrives: eight sends on one
       # station and eight across two, each told within 250 ms (the look
       # once a second took 424 ms at the median), and the times printed.
       - name: An idle agent is told of its mail when it arrives (timings; nobody held is woken)
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test wake -- --ignored --nocapture
       # The daemon is ended under running agents (the pane host keeps them):
       # a rule check waits and gets its answer, or is refused at its
       # deadline; an approval is found again by its hook after a restart.
       - name: While spandeck is away (rules hold; an approval survives a restart)
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test away -- --ignored --nocapture
       # The deck's refresh in a real browser: a station frozen and one that
       # answers as 0.4.5 did; and what an idle deck asks, counted against
       # the 816 calls a minute of before.
       - name: The deck asks each station one question (a frozen station, one from before, an idle count)
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test refresh -- --ignored --nocapture
       # A machine that cannot download is sent the release over SSH: two
       # real stations are installed and started from what was sent (this
@@ -68,6 +78,7 @@ jobs:
       # Add a machine dialog on a phone, which says so as progress. About
       # twenty seconds.
       - name: Add a machine (a release sent over SSH installs and joins; the dialog on a phone)
+        if: ${{ !cancelled() }}
         run: |
           cargo test -p spandeck --test phase5 a_machine_that_cannot_download_is_sent -- --ignored
           cargo test -p spandeck --test phase5 add_a_machine_on_a_phone -- --ignored
@@ -76,6 +87,7 @@ jobs:
       # it, while calls between the two are timed: none may be held up by
       # the transfer. About fifteen seconds.
       - name: A release supplied by the fleet (a station's own copy; calls are not held up meanwhile)
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test supply -- --ignored --nocapture
       # Chat for every pane, in a real browser at a phone's width and a
       # computer's: a layout of a Codex whose hooks never ran and a shell,
@@ -85,6 +97,7 @@ jobs:
       # scrolls, and the message box sits on a phone's keyboard. About
       # twenty seconds.
       - name: Chat for every pane, and one chat for all of them (phone and computer, the keyboard)
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test chat -- --ignored
       # The microphone of the message box, with stand-ins for the browser's
       # dictation and recorder: a start that throws, one that is never
@@ -93,6 +106,7 @@ jobs:
       # recording turned into text by a stand-in for the owner's speech
       # program, for the owner alone, and deleted. About fifteen seconds.
       - name: The microphone never holds the page; a recording is the owner's alone and is deleted
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test mic -- --ignored
       # A terminal's history on a phone is the browser's to scroll: the rest
       # of it, with the browser's own touches. A pane another window holds
@@ -102,12 +116,14 @@ jobs:
       # sent. About ten seconds. (The measure in the same file is run by
       # hand: docs/measurements.md.)
       - name: A terminal's history on a phone (watched, whole width, a flood, earlier output)
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test phonescroll the_rest -- --ignored
       # The Inbox in a real browser at an iPhone's width and a computer's:
       # one size for every title, body and line of where and when, nothing
       # wider than its card, a long body cut and opened by a tap. About five
       # seconds.
       - name: The Inbox is one size of text, and nothing runs off its card (phone and computer)
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test inbox -- --ignored
       # HTTPS, the deck saved on the device, and carrying on through
       # another station, in a real browser at a phone's size. The rules of
@@ -120,6 +136,7 @@ jobs:
       # a new build taken whole, and taken away by the switch. About two
       # and a half minutes.
       - name: A page carries on through another station; the deck saved on the device; HTTPS turned on from the deck
+        if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test failover -- --ignored
       # Agent programs (the owner's report of 17 Nov 2026: "no feedback,
       # don't know if it's doing it, if it worked, don't know if the
@@ -131,10 +148,37 @@ jobs:
       # through another station, and the command line; and the dialog at a
       # phone's size. No real agent program is run. About forty seconds.
       - name: Agent programs (every action says what it did; one job at a time; is it the latest; the dialog on a phone)
+        if: ${{ !cancelled() }}
         run: |
           cargo test -p spandeck --test agent_programs every_update -- --ignored
           cargo test -p spandeck --test agent_programs an_update_asked -- --ignored
           cargo test -p spandeck --test agent_programs on_a_phone -- --ignored
+      # Suites of the merge tier that no step above runs. One failing does
+      # not stop the ones after it: each step runs unless the run is cancelled.
+      - name: The page says when its link is silent (two daemons and a browser, measured times)
+        if: ${{ !cancelled() }}
+        run: cargo test -p spandeck --test heartbeat -- --ignored
+      - name: What is sent to one pane keeps its order (lanes)
+        if: ${{ !cancelled() }}
+        run: cargo test -p spandeck --test lanes -- --ignored
+      - name: Folder trust and hooks trust (a first screen, a notice before it, mail that waits)
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p spandeck --test foldertrust -- --ignored --skip canary_ --skip live_
+          cargo test -p spandeck --test hookstrust -- --ignored --skip canary_ --skip live_
+      - name: Questions, retries, roles, the record, agent setup
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p spandeck --test questions -- --ignored --skip canary_ --skip live_
+          cargo test -p spandeck --test retry -- --ignored --skip canary_ --skip live_
+          cargo test -p spandeck --test roles -- --ignored --skip canary_ --skip live_
+          cargo test -p spandeck --test phase6 -- --ignored --skip canary_ --skip live_ --skip pictures_ --skip screenshots_
+          cargo test -p spandeck --test agent_setup -- --ignored --skip canary_ --skip live_ --skip pictures_ --skip screenshots_
+      - name: Tools for agents (the station and the deck)
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p spandeck --test tools -- --ignored --skip canary_ --skip live_
+          cargo test -p spandeck --test tools_deck -- --ignored --skip canary_ --skip live_ --skip pictures_ --skip screenshots_
   build:
     strategy:
       fail-fast: false
