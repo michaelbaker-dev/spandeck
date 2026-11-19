@@ -217,6 +217,10 @@ enum Cmd {
         /// Another station in the fleet, by name.
         #[arg(long)]
         station: Option<String>,
+        /// Only ask the release host whether a newer spandeck is
+        /// published, now. Nothing is downloaded or installed.
+        #[arg(long, conflicts_with = "version")]
+        check: bool,
     },
     /// The agent programs on each station: version, whether it is the
     /// newest published, and the last update. `spandeck agents update`
@@ -1546,24 +1550,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Cmd::Fleet { join: None, .. } => {
             let v = c.call("fleet.refresh", json!({}))?;
-            show(j, &v, |v| {
-                v["stations"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|s| {
-                        format!(
-                            "{:<18} {:<14} {:<8} working {}  need you {}",
-                            s["station"].as_str().unwrap_or(""),
-                            s["state"].as_str().unwrap_or(""),
-                            s["version"].as_str().unwrap_or(""),
-                            s["working"],
-                            s["needs_you"]
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            });
+            show(j, &v, fleet_lines);
         }
         Cmd::Integration { cmd } => {
             let v = match cmd {
@@ -1588,7 +1575,37 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 "restarting; terminals stay open. If it does not come back healthy, the restart is undone.".to_string()
             });
         }
-        Cmd::Update { version, station } => {
+        // Is a newer spandeck published? Asks the release host now, and
+        // installs nothing.
+        Cmd::Update {
+            station,
+            check: true,
+            ..
+        } => {
+            let asked = on_station(
+                &mut c,
+                station.as_deref(),
+                "update.check",
+                json!({"again": true}),
+            )?;
+            let name = asked["station"].as_str().unwrap_or("").to_string();
+            // It answers at once and asks in its own time: a few seconds.
+            let mut v = Value::Null;
+            for _ in 0..30 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                v = c.call("fleet.refresh", json!({}))?;
+                let row = v["stations"]
+                    .as_array()
+                    .and_then(|rows| rows.iter().find(|s| s["station"] == json!(name)));
+                if row.is_none_or(|s| s["update"]["checking"] != json!(true)) {
+                    break;
+                }
+            }
+            show(j, &v, fleet_lines);
+        }
+        Cmd::Update {
+            version, station, ..
+        } => {
             let v = on_station(
                 &mut c,
                 station.as_deref(),
@@ -2194,6 +2211,43 @@ fn removed_summary(v: &Value) -> String {
 }
 
 /// Call a method here, or on another station in the fleet through this one.
+/// `spandeck fleet`: a line for each station, with what is known of a
+/// newer spandeck beside its version, and a last line when one is out.
+fn fleet_lines(v: &Value) -> String {
+    let mut lines: Vec<String> = v["stations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| {
+            format!(
+                "{:<18} {:<14} {:<8} working {}  need you {}  {}",
+                s["station"].as_str().unwrap_or(""),
+                s["state"].as_str().unwrap_or(""),
+                s["version"].as_str().unwrap_or(""),
+                s["working"],
+                s["needs_you"],
+                s["update"]["says"].as_str().unwrap_or("")
+            )
+            .trim_end()
+            .to_string()
+        })
+        .collect();
+    let update = &v["update"];
+    match update["state"].as_str() {
+        Some("available") => lines.push(format!(
+            "{}{}. `spandeck update` updates this station, `spandeck update --station NAME` another.",
+            update["says"].as_str().unwrap_or(""),
+            update["url"].as_str().map(|u| format!(": {u}")).unwrap_or_default()
+        )),
+        Some("unknown" | "off") => lines.push(format!(
+            "Whether a newer spandeck is published: {}.",
+            update["says"].as_str().unwrap_or("")
+        )),
+        _ => {}
+    }
+    lines.join("\n")
+}
+
 fn on_station(
     c: &mut spandeck_core::client::Client,
     station: Option<&str>,

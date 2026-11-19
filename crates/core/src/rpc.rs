@@ -357,7 +357,13 @@ mod agent_program_calls {
 
     #[test]
     fn only_the_owner_updates_installs_or_checks_agent_programs() {
-        for method in ["agents.update", "agents.install", "agents.check"] {
+        // And asking whether a newer spandeck is published (19 Nov 2026).
+        for method in [
+            "agents.update",
+            "agents.install",
+            "agents.check",
+            "update.check",
+        ] {
             for authority in [Authority::Agent, Authority::ReadOnly, Authority::Peer] {
                 assert!(!allowed(authority, method), "{method}");
             }
@@ -724,6 +730,7 @@ const REPEATABLE: &[&str] = &[
     "project.recipes",
     // Asking a release host again asks the same question.
     "agents.check",
+    "update.check",
     // The file explorer's looks (files.rs).
     "files.home",
     "files.list",
@@ -2658,6 +2665,11 @@ impl Daemon {
                     .unwrap_or(false);
                 self.agents_check(agent, again)
             }
+            // Ask this station's release host whether a newer spandeck is
+            // published (newrelease.rs). Like `agents.check`: the owner's
+            // alone, since it makes this station call a host outside.
+            // Nothing is downloaded or installed; it answers at once.
+            "update.check" => self.update_check(flag(&params, "again")),
             // Update one agent program, or all of them, on this station. The
             // caller names an agent; what is run comes from the catalogue or
             // this station's own config. Owner only: it changes the station.
