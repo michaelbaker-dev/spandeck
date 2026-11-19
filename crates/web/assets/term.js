@@ -26,6 +26,13 @@ import { Hist, CHUNK } from './hist.js';
 // A terminal as every pane has it. Emoji take two cells, as the programs
 // that print them expect: the terminal's own table (Unicode 6) gives them
 // one, and the next character was drawn on top of them.
+//
+// `vendor/xterm.js` carries one change of ours, in `Viewport._handleScroll`:
+// `if(!this._currentRowHeight)return;`. After a reset (what a station sends
+// on attaching starts with one) the library knows no row height until the
+// next frame; a scroll of its view heard in between at offset 0 was 0/0
+// lines, the line it shows was no number from then on, and the screen was
+// drawn blank until the pane printed enough to scroll. Keep it at an upgrade.
 export function newTerminal(options) {
   const term = new Terminal({ allowProposedApi: true, ...options });
   term.loadAddon(new Unicode11Addon.Unicode11Addon());

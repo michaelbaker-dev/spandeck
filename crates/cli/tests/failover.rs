@@ -1071,6 +1071,17 @@ fn a_page_carries_on_through_the_fastest_station_that_answers() {
             json!({"pane": pane, "text": "echo after-$((40+3))\n"}),
         );
         page.wait("the pane through the other station", "[...document.querySelectorAll('.xterm-rows > div')].map(r => r.textContent).join('\\n').includes('after-43')");
+        // A bug that happened: this test failed four times in nine, the pane
+        // attached and its lines in the terminal, the screen drawn blank.
+        // What a station sends on attaching starts with a reset; the
+        // terminal library then knows no row height until the next frame,
+        // and a scroll of its own view heard in between at the top made the
+        // line it shows 0/0. (`vendor/xterm.js` passes such a scroll over.)
+        assert_eq!(
+            page.js("(t => { const v = t.term.element.querySelector('.xterm-viewport'); t.term.reset(); v.scrollTop = 0; v.dispatchEvent(new Event('scroll')); return Number.isFinite(t.term.buffer.active.viewportY); })(document.querySelector('.pane').paneTerm)"),
+            json!(true),
+            "the terminal no longer knows which line it shows"
+        );
         // The station it works through says so in its log.
         let i = fleet
             .stations
