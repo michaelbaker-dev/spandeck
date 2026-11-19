@@ -1714,6 +1714,13 @@ instruction to build what the report recommended.
     stored with a bare name, as they were until the station wrote the project into the
     address, counts only when a pane of the project had the name at that time and no other
     pane did; where two had it, the message is left out and the document says how many.
+  - **One row for each name.** A pane that ended and whose name another pane of the
+    project has since (a critic that exited and was replaced) is not a row of its own: its
+    time in each state, its tool calls, its approvals and its tokens are counted in the
+    row of the pane that has the name now, which names the earlier panes by id
+    (`earlier_panes`). With no pane of the name running, the row is the newest. It is
+    folded, not listed apart, so that a name's time in its states still sums to the wall
+    time; the pane that took the name is not "marked exited and running again".
   - **Tokens, cost and turns are the period's, to the hour.** The station counts each
     conversation's tokens by the hour (the archive's `usage_hours`), so a pane's are those
     of the whole hours that hold the period, first event to last, and the document names

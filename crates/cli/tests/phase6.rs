@@ -827,6 +827,11 @@ fn a_projects_record_is_written_by_the_station_from_what_it_holds() {
     std::thread::sleep(Duration::from_millis(5));
     let began = spandeck_core::paths::now_ms();
     let repo = project(&s, "demo", &[], "");
+    // A first reviewer that ended and was replaced. (Such a critic stood
+    // in the record as a second `critic`, with zeros: 19 Nov 2026.)
+    let first_reviewer = agent(&s, "demo", &repo, "reviewer", json!({"steps": []}));
+    s.wait_text(&first_reviewer, "[fake] session");
+    s.call("pane.close", json!({"pane": first_reviewer}));
     // The reviewer takes its mail 400 ms after it is told of it, and answers.
     let reviewer = agent(
         &s,
@@ -923,7 +928,13 @@ fn a_projects_record_is_written_by_the_station_from_what_it_holds() {
             .unwrap_or_else(|| panic!("no pane {name} in {}", r["agents"]))
     };
     let (b, v) = (by_name("builder"), by_name("reviewer"));
+    // One row for each name: the reviewer that ended is in the row of the
+    // one that replaced it.
     assert_eq!(r["agents"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        (&v["pane"], &v["earlier_panes"]),
+        (&json!(reviewer), &json!([first_reviewer]))
+    );
     assert_eq!(
         (
             r["project"].as_str(),
@@ -1071,6 +1082,7 @@ fn a_projects_record_is_written_by_the_station_from_what_it_holds() {
         did,
         [
             ("project.added", ""),
+            ("pane.closed", "reviewer"),
             ("approval.resolved", "builder"),
             ("msg.sent", "builder"),
             ("pane.restarted", "reviewer"),

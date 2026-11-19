@@ -100,6 +100,62 @@ pub(crate) struct Pane {
     /// What it used in the hours the period touches (`usage_between`), or
     /// null.
     pub usage: Value,
+    pub created_ms: u64,
+    /// Earlier panes of its name that ended, oldest first: their ids. What
+    /// they did is counted in this pane's row.
+    pub earlier: Vec<String>,
+}
+
+impl Pane {
+    /// Whether `id` is this pane or an earlier one counted in its row.
+    fn is(&self, id: &str) -> bool {
+        self.id == id || self.earlier.iter().any(|e| e == id)
+    }
+}
+
+/// One row for each name: a pane that ended and whose name another pane
+/// of the project has since is not a row of its own, it is counted in
+/// that pane's. (A critic that exited and was replaced stood beside the
+/// real one as a second `critic` with zeros: 19 Nov 2026.) Of several
+/// panes of one name the row is the one that runs, or with none running
+/// the newest; two that both run each keep their row.
+pub(crate) fn one_row_a_name(mut panes: Vec<Pane>) -> Vec<Pane> {
+    panes.sort_by(|a, b| (&a.name, a.created_ms, &a.id).cmp(&(&b.name, b.created_ms, &b.id)));
+    let mut rows: Vec<Pane> = vec![];
+    let mut ended: Vec<Pane> = vec![];
+    for p in panes {
+        if ended.last().is_some_and(|e| e.name != p.name) {
+            close_name(&mut rows, std::mem::take(&mut ended));
+        }
+        if p.live {
+            let mut p = p;
+            // Those of its name that were started before it and ended.
+            p.earlier = ended.drain(..).map(|e| e.id).collect();
+            rows.push(p);
+        } else {
+            ended.push(p);
+        }
+    }
+    close_name(&mut rows, ended);
+    rows.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    rows
+}
+
+/// The ended panes of one name that no running pane of the name followed.
+fn close_name(rows: &mut Vec<Pane>, mut ended: Vec<Pane>) {
+    let Some(mut newest) = ended.pop() else {
+        return;
+    };
+    let ids = ended.into_iter().map(|e| e.id);
+    match rows.last_mut().filter(|r| r.name == newest.name) {
+        // Started after the running pane of its name and ended: counted
+        // with it all the same, since the name has one row.
+        Some(row) => row.earlier.extend(ids.chain([newest.id])),
+        None => {
+            newest.earlier = ids.collect();
+            rows.push(newest);
+        }
+    }
 }
 
 const HOUR: u64 = 3_600_000;
@@ -343,6 +399,10 @@ pub(crate) fn build(inp: &Input) -> Value {
             index.insert(&p.name, i);
         }
         index.insert(&p.id, i);
+        // An earlier pane of its name is counted in its row.
+        for id in &p.earlier {
+            index.insert(id, i);
+        }
     }
     let pane_of = |addr: &str| index.get(bare(addr).as_str()).copied();
     let name_of = |pane: Option<&str>| -> String {
@@ -370,6 +430,9 @@ pub(crate) fn build(inp: &Input) -> Value {
     let mut by_pane: BTreeMap<&str, Vec<&LogRow>> = BTreeMap::new();
     for row in &inp.log {
         if let Some(p) = row.pane.as_deref() {
+            // Under its row's pane: its own id, or the id of the pane that
+            // has its name now.
+            let p = index.get(p).map_or(p, |i| inp.panes[*i].id.as_str());
             by_pane.entry(p).or_default().push(row);
         }
     }
@@ -491,6 +554,9 @@ pub(crate) fn build(inp: &Input) -> Value {
             for r in &rows {
                 match (exited, r.kind.as_str()) {
                     (_, "pane.exited") => exited = Some(*r),
+                    // The pane that took its name is another pane: the one
+                    // that exited is not running again.
+                    (Some(e), _) if e.pane != r.pane => exited = None,
                     (Some(e), "pane.created" | "pane.resumed" | "pane.state" | "agent.tool") => {
                         let restarted = rows.iter().find(|x| {
                             x.kind == "pane.restarted" && x.ts >= e.ts && x.ts <= r.ts + 5000
@@ -541,14 +607,19 @@ pub(crate) fn build(inp: &Input) -> Value {
             }
             let mine: Vec<&Value> = approvals
                 .iter()
-                .filter(|a| a["pane"].as_str() == Some(p.id.as_str()))
+                .filter(|a| a["pane"].as_str().is_some_and(|id| p.is(id)))
                 .collect();
             let waits: Vec<u64> = mine.iter().filter_map(|a| a["wait_ms"].as_u64()).collect();
             let all = &p.usage;
             let reported = all["total_tokens"].as_i64().is_some_and(|t| t > 0);
-            let (tools, failed) = inp.tools.get(&p.id).copied().unwrap_or((0, 0));
+            let (tools, failed) = inp
+                .tools
+                .iter()
+                .filter(|(id, _)| p.is(id))
+                .fold((0, 0), |sum, (_, t)| (sum.0 + t.0, sum.1 + t.1));
             json!({
-                "pane": p.id, "name": p.name, "role": p.role, "agent": p.agent,
+                "pane": p.id, "earlier_panes": p.earlier,
+                "name": p.name, "role": p.role, "agent": p.agent,
                 "program": p.program, "model": p.model, "running": p.live,
                 "time_in_state_ms": spent,
                 "state_changes": changes.len(),
@@ -957,9 +1028,12 @@ pub fn markdown(v: &Value) -> String {
     ));
     let agents = v["agents"].as_array().cloned().unwrap_or_default();
     line(format!("- Panes: {}", agents.len()));
+    // An earlier pane of a name is counted in the row of the pane that has
+    // the name now: said here and under the pane.
+    let earlier = |a: &Value| a["earlier_panes"].as_array().map_or(0, |e| e.len());
     for a in &agents {
         line(format!(
-            "  - {}: program {}, model {}{}{}",
+            "  - {}: program {}, model {}{}{}{}",
             code(&str_(&a["name"])),
             code(&str_(&a["program"])),
             a["model"]
@@ -975,6 +1049,10 @@ pub fn markdown(v: &Value) -> String {
             } else {
                 " (not running now)"
             },
+            match earlier(a) {
+                0 => String::new(),
+                k => format!("; with {k} earlier pane(s) of this name that ended"),
+            },
         ));
     }
     line(String::new());
@@ -985,6 +1063,19 @@ pub fn markdown(v: &Value) -> String {
     for a in &agents {
         line(format!("### Pane {}", code(&str_(&a["name"]))));
         line(String::new());
+        if earlier(a) > 0 {
+            let ids: Vec<String> = a["earlier_panes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|id| id.as_str())
+                .map(code)
+                .collect();
+            line(format!(
+                "- Earlier panes of this name, which ended and are counted in the numbers below: {}",
+                ids.join(", ")
+            ));
+        }
         let t = &a["time_in_state_ms"];
         let shown: Vec<String> = STATES
             .iter()
@@ -1388,7 +1479,7 @@ impl Daemon {
         if metas.is_empty() && self.project_path(project).is_none() {
             return Err(Error::NotFound(format!("project {project}")));
         }
-        let mut panes: Vec<Pane> = metas
+        let panes: Vec<Pane> = metas
             .into_iter()
             .map(|(id, (meta, live))| {
                 let model = serde_json::from_value::<PaneMeta>(meta.clone())
@@ -1416,13 +1507,17 @@ impl Daemon {
                     state_now: live.then(|| text(&meta["state"])).flatten(),
                     // Known once the period is: below.
                     usage: Value::Null,
+                    created_ms: meta["created_ms"].as_u64().unwrap_or(0),
+                    earlier: vec![],
                     id,
                 }
             })
             .collect();
-        panes.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
-        let ids: HashSet<&str> = panes.iter().map(|p| p.id.as_str()).collect();
-        let ids_json = json!(panes.iter().map(|p| &p.id).collect::<Vec<_>>()).to_string();
+        // Every pane the project had is read for; a name has one row.
+        let all_ids: Vec<String> = panes.iter().map(|p| p.id.clone()).collect();
+        let ids: HashSet<&str> = all_ids.iter().map(String::as_str).collect();
+        let ids_json = json!(all_ids).to_string();
+        let mut panes = one_row_a_name(panes);
 
         // -------------------------------------------------------- log
         let mut log: Vec<LogRow> = vec![];
@@ -1595,7 +1690,11 @@ impl Daemon {
         if let Some((first, last)) = span(&log, &messages, &notes) {
             let (a, b) = hours(first, last);
             for p in &mut panes {
-                p.usage = self.usage_between(&[p.id.as_str()], a, b);
+                let ids: Vec<&str> = std::iter::once(&p.id)
+                    .chain(&p.earlier)
+                    .map(String::as_str)
+                    .collect();
+                p.usage = self.usage_between(&ids, a, b);
             }
         }
         Ok(Input {
@@ -1725,6 +1824,8 @@ mod tests {
                 live: true,
                 state_now: None,
                 usage: Value::Null,
+                created_ms: 0,
+                earlier: vec![],
             }],
             log: vec![
                 row(100_000, "pane.created", json!({})),
@@ -1834,6 +1935,8 @@ mod tests {
             live: true,
             state_now: None,
             usage: Value::Null,
+            created_ms: 0,
+            earlier: vec![],
         };
         let t0 = 1_000_000_000;
         let mut log = vec![
@@ -1992,6 +2095,132 @@ mod tests {
             l["recipient_working"]["read"]["median_ms"],
             json!(5 * MINUTE),
             "{l}"
+        );
+    }
+
+    /// The reason for this test: in the record of `hero3` a critic that
+    /// exited and was replaced stood as a second `critic` beside the real
+    /// one, with zeros (19 Nov 2026). A name has one row, the pane that
+    /// has it now; what the earlier pane did is counted there, and it is
+    /// not taken for a pane that exited and ran again.
+    #[test]
+    fn a_pane_that_ended_and_was_replaced_is_counted_in_the_row_of_its_name() {
+        let row = |ts: u64, pane: &str, kind: &str, data: Value| LogRow {
+            ulid: format!("{ts}-{pane}-{kind}"),
+            ts,
+            kind: kind.into(),
+            pane: Some(pane.into()),
+            project: Some("hero3".into()),
+            task: None,
+            actor: None,
+            data,
+        };
+        let pane = |id: &str, name: &str, created_ms: u64, live: bool| Pane {
+            id: id.into(),
+            name: name.into(),
+            role: None,
+            agent: "fake".into(),
+            program: "fake".into(),
+            model: None,
+            live,
+            state_now: None,
+            usage: Value::Null,
+            created_ms,
+            earlier: vec![],
+        };
+        let panes = one_row_a_name(vec![
+            pane("p-3", "critic", 30_000, true),
+            pane("p-2", "critic", 20_000, false),
+            pane("p-1", "critic", 10_000, false),
+            pane("p-b", "builder", 10_000, false),
+        ]);
+        let rows: Vec<(&str, Vec<&str>)> = panes
+            .iter()
+            .map(|p| {
+                (
+                    p.id.as_str(),
+                    p.earlier.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        // The builder ended and nothing replaced it: it keeps its row.
+        assert_eq!(rows, [("p-b", vec![]), ("p-3", vec!["p-1", "p-2"])]);
+        let working = json!({"state": "working", "from": "idle"});
+        let inp = Input {
+            project: "hero3".into(),
+            station: "spark2".into(),
+            generated_ms: 100_000,
+            since_ms: None,
+            until_ms: None,
+            all: false,
+            panes,
+            log: vec![
+                row(10_000, "p-b", "pane.created", json!({})),
+                row(20_000, "p-2", "pane.created", json!({})),
+                row(21_000, "p-2", "pane.state", working.clone()),
+                row(25_000, "p-2", "pane.exited", json!({"exit": 1})),
+                row(26_000, "p-2", "pane.closed", json!({})),
+                row(30_000, "p-3", "pane.created", json!({})),
+                row(31_000, "p-3", "pane.state", working),
+                row(40_000, "p-b", "pane.closed", json!({})),
+            ],
+            log_truncated: false,
+            tools: [("p-2".to_string(), (2, 1)), ("p-3".to_string(), (5, 0))].into(),
+            station_starts: vec![],
+            messages: vec![],
+            messages_truncated: false,
+            messages_shared_name: 0,
+            notes: vec![],
+            activity_count: 0,
+            approvals: BTreeMap::new(),
+        };
+        let v = build(&inp);
+        let agents = v["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 2, "{agents:?}");
+        let c = &agents[1];
+        assert_eq!(
+            (&c["name"], &c["pane"], &c["earlier_panes"], &c["running"]),
+            (
+                &json!("critic"),
+                &json!("p-3"),
+                &json!(["p-1", "p-2"]),
+                &json!(true)
+            )
+        );
+        // Both critics' work, and the time between them, in one row that
+        // sums to the wall time.
+        let t = &c["time_in_state_ms"];
+        assert_eq!(
+            (
+                t["not_started"].as_u64(),
+                t["idle"].as_u64(),
+                t["working"].as_u64(),
+                t["exited"].as_u64(),
+                t["closed"].as_u64()
+            ),
+            (
+                Some(10_000),
+                Some(2000),
+                Some(13_000),
+                Some(1000),
+                Some(4000)
+            ),
+            "{t}"
+        );
+        assert_eq!(
+            (
+                &c["tool_calls"],
+                &c["tool_calls_failed"],
+                &c["work_periods"]
+            ),
+            (&json!(7), &json!(1), &json!(2))
+        );
+        assert_eq!(v["looks_wrong"], json!([]), "another pane is not a restart");
+        let md = markdown(&v);
+        assert_eq!(md.matches("### Pane `critic`").count(), 1, "{md}");
+        assert!(
+            md.contains("- Earlier panes of this name, which ended and are counted in the numbers below: `p-1`, `p-2`"),
+            "{md}"
         );
     }
 
