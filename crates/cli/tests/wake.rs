@@ -195,11 +195,13 @@ fn an_agent_that_cannot_take_a_turn_is_nudged_less_and_less_then_left_alone_and_
     let nudged = logged(&s, "msg.nudged", &stuck);
     assert_eq!(nudged.len(), 4, "told four times: {nudged:?}");
     // Each wait is its 1, 2 or 5 seconds, and up to the second between
-    // two looks more.
+    // two looks more. (A nudge's entry in the log is written a moment
+    // after the nudge is counted from, and not the same moment each time,
+    // so a wait can read a little short: [1751, 1999, 5001] was seen.)
     let gaps: Vec<u64> = nudged.windows(2).map(|w| w[1] - w[0]).collect();
     for (gap, least) in gaps.iter().zip([1000, 2000, 5000]) {
         assert!(
-            (least..least + 1200).contains(gap),
+            (least - 300..least + 1200).contains(gap),
             "each wait longer than the last: {gaps:?}"
         );
     }
