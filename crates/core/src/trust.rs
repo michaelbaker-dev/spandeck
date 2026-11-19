@@ -103,6 +103,12 @@ pub struct TrustState {
     requests: Mutex<BTreeMap<String, Request>>,
     /// Requests waiting at other stations of this fleet, by id.
     relayed: Mutex<BTreeMap<String, Relayed>>,
+    /// The number of the last list of waiting requests this station sent,
+    /// and of the last it took from each other station. Two lists sent one
+    /// after the other can arrive the other way round: the older is not
+    /// taken, or a request answered at once would stay listed there.
+    relay_sent: Mutex<u64>,
+    relay_taken: Mutex<BTreeMap<String, u64>>,
     outgoing: Mutex<Option<Outgoing>>,
     /// Goes up each time the key is replaced: a station left the fleet, or
     /// the fleet joined another. A connection that was let in with the old
@@ -193,6 +199,8 @@ impl TrustState {
             file,
             requests: Mutex::new(BTreeMap::new()),
             relayed: Mutex::new(BTreeMap::new()),
+            relay_sent: Mutex::new(0),
+            relay_taken: Mutex::new(BTreeMap::new()),
             outgoing: Mutex::new(None),
             epoch: tokio::sync::watch::Sender::new(0),
             retired_lock: Mutex::new(()),
@@ -976,8 +984,7 @@ impl Daemon {
     /// sent each time: a request that was answered is no longer in it. A
     /// station that is away, or too old to know the call, is skipped.
     pub(crate) async fn trust_relay_send(&self) {
-        let requests = self.trust_waiting();
-        let params = json!({"requests": requests});
+        let params = self.trust_relay_list().1;
         let mates: Vec<String> = self
             .fleet
             .peers()
@@ -994,15 +1001,25 @@ impl Daemon {
     /// In a station's round, while a request waits here: a station that
     /// was away when it arrived hears of it.
     pub(crate) async fn trust_relay_to(&self, peer: &crate::fleet::Peer) {
-        let requests = self.trust_waiting();
+        let (requests, params) = self.trust_relay_list();
         if requests.is_empty() || peer.state != "online" || peer.info["trust_relay"] != json!(true)
         {
             return;
         }
         let _ = self
             .fleet
-            .call_addr(&peer.addr, "trust.relay", json!({"requests": requests}))
+            .call_addr(&peer.addr, "trust.relay", params)
             .await;
+    }
+
+    /// The list as it is now, numbered: a later list has a higher number,
+    /// also after a restart (the clock is the least it can be).
+    fn trust_relay_list(&self) -> (Vec<Value>, Value) {
+        let mut sent = self.trust.relay_sent.lock().unwrap();
+        *sent = (*sent + 1).max(now_ms());
+        let requests = self.trust_waiting();
+        let params = json!({"requests": requests, "seq": *sent});
+        (requests, params)
     }
 
     fn trust_relay_soon(&self) {
@@ -1025,6 +1042,16 @@ impl Daemon {
             Some(p) => p.station,
             None => clean_name(&caller.who),
         };
+        // An older list than the last one taken from that station. (A
+        // station from before the lists were numbered sends no number.)
+        if let Some(seq) = params["seq"].as_u64() {
+            let mut taken = self.trust.relay_taken.lock().unwrap();
+            let last = taken.entry(at.clone()).or_insert(0);
+            if seq <= *last {
+                return Ok(json!({"ok": true}));
+            }
+            *last = seq;
+        }
         let now = now_ms();
         let plain =
             |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
@@ -1637,6 +1664,8 @@ mod tests {
             file: PathBuf::new(),
             requests: Mutex::new(BTreeMap::new()),
             relayed: Mutex::new(BTreeMap::new()),
+            relay_sent: Mutex::new(0),
+            relay_taken: Mutex::new(BTreeMap::new()),
             outgoing: Mutex::new(None),
             epoch: tokio::sync::watch::Sender::new(0),
             retired_lock: Mutex::new(()),

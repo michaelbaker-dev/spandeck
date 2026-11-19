@@ -272,7 +272,10 @@ export function phoneChips(st, p) {
     // (Drawn as chips, not as buttons of their own: the row is the button.)
     ...warningChips(f, true).map(lone),
   ].filter(Boolean);
-  if (!kids.length && !f.git && !f.mem) return null;
+  // (Not for memory alone: it is not in what the bar compares, so the row
+  // would be there or not by when the bar was last built, and a
+  // conversation would be found scrolled somewhere else.)
+  if (!kids.length && !f.git) return null;
   if (!kids.length) kids.push(chip('g-more', 'Branch, processor and memory'));
   const says = ['At a glance', f.model ? `model ${f.model.full}` : null, f.ctx ? f.ctx.says : null, f.update ? 'an update is available' : null, f.vault && !f.vault.ok ? f.vault.label : null, f.mail ? `${f.mail} unread` : null].filter(Boolean).join(', ') + '. Opens everything known of this pane.';
   return fitted(h('button', { type: 'button', class: 'gchips gchips-phone', 'aria-label': says, 'aria-haspopup': 'dialog', onclick: (e) => { e.currentTarget.blur(); glanceSheet(st, p); } }, kids,
