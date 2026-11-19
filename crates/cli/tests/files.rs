@@ -418,7 +418,8 @@ fn a_pane_is_moved_to_another_folder_and_stays_there() {
 
     // A pane of a project: inside the project, and the project's file
     // says where; never out of it.
-    let repo = s.git_repo("proj");
+    // (On a Mac the temporary folder is reached through a link; a pane says the real one.)
+    let repo = std::fs::canonicalize(s.git_repo("proj")).unwrap();
     std::fs::create_dir_all(repo.join("crates/core")).unwrap();
     s.call(
         "project.new",
@@ -567,7 +568,7 @@ fn nothing_a_pane_works_in_is_deleted_renamed_or_moved() {
     assert_eq!(codes(&out), [] as [&str; 0], "{out}");
 
     // A project: not while a pane of it is listed; then like any folder.
-    let repo = s.git_repo("tally");
+    let repo = std::fs::canonicalize(s.git_repo("tally")).unwrap();
     s.call(
         "project.new",
         json!({"path": repo, "name": "tally", "panes": [{"name": "build", "agent": "shell"}], "open": true}),
