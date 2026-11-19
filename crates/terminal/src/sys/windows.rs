@@ -1065,6 +1065,22 @@ pub fn processes() -> Vec<Proc> {
 /// Nothing to do: see `processes`.
 pub fn end_processes(_pids: &[i32]) {}
 
+/// What one pane's programs have used and hold now (`tree_usage`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TreeUse {
+    pub cpu_ms: u64,
+    pub rss_bytes: u64,
+    pub count: u32,
+}
+
+/// Not read on Windows, so nothing is shown there. A pane's programs are
+/// in a job object, whose accounting would say this soundly, but the job
+/// is held by the pane host's process and this process has only the
+/// program's id: the host would have to be asked, which it cannot be yet.
+pub fn tree_usage(_roots: &[i32]) -> Option<Vec<TreeUse>> {
+    None
+}
+
 /// Nothing to do: handles are not inherited unless asked for.
 pub fn close_inherited() {}
 

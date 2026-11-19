@@ -371,16 +371,27 @@ export function usageTitle(u) {
 }
 // The model's short name and a small context gauge: two pieces, so a narrow
 // strip can drop them one after the other.
-export function usageGauge(u, onclick) {
+// `word`: the context says what it is ("context 62%", then the gauge), as
+// on a pane's header chips (chips.js).
+export function usageGauge(u, onclick, word = false) {
   if (!u || !u.model) return [];
   const title = usageTitle(u);
   const pct = u.context_pct;
   const level = pct >= 90 ? ' full' : pct >= 70 ? ' high' : '';
   const ctx = contextText(u);
   const attrs = (cls) => ({ class: cls, title, ...(onclick ? { role: 'button', tabIndex: 0, onclick, onkeydown: (e) => { if (e.key === 'Enter') onclick(e); } } : {}) });
+  const gauge = pct !== null && pct !== undefined ? h('span', { class: 'gauge' }, h('i', { style: { width: Math.max(2, Math.min(100, pct)) + '%' } })) : null;
   return [
     h('span', { ...attrs('usage-model'), 'aria-label': `Model ${u.model}` }, modelShort(u.model)),
-    ctx ? h('span', { ...attrs('usage-ctx' + level), 'aria-label': `Context ${ctx}` },
-      pct !== null && pct !== undefined ? h('span', { class: 'gauge' }, h('i', { style: { width: Math.max(2, Math.min(100, pct)) + '%' } })) : null, ctx) : null,
+    ctx ? h('span', { ...attrs('usage-ctx' + level), 'aria-label': word ? contextSays(u) : `Context ${ctx}` },
+      word ? ['context ', h('b', {}, ctx), gauge] : [gauge, ctx]) : null,
   ].filter(Boolean);
+}
+// How full the context is, spelled out: "Context used: 62% of 1,000,000
+// tokens", or the count alone where the model's window is not known.
+export function contextSays(u) {
+  if (!u || u.context_tokens === null || u.context_tokens === undefined) return '';
+  return u.context_window && u.context_pct !== null && u.context_pct !== undefined
+    ? `Context used: ${u.context_pct}% of ${exact(u.context_window)} tokens`
+    : `Context used: ${exact(u.context_tokens)} tokens (the model's window is not known)`;
 }

@@ -209,6 +209,10 @@ const READ_METHODS: &[&str] = &[
     // The lists above that a Control Deck shows of a station, in one
     // answer (snapshot.rs). Not on the agents' list.
     "deck.snapshot",
+    // What a pane's header says at a glance (glance.rs): its folder's
+    // branch, its programs' processor and memory. Not on the agents'
+    // list: a pane's view, which an agent reads, has none of it.
+    "pane.glance",
 ];
 
 /// Changes that are only worth making if they are stored: refused while
@@ -365,6 +369,11 @@ mod agent_program_calls {
         }
         assert!(allowed(Authority::ReadOnly, "agents.status"));
         assert!(!allowed(Authority::Agent, "agents.status"));
+        // Rule 7, and "A pane's header says more at a glance": another
+        // project's branch is not an agent's to read.
+        assert!(allowed(Authority::ReadOnly, "pane.glance"));
+        assert!(!allowed(Authority::Agent, "pane.glance"));
+        assert!(!allowed(Authority::Peer, "pane.glance"));
     }
 }
 
@@ -2187,6 +2196,7 @@ impl Daemon {
             "orders.table" => self.enforcement_table(),
 
             // --------------------------------------------------------- fleet
+            "pane.glance" => self.glance(),
             "perf.get" => self.perf_view(),
             "tailnet.view" => self.tailnet_view(),
             "tailnet.report" => self.tailnet_report(),

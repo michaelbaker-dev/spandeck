@@ -1313,3 +1313,48 @@ body.fx-sizing { cursor: col-resize; }
   .fx-foot .mini, .fx-foot .btn { min-height: 40px; padding: 4px 12px; }
   .fx-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 }
+
+/* A pane's header says more at a glance (chips.js; DECISIONS.md, 19 Nov 2026).
+   Small rounded chips under the folder in a conversation's bar; the same
+   facts as plain pieces of a terminal's one line; on a phone one row that
+   opens a sheet. Every colour is the look's: a chip's own are worked out
+   from the state colours as the other shades are. In Spandeck Dark a
+   warning is written in its colour; in any other look it is written in
+   the look's text on that colour's shade, so it reads whatever was chosen. */
+:root { --chip-warn: var(--amber); --chip-bad: var(--red); --chip-info: var(--blue); --chip-warn-line: var(--amber-line); --chip-bad-line: var(--red-line); --chip-info-line: var(--blue-line); }
+:root[data-themed], .pane[data-themed], .chat-bar[data-themed], .chat-body[data-themed], .thumb[data-themed] {
+  --chip-warn: var(--text); --chip-bad: var(--text); --chip-info: var(--text); --chip-warn-line: var(--amber); --chip-bad-line: var(--red); --chip-info-line: var(--blue);
+}
+.gchips { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; min-width: 0; overflow: hidden; margin-top: 3px; }
+.gchips.wraps { flex-wrap: wrap; row-gap: 4px; }
+.gchips .gchip, .strip .gchip { display: inline-flex; align-items: center; gap: 5px; flex: none; min-height: 0; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); color: var(--muted);
+  font: inherit; font-size: calc(12px * var(--ui-scale)); line-height: 1.45; white-space: nowrap; overflow: visible; }
+.gchips .gchip b, .strip .gchip b { color: var(--text); font-weight: 600; overflow: visible; }
+.gchips .gchip .g-more { font-size: inherit; overflow: visible; }
+.gchips .g-git b, .strip-git b { max-width: 18em; overflow: hidden; text-overflow: ellipsis; }
+.gchip .ico { flex: none; }
+button.gchip { cursor: pointer; } button.gchip:hover:not(:disabled) { border-color: var(--blue); }
+.gchips .gchip.warn, .strip .gchip.warn { color: var(--chip-warn); border-color: var(--chip-warn-line); background: var(--needs-bg); }
+.gchips .gchip.bad, .strip .gchip.bad { color: var(--chip-bad); border-color: var(--chip-bad-line); background: var(--err-bg); }
+.gchips .gchip.info, .strip .gchip.info { color: var(--chip-info); border-color: var(--chip-info-line); background: var(--work-bg); }
+.gmeter { flex: none; display: inline-block; width: 36px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.gmeter i { display: block; height: 100%; background: var(--blue); } .gmeter.high i { background: var(--amber); } .gmeter.full i { background: var(--red); }
+/* A terminal's one line. What gives way in a narrow strip is let go of
+   whole, by chips.js (`fitStrip`), before the strip's own rules squeeze
+   anything: the cost, how many files are changed, the branch, the model,
+   the context, then the processor and the memory. A warning never is. */
+.strip [hidden] { display: none !important; }
+.strip-git, .strip-cost, .strip-use { display: inline-flex; align-items: center; gap: 4px; flex: none; white-space: nowrap; color: var(--muted); font-size: calc(12px * var(--ui-scale)); }
+.strip-git b, .strip-cost b, .strip-use b, .strip .usage-ctx b { color: var(--text); font-weight: 600; flex: none; }
+.strip-git .ico, .strip-git .g-more { flex: none; }
+.strip .usage-model[data-drop], .strip .usage-ctx[data-drop] { flex: none; }
+.strip-cost[role=button] { cursor: pointer; }
+.strip .gchip { line-height: 1.3; }
+/* A phone: the row is one button, 44 px tall, under the bar's own row. */
+.chat-bar .gchips-phone { order: 12; flex: 1 0 100%; min-height: 44px; margin: 0; padding: 0 2px; justify-content: flex-start; background: none; border: none; border-radius: 0; text-align: left; }
+.chat-bar .gchips-phone .gchip { padding: 2px 8px; }
+.g-open { flex: none; margin-left: auto; color: var(--muted); font-size: calc(18px * var(--ui-scale)); padding: 0 2px; }
+.glance-sheet .facts .fact { align-items: center; } .glance-sheet .facts .fact b { margin-left: auto; } .glance-sheet .facts .fact .muted { flex: none; }
+.glance-sheet .fact.g-warn b, .glance-sheet .fact.g-bad b { color: var(--chip-warn); } .glance-sheet .fact.g-bad b { color: var(--chip-bad); }
+.glance-sheet .g-act { flex: none; }
+@media (max-width: 760px) { .glance-sheet .g-act { min-height: 44px; padding: 4px 14px; } }

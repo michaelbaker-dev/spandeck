@@ -35,6 +35,7 @@
 // - Times are the station's: an elapsed time is worked out from the clock the
 //   station sent with its answer, plus the time since that answer arrived.
 
+import { chipsSig, chatChips, phoneChips, watchGlance } from './chips.js';
 import { h, showMenu, toast, dialog, copyText, dot, stateOf, STATE_LABEL, fmtTokens, fmtCost, exact, modelShort, heldWords, rapidLine, RELEASE_SAYS, trustAnsweredWords, trustTick, trustCard, hooksTick } from './ui.js';
 import { renderMarkdown } from './md.js';
 import { sendAct } from './typed.js';
@@ -238,6 +239,9 @@ class Conv {
     this.where = 'phone'; this.used = true; this.seeded = false;
 
     this.bar = h('header', { class: 'chat-bar' });
+    // The bar is drawn again when its station says something new of what
+    // the chips show (chips.js).
+    this.offGlance = watchGlance(st, () => !this.disposed && this.bar.isConnected, () => this.drawBar());
     this.log = h('div', { class: 'chat-log', role: 'log', 'aria-live': 'off', 'aria-label': 'Conversation', tabIndex: 0 });
     this.log.addEventListener('scroll', () => this.scrolled(), { passive: true });
     if (typeof ResizeObserver === 'function') { this.sized = new ResizeObserver(() => this.resized()); this.sized.observe(this.log); }
@@ -485,7 +489,7 @@ class Conv {
     const state = stateOf(p);
     const pct = [p.usage ? 1 : 0, p.usage?.context_pct ?? null, p.usage?.context_tokens ?? null];
     const files = env.files ? env.files(this.st, p) : null;
-    const sig = JSON.stringify([phone, !!files, title, sub, p.cwd || '', state, p.needs_reason, face, this.available, this.available === false ? this.reason : '', next.length, next[0] && keyOf(next[0].st, next[0].p), this.where, p.name, pct, p.rapid?.says]);
+    const sig = JSON.stringify([phone, !!files, title, sub, p.cwd || '', state, p.needs_reason, face, this.available, this.available === false ? this.reason : '', next.length, next[0] && keyOf(next[0].st, next[0].p), this.where, p.name, pct, p.rapid?.says, chipsSig(this.st, p)]);
     if (sig === this.barSig) return;
     this.barSig = sig;
     const pick = (to) => h('button', { type: 'button', class: face === to ? 'on' : '', 'aria-pressed': String(face === to), onclick: (e) => { e.currentTarget.blur(); if (face !== to) setFace(this.st, p, to); } }, to === 'chat' ? 'Chat' : 'Terminal');
@@ -502,7 +506,9 @@ class Conv {
         // beginning, not its end (the mark keeps the first "/" in place).
         // With the file explorer (files.js) a tap on it shows that folder's files.
         p.cwd ? h('span', { class: 'muted mono chat-cwd' + (files ? ' opens' : ''), title: `The folder ${p.agent === 'shell' ? 'this shell' : 'this agent'} was started in: ${p.cwd}${files ? '. Tap to see its files.' : ''}`, 'aria-label': `Folder: ${p.cwd}`,
-          ...(files ? { role: 'button', tabIndex: 0, onclick: (e) => { e.stopPropagation(); files(); }, onkeydown: (e) => { if (e.key === 'Enter') files(); } } : {}) }, '\u200e' + p.cwd) : null),
+          ...(files ? { role: 'button', tabIndex: 0, onclick: (e) => { e.stopPropagation(); files(); }, onkeydown: (e) => { if (e.key === 'Enter') files(); } } : {}) }, '\u200e' + p.cwd) : null,
+        // What is known at a glance, as chips on a third line (chips.js).
+        phone ? null : chatChips(this.st, p, p.usage ? () => this.usageSheet() : null)),
       this.available === false
         ? h('span', { class: 'chat-why', role: 'note' }, 'Terminal only: ' + this.why())
         : h('div', { class: 'chat-switch', role: 'group', 'aria-label': 'Show this pane as' }, pick('chat'), pick('terminal')),
@@ -511,6 +517,9 @@ class Conv {
       this.ringEl(),
       h('button', { type: 'button', class: 'icon-btn chat-more', 'aria-label': 'Pane menu', title: 'Pane menu', 'aria-haspopup': 'menu', onclick: menu }, '⋯'),
       rapidLine(p),
+      // On a phone: two chips and any warning in a row of their own; a tap
+      // opens the sheet with everything.
+      phone ? phoneChips(this.st, p) : null,
     ].filter(Boolean));
   }
 
@@ -1995,6 +2004,7 @@ class Conv {
     // (Its window for what the program shows goes with it.)
     if (this.listBox) { const b = this.listBox; this.listBox = null; b.quiet = true; b.close(); }
     if (this.sized) this.sized.disconnect();
+    this.offGlance();
     clearTimeout(this.retry);
     this.unwatch();
     this.stopTalking();

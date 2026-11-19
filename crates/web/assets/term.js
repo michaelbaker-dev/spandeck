@@ -14,7 +14,8 @@
 // symbols font) is the same case: the terminal measured its cells with the
 // font that stood in for it, so it measures again and then does as above.
 
-import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge, heldWords, rapidLine, RELEASE_SAYS, trustAsksWords, trustAnsweredWords, hooksAsksWords, hooksAnsweredWords } from './ui.js';
+import { stripChips, fitStrip, watchGlance } from './chips.js';
+import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, heldWords, rapidLine, RELEASE_SAYS, trustAsksWords, trustAnsweredWords, hooksAsksWords, hooksAnsweredWords } from './ui.js';
 import { paneIcon, iconName, hideIcon, fileIcon } from './icons.js';
 import { keyTyped, paneWrote, keysNotSent } from './perf.js';
 import { HOLD_MS, isTyping, isPaste, holdTake, heldTooLong, keysWords, wasWere, offWords, droppedWords, sendAct } from './typed.js';
@@ -65,6 +66,9 @@ export class PaneTerm {
     this.me = api.client;
 
     this.strip = h('div', { class: 'strip', oncontextmenu: (e) => this._menu(e) });
+    // While this strip is on screen its station is asked what its panes
+    // say at a glance (chips.js); the strip is drawn again every second.
+    this._offGlance = watchGlance(station, () => !this.disposed && this.strip.isConnected, () => this.renderStrip());
     this.body = h('div', { class: 'term-body' });
     // Slides in from the right: the agents working under this one.
     this.drawer = h('aside', { class: 'agents-drawer', 'aria-label': 'Agents under this one' });
@@ -1060,6 +1064,7 @@ export class PaneTerm {
           h('span', { class: 'dot ' + a.state }), h('b', {}, a.name), h('span', { class: 'muted grow' }, a.detail), h('span', { class: 'muted' }, a.activity))))
           : h('p', { class: 'muted' }, 'No agents are working under this one. Helpers it gives tasks to, and its own sub-agents, appear here.'));
     }
+    const glance = stripChips(this.station, p, this.opts.onUsage ? () => this.opts.onUsage(this) : null);
     // replaceChildren would print a missing piece as the word "null".
     const kids = [
       dot(p),
@@ -1073,6 +1078,9 @@ export class PaneTerm {
       // With the file explorer (files.js) the folder opens it, and so does the button before it.
       files ? h('button', { class: 'strip-files', title: `Files on ${this.station}, at this pane's folder`, 'aria-label': `Files of ${p.name}`, onclick: files }, fileIcon('folder')) : null,
       p.cwd ? h('span', { class: 'strip-note strip-cwd mono' + (files ? ' opens' : ''), title: `The folder ${p.agent === 'shell' ? 'this shell' : 'this agent'} was started in: ${p.cwd}${files ? '. Click to see its files.' : ''}`, 'aria-label': `Folder: ${p.cwd}`, ...(files ? { role: 'button', tabIndex: 0, onclick: files, onkeydown: (e) => { if (e.key === 'Enter') files(); } } : {}) }, '\u200e' + p.cwd) : null,
+      // What is known at a glance (chips.js): the model, the context, the
+      // branch and the cost; a warning only when there is one.
+      ...glance.left,
       p.rapid ? h('span', { class: 'strip-note rapid-line', title: p.rapid.more }, p.rapid.says) : null,
       p.needs_reason && s === 'needs_you' ? h('span', { class: 'strip-reason', title: trustAsksWords(p) || hooksAsksWords(p) || p.needs_reason }, p.needs_reason) : null,
       // The program asks whether to trust the folder, and spandeck can
@@ -1085,8 +1093,8 @@ export class PaneTerm {
       p.hooks_trust?.asks?.button && !p.exited ? h('button', { class: 'mini hooks-tap', title: hooksAsksWords(p), onclick: () => rpc('pane.trust_hooks') }, 'Trust spandeck\'s hooks') : null,
       hooksAnsweredWords(p) ? h('span', { class: 'strip-note hooks-said', title: 'It is in the ship\'s log. The switch is in Agent setup.' }, hooksAnsweredWords(p)) : null,
       h('span', { class: 'grow' }),
-      // The model and how full its context is. The first things a narrow strip drops.
-      ...usageGauge(p.usage, this.opts.onUsage ? () => this.opts.onUsage(this) : null),
+      // (A phone's strip: the model and the context, where they always were.)
+      ...glance.old,
       p.paused ? h('span', { class: 'chip warn' }, 'paused') : null,
       p.held && !p.exited ? h('span', { class: 'strip-reason', title: heldWords(p.held) }, heldWords(p.held)) : null,
       p.held && !p.exited ? h('button', { class: 'mini', title: RELEASE_SAYS, onclick: () => rpc('pane.release') }, 'Release') : null,
@@ -1095,6 +1103,8 @@ export class PaneTerm {
       this._lostControl ? h('button', { class: 'mini', title: 'Another client set this pane\'s size', onclick: () => this.takeControl() }, 'Take control') : null,
       agents.length || this.agentsOpen ? h('button', { class: 'mini' + (this.agentsOpen ? ' on' : ''), 'aria-pressed': String(this.agentsOpen), title: 'The agents working under this one',
         onclick: () => { this.agentsOpen = !this.agentsOpen; this.renderStrip(); } }, this.agentsOpen ? 'Agents ›' : `‹ Agents ${agents.length}`) : null,
+      // The processor and the memory of the pane's own programs.
+      ...glance.right,
       // The pane's other face, its conversation (chat.js), where it has one.
       this.opts.face ? this.opts.face(this) : null,
       p.agent !== 'shell' && !p.exited && (s === 'working' || s === 'needs_you')
@@ -1110,6 +1120,8 @@ export class PaneTerm {
     if (sig === this._stripSig) return;
     this._stripSig = sig;
     this.strip.replaceChildren(...kids);
+    // What gives way in a narrow strip does so whole (chips.js).
+    fitStrip(this.strip);
   }
 
   _menu(e) {
@@ -1140,6 +1152,7 @@ export class PaneTerm {
 
   dispose() {
     this.disposed = true;
+    this._offGlance();
     clearInterval(this._tick);
     clearTimeout(this._retry);
     clearTimeout(this._holdTimer);

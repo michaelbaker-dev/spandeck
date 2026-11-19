@@ -543,6 +543,8 @@ pub struct Inner {
     pub(crate) resume_lock: Mutex<()>,
     /// Agent programs: versions read, updates running, restarts owed.
     pub(crate) agents: crate::agents::AgentsState,
+    /// What panes say at a glance, and its sampling (glance.rs).
+    pub(crate) glance: crate::glance::GlanceState,
     /// Tools: the jobs that install them here (tools.rs).
     pub(crate) tools: crate::tools::ToolsState,
     /// The role library (roledoc.rs).
@@ -780,6 +782,7 @@ impl Daemon {
             sync: Default::default(),
             resume_lock: Mutex::new(()),
             agents: Default::default(),
+            glance: Default::default(),
             tools: Default::default(),
             roles: Default::default(),
             prices: Default::default(),
@@ -3263,6 +3266,9 @@ impl Daemon {
         // keeps (`agents.status` rows carry `job` and `latest`), and
         // `agents.check` asks whether each is the newest.
         caps.push(crate::agents::CAP);
+        // A pane's branch, processor, memory and mail, and a held answer
+        // about its agent program (`pane.glance`, glance.rs).
+        caps.push(crate::glance::CAP);
         // The tools document, `tools.status` and the jobs that install a
         // tool here: a station without it needs a newer spandeck.
         caps.push(crate::tools::CAP);

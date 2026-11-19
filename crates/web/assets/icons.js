@@ -69,6 +69,13 @@ export const watchIcon = () => frame('watch',
 // of the text around it.
 export const hideIcon = () => frame('hide', line('M3.5 12h9', 'currentColor', 1.6));
 
+// On a pane's header chips (chips.js), in the colour of the chip's text: a
+// git branch, and the vault's key.
+const small = (name, ...kids) => el('svg', { class: 'ico ico-' + name, width: 12, height: 12, viewBox: '0 0 16 16', 'aria-hidden': 'true', focusable: 'false' }, ...kids);
+const ring = (cx, cy, r) => el('circle', { cx, cy, r, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.5 });
+export const branchIcon = () => small('branch', ring(4, 3.5, 1.7), ring(4, 12.5, 1.7), ring(12, 5.5, 1.7), line('M4 5.2v5.6M12 7.2c0 3-8 1.5-8 3.6', 'currentColor'));
+export const keyIcon = () => small('key', ring(5, 8, 2.8), line('M7.8 8h6.2M11.5 8v2.6M14 8v2', 'currentColor'));
+
 export const stationIcon = () => frame('station',
   el('rect', { x: 1.5, y: 2.5, width: 13, height: 8.5, rx: 1.5, fill: 'none', stroke: '#8b98a7', 'stroke-width': 1.3 }),
   line('M5.5 13.5h5M8 11v2.5', '#8b98a7', 1.3));

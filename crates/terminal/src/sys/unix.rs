@@ -489,6 +489,190 @@ pub fn end_processes(pids: &[i32]) {
     }
 }
 
+/// What one pane's programs have used and hold now (`tree_usage`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TreeUse {
+    /// Processor time used so far by the programs that are alive, in
+    /// milliseconds. A program that ended takes its time with it.
+    pub cpu_ms: u64,
+    /// Resident memory, each program's added up (what two of them share
+    /// is counted twice).
+    pub rss_bytes: u64,
+    /// How many programs were counted: 0 when the pane's program is gone.
+    pub count: u32,
+}
+
+/// One process, as `tree_usage` reads it.
+struct ProcNow {
+    pid: i32,
+    ppid: i32,
+    sid: i32,
+    cpu_ms: u64,
+    rss_bytes: u64,
+}
+
+/// For each pane's program (`roots`): what it and everything it started
+/// are using. A pane's program leads a session, so what it started is
+/// every process of that session, and every process that descends from
+/// it by its parents (one that began a session of its own). One pass over
+/// the system's processes, whatever the number of panes. `None` where
+/// this system has no sound way to read it: nothing is then shown.
+pub fn tree_usage(roots: &[i32]) -> Option<Vec<TreeUse>> {
+    Some(sum_trees(&all_procs()?, roots))
+}
+
+fn sum_trees(procs: &[ProcNow], roots: &[i32]) -> Vec<TreeUse> {
+    let parent: std::collections::HashMap<i32, i32> =
+        procs.iter().map(|p| (p.pid, p.ppid)).collect();
+    let place: std::collections::HashMap<i32, usize> = roots
+        .iter()
+        .enumerate()
+        .filter(|(_, pid)| **pid > 1)
+        .map(|(i, pid)| (*pid, i))
+        .collect();
+    let mut out = vec![TreeUse::default(); roots.len()];
+    for p in procs {
+        let mut at = place.get(&p.sid).copied();
+        // Up through its parents, a bounded way: a chain is never this long.
+        let (mut pid, mut steps) = (p.pid, 0);
+        while at.is_none() && pid > 1 && steps < 64 {
+            at = place.get(&pid).copied();
+            pid = parent.get(&pid).copied().unwrap_or(0);
+            steps += 1;
+        }
+        if let Some(i) = at {
+            out[i].cpu_ms += p.cpu_ms;
+            out[i].rss_bytes += p.rss_bytes;
+            out[i].count += 1;
+        }
+    }
+    out
+}
+
+/// Linux: every process's `/proc/<pid>/stat`, one small read each.
+#[cfg(target_os = "linux")]
+fn all_procs() -> Option<Vec<ProcNow>> {
+    // SAFETY: sysconf only reads.
+    let (ticks, page) = unsafe {
+        (
+            libc::sysconf(libc::_SC_CLK_TCK),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
+    if ticks <= 0 || page <= 0 {
+        return None;
+    }
+    let mut out = vec![];
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        // A process that ended meanwhile is simply not there.
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        if let Some(p) = parse_stat(pid, &stat, ticks as u64, page as u64) {
+            out.push(p);
+        }
+    }
+    Some(out)
+}
+
+/// One line of `/proc/<pid>/stat` (proc(5)). The program's name is in
+/// brackets and may hold spaces and brackets, so the fields are counted
+/// from the last ")": state, parent, group, session, ..., user and system
+/// time in clock ticks (fields 14 and 15), ..., resident pages (field 24).
+#[cfg(target_os = "linux")]
+fn parse_stat(pid: i32, stat: &str, ticks: u64, page: u64) -> Option<ProcNow> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let f: Vec<&str> = rest.split_ascii_whitespace().collect();
+    let n = |i: usize| f.get(i)?.parse::<u64>().ok();
+    Some(ProcNow {
+        pid,
+        ppid: f.get(1)?.parse().ok()?,
+        sid: f.get(3)?.parse().ok()?,
+        cpu_ms: (n(11)? + n(12)?) * 1000 / ticks,
+        rss_bytes: f.get(21)?.parse::<i64>().ok()?.max(0) as u64 * page,
+    })
+}
+
+/// macOS: libproc, one call for each process. A process of another user
+/// is refused and left out, which is right: a pane's programs are the
+/// owner's. NOT COMPILED OR RUN where this was written (a Linux machine):
+/// it uses only what the `libc` crate declares for macOS.
+#[cfg(target_os = "macos")]
+fn all_procs() -> Option<Vec<ProcNow>> {
+    use std::mem::size_of;
+    // Processor times are in the machine's own clock units (not
+    // nanoseconds on Apple silicon): the time base converts them.
+    #[allow(deprecated)]
+    let (numer, denom) = {
+        // SAFETY: two plain numbers, for which all zeroes is a value.
+        let mut base: libc::mach_timebase_info = unsafe { std::mem::zeroed() };
+        // SAFETY: a valid pointer to the struct it fills.
+        if unsafe { libc::mach_timebase_info(&mut base) } != 0 || base.denom == 0 {
+            return None;
+        }
+        (base.numer as u128, base.denom as u128)
+    };
+    // SAFETY: with no buffer it only says how many there are.
+    let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if n <= 0 {
+        return None;
+    }
+    let mut pids: Vec<libc::pid_t> = vec![0; n as usize + 64];
+    // SAFETY: the buffer is `pids`, and its size in bytes is given.
+    let n = unsafe {
+        libc::proc_listallpids(
+            pids.as_mut_ptr() as *mut libc::c_void,
+            (pids.len() * size_of::<libc::pid_t>()) as libc::c_int,
+        )
+    };
+    if n <= 0 {
+        return None;
+    }
+    pids.truncate((n as usize).min(pids.len()));
+    let mut out = vec![];
+    for pid in pids.into_iter().filter(|p| *p > 1) {
+        // SAFETY: plain data, for which all zeroes is a value.
+        let mut info: libc::proc_taskallinfo = unsafe { std::mem::zeroed() };
+        let size = size_of::<libc::proc_taskallinfo>() as libc::c_int;
+        // SAFETY: the buffer is `info`, and its size is given.
+        let got = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTASKALLINFO,
+                0,
+                &mut info as *mut libc::proc_taskallinfo as *mut libc::c_void,
+                size,
+            )
+        };
+        if got != size {
+            continue;
+        }
+        let units = info.ptinfo.pti_total_user as u128 + info.ptinfo.pti_total_system as u128;
+        out.push(ProcNow {
+            pid,
+            ppid: info.pbsd.pbi_ppid as i32,
+            // SAFETY: getsid only reads; a pid that is gone gives -1.
+            sid: unsafe { libc::getsid(pid) },
+            cpu_ms: (units * numer / denom / 1_000_000) as u64,
+            rss_bytes: info.ptinfo.pti_resident_size,
+        });
+    }
+    Some(out)
+}
+
+/// Any other Unix: not read, so nothing is shown.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn all_procs() -> Option<Vec<ProcNow>> {
+    None
+}
+
 /// Close descriptors inherited from a previous image whose handoff is not
 /// being adopted, so orphaned terminals do not stay half-open. Call before
 /// this process opens anything.
@@ -702,4 +886,72 @@ pub fn user_name() -> Option<String> {
 pub fn system_program(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.uid() == 0 && m.mode() & 0o022 == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(pid: i32, ppid: i32, sid: i32, cpu_ms: u64, rss_bytes: u64) -> ProcNow {
+        ProcNow {
+            pid,
+            ppid,
+            sid,
+            cpu_ms,
+            rss_bytes,
+        }
+    }
+
+    /// The reason: "CPU and memory of a pane's programs (the process tree
+    /// under the pane's PTY)". What a pane started is counted for that pane
+    /// and no other: everything in its session, a program that began a
+    /// session of its own under it, and nothing of the station's own or of
+    /// the pane beside it.
+    #[test]
+    fn a_panes_programs_are_its_session_and_what_descends_from_it() {
+        let procs = [
+            p(50, 1, 50, 900, 9000),    // the station itself
+            p(100, 50, 100, 10, 1000),  // pane A's shell: leads a session
+            p(101, 100, 100, 20, 2000), // what it runs
+            p(102, 1, 100, 5, 500),     // left in the background: its parent is gone
+            p(110, 101, 110, 40, 4000), // began a session of its own
+            p(111, 110, 110, 1, 100),   // and its child
+            p(200, 50, 200, 7, 700),    // pane B's shell
+            p(300, 1, 300, 99, 9900),   // somebody else's
+        ];
+        let used = sum_trees(&procs, &[100, 200, 999, 0]);
+        assert_eq!(
+            used[0],
+            TreeUse {
+                cpu_ms: 76,
+                rss_bytes: 7600,
+                count: 5
+            }
+        );
+        assert_eq!(
+            used[1],
+            TreeUse {
+                cpu_ms: 7,
+                rss_bytes: 700,
+                count: 1
+            }
+        );
+        // A program that is gone, and a pane with none: nothing, and no
+        // other process is taken for theirs.
+        assert_eq!((used[2], used[3]), Default::default());
+    }
+
+    /// The reason: a program may be named anything, brackets and spaces
+    /// included, and its name is in the middle of the line that is read.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_line_is_read_whatever_the_program_is_called() {
+        let line = "4242 (tmux: a) b (c) R 100 4242 77 34816 4242 4194304 1 0 0 0 250 50 0 0 20 0 3 0 100 1000000 300 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0";
+        let read = parse_stat(4242, line, 100, 4096).unwrap();
+        assert_eq!(
+            (read.ppid, read.sid, read.cpu_ms, read.rss_bytes),
+            (100, 77, 3000, 300 * 4096)
+        );
+        assert!(parse_stat(1, "1 (short", 100, 4096).is_none());
+    }
 }

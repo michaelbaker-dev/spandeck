@@ -26,6 +26,7 @@ import { qrSvg } from './qr.js';
 import { initFailover } from './failover.js';
 import { sendAct } from './typed.js';
 import { initMic, micFor } from './mic.js';
+import { initChips } from './chips.js';
 import { initChat, chatMenu, chatLooks, draftCount, conversation, faceOf, setFace, chatToggle, termBox, chatBeforeRender, chatAfterRender, chatPark, chatResized, sync as syncKids, homeMode, homeSwitch, sessionRow, recentRows, newSession } from './chat.js';
 
 // The page opens in the look this browser last had, before anything is asked.
@@ -4794,6 +4795,9 @@ initFiles({
   // Move agent here: the pane's program is started again in `cwd`.
   movePane: (st, p, cwd) => api.on(st, 'pane.restart', { pane: p.id, cwd }).then((r) => { reattach(st, p.id); stationSoon(st, 60); return r; }),
 });
+// A pane's header chips (chips.js): what they read of this page, and the
+// dialogs their warnings open.
+initChips({ api, hasCap, isPhone, vault: (st) => S.fleet.stations.find(s => s.station === st)?.vault || null, openVault: vaultPanel, openAgents: agentsPanel, openInbox: inboxPanel });
 initChat({
   files: (st, p) => (hasCap(st, 'files') ? () => filesFor(st, p) : null),
   api, hasCap, isPhone, update, go, paneUrl, rpc, findPane, paneMenu, usage: usageDialog, online, onlineStations, panesOf, freeName, lastSessionNote, pref, setPref,

@@ -55,6 +55,7 @@ pub mod fleet;
 pub mod foldertrust;
 pub mod fonts;
 pub mod git;
+pub mod glance;
 pub mod guard;
 pub mod holds;
 pub mod hooks;

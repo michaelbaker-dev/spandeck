@@ -18,6 +18,9 @@
 //!                 on Unix, where the login service does it)
 //!   the machine   `hostname`, `load_average`, `random_bytes`, `keep_awake_cmd`,
 //!                 `hold_awake`
+//!   a pane's use  `tree_usage`, `TreeUse`: processor time and memory of
+//!                 everything a pane's program started (Linux and macOS;
+//!                 nothing on Windows)
 //!   shells        `default_shell`, `shell_line`
 //!   a console     `stdin_raw`
 //!

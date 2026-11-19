@@ -959,10 +959,14 @@ fn a_dialog_keeps_the_keyboard_while_a_pane_is_open() {
     page.terminal_face();
     let strip = page.wait(
         "the model and the context gauge in the strip",
-        "(m => m && document.querySelector('.strip .usage-ctx .gauge i') && document.querySelector('.strip .usage-ctx').title.includes('at list prices') ? [m.innerText, document.querySelector('.strip .usage-ctx').innerText, document.querySelector('.strip .usage-ctx').title] : false)(document.querySelector('.strip .usage-model'))",
+        "(m => m && document.querySelector('.strip .usage-ctx .gauge i') && document.querySelector('.strip .usage-ctx').title.includes('at list prices') ? [m.innerText, document.querySelector('.strip .usage-ctx').innerText.replace(/\\s+/g, ' '), document.querySelector('.strip .usage-ctx').title] : false)(document.querySelector('.strip .usage-model'))",
     );
     assert_eq!(strip[0], json!("opus-5-5"));
-    assert_eq!(strip[1], json!("70%"), "700,150 of the list's 1,000,000");
+    assert_eq!(
+        strip[1],
+        json!("context 70%"),
+        "700,150 of the list's 1,000,000"
+    );
     let title = strip[2].as_str().unwrap();
     assert!(
         title.contains("Model: claude-opus-5-5")

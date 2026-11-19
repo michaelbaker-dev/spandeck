@@ -192,6 +192,16 @@ jobs:
         run: |
           cargo test -p spandeck --test files -- --ignored
           cargo test -p spandeck --test filespanel -- --ignored
+      # A pane's header chips, in a real browser: the model, the context,
+      # the branch and the cost in a conversation's bar and on a terminal's
+      # strip, with the processor and memory of the pane's programs; an
+      # update and a locked vault only when it is so; a branch named as
+      # markup shown as text; a narrow pane; a light theme and a pane's own
+      # look read at 4.5:1; a phone's row and its sheet. About twenty
+      # seconds.
+      - name: A pane's header chips (a computer and a phone, themes)
+        if: ${{ !cancelled() }}
+        run: cargo test -p spandeck --test chips -- --ignored
   build:
     strategy:
       fail-fast: false

@@ -283,6 +283,19 @@ days, not hours.
   station ask (`agents.check`): an agent, a read-only caller and another station
   cannot.
 
+- **What a pane's header says at a glance** (19 Nov 2026). While a Control Deck shows
+  a station's panes, that station runs `git status` in each pane's folder (once per
+  folder, at most every ten seconds, for two seconds at most) and reads how much
+  processor and memory each pane's programs use. Nobody asked for that `git status`,
+  and a pane can be in a folder copied from anywhere, so it is run so that it runs
+  nothing the repository names: `core.fsmonitor` (a command in a repository's own
+  settings that `git status` would start) is switched off for the call, and it takes
+  no lock there. A branch's name comes back as data and is shown as text. The call
+  that serves all this (`pane.glance`) is not on the agents' list: an agent reads pane
+  views, and learns no other project's branch or load from spandeck. The update chip
+  is made from what the station already holds; a header never makes a station ask a
+  release host.
+
 ## Known limits
 
 - Turning HTTPS on at a station publishes its name, `<machine>.<tailnet>.ts.net`, in
