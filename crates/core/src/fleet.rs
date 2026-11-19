@@ -1364,7 +1364,11 @@ impl Daemon {
                 v
             })
             .collect();
-        json!({"station": self.station, "version": VERSION, "stations": std::iter::once(me).chain(peers).collect::<Vec<_>>(), "stops": self.stops(20)})
+        let mut stations: Vec<Value> = std::iter::once(me).chain(peers).collect();
+        // Is a newer spandeck published? The newest any station learned,
+        // and beside each station what that means for it (newrelease.rs).
+        let update = self.fleet_update(&mut stations);
+        json!({"station": self.station, "version": VERSION, "stations": stations, "update": update, "stops": self.stops(20)})
     }
 
     // ----------------------------------------------------------------- stop-all

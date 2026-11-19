@@ -148,6 +148,7 @@ From the Control Deck, right-click a station (or use the commands on any station
 | --- | --- | --- |
 | Restart spandeck, keeping every terminal | Restart spandeck here | `spandeck restart [--station NAME]` |
 | Update to the latest release | Update to the latest release | `spandeck update [--station NAME]` |
+| Ask whether a newer spandeck is published (stations also ask once a day; `[update] check = false` turns that off) | Check for a newer spandeck now | `spandeck update --check` |
 | Wake a sleeping machine | Wake it | `spandeck wake NAME` |
 | Start spandeck where it is not running | Start spandeck there | `spandeck start NAME` |
 | End every pane on a station | Close all panes here… | `spandeck pane close --all [--station NAME]` |

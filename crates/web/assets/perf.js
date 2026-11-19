@@ -242,7 +242,9 @@ function stationFacts(data, row) {
   const f = (label, value, title) => ({ label, value, title });
   const req = r ? KINDS.filter(([k]) => num(r.requests?.handled?.[k]?.count)).map(([k, name]) => ({ k, name, x: r.requests.handled[k] })) : [];
   return { s, r, v, facts: [
-    f('Version', s.version || '?', s.state === 'online' ? '' : 'The version it last had'),
+    // Beside it, whether a newer spandeck is published, as the serving
+    // station says it for this one: "latest", "0.4.19 available", …
+    f('Version', [s.version || '?', s.update && s.update.says ? String(s.update.says).slice(0, 240) : ''].filter(Boolean).join(' · '), s.state === 'online' ? '' : 'The version it last had'),
     f('Up for', r ? span(r.now_ms - r.started_ms) : na, r ? `Since ${new Date(r.started_ms).toLocaleString()}; ${r.panes} panes` : ''),
     f('Restarts, 24 h', r ? String(num(r.restarts?.last_24h) ?? 0) : na, r ? (r.restarts?.list || []).slice(0, 4).map(x => `${clock(x.at_ms)} ${x.what}: ${x.why}`).join('\n') : ''),
     f('Requests (p50 / p95)', r ? (req.length ? req.map(q => `${q.k} ${stat(q.x)}`).join(' · ') : 'none yet') : na, r ? KINDS.map(([k, name]) => statTitle(r.requests?.handled?.[k], `From ${name}`)).join('\n') : ''),

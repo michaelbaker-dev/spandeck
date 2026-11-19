@@ -440,6 +440,9 @@ pub struct UpdateConfig {
     /// After an update proves healthy, replace the binary this station was
     /// started from, so a reboot starts the new version.
     pub in_place: bool,
+    /// `check = false`: this station never asks its release host whether
+    /// a newer spandeck is published (newrelease.rs).
+    pub check: Option<bool>,
 }
 
 impl Default for UpdateConfig {
@@ -447,6 +450,7 @@ impl Default for UpdateConfig {
         UpdateConfig {
             url: None,
             in_place: true,
+            check: None,
         }
     }
 }
