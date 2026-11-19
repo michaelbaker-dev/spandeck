@@ -1560,6 +1560,14 @@ impl Daemon {
                 // directory makes Claude Code ask to trust it at every start).
                 let attached = self.paths.drops_dir().join(pane).join("attached");
                 args.push(format!("Read(/{}/**)", attached.display()));
+                // What a tool of spandeck's wrote for the agent (its
+                // browser's screenshots) is kept outside the pane's folder
+                // too. Found with the real Claude Code, 18 Nov 2026: three
+                // agents stopped to ask before reading a screenshot they
+                // had just taken.
+                for dir in tools.outputs(agent) {
+                    args.push(format!("Read(/{}/**)", dir.display()));
+                }
             }
             AgentKind::Codex => args.extend([
                 "-c".to_string(),

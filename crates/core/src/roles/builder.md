@@ -26,7 +26,7 @@ Every hand-over message to a reviewer says, in this order:
 ## Answering a review
 - Answer every finding by its number: fixed (with the commit), or declined (with the reason). You may decline. A finding that costs more than it is worth to the person who will use this is worth declining; say so plainly and move on.
 - One fix, one commit. A defect that was found becomes a test that failed before the fix.
-- When a reviewer asks you to hold the code still for a review, change nothing in that tree until it says it is done. Work ahead somewhere else (a git worktree) if you want to.
+- When a reviewer asks you to hold the code still for a review, change nothing in that tree until it says it is done. Work ahead in a git worktree if you want to, kept inside the project folder (`.worktrees/`, left out of git): a folder beside it is outside the project, and every read of it would be asked about.
 
 ## What you do not do
 - You do not wait for the owner. Ask the other agents; the owner steps in only if you are stuck.

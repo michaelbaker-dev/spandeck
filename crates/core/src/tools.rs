@@ -145,6 +145,9 @@ pub(crate) struct Wiring {
     /// Tools chosen for this station that a pane started now does not
     /// get, the agents each is for, and why.
     without: Vec<(String, Vec<String>, String)>,
+    /// Where each wired catalogue tool writes what it makes for the agent
+    /// (a browser's screenshots), and the agents each is for.
+    outputs: Vec<(PathBuf, Vec<String>)>,
 }
 
 fn applies(agents: &[String], kind: AgentKind) -> bool {
@@ -158,6 +161,15 @@ impl Wiring {
             .iter()
             .filter(|(name, agents)| applies(agents, kind) && self.servers.contains_key(name))
             .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// The folders this kind of agent's tools write into for it.
+    pub fn outputs(&self, kind: AgentKind) -> Vec<&Path> {
+        self.outputs
+            .iter()
+            .filter(|(_, agents)| applies(agents, kind))
+            .map(|(dir, _)| dir.as_path())
             .collect()
     }
 
@@ -287,6 +299,11 @@ impl Daemon {
             .filter(|v| self.tool_ready(name, tool, v))
     }
 
+    /// Does this catalogue tool write files for the agent to read?
+    fn tool_output(&self, tool: &Tool) -> Option<&'static str> {
+        toolcat::entry(tool.catalogue.as_deref()?)?.output_arg
+    }
+
     /// A catalogue tool as an agent is given it: spandeck's Node and the
     /// tool's entry file by their whole paths, and the catalogue's
     /// arguments.
@@ -369,6 +386,10 @@ impl Daemon {
             match server {
                 Some(server) => {
                     w.servers.insert(name.clone(), server);
+                    if self.tool_output(tool).is_some() {
+                        w.outputs
+                            .push((self.tool_data(name).join("output"), tool.agents.clone()));
+                    }
                     if tool.allow_without_asking {
                         w.allow.push((name.clone(), tool.agents.clone()));
                     }

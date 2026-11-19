@@ -386,6 +386,13 @@ fn each_station_installs_for_itself_and_an_agent_gets_a_tool_only_where_it_is_re
         "{screen}"
     );
     assert!(screen.contains("0.0.84/node_modules"), "{screen}");
+    // What the tool writes for the agent can be read by it without a
+    // question (18 Nov 2026: three real agents stopped to ask before
+    // reading a screenshot they had just taken).
+    assert!(
+        screen.contains("/tools/playwright/data/output/**)>"),
+        "{screen}"
+    );
     let (_, screen) = started_with(&a, "codex");
     assert!(
         screen.contains("mcp_servers.playwright.default_tools_approval_mode=\"approve\""),
