@@ -480,18 +480,41 @@ async fn what_is_sent_to_one_pane_keeps_its_order_by_every_road() {
     // is thrown away and its sender told; what was typed after is not.
     let at_deaf = deck.attach(json!({"pane": deaf})).await;
     let lines = "0123456789abcdef0123456789abcdef0123456789abcdef\r".repeat(420);
-    deck.key(at_deaf, &lines).await;
-    deck.key(at_deaf, "typed before the stop").await;
-    let stop = deck.ask("pane.stop", json!({"pane": deaf})).await;
-    deck.key(at_deaf, "typed after the stop").await;
-    let refused = deck.answer(stop).await.unwrap_err();
+    // A terminal takes the first few kilobytes whoever is reading, and a
+    // stop that arrives before it is full gets its key in and rightly says
+    // stopped (phase1.rs says the same of its paste). With nothing waited
+    // for, that happened two times in fifteen here, and the test expected
+    // a refusal it had not set up. So the four are sent, still with no
+    // wait between them, until the terminal is full: the station says so
+    // itself, by refusing the stop. Nothing reads what a try leaves in the
+    // terminal, so each try leaves less room; and the key of a stop is Esc
+    // in an agent's pane, which ends nothing when it does get in.
+    let discarded = |seen: &Seen| -> Vec<Value> {
+        let ours = |v: &&Value| v["chan"] == json!(at_deaf) && v.get("input_discarded").is_some();
+        seen.said.iter().filter(ours).cloned().collect()
+    };
+    let mut tries = 0;
+    let (refused, told_before) = loop {
+        tries += 1;
+        assert!(
+            tries <= 10,
+            "the terminal of a program that reads nothing never filled"
+        );
+        let told_before = discarded(&deck.seen.lock().unwrap()).len();
+        deck.key(at_deaf, &lines).await;
+        deck.key(at_deaf, "typed before the stop").await;
+        let stop = deck.ask("pane.stop", json!({"pane": deaf})).await;
+        deck.key(at_deaf, "typed after the stop").await;
+        match deck.answer(stop).await {
+            Ok(done) => assert_eq!(done["stopped"], json!(true), "{done}"),
+            Err(refused) => break (refused, told_before),
+        }
+    };
     assert_eq!(refused["code"], json!("not_reading"), "{refused}");
     let told = deck
         .until("word of what was thrown away", |seen| {
-            seen.said
-                .iter()
-                .find(|v| v["chan"] == json!(at_deaf) && v.get("input_discarded").is_some())
-                .cloned()
+            let told = discarded(seen);
+            told.last().filter(|_| told.len() > told_before).cloned()
         })
         .await;
     assert_eq!(told["input_discarded"], json!(2), "{told}");
