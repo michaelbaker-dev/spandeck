@@ -21,7 +21,7 @@
 //! any run of backticks in it, so it cannot start a heading or end its
 //! block.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use serde_json::{json, Value};
 
@@ -147,9 +147,84 @@ pub(crate) struct Input {
     pub station_starts: Vec<u64>,
     pub messages: Vec<Msg>,
     pub messages_truncated: bool,
+    /// Messages left out because the bare name they were sent to was also
+    /// the name of another project's pane that was open then.
+    pub messages_shared_name: u64,
     pub notes: Vec<Note>,
     pub activity_count: i64,
     pub approvals: BTreeMap<String, Stored>,
+}
+
+/// When a pane was open under its name: from its start until it ended
+/// (`None`: it has not).
+pub(crate) struct Open {
+    pub name: String,
+    pub from: u64,
+    pub to: Option<u64>,
+}
+
+impl Open {
+    fn at(&self, name: &str, ts: u64) -> bool {
+        self.name == name && self.from <= ts && self.to.is_none_or(|to| ts <= to)
+    }
+}
+
+/// Whether a message is this project's.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Whose {
+    Ours,
+    Not,
+    /// Sent to a bare name that a pane of this project and a pane of
+    /// another both had at that time: the station kept no project for it.
+    SharedName,
+}
+
+/// What tells whose a message is: the project, its panes' ids, and when
+/// its panes (`own`) and every other pane of the station (`others`) were
+/// open under which name.
+pub(crate) struct Panes<'a> {
+    pub project: &'a str,
+    pub station: &'a str,
+    pub ids: &'a HashSet<&'a str>,
+    pub own: &'a [Open],
+    pub others: &'a [Open],
+}
+
+impl Panes<'_> {
+    /// A message is the project's when it was sent by one of its panes or
+    /// to one of them: a pane's id, or `project/name`. Never by a pane's
+    /// name alone: other projects have a `builder` and a `critic` too. A
+    /// bare name (a message stored before the station wrote the project
+    /// into the address) is the project's only when a pane of the project
+    /// had the name at that time and no other pane did.
+    pub(crate) fn whose(&self, m: &Msg) -> Whose {
+        let here = |addr: &str| -> Option<String> {
+            let (name, station) = split_address(addr);
+            station
+                .is_none_or(|s| s == self.station)
+                .then(|| name.to_string())
+        };
+        let ours = |name: &str| {
+            self.ids.contains(name)
+                || name
+                    .split_once('/')
+                    .is_some_and(|(project, _)| project == self.project)
+        };
+        if here(&m.from).is_some_and(|name| ours(&name)) {
+            return Whose::Ours;
+        }
+        match here(&m.to) {
+            Some(name) if ours(&name) => Whose::Ours,
+            Some(name) if !name.contains('/') && self.own.iter().any(|o| o.at(&name, m.ts)) => {
+                if self.others.iter().any(|o| o.at(&name, m.ts)) {
+                    Whose::SharedName
+                } else {
+                    Whose::Ours
+                }
+            }
+            _ => Whose::Not,
+        }
+    }
 }
 
 fn data_str<'a>(row: &'a LogRow, key: &str) -> &'a str {
@@ -693,6 +768,12 @@ pub(crate) fn build(inp: &Input) -> Value {
     if inp.messages_truncated {
         missing.push(format!(
             "More than {MSG_SCAN_CAP} messages of the station fall in the period; only the oldest {MSG_SCAN_CAP} were looked at."
+        ));
+    }
+    if inp.messages_shared_name > 0 {
+        missing.push(format!(
+            "{} message(s) of the period were sent to a pane's bare name while a pane of another project had the same name; the station kept no project for them, so they are not in this record.",
+            inp.messages_shared_name
         ));
     }
     if timeline_skipped {
@@ -1399,17 +1480,15 @@ impl Daemon {
         };
 
         // --------------------------------------------------- messages
-        let own = format!("{project}/");
-        let names: BTreeSet<&str> = panes
-            .iter()
-            .flat_map(|p| [p.id.as_str(), p.name.as_str()])
-            .collect();
-        let ours = |addr: &str| {
-            let (name, station) = split_address(addr);
-            station.is_none_or(|s| s == self.station)
-                && (names.contains(name)
-                    || name.strip_prefix(&own).is_some_and(|n| names.contains(n)))
+        let (own, others) = self.open_names(project);
+        let whose = Panes {
+            project,
+            station: &self.station,
+            ids: &ids,
+            own: &own,
+            others: &others,
         };
+        let mut messages_shared_name = 0u64;
         let mut messages: Vec<Msg> = vec![];
         let (mut last_row, mut scanned, mut messages_truncated) = (0i64, 0usize, false);
         loop {
@@ -1445,8 +1524,10 @@ impl Daemon {
             let n = page.len();
             for (row, m) in page {
                 last_row = row;
-                if m.project.as_deref() == Some(project) || ours(&m.from) || ours(&m.to) {
-                    messages.push(m);
+                match whose.whose(&m) {
+                    Whose::Ours => messages.push(m),
+                    Whose::SharedName => messages_shared_name += 1,
+                    Whose::Not => {}
                 }
             }
             scanned += n;
@@ -1514,9 +1595,60 @@ impl Daemon {
             station_starts,
             messages,
             messages_truncated,
+            messages_shared_name,
             notes,
             approvals,
         })
+    }
+
+    /// When each pane the station knows of was open under its name: the
+    /// project's own, and all the others.
+    fn open_names(&self, project: &str) -> (Vec<Open>, Vec<Open>) {
+        type Row = (String, Option<String>, Option<String>, i64, Option<i64>);
+        let mut rows: BTreeMap<String, (Option<String>, Open)> = self
+            .db
+            .read(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT id, json_extract(meta,'$.name'), json_extract(meta,'$.project'), created, closed
+                     FROM panes WHERE json_valid(meta)",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<Row>>>()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(id, name, project, created, closed)| {
+                let open = Open {
+                    name: name?,
+                    from: created.max(0) as u64,
+                    to: closed.map(|c| c.max(0) as u64),
+                };
+                Some((id, (project, open)))
+            })
+            .collect();
+        // A pane as it is now: its record may still wait to be written.
+        for p in self.list_panes() {
+            let m = p.meta();
+            if m.exit.is_none() {
+                let open = Open {
+                    name: m.name.clone(),
+                    from: m.created_ms,
+                    to: None,
+                };
+                rows.insert(m.id.clone(), (m.project.clone(), open));
+            }
+        }
+        let (mut own, mut others) = (vec![], vec![]);
+        for (of, open) in rows.into_values() {
+            if of.as_deref() == Some(project) {
+                own.push(open);
+            } else {
+                others.push(open);
+            }
+        }
+        (own, others)
     }
 }
 
@@ -1606,6 +1738,7 @@ mod tests {
                 acted: None,
             }],
             messages_truncated: false,
+            messages_shared_name: 0,
             notes: vec![Note {
                 ts: 103_000,
                 kind: "decision".into(),
@@ -1787,6 +1920,7 @@ mod tests {
                 msg("soon", t0 + 3000, Some(t0 + 3000 + 4 * MINUTE)),
             ],
             messages_truncated: false,
+            messages_shared_name: 0,
             notes: vec![],
             activity_count: 0,
             approvals: BTreeMap::new(),
@@ -1841,5 +1975,88 @@ mod tests {
             json!(5 * MINUTE),
             "{l}"
         );
+    }
+
+    /// The reason for this test: the record of `hero3` held eight messages
+    /// of `pairtest`, an older project on the same station whose panes had
+    /// the same names, and began at that project's time (19 Nov 2026). A
+    /// message is a project's by its panes' ids and by `project/name`,
+    /// never by a pane's name; a bare name counts only while no pane of
+    /// another project had it.
+    #[test]
+    fn a_message_is_a_projects_by_its_panes_and_never_by_a_name_alone() {
+        let ids: HashSet<&str> = ["p-new"].into();
+        let open = |from: u64, to: Option<u64>| Open {
+            name: "critic".into(),
+            from,
+            to,
+        };
+        // pairtest's critic was open from 100 to 200; hero3's from 300.
+        let (own, others) = ([open(300, None)], [open(100, Some(200))]);
+        let panes = Panes {
+            project: "hero3",
+            station: "spark2",
+            ids: &ids,
+            own: &own,
+            others: &others,
+        };
+        let whose = |ts: u64, from: &str, to: &str| {
+            panes.whose(&Msg {
+                id: "m".into(),
+                ts,
+                from: from.into(),
+                to: to.into(),
+                kind: "note".into(),
+                body: "b".into(),
+                status: "read".into(),
+                project: None,
+                received: None,
+                read: None,
+                acted: None,
+            })
+        };
+        // What was in the record and was not hero3's.
+        assert_eq!(
+            whose(150, "pairtest/builder@spark2", "critic@spark2"),
+            Whose::Not
+        );
+        assert_eq!(
+            whose(350, "pairtest/critic@spark2", "pairtest/builder@spark2"),
+            Whose::Not
+        );
+        // hero3's own, by project and by id, from a pane and from the owner.
+        assert_eq!(
+            whose(350, "hero3/builder@spark2", "critic@spark2"),
+            Whose::Ours
+        );
+        assert_eq!(whose(350, "you@spark2", "hero3/critic@spark2"), Whose::Ours);
+        assert_eq!(
+            whose(350, "pairtest/user@spark2", "p-new@spark2"),
+            Whose::Ours
+        );
+        // A bare name only hero3's pane had then; the same name on another
+        // station is that station's.
+        assert_eq!(whose(350, "you@spark2", "critic@spark2"), Whose::Ours);
+        assert_eq!(whose(350, "you@spark2", "critic@golf"), Whose::Not);
+        // Both projects had a `critic` open: said, not guessed.
+        let both = [open(100, None)];
+        let panes = Panes {
+            others: &both,
+            ..panes
+        };
+        let m = Msg {
+            id: "m".into(),
+            ts: 350,
+            from: "you@spark2".into(),
+            to: "critic@spark2".into(),
+            kind: "note".into(),
+            body: "b".into(),
+            status: "read".into(),
+            project: None,
+            received: None,
+            read: None,
+            acted: None,
+        };
+        assert_eq!(panes.whose(&m), Whose::SharedName);
     }
 }

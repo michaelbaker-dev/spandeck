@@ -805,6 +805,27 @@ fn a_projects_record_is_written_by_the_station_from_what_it_holds() {
     const READS_AFTER_MS: u64 = 400;
     const ANSWERED_AFTER_MS: u64 = 300;
     let s = Station::start("alpha");
+    // An older project on the station whose panes had the same names, and
+    // a message between them. (The record of `hero3` held eight messages
+    // of `pairtest`, and began at that project's time: 19 Nov 2026.)
+    let old_repo = project(&s, "old", &[], "");
+    let old_reviewer = agent(&s, "old", &old_repo, "reviewer", json!({"steps": []}));
+    s.wait_text(&old_reviewer, "[fake] session");
+    let old_builder = agent(
+        &s,
+        "old",
+        &old_repo,
+        "builder",
+        json!({"steps": [
+            {"rpc": {"method": "msg.send", "params": {"to": "reviewer", "body": "of the old project"}}}
+        ]}),
+    );
+    s.wait_text(&old_builder, "[fake] msg.send ->");
+    for pane in [&old_builder, &old_reviewer] {
+        s.call("pane.close", json!({"pane": pane}));
+    }
+    std::thread::sleep(Duration::from_millis(5));
+    let began = spandeck_core::paths::now_ms();
     let repo = project(&s, "demo", &[], "");
     // The reviewer takes its mail 400 ms after it is told of it, and answers.
     let reviewer = agent(
@@ -939,7 +960,13 @@ fn a_projects_record_is_written_by_the_station_from_what_it_holds() {
 
     // Three messages, between three pairs; the one the reviewer took
     // 400 ms to read was sent while it was not working.
+    // (None of them the old project's, and the period is this project's.)
     let m = &r["messages"];
+    assert!(
+        r["period"]["first_event_ms"].as_u64().unwrap() >= began,
+        "{}",
+        r["period"]
+    );
     assert_eq!(m["count"], json!(3));
     assert_eq!(
         m["pairs"],

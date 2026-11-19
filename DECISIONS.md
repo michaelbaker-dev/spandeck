@@ -1707,6 +1707,13 @@ instruction to build what the report recommended.
   are UTC. Text from agents is only ever in a fenced block or a code span. "What looks
   wrong" lists counts against stated limits and no opinion. What the station does not record
   is said in the document, never filled in.
+  - **It holds this project's and no other's** (19 Nov 2026: the record of `hero3` held
+    eight messages of `pairtest`, whose panes had the same names, and began at that
+    project's time). A message is the project's when one of its panes sent it or it was
+    sent to one: by the pane's id or by `project/name`, never by a pane's name. A message
+    stored with a bare name, as they were until the station wrote the project into the
+    address, counts only when a pane of the project had the name at that time and no other
+    pane did; where two had it, the message is left out and the document says how many.
 - **Watch is the conversation.** A project's Watch shows its agents as a strip (state, how
   long, one line of what each is doing; no terminal thumbnail), who is waiting for whom
   when that can be told from the messages and the states and never otherwise, and the
