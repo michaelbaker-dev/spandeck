@@ -340,6 +340,108 @@ fn guarded(path: &Path, home: &Path, state: &Path) -> Option<&'static str> {
     None
 }
 
+/// A pane this station lists (running or ended, not closed) and the
+/// folder it was started in or moved to. Where a shell has since `cd`'d is
+/// not known to the station.
+#[derive(Debug, Clone)]
+pub struct Busy {
+    pub id: String,
+    pub name: String,
+    pub project: Option<String>,
+    pub ended: bool,
+    cwd: PathBuf,
+    real: PathBuf,
+}
+
+impl Busy {
+    pub fn new(id: &str, name: &str, project: Option<&str>, ended: bool, cwd: &str) -> Busy {
+        let cwd = PathBuf::from(cwd);
+        Busy {
+            id: id.to_string(),
+            name: name.to_string(),
+            project: project.map(String::from),
+            ended,
+            real: real(&cwd),
+            cwd,
+        }
+    }
+}
+
+/// The panes whose folder is `path` or below it. Nothing in use is
+/// trashed, deleted, renamed or moved away (the owner, 19 Nov 2026), and
+/// nothing forces it: the owner closes those panes first. Paths are
+/// compared a part at a time, so `/a/b` in use does not hold `/a/bc`.
+fn in_use<'a>(path: &Path, busy: &'a [Busy]) -> Vec<&'a Busy> {
+    // A link is the link: a pane is in its way only if the pane's folder
+    // is written through it.
+    let link = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    let p = real(path);
+    busy.iter()
+        .filter(|b| b.cwd.starts_with(path) || (!link && b.real.starts_with(&p)))
+        .collect()
+}
+
+/// "builder and critic (project tally), and sh1 (ended, not closed)".
+fn busy_names(who: &[&Busy]) -> String {
+    let mut groups: Vec<(Option<&str>, Vec<String>)> = vec![];
+    for b in who {
+        let name = match b.ended {
+            true => format!("{} (ended, not closed)", b.name),
+            false => b.name.clone(),
+        };
+        match groups.iter_mut().find(|(p, _)| *p == b.project.as_deref()) {
+            Some((_, names)) => names.push(name),
+            None => groups.push((b.project.as_deref(), vec![name])),
+        }
+    }
+    let and = |list: &[String], last: &str| match list {
+        [] => String::new(),
+        [one] => one.clone(),
+        [most @ .., end] => format!("{}{last}{end}", most.join(", ")),
+    };
+    let groups: Vec<String> = groups
+        .iter()
+        .map(|(project, names)| match project {
+            Some(p) => format!("{} (project {p})", and(names, " and ")),
+            None => and(names, " and "),
+        })
+        .collect();
+    and(&groups, ", and ")
+}
+
+/// The refusal for something in use, as an item of `failed` or of a job's
+/// `errors`: the page tells it by `in_use` and names the `panes`.
+fn in_use_item(path: &str, who: &[&Busy]) -> Value {
+    let verb = match who {
+        [one] if one.ended => "is still open",
+        [_] => "is working",
+        _ => "are working",
+    };
+    json!({
+        "path": path,
+        "code": "in_use",
+        "message": format!(
+            "{} {verb} in {path} or a folder inside it. Close {} first",
+            busy_names(who),
+            if who.len() == 1 { "that pane" } else { "those panes" },
+        ),
+        "panes": who.iter().map(|b| json!({
+            "id": b.id, "name": b.name, "project": b.project, "ended": b.ended,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// `files.rename`'s refusal for a folder in use, or None.
+pub fn rename_in_use(path: &Path, busy: &[Busy]) -> Option<Value> {
+    let who = in_use(path, busy);
+    if who.is_empty() {
+        return None;
+    }
+    let mut v = in_use_item(&shown(path), &who);
+    v["ok"] = json!(false);
+    Some(v)
+}
+
 // -------------------------------------------------------------- conflicts
 
 /// What to do when the name is taken.
@@ -737,7 +839,14 @@ fn item_failed(path: &str, code: &str, message: impl Into<String>) -> Value {
 /// `files.trash`: each path is moved into a folder of its own under
 /// `trash`, with where it came from. What cannot be moved there (it is on
 /// another disk: `other_disk`) is not deleted and is listed.
-pub fn trash(root: &Path, paths: &[String], by: &str, home: &Path, state: &Path) -> Result<Value> {
+pub fn trash(
+    root: &Path,
+    paths: &[String],
+    by: &str,
+    home: &Path,
+    state: &Path,
+    busy: &[Busy],
+) -> Result<Value> {
     let id = new_id("tr");
     let dir = root.join(&id);
     std::fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
@@ -753,6 +862,11 @@ pub fn trash(root: &Path, paths: &[String], by: &str, home: &Path, state: &Path)
         };
         if let Some(why) = guarded(&from, home, state) {
             failed.push(item_failed(path, "refused", why));
+            continue;
+        }
+        let who = in_use(&from, busy);
+        if !who.is_empty() {
+            failed.push(in_use_item(path, &who));
             continue;
         }
         let held = items.len().to_string();
@@ -851,9 +965,14 @@ pub fn sweep_trash(root: &Path, now_ms: u64, keep_ms: u64) -> usize {
 }
 
 /// `files.delete`: for good.
-pub fn delete(paths: &[String], home: &Path, state: &Path) -> Value {
+pub fn delete(paths: &[String], home: &Path, state: &Path, busy: &[Busy]) -> Value {
     let (mut deleted, mut failed) = (vec![], vec![]);
     for path in paths {
+        let who = abs(path).map(|p| in_use(&p, busy)).unwrap_or_default();
+        if !who.is_empty() {
+            failed.push(in_use_item(path, &who));
+            continue;
+        }
         let out = abs(path).and_then(|p| {
             if let Some(why) = guarded(&p, home, state) {
                 return Err(Error::Denied(why.to_string()));
@@ -1037,6 +1156,15 @@ impl Job {
             true => st
                 .errors
                 .push(item_failed(&shown(path), code, message.into())),
+            false => st.errors_more += 1,
+        }
+    }
+
+    /// An error that carries more than a sentence (`in_use`: the panes).
+    fn error_item(&self, item: Value) {
+        let mut st = self.st.lock().unwrap();
+        match st.errors.len() < LISTED {
+            true => st.errors.push(item),
             false => st.errors_more += 1,
         }
     }
@@ -1262,8 +1390,16 @@ fn real(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// A copy or a move on this station.
-fn transfer_local(job: &Job, parts: &Parts, paths: &[PathBuf], home: &Path, state: &Path) {
+/// A copy or a move on this station. `busy`: the panes the station lists
+/// now, asked for each item moved (a job can run long).
+fn transfer_local(
+    job: &Job,
+    parts: &Parts,
+    paths: &[PathBuf],
+    home: &Path,
+    state: &Path,
+    busy: &dyn Fn() -> Vec<Busy>,
+) {
     let dir = PathBuf::from(&job.dir);
     let per = count(job, paths);
     for (from, (files, bytes)) in paths.iter().zip(per) {
@@ -1291,6 +1427,12 @@ fn transfer_local(job: &Job, parts: &Parts, paths: &[PathBuf], home: &Path, stat
             }
             if let Some(why) = guarded(from, home, state) {
                 job.error(from, "refused", why);
+                continue;
+            }
+            let panes = busy();
+            let who = in_use(from, &panes);
+            if !who.is_empty() {
+                job.error_item(in_use_item(&shown(from), &who));
                 continue;
             }
         }
@@ -2004,6 +2146,23 @@ impl Daemon {
         self.files_dir().join("trash")
     }
 
+    /// Every pane this station lists, with its folder: what is in use.
+    fn files_busy(&self) -> Vec<Busy> {
+        self.list_panes()
+            .iter()
+            .map(|p| {
+                let m = p.meta.lock().unwrap();
+                Busy::new(
+                    &m.id,
+                    &m.name,
+                    m.project.as_deref(),
+                    m.exit.is_some(),
+                    &m.cwd,
+                )
+            })
+            .collect()
+    }
+
     /// The ship's log says what was changed, where, by whom and how much:
     /// never what a file holds.
     fn files_log(&self, kind: &str, by: &str, data: Value) {
@@ -2095,6 +2254,9 @@ impl Daemon {
                     if let Some(why) = guarded(&path, &d.home, &d.paths.state_dir) {
                         return Err(Error::Denied(format!("{from} is not renamed here: {why}")));
                     }
+                    if let Some(refusal) = rename_in_use(&path, &d.files_busy()) {
+                        return Ok(refusal);
+                    }
                     let out = rename(&path, text(&params, "name")?)?;
                     if out["ok"] == json!(true) {
                         d.files_log(
@@ -2110,7 +2272,15 @@ impl Daemon {
             "files.trash" => {
                 self.files_off(move |d| {
                     let paths = paths_of(&params)?;
-                    let out = trash(&d.trash_dir(), &paths, &by, &d.home, &d.paths.state_dir)?;
+                    let busy = d.files_busy();
+                    let out = trash(
+                        &d.trash_dir(),
+                        &paths,
+                        &by,
+                        &d.home,
+                        &d.paths.state_dir,
+                        &busy,
+                    )?;
                     if !out["trash"].is_null() {
                         d.files_log(
                             "files.trashed",
@@ -2139,7 +2309,8 @@ impl Daemon {
             }
             "files.delete" => {
                 self.files_off(move |d| {
-                    let out = delete(&paths_of(&params)?, &d.home, &d.paths.state_dir);
+                    let busy = d.files_busy();
+                    let out = delete(&paths_of(&params)?, &d.home, &d.paths.state_dir, &busy);
                     d.files_log(
                         "files.deleted",
                         &by,
@@ -2356,7 +2527,15 @@ impl Daemon {
             let job = running;
             let failed = match &job.to {
                 None => {
-                    transfer_local(&job, &d.files.parts, &paths, &d.home, &d.paths.state_dir);
+                    let busy = || d.files_busy();
+                    transfer_local(
+                        &job,
+                        &d.files.parts,
+                        &paths,
+                        &d.home,
+                        &d.paths.state_dir,
+                        &busy,
+                    );
                     None
                 }
                 Some(station) => {

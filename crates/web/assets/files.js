@@ -8,6 +8,9 @@
 //   - A file's name and what it holds are data: put on the page as text,
 //     never as HTML. A preview is text in a box, or an image the station
 //     itself says is a PNG, JPEG, GIF or WebP.
+//   - What a pane is working in is not deleted, renamed or moved: the
+//     station refuses it, and the page names the panes and offers no way
+//     round it.
 //   - A station that is slow or does not answer is said in its own listing;
 //     the other listing and the rest of the deck go on.
 // Everything is asked through the calls the page already makes (`api.on`);
@@ -129,6 +132,38 @@ function askClash(title, text, all) {
         h('button', { type: 'button', class: 'primary danger', onclick: pick('replace', close) }, 'Replace'))),
     { onClose: () => { if (!answered) resolve({ choice: 'skip', all: false }); } });
   });
+}
+
+// "builder and critic (project tally), and sh (ended, not closed)": the
+// panes a station says are in a folder.
+function paneNames(panes) {
+  const and = (list, last) => (list.length < 2 ? list.join('') : list.slice(0, -1).join(', ') + last + list[list.length - 1]);
+  const groups = new Map();
+  for (const p of panes) {
+    const key = p.project || '';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(String(p.name) + (p.ended ? ' (ended, not closed)' : ''));
+  }
+  return and([...groups].map(([project, names]) => and(names, ' and ') + (project ? ` (project ${project})` : '')), ', and ');
+}
+// Nothing in use is deleted, renamed or moved: the station refused these
+// (`in_use`), and names the panes. There is no way to do it anyway from
+// here: the panes are closed first. `verb`: delete, rename or move.
+// `done`: what did go ahead in the same request, said first.
+function inUseNotice(verb, refused, sep, done) {
+  const one = refused.length === 1 ? baseOf(refused[0].path, sep) : null;
+  dialog(one ? `${one} is in use` : `${refused.length} folders are in use`, (close) => h('div', { class: 'fx-inuse' },
+    done ? h('p', { class: 'fx-inuse-done' }, done) : null,
+    refused.slice(0, 20).map(f => {
+      const panes = f.panes || [], many = panes.length !== 1;
+      return h('p', { class: 'fx-inuse-item' },
+        panes.length ? `${paneNames(panes)} ${many ? 'are' : panes[0].ended ? 'is still open' : 'is working'} in ` : 'A pane is working in ',
+        h('bdi', { class: 'mono' }, baseOf(f.path, sep)), ' or a folder inside it. ',
+        `Close ${many ? 'those panes' : 'that pane'}, then ${verb} it.`);
+    }),
+    refused.length > 20 ? h('p', { class: 'muted' }, `and ${refused.length - 20} more`) : null,
+    h('p', { class: 'muted fx-inuse-why' }, `Nothing a pane is working in is ${verb === 'delete' ? 'deleted' : verb === 'rename' ? 'renamed' : 'moved'}.`),
+    h('div', { class: 'row end' }, h('button', { type: 'button', class: 'primary fx-inuse-ok', onclick: close }, 'OK'))));
 }
 
 // ------------------------------------------------------------- one listing
@@ -388,28 +423,34 @@ class Listing {
     if (sig === this.toolsSig) return;
     this.toolsSig = sig;
     const b = (cls, label, run, off, title) => h('button', { type: 'button', class: 'mini fx-' + cls, disabled: !!off, title, onclick: run }, label);
-    const more = (e) => { const r = e.currentTarget.getBoundingClientRect(); this.menu(r.left, r.bottom + 2, null); };
-    const make = [
-      b('mkdir', 'New folder', () => this.startDraft('dir'), !ok),
-      b('mkfile', 'New file', () => this.startDraft('file'), !ok),
-      b('upload', 'Upload', () => this.panel.pickFiles(this, this.root), !ok, 'Send files from this device into this folder'),
-      b('paste', 'Paste', () => this.panel.paste(this, this.root), !ok || !clip, clip ? `Put the ${items(clip.paths.length)} ${clip.op === 'cut' ? 'cut' : 'copied'} from ${clip.station} into this folder` : 'Nothing was copied or cut'),
-    ];
-    const act = [
-      b('copy', 'Copy', () => this.copy('copy'), !n),
-      b('cut', 'Cut', () => this.copy('cut'), !n),
-      b('rename', 'Rename', () => this.startRename(), n !== 1),
-      b('delete', 'Delete', () => this.trash(), !n, 'To the trash of this station: it can be undone'),
-      b('download', 'Download', () => this.download(), !n, 'Save on this device. Several things, or a folder, come as one zip'),
-      b('more', 'More', more, !ok),
-    ];
+    const under = (e) => { const r = e.currentTarget.getBoundingClientRect(); return [r.left, r.bottom + 2]; };
+    const more = (e) => this.menu(...under(e));
     if (this.panel.tapOpens()) {
-      // Ticks are how several things are chosen where a tap opens.
-      this.toolsEl.replaceChildren(...make, h('span', { class: 'grow' }), b('select' + (this.selecting ? ' on' : ''), this.selecting ? 'Done' : 'Select', () => this.setSelecting(!this.selecting), !ok));
+      // No right-click where a finger does the pointing: the buttons stay,
+      // and ticks are how several things are chosen where a tap opens.
+      this.toolsEl.replaceChildren(
+        b('upload', 'Upload', () => this.panel.pickFiles(this, this.root), !ok, 'Send files from this device into this folder'),
+        b('mkdir', 'New folder', () => this.startDraft('dir'), !ok),
+        b('mkfile', 'New file', () => this.startDraft('file'), !ok),
+        b('paste', 'Paste', () => this.panel.paste(this, this.root), !ok || !clip, clip ? `Put the ${items(clip.paths.length)} ${clip.op === 'cut' ? 'cut' : 'copied'} from ${clip.station} into this folder` : 'Nothing was copied or cut'),
+        h('span', { class: 'grow' }), b('select' + (this.selecting ? ' on' : ''), this.selecting ? 'Done' : 'Select', () => this.setSelecting(!this.selecting), !ok));
       this.actEl.hidden = !this.selecting;
-      this.actEl.replaceChildren(h('span', { class: 'fx-count', 'aria-live': 'polite' }, n ? `${n} ticked` : 'Tick what you want'), ...act);
+      this.actEl.replaceChildren(h('span', { class: 'fx-count', 'aria-live': 'polite' }, n ? `${n} ticked` : 'Tick what you want'),
+        b('copy', 'Copy', () => this.copy('copy'), !n),
+        b('cut', 'Cut', () => this.copy('cut'), !n),
+        b('rename', 'Rename', () => this.startRename(), n !== 1),
+        b('delete', 'Delete', () => this.trash(), !n, 'To the trash of this station: it can be undone'),
+        b('download', 'Download', () => this.download(), !n, 'Save on this device. Several things, or a folder, come as one zip'),
+        b('more', 'More', more, !ok));
     } else {
-      this.toolsEl.replaceChildren(...make, h('span', { class: 'fx-gap' }), ...act);
+      // At a computer everything is in the right-click menu and on the
+      // keys. Two buttons are left: New, and the same menu for a mouse
+      // that has no right button.
+      const fresh = h('button', { type: 'button', class: 'mini fx-new', disabled: !ok, 'aria-haspopup': 'menu', title: 'A new folder or a new file in this folder',
+        onclick: (e) => showMenu(...under(e), [{ label: 'Folder', action: () => this.startDraft('dir') }, { label: 'File', action: () => this.startDraft('file') }]) }, 'New');
+      const all = h('button', { type: 'button', class: 'mini fx-more', disabled: !ok, 'aria-haspopup': 'menu', 'aria-label': 'More: what can be done with what is selected, or with this folder',
+        title: n ? `What can be done with the ${items(n)} selected (the same as a right-click)` : 'Upload, Paste and the rest for this folder (the same as a right-click)', onclick: more }, '⋯');
+      this.toolsEl.replaceChildren(fresh, all);
       this.actEl.hidden = true;
     }
   }
@@ -437,7 +478,7 @@ class Listing {
     if (this.draft) kids.push(this.nameRow(this.draft, this.draft.kind === 'dir' ? 'folder' : 'binary', this.draft.kind === 'dir' ? 'New folder' : 'New file', '', (name) => this.commitDraft(name), () => { this.draft = null; this.drawTree(); }));
     shown.forEach((r, i) => kids.push(r.note ? deep(h('div', { class: 'fx-row fx-note-row' + (r.bad ? ' bad' : '') }, r.note), r.depth) : this.row(r, i, phone, clip)));
     if (flat.length > shown.length) kids.push(h('button', { type: 'button', class: 'fx-more-rows', onclick: () => { this.limit += ROWS_STEP; this.drawTree(); } }, `Show more (${flat.length - shown.length} below)`));
-    if (!flat.length && !this.draft) kids.push(h('div', { class: 'fx-note' }, (this.dirs.get(this.root)?.entries || []).length ? 'Only hidden files here. The eye above shows them.' : 'This folder is empty. Drop files here, or use Upload.'));
+    if (!flat.length && !this.draft) kids.push(h('div', { class: 'fx-note' }, (this.dirs.get(this.root)?.entries || []).length ? 'Only hidden files here. The eye above shows them.' : phone ? 'This folder is empty. Use Upload to put files here.' : 'This folder is empty. Drop files here, or right-click for Upload.'));
     const top = this.tree.scrollTop;
     this.tree.replaceChildren(...kids);
     this.tree.scrollTop = top;
@@ -509,7 +550,7 @@ class Listing {
     if (!r) { if (e.target === this.tree && !this.selecting) this.select([], null); return; }
     if (e.target.closest('.fx-tri')) { e.stopPropagation(); return this.toggle(r); }
     if (r.odd) return;
-    if (e.target.closest('.fx-dots')) { const b = e.target.closest('.fx-dots').getBoundingClientRect(); this.select([r.path], r.path); return this.menu(b.right, b.bottom + 2, r); }
+    if (e.target.closest('.fx-dots')) { const b = e.target.closest('.fx-dots').getBoundingClientRect(); this.select([r.path], r.path); return this.menu(b.right, b.bottom + 2); }
     if (this.selecting) { const next = new Set(this.sel); if (next.has(r.path)) next.delete(r.path); else next.add(r.path); return this.select(next, r.path); }
     if (this.panel.tapOpens()) return this.open(r);
     if (e.shiftKey) { this.sel = new Set(this.range(r.path)); this.cursor = r.path; this.drawTree(); this.drawTools(); return; }
@@ -528,13 +569,18 @@ class Listing {
     e.preventDefault();
     const r = this.hit(e);
     if (r && r.odd) return;
+    // As a desktop's file manager does: a right-click on a row that is not
+    // selected selects it alone; inside what is selected, the selection
+    // stays; on empty space, nothing is selected and the menu is the
+    // folder's.
     if (r && !this.sel.has(r.path)) this.select([r.path], r.path);
-    this.menu(e.clientX, e.clientY, r);
+    if (!r && this.sel.size && !this.selecting) this.select([], null);
+    this.menu(e.clientX, e.clientY);
   }
 
-  // Everything that can be done here: for a row (with what is selected),
-  // or for the folder shown.
-  menu(x, y, r) {
+  // Everything that can be done here: with what is selected, or, with
+  // nothing selected, with the folder shown.
+  menu(x, y) {
     if (!this.root) return;
     const picked = this.selected(), n = picked.length, one = n === 1 ? picked[0] : null, clip = this.panel.clip;
     showMenu(x, y, [
@@ -544,12 +590,12 @@ class Listing {
       n && '-',
       n && { label: 'Copy', hint: 'Ctrl+C', action: () => this.copy('copy') },
       n && { label: 'Cut', hint: 'Ctrl+X', action: () => this.copy('cut') },
-      { label: one && one.isDir ? `Paste into ${one.e.name}` : 'Paste', hint: clip ? `${items(clip.paths.length)} from ${clip.station}` : 'nothing copied', disabled: !clip, action: () => this.panel.paste(this, one && one.isDir ? one.path : this.root) },
+      clip && { label: one && one.isDir ? `Paste into ${one.e.name}` : 'Paste', hint: `${items(clip.paths.length)} from ${clip.station}`, action: () => this.panel.paste(this, one && one.isDir ? one.path : this.root) },
       one && { label: 'Rename', hint: 'F2', action: () => this.startRename() },
       n && { label: 'Download', hint: n > 1 || (one && one.isDir) ? 'as one zip' : undefined, action: () => this.download() },
       n && { label: n > 1 ? 'Copy paths' : 'Copy path', action: () => copyText(picked.map(p => p.path).join('\n'), n > 1 ? 'Copied the paths' : 'Copied the path') },
       n && { label: 'Delete', hint: 'to the trash', danger: true, action: () => this.trash() },
-      '-',
+      (n || clip) && '-',
       { label: 'New folder', action: () => this.startDraft('dir') },
       { label: 'New file', action: () => this.startDraft('file') },
       { label: 'Upload…', action: () => this.panel.pickFiles(this, one && one.isDir ? one.path : this.root) },
@@ -624,6 +670,12 @@ class Listing {
   async commitRename(row, name) {
     let r;
     try { r = await change(this.station, 'files.rename', { path: row.path, name }); } catch (e) { return say(e); }
+    if (r.ok === false && r.code === 'in_use') {
+      this.renaming = null;
+      this.drawTree();
+      inUseNotice('rename', [{ path: row.path, panes: r.panes }], this.sep);
+      return null;
+    }
     if (r.ok === false) return r.message || 'That name is taken.';
     this.renaming = null;
     if (this.expanded.delete(row.path)) this.dirs.delete(row.path);
@@ -640,8 +692,8 @@ class Listing {
     if (!picked.length) return;
     let r;
     try { r = await change(station, 'files.trash', { paths: picked.map(p => p.path) }); } catch (e) { return toast(say(e), 'error'); }
-    const gone = (r.trashed || []).length, failed = r.failed || [];
-    const far = failed.filter(f => f.code === 'other_disk'), rest = failed.filter(f => f.code !== 'other_disk');
+    const gone = (r.trashed || []).length, failed = r.failed || [], sep = this.sep;
+    const far = failed.filter(f => f.code === 'other_disk'), used = failed.filter(f => f.code === 'in_use'), rest = failed.filter(f => f.code !== 'other_disk' && f.code !== 'in_use');
     this.sel.clear();
     this.panel.changed(station);
     if (gone) {
@@ -655,12 +707,16 @@ class Listing {
       } });
     }
     if (rest.length) toast(`${plural(rest.length, 'thing')} not deleted: ${rest[0].message}`, 'error');
+    // What a pane is working in stays, and is never asked about again as
+    // "delete anyway": the panes are named, to be closed first.
+    if (used.length) inUseNotice('delete', used, sep, gone ? `${items(gone)} moved to the trash. Not deleted:` : null);
     if (far.length) {
       confirmBox('Delete for good?', `${far.length === 1 ? this.nameOf(far[0].path) + ' is' : items(far.length) + ' are'} on another disk than ${station}'s trash, and cannot be moved there. Delete for good? This cannot be undone.`, 'Delete for good', async () => {
         try {
           const d = await change(station, 'files.delete', { paths: far.map(f => f.path) });
-          const not = d.failed || [];
-          toast(not.length ? `${plural(not.length, 'thing')} not deleted: ${not[0].message}` : `${items((d.deleted || []).length)} deleted for good`, not.length ? 'error' : 'info');
+          const held = (d.failed || []).filter(f => f.code === 'in_use'), not = (d.failed || []).filter(f => f.code !== 'in_use'), n = (d.deleted || []).length;
+          if (held.length) inUseNotice('delete', held, sep, n ? `${items(n)} deleted for good. Not deleted:` : null);
+          if (not.length || !held.length) toast(not.length ? `${plural(not.length, 'thing')} not deleted: ${not[0].message}` : `${items(n)} deleted for good`, not.length ? 'error' : 'info');
         } catch (e) { toast(say(e), 'error'); }
         this.panel.changed(station);
       });
@@ -1041,14 +1097,17 @@ class Panel {
         const was = had?.job.state;
         this.jobs.set(key, { station, id: job.id, mine: had ? had.mine : false, to: job.to || station, job });
         // A job that wrote into a folder on screen has ended: read it again.
-        if (job.state !== 'running' && was === 'running') { this.changed(job.to || station); if (job.op === 'move') this.changed(station); this.said(station, job); }
+        if (job.state !== 'running' && was === 'running') { this.changed(job.to || station); if (job.op === 'move') this.changed(station); this.said(station, job, !!had.mine); }
       }
     }));
   }
-  said(station, job) {
+  said(station, job, mine) {
     const errs = (job.errors || []).length + (job.errors_more || 0);
+    // What a pane is working in was not moved: its own notice, by name.
+    const used = (job.errors || []).filter(e => e.code === 'in_use'), other = (job.errors || []).find(e => e.code !== 'in_use');
+    if (used.length && mine) inUseNotice('move', used, this.views.find(v => v.station === station)?.sep || '/', (job.created || []).length ? `${items(job.created.length)} moved. Not moved:` : null);
     if (job.state === 'failed') toast(job.message || 'The copy failed.', 'error');
-    else if (job.state === 'done' && errs) toast(`${job.op === 'move' ? 'Moved' : 'Copied'}, except ${errs}: ${job.errors[0]?.message || ''}`, 'error');
+    else if (job.state === 'done' && errs && (other || !used.length || !mine)) toast(`${job.op === 'move' ? 'Moved' : 'Copied'}, except ${errs}: ${(other || job.errors[0])?.message || ''}`, 'error');
   }
   async poll() {
     if (this.polling) return;

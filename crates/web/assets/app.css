@@ -1233,7 +1233,6 @@ body.fx-sizing { cursor: col-resize; }
 .fx-path-err, .fx-name-err, .fx-move-err { color: var(--red); } .fx-path-err { flex: 1 0 100%; } .fx-path-err:empty, .fx-name-err:empty, .fx-move-err:empty { display: none; }
 .fx-tools { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 2px 8px 6px 12px; }
 .fx-tools .mini { padding: 2px 7px; } .fx-tools .mini.on { border-color: var(--blue); background: var(--sel-bg); }
-.fx-gap { flex: none; width: 1px; align-self: stretch; margin: 2px 3px; background: var(--line); }
 .fx-cols { flex: none; display: flex; align-items: center; gap: 6px; padding: 2px 16px 2px 12px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--muted); font-size: calc(11px * var(--ui-scale)); text-transform: uppercase; letter-spacing: .04em; background: var(--panel2); }
 .fx-c-name { flex: 1 1 auto; padding-left: 40px; }
 .fx-tree { flex: 1 1 auto; min-height: 60px; overflow: hidden auto; overscroll-behavior: contain; padding: 2px 0 12px; background: var(--bg); outline: none; position: relative; }
@@ -1286,7 +1285,7 @@ body.fx-sizing { cursor: col-resize; }
 .fx-text { margin: 0; max-height: min(62vh, calc(var(--vv-height, 100dvh) - 260px)); min-height: 60px; overflow: auto; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--well); color: var(--text); font-size: var(--mono-px, 12.5px); white-space: pre; word-break: normal; tab-size: 4; }
 .fx-img { display: block; max-width: 100%; max-height: 62vh; margin: 0 auto; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: var(--well); }
 .fx-preview-note { margin: 8px 0 0; }
-.fx-clash p { overflow-wrap: anywhere; }
+.fx-clash p { overflow-wrap: anywhere; } .fx-inuse p { overflow-wrap: anywhere; } .fx-inuse-done { font-weight: 600; }
 /* A toast with something to press (Undo). */
 .toast.has-act { display: flex; align-items: center; gap: 12px; } .toast-act { flex: none; border-color: var(--blue); color: var(--blue); padding: 3px 10px; }
 /* The folder of a pane opens the panel. */
@@ -1306,7 +1305,7 @@ body.fx-sizing { cursor: col-resize; }
   .fx-bar, .fx-path, .fx-tools { background: var(--panel); padding-left: 10px; padding-right: 10px; }
   .fx-bar { gap: 4px; padding-top: 8px; } .fx-nav { min-width: 44px; min-height: 44px; justify-content: center; } .fx-station { min-height: 44px; font-size: 16px; }
   .fx-crumbs { min-height: 44px; } .fx-seg { min-height: 40px; padding: 2px 6px; font-size: calc(14px * var(--ui-scale)); } .fx-path-box { min-height: 44px; font-size: 16px; }
-  .fx-tools { gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--line); } .fx-tools .mini, .fx-actbar .mini { min-height: 44px; padding: 4px 12px; font-size: calc(14px * var(--ui-scale)); } .fx-tools .mini { padding: 4px 9px; } .fx-tools { gap: 5px; }
+  .fx-tools { gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--line); } .fx-tools .mini, .fx-actbar .mini { min-height: 44px; padding: 4px 12px; font-size: calc(14px * var(--ui-scale)); } .fx-tools .mini { padding: 4px 6px; white-space: nowrap; } .fx-tools { gap: 4px; }
   .fx-row { min-height: 52px; gap: 8px; padding-right: 4px; border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent); } .fx-name { font-size: calc(15px * var(--ui-scale)); }
   .fx-tri { width: 36px; height: 44px; margin-left: -6px; } .fx-name-box { min-height: 40px; font-size: 16px; }
   .fx-tick { width: 24px; height: 24px; margin: 0 6px 0 4px; }

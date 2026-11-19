@@ -298,7 +298,7 @@ fn what_is_deleted_goes_to_a_trash_and_comes_back() {
         s(&home.join("gone.txt")),
         s(&home),
     ];
-    let out = trash(&trash_dir, &paths, "you", &home, &state).unwrap();
+    let out = trash(&trash_dir, &paths, "you", &home, &state, &[]).unwrap();
     assert_eq!(out["trashed"], json!([paths[0], paths[1]]));
     let codes: Vec<&str> = out["failed"]
         .as_array()
@@ -323,7 +323,7 @@ fn what_is_deleted_goes_to_a_trash_and_comes_back() {
     assert_eq!(std::fs::read(home.join("b.txt")).unwrap(), b"b");
     assert_eq!(restore(&trash_dir, &id).unwrap_err().code(), "not_found");
     // Kept seven days, then removed.
-    let out = trash(&trash_dir, &paths[1..2], "you", &home, &state).unwrap();
+    let out = trash(&trash_dir, &paths[1..2], "you", &home, &state, &[]).unwrap();
     let id = out["trash"].as_str().unwrap();
     assert_eq!(
         sweep_trash(&trash_dir, now_ms() + TRASH_KEEP_MS - 60_000, TRASH_KEEP_MS),
@@ -341,10 +341,120 @@ fn what_is_deleted_goes_to_a_trash_and_comes_back() {
         &[s(&home.join("c.txt")), s(&home.join("work")), s(&home)],
         &home,
         &state,
+        &[],
     );
     assert_eq!(gone["deleted"].as_array().unwrap().len(), 2);
     assert_eq!(gone["failed"][0]["path"], json!(s(&home)));
     assert!(home.exists() && !home.join("work").exists());
+}
+
+/// The owner, 19 Nov 2026: nothing in use is deleted. A folder a pane was
+/// started in, and every folder above it, is not trashed, deleted or
+/// moved away; what is free in the same call goes ahead; a folder whose
+/// name only begins the same (`/a/b` in use, `/a/bc`) is free; and the
+/// refusal names the panes.
+#[test]
+fn what_a_pane_works_in_is_not_trashed_deleted_or_moved() {
+    let t = tmp();
+    let (home, state) = (t.path().join("home"), t.path().join("home/state"));
+    let a = home.join("a");
+    for dir in ["a/b/deep", "a/bc", "a/free", "dest", "state"] {
+        std::fs::create_dir_all(home.join(dir)).unwrap();
+    }
+    let busy = vec![
+        Busy::new("p1", "builder", Some("tally"), false, &s(&a.join("b/deep"))),
+        Busy::new("p2", "critic", Some("tally"), false, &s(&a.join("b"))),
+        Busy::new("p3", "sh", None, true, &s(&a.join("b/deep"))),
+    ];
+    let paths = vec![
+        s(&a.join("b")),
+        s(&a.join("bc")),
+        s(&a),
+        s(&a.join("b/deep")),
+    ];
+    let out = trash(
+        &state.join("files/trash"),
+        &paths,
+        "you",
+        &home,
+        &state,
+        &busy,
+    )
+    .unwrap();
+    assert_eq!(out["trashed"], json!([paths[1]]));
+    let failed = out["failed"].as_array().unwrap();
+    assert!(failed.iter().all(|f| f["code"] == json!("in_use")), "{out}");
+    assert_eq!(failed.len(), 3);
+    assert_eq!(
+        failed[0]["message"],
+        json!(format!(
+            "builder and critic (project tally), and sh (ended, not closed) are working in {} or a folder inside it. Close those panes first",
+            paths[0]
+        ))
+    );
+    assert_eq!(
+        failed[0]["panes"][0],
+        json!({"id": "p1", "name": "builder", "project": "tally", "ended": false})
+    );
+    // The folder below: only the two panes that are in it.
+    assert_eq!(failed[2]["panes"].as_array().unwrap().len(), 2);
+    assert!(a.join("b/deep").is_dir() && !a.join("bc").exists());
+
+    let gone = delete(
+        &[paths[0].clone(), s(&a.join("free"))],
+        &home,
+        &state,
+        &busy,
+    );
+    assert_eq!(gone["deleted"], json!([s(&a.join("free"))]));
+    assert_eq!(gone["failed"][0]["code"], json!("in_use"));
+    assert!(a.join("b/deep").is_dir());
+
+    assert_eq!(
+        rename_in_use(&a, &busy).unwrap()["code"],
+        json!("in_use"),
+        "a folder above a pane's is not renamed either"
+    );
+    assert!(rename_in_use(&home.join("dest"), &busy).is_none());
+
+    // A move is refused, a copy is not; and with the panes closed the
+    // same move goes ahead.
+    let reg = parts(t.path());
+    let panes = busy.clone();
+    let job = Job::new(Op::Move, None, &s(&home.join("dest")), Conflict::Fail);
+    transfer_local(&job, &reg, &[a.join("b")], &home, &state, &move || {
+        panes.clone()
+    });
+    job.finish(None);
+    let v = job.view();
+    assert_eq!(v["errors"][0]["code"], json!("in_use"), "{v}");
+    assert_eq!(v["errors"][0]["panes"][1]["name"], json!("critic"));
+    assert!(a.join("b/deep").is_dir() && !home.join("dest/b").exists());
+    let job = Job::new(Op::Copy, None, &s(&home.join("dest")), Conflict::Fail);
+    transfer_local(&job, &reg, &[a.join("b")], &home, &state, &|| busy.clone());
+    assert!(home.join("dest/b/deep").is_dir() && a.join("b/deep").is_dir());
+    let job = Job::new(Op::Move, None, &s(&home.join("dest")), Conflict::KeepBoth);
+    transfer_local(&job, &reg, &[a.join("b")], &home, &state, &Vec::new);
+    assert!(home.join("dest/b (2)/deep").is_dir() && !a.join("b").exists());
+
+    // A link to a folder in use is only a link: removing it removes
+    // nothing a pane stands in. A pane started through the link is in
+    // the link's way.
+    #[cfg(unix)]
+    {
+        std::fs::create_dir_all(a.join("b/deep")).unwrap();
+        std::os::unix::fs::symlink(a.join("b"), home.join("link")).unwrap();
+        let through = Busy::new("p4", "via", None, false, &s(&home.join("link/deep")));
+        let link = vec![s(&home.join("link"))];
+        let out = delete(&link, &home, &state, &[busy[0].clone(), through]);
+        assert_eq!(
+            out["failed"][0]["panes"],
+            json!([{"id": "p4", "name": "via", "project": null, "ended": false}])
+        );
+        let out = delete(&link, &home, &state, &busy[..1]);
+        assert_eq!(out["deleted"], json!(link));
+        assert!(a.join("b/deep").is_dir());
+    }
 }
 
 fn tree(root: &Path) {
@@ -374,7 +484,7 @@ fn tree(root: &Path) {
 
 fn run(job: &Job, reg: &Parts, paths: &[PathBuf]) -> Value {
     let nowhere = Path::new("/nonexistent-home");
-    transfer_local(job, reg, paths, nowhere, nowhere);
+    transfer_local(job, reg, paths, nowhere, nowhere, &Vec::new);
     job.finish(None);
     job.view()
 }

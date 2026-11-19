@@ -462,6 +462,176 @@ fn a_pane_is_moved_to_another_folder_and_stays_there() {
     assert_eq!(s.pane(&sh)["cwd"], json!(there));
 }
 
+/// The owner, 19 Nov 2026: "we should not delete anything that is in use,
+/// we would ask the user to close those panes before deleting. If no
+/// panes are open then we could delete panes and projects". Decided at the
+/// station: the folder a pane it lists was started in, and every folder
+/// above it, is not trashed, deleted, renamed or moved; the answer says
+/// `in_use` and names the panes; what is free in the same call goes ahead.
+/// With the pane closed the folder goes like any other, a project's too:
+/// the project then says its folder is gone, and Undo brings it back.
+#[test]
+fn nothing_a_pane_works_in_is_deleted_renamed_or_moved() {
+    let s = Station::start("alpha");
+    let home = s.root.join("home");
+    let a = home.join("a");
+    for dir in ["a/b/deep", "a/bc", "dest"] {
+        std::fs::create_dir_all(home.join(dir)).unwrap();
+    }
+    std::fs::write(a.join("free.txt"), b"x").unwrap();
+    let sh = s.call(
+        "pane.spawn",
+        json!({"program": "/bin/sh", "name": "builder", "cwd": a.join("b")}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let codes = |out: &Value| -> Vec<String> {
+        out["failed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["code"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let moved = |paths: Value| {
+        let job = s.call(
+            "files.transfer",
+            json!({"op": "move", "paths": paths, "dir": home.join("dest")}),
+        )["job"]
+            .clone();
+        wait_for("the move to finish", 20, || {
+            let jobs = s.call("files.jobs", json!({}));
+            let j = jobs["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"] == job)
+                .cloned()?;
+            (j["state"] != json!("running")).then_some(j)
+        })
+    };
+
+    // The pane's folder, the folder above it, and beside them a folder
+    // whose name only begins the same.
+    let out = s.call(
+        "files.trash",
+        json!({"paths": [a.join("b"), a.join("bc"), a]}),
+    );
+    assert_eq!(out["trashed"], json!([a.join("bc")]), "{out}");
+    assert_eq!(codes(&out), ["in_use", "in_use"], "{out}");
+    let said = &out["failed"][0];
+    assert_eq!(said["panes"][0]["name"], json!("builder"), "{out}");
+    assert_eq!(said["panes"][0]["id"], json!(sh));
+    assert!(
+        said["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("builder is working in "),
+        "{said}"
+    );
+    let out = s.call("files.delete", json!({"paths": [a.join("b"), a]}));
+    assert_eq!(codes(&out), ["in_use", "in_use"], "{out}");
+    for (path, name) in [(a.join("b"), "c"), (a.clone(), "z")] {
+        let out = s.call("files.rename", json!({"path": path, "name": name}));
+        assert_eq!(
+            (out["ok"].clone(), out["code"].clone()),
+            (json!(false), json!("in_use")),
+            "{out}"
+        );
+        assert_eq!(out["panes"][0]["name"], json!("builder"));
+    }
+    let job = moved(json!([a.join("b"), a.join("free.txt")]));
+    assert_eq!(job["errors"][0]["code"], json!("in_use"), "{job}");
+    assert_eq!(job["errors"][0]["panes"][0]["name"], json!("builder"));
+    assert!(home.join("dest/free.txt").exists(), "what is free is moved");
+    assert!(a.join("b/deep").is_dir(), "nothing in use was touched");
+    assert!(s.pane(&sh)["exited"] != json!(true));
+
+    // Ended and still listed, it is still in the way; closed, it is not.
+    s.call("pane.send_text", json!({"pane": sh, "text": "exit"}));
+    wait_for("the shell to end", 10, || {
+        (s.pane(&sh)["exited"] == json!(true)).then_some(())
+    });
+    let out = s.call("files.trash", json!({"paths": [a.join("b")]}));
+    assert_eq!(out["failed"][0]["panes"][0]["ended"], json!(true), "{out}");
+    s.call("pane.close", json!({"pane": sh}));
+    let out = s.call("files.rename", json!({"path": a.join("b"), "name": "c"}));
+    assert_eq!(out["ok"], json!(true), "{out}");
+    let job = moved(json!([a.join("c")]));
+    assert_eq!(job["errors"], json!([]), "{job}");
+    assert!(home.join("dest/c/deep").is_dir());
+    let out = s.call("files.trash", json!({"paths": [a]}));
+    assert_eq!(out["trashed"], json!([a]), "{out}");
+    let out = s.call("files.delete", json!({"paths": [home.join("dest/c")]}));
+    assert_eq!(codes(&out), [] as [&str; 0], "{out}");
+
+    // A project: not while a pane of it is listed; then like any folder.
+    let repo = s.git_repo("tally");
+    s.call(
+        "project.new",
+        json!({"path": repo, "name": "tally", "panes": [{"name": "build", "agent": "shell"}], "open": true}),
+    );
+    let project = || {
+        s.call("project.list", json!({}))
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == json!("tally"))
+            .cloned()
+            .expect("the project is still listed")
+    };
+    wait_for("the project's pane", 10, || {
+        project()["panes"]
+            .as_array()
+            .filter(|p| !p.is_empty())
+            .map(|_| ())
+    });
+    let out = s.call("files.trash", json!({"paths": [repo]}));
+    assert_eq!(codes(&out), ["in_use"], "{out}");
+    assert_eq!(
+        out["failed"][0]["panes"][0],
+        json!({"id": project()["panes"][0]["id"], "name": "build", "project": "tally", "ended": false})
+    );
+    assert!(
+        out["failed"][0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("build (project tally) is working in "),
+        "{out}"
+    );
+    s.call("project.close", json!({"name": "tally"}));
+    let out = s.call("files.trash", json!({"paths": [repo]}));
+    assert_eq!(out["trashed"], json!([repo]), "{out}");
+    assert!(!repo.exists());
+    // The project is still listed and says what became of its folder;
+    // opening it is refused in a sentence, and nothing is started.
+    let gone = project();
+    let problem = gone["problem"].as_str().unwrap_or_default();
+    assert!(
+        problem.contains("the folder of project tally")
+            && problem.contains("deleted, renamed or moved"),
+        "{gone}"
+    );
+    assert_eq!(gone["panes"], json!([]));
+    let refused = s
+        .try_call("project.open", json!({"name": "tally"}))
+        .unwrap_err();
+    assert!(
+        refused.code == "not_found" && refused.message.contains("Put it back"),
+        "{}: {}",
+        refused.code,
+        refused.message
+    );
+    assert!(!repo.exists(), "opening a project does not make its folder");
+    // Undo: the folder is back, and the project opens as before.
+    let back = s.call("files.restore", json!({"trash": out["trash"]}));
+    assert_eq!(back["restored"], json!([repo]), "{back}");
+    assert!(project()["problem"].is_null(), "{}", project());
+    let opened = s.call("project.open", json!({"name": "tally"}));
+    assert_eq!(opened["panes"][0]["cwd"], json!(repo), "{opened}");
+}
+
 /// Between stations a copy is pushed by the station that has the files,
 /// as the owner's own `files.mkdir` and `files.put` forwarded to the
 /// other: a folder tree arrives whole, with its modes, `files.jobs` says

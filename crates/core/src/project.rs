@@ -289,6 +289,20 @@ impl ProjectFile {
     }
 }
 
+/// A registered project's file. A project whose folder is gone (deleted in
+/// the file explorer with no pane in it, or renamed or moved by anything)
+/// stays in the list and says so, with what to do; it is never an error
+/// about a file's name.
+fn project_load(name: &str, dir: &Path) -> Result<ProjectFile> {
+    if !dir.is_dir() {
+        return Err(Error::NotFound(format!(
+            "the folder of project {name}, {}: it was deleted, renamed or moved. Put it back (Undo in Files brings back what was deleted there in the last 7 days), or remove the project from this station",
+            dir.display()
+        )));
+    }
+    ProjectFile::load(dir)
+}
+
 pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -314,7 +328,7 @@ impl Daemon {
             .project_path(name)
             .ok_or_else(|| Error::NotFound(format!("project {name}")))?;
         let path = PathBuf::from(path);
-        let file = ProjectFile::load(&path)?;
+        let file = project_load(name, &path)?;
         Ok((path, file))
     }
 
@@ -544,7 +558,7 @@ impl Daemon {
                 )
             })
             .map_err(|_| Error::NotFound(format!("project {name}")))?;
-        let file = ProjectFile::load(Path::new(&path));
+        let file = project_load(name, Path::new(&path));
         let panes: Vec<Value> = self
             .list_panes()
             .iter()

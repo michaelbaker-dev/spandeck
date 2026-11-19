@@ -96,6 +96,39 @@ fn press(page: &Page, i: usize, class: &str) {
     click(page, class, &format!("{}?.querySelector('.{class}')", v(i)));
 }
 
+/// The names of the open menu's items, top to bottom.
+fn menu_items(page: &Page) -> Vec<String> {
+    page.wait("a menu", "!!document.querySelector('.menu')");
+    page.js("[...document.querySelectorAll('.menu .menu-item')].map(i => i.firstChild.textContent)")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect()
+}
+
+fn close_menu(page: &Page) {
+    page.js("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true}))");
+    page.wait("no menu", "!document.querySelector('.menu')");
+}
+
+/// The empty space of listing `i`, right-clicked: the folder's own menu.
+fn empty_space(i: usize) -> String {
+    format!("{}?.querySelector('.fx-tree')", v(i))
+}
+
+/// An item of the folder's menu (a right-click on empty space).
+fn folder_menu(page: &Page, i: usize, label: &str) {
+    page.right_click(&empty_space(i));
+    page.choose(label);
+}
+
+/// An item of the "⋯" button's menu: for what is selected, or the folder.
+fn more_menu(page: &Page, i: usize, label: &str) {
+    press(page, i, "fx-more");
+    page.choose(label);
+}
+
 /// A key the tree of listing `i` is handed.
 fn key(page: &Page, i: usize, key: &str, held: &str) {
     page.wait(
@@ -388,18 +421,30 @@ fn files_are_made_renamed_and_deleted_with_undo() {
     let page = Page::open(&s, 1400, 900);
     open_from_strip(&page, &s, &sh);
 
-    press(&page, 0, "fx-mkdir");
+    // At a computer the toolbar is two buttons: New, and the menu a
+    // right-click opens.
+    assert_eq!(
+        page.js(&format!(
+            "[...{}.querySelectorAll('.fx-tools button')].map(b => b.innerText)",
+            v(0)
+        )),
+        json!(["New", "⋯"])
+    );
+    press(&page, 0, "fx-new");
+    assert_eq!(menu_items(&page), ["Folder", "File"]);
+    page.choose("Folder");
     name_it(&page, 0, "drafts");
     shows(&page, 0, "drafts");
     assert!(work.join("drafts").is_dir());
 
-    press(&page, 0, "fx-mkfile");
+    press(&page, 0, "fx-new");
+    page.choose("File");
     name_it(&page, 0, "todo.md");
     shows(&page, 0, "todo.md");
     assert_eq!(std::fs::read(work.join("todo.md")).unwrap(), b"");
 
     // A name that is taken: said in the row, and nothing is replaced.
-    press(&page, 0, "fx-mkfile");
+    folder_menu(&page, 0, "New file");
     name_it(&page, 0, "keep.txt");
     let said = page.wait(
         "the name is taken",
@@ -436,15 +481,182 @@ fn files_are_made_renamed_and_deleted_with_undo() {
     );
     shows(&page, 0, "keep.txt");
     assert_eq!(std::fs::read(work.join("keep.txt")).unwrap(), b"kept");
-    // Two at once from the toolbar, a folder among them.
+
+    // The right-click menu has everything the toolbar had. On a file that
+    // is not selected: that file alone is selected first.
+    let selected = || page.js(&format!("{}.listing.selected().map(r => r.e.name)", v(0)));
+    click(&page, "drafts", &row(0, "drafts"));
+    page.right_click(&row(0, "keep.txt"));
+    assert_eq!(selected(), json!(["keep.txt"]));
+    assert_eq!(
+        menu_items(&page),
+        [
+            "Preview",
+            "Copy",
+            "Cut",
+            "Rename",
+            "Download",
+            "Copy path",
+            "Delete",
+            "New folder",
+            "New file",
+            "Upload…",
+            "Read again"
+        ]
+    );
+    // Something copied: Paste is there, and on a folder it is into it.
+    page.choose("Copy");
+    page.right_click(&row(0, "drafts"));
+    assert_eq!(selected(), json!(["drafts"]));
+    assert_eq!(
+        menu_items(&page),
+        [
+            "Open",
+            "Open in place",
+            "Copy",
+            "Cut",
+            "Paste into drafts",
+            "Rename",
+            "Download",
+            "Copy path",
+            "Delete",
+            "New folder",
+            "New file",
+            "Upload…",
+            "Read again"
+        ]
+    );
+    close_menu(&page);
+    // Several: a right-click inside what is selected keeps it.
+    click_with(&page, "done.md too", &row(0, "done.md"), "ctrlKey: true");
+    page.right_click(&row(0, "drafts"));
+    assert_eq!(selected(), json!(["drafts", "done.md"]));
+    let several = [
+        "Copy",
+        "Cut",
+        "Paste",
+        "Download",
+        "Copy paths",
+        "Delete",
+        "New folder",
+        "New file",
+        "Upload…",
+        "Read again",
+    ];
+    assert_eq!(menu_items(&page), several);
+    close_menu(&page);
+    // The "⋯" button opens the same menu, for a mouse with one button.
+    press(&page, 0, "fx-more");
+    assert_eq!(menu_items(&page), several);
+    assert_eq!(selected(), json!(["drafts", "done.md"]));
+    close_menu(&page);
+    // Empty space: nothing is selected any more, and the menu is the
+    // folder's.
+    page.right_click(&empty_space(0));
+    assert_eq!(selected(), json!([]));
+    assert_eq!(
+        menu_items(&page),
+        [
+            "Paste",
+            "New folder",
+            "New file",
+            "Upload…",
+            "Copy this folder's path",
+            "Read again"
+        ]
+    );
+    close_menu(&page);
+    click(
+        &page,
+        "forget what was copied",
+        &format!("{FX}.querySelector('.fx-clip-clear')"),
+    );
+    page.right_click(&empty_space(0));
+    assert!(!menu_items(&page).contains(&"Paste".to_string()));
+    close_menu(&page);
+
+    // Two at once from the menu, a folder among them.
     click(&page, "drafts", &row(0, "drafts"));
     click_with(&page, "done.md too", &row(0, "done.md"), "ctrlKey: true");
-    press(&page, 0, "fx-delete");
+    page.right_click(&row(0, "done.md"));
+    page.choose("Delete");
     shows_no(&page, 0, "drafts");
     assert!(!work.join("drafts").exists() && !work.join("done.md").exists());
     assert_eq!(names(&page, 0), ["keep.txt"]);
     assert_eq!(s.log("files.trashed").len(), 2);
     assert_eq!(s.log("files.restored").len(), 1);
+}
+
+/// The owner, 19 Nov 2026: "we should not delete anything that is in use,
+/// we would ask the user to close those panes before deleting". The
+/// folder a pane works in is not deleted or renamed from the panel: a
+/// notice names the pane, offers no "delete anyway", and says what did
+/// go; the folder is still on disk. With the pane closed, it is deleted.
+#[test]
+#[ignore = "merge tier: a browser"]
+fn a_folder_a_pane_works_in_is_not_deleted_and_the_notice_names_the_pane() {
+    let s = Station::start("alpha");
+    let work = home(&s).join("work");
+    // A name that would be markup, were it not put on the page as text.
+    let site = work.join("<b>site");
+    std::fs::create_dir_all(site.join("pages")).unwrap();
+    std::fs::create_dir_all(work.join("notes")).unwrap();
+    let sh = shell(&s, "scratch", &home(&s));
+    let builder = shell(&s, "builder", &site.join("pages"));
+    let page = Page::open(&s, 1400, 900);
+    open_from_strip(&page, &s, &sh);
+    double_click(&page, "work", &row(0, "work"));
+    at(&page, 0, &work);
+    let notice = "document.querySelector('.dialog .fx-inuse')";
+
+    // Two selected, one of them in use: the free one goes, the other
+    // stays and is said by name, with the pane's.
+    click(&page, "the site", &row(0, "<b>site"));
+    click_with(&page, "notes too", &row(0, "notes"), "ctrlKey: true");
+    key(&page, 0, "Delete", "");
+    let said = page.wait("the notice", &format!("{notice}?.innerText"));
+    let said = said.as_str().unwrap();
+    assert!(
+        said.contains("1 item moved to the trash. Not deleted:")
+            && said.contains("builder is working in <b>site or a folder inside it.")
+            && said.contains("Close that pane, then delete it."),
+        "{said}"
+    );
+    assert_eq!(
+        page.js(&format!(
+            "[document.querySelector('.dialog h2').innerText, {notice}.querySelectorAll('b').length, [...document.querySelectorAll('.dialog button')].map(b => b.innerText.trim())]"
+        )),
+        json!(["<b>site is in use", 0, ["✕", "OK"]])
+    );
+    shot(&page, "in-use-notice");
+    assert!(site.join("pages").is_dir() && !work.join("notes").exists());
+    dialog_button(&page, "OK");
+    no_dialog(&page);
+    assert_eq!(names(&page, 0), ["<b>site"]);
+
+    // Renamed neither.
+    click(&page, "the site", &row(0, "<b>site"));
+    key(&page, 0, "F2", "");
+    name_it(&page, 0, "elsewhere");
+    let said = page.wait("the notice", &format!("{notice}?.innerText"));
+    assert!(
+        said.as_str()
+            .unwrap()
+            .contains("Close that pane, then rename it."),
+        "{said}"
+    );
+    dialog_button(&page, "OK");
+    no_dialog(&page);
+    assert!(site.is_dir() && !work.join("elsewhere").exists());
+    assert_eq!(names(&page, 0), ["<b>site"]);
+
+    // The pane closed: deleted like any other folder.
+    s.call("pane.close", json!({"pane": builder}));
+    page.right_click(&row(0, "<b>site"));
+    page.choose("Delete");
+    shows_no(&page, 0, "<b>site");
+    assert!(!site.exists());
+    assert_eq!(page.js(&format!("!!{notice}")), json!(false));
 }
 
 /// Files come in by the Upload button and by a drop: a file larger than
@@ -461,8 +673,9 @@ fn files_are_uploaded_by_the_button_and_by_a_drop() {
     let page = Page::open(&s, 1400, 900);
     open_from_strip(&page, &s, &sh);
 
-    // The Upload button: what the file box is given goes to the folder shown.
-    press(&page, 0, "fx-upload");
+    // Upload, in the folder's menu: what the file box is given goes to the
+    // folder shown.
+    folder_menu(&page, 0, "Upload…");
     page.js(&format!(
         "(() => {{ const p = {FX}.panel, dt = new DataTransfer(); dt.items.add(new File(['picked from the device'], 'picked.txt')); dt.items.add(new File([new Uint8Array([0, 1, 2, 255])], 'four.bin')); p.input.files = dt.files; p.input.dispatchEvent(new Event('change')); return true; }})()"
     ));
@@ -599,7 +812,7 @@ fn several_files_are_copied_and_cut_and_pasted_on_one_station() {
     // Into dest: pasted there as copies.
     double_click(&page, "dest", &row(0, "dest"));
     at(&page, 0, &work.join("dest"));
-    press(&page, 0, "fx-paste");
+    folder_menu(&page, 0, "Paste");
     wait_file(&work.join("dest/a.txt"), b"a.txt");
     wait_file(&work.join("dest/c.txt"), b"c.txt");
     wait_file(&work.join("dest/album/inner/x.txt"), b"x");
@@ -616,7 +829,7 @@ fn several_files_are_copied_and_cut_and_pasted_on_one_station() {
     // that is taken there is asked about.
     key(&page, 0, "a", "ctrlKey: true");
     assert_eq!(selected(), json!(["album", "a.txt", "c.txt"]));
-    press(&page, 0, "fx-cut");
+    more_menu(&page, 0, "Cut");
     page.wait(
         "the chip",
         &format!("{FX}.querySelector('.fx-clip span')?.innerText === '3 items cut from alpha'"),
@@ -772,13 +985,13 @@ fn a_selection_is_dragged_from_one_station_to_another() {
     shows_no(&page, 0, "two.txt");
 
     // A cut pasted on the other station is a copy, and the page says so.
-    click(&page, "one.txt", &row(0, "one.txt"));
-    press(&page, 0, "fx-cut");
+    page.right_click(&row(0, "one.txt"));
+    page.choose("Cut");
     double_click(&page, "inbox", &row(1, "inbox"));
     at(&page, 1, &to.join("inbox"));
     std::fs::remove_file(to.join("inbox/one.txt")).unwrap();
     shows_no(&page, 1, "one.txt");
-    press(&page, 1, "fx-paste");
+    folder_menu(&page, 1, "Paste");
     wait_file(&to.join("inbox/one.txt"), b"one");
     page.wait(
         "what was said",
@@ -933,7 +1146,7 @@ fn names_and_previews_are_text_and_a_download_is_a_tickets_link() {
         ))
     };
     click(&page, "page.html", &row(0, "page.html"));
-    press(&page, 0, "fx-download");
+    more_menu(&page, 0, "Download");
     let link = page.wait(
         "the download's link",
         &format!("{FX}.querySelector('.fx-xfer[data-kind=link] a.fx-link')?.getAttribute('href')"),
@@ -960,7 +1173,7 @@ fn names_and_previews_are_text_and_a_download_is_a_tickets_link() {
     // Several things: one zip, built at the station, then its link.
     click(&page, "pics", &row(0, "pics"));
     click_with(&page, "long.log", &row(0, "long.log"), "ctrlKey: true");
-    press(&page, 0, "fx-download");
+    more_menu(&page, 0, "Download");
     let link = page.wait(
         "the zip's link",
         &format!("{FX}.querySelector('.fx-xfer[data-kind=link] a.fx-link')?.getAttribute('href')"),
@@ -1171,6 +1384,14 @@ fn on_a_phone_the_panel_is_a_sheet_with_ticks_to_select() {
         )),
         json!([true, 0])
     );
+    // No right-click on a phone: its buttons stay, on one line.
+    assert_eq!(
+        page.js(&format!(
+            "(b => [b.map(x => x.innerText), new Set(b.map(x => Math.round(x.getBoundingClientRect().top))).size])([...{}.querySelectorAll('.fx-tools button')])",
+            v(0)
+        )),
+        json!([["Upload", "New folder", "New file", "Paste", "Select"], 1])
+    );
     // Under a name: its size and age.
     let sub = page.js(&format!(
         "{}.querySelector('.fx-sub').innerText",
@@ -1361,7 +1582,7 @@ fn the_panel_stands_beside_a_layout_and_follows_every_theme() {
     // Something selected, something on the clipboard and a finished copy,
     // so that every kind of text is on screen for each look.
     click(&page, "main.rs", &row(0, "main.rs"));
-    press(&page, 0, "fx-copy");
+    more_menu(&page, 0, "Copy");
     click(
         &page,
         "the triangle of src",
@@ -1369,7 +1590,7 @@ fn the_panel_stands_beside_a_layout_and_follows_every_theme() {
     );
     double_click(&page, "docs", &row(0, "docs"));
     at(&page, 0, &work.join("docs"));
-    press(&page, 0, "fx-paste");
+    more_menu(&page, 0, "Paste");
     wait_file(&work.join("docs/main.rs"), &vec![b'x'; 2_300]);
     press(&page, 0, "fx-nav-up");
     at(&page, 0, &work);
@@ -1402,6 +1623,20 @@ fn the_panel_stands_beside_a_layout_and_follows_every_theme() {
     };
     let dark = check("Spandeck Dark");
     shot(&page, "beside-a-layout-dark");
+    // The menus, where a pointer would open them (for the pictures).
+    page.wait(
+        "a right-click on the file",
+        &format!("(r => r ? (b => (r.dispatchEvent(new MouseEvent('contextmenu', {{bubbles: true, cancelable: true, clientX: b.left + 150, clientY: b.top + 12}})), true))(r.getBoundingClientRect()) : false)({})", row(0, "README.md")),
+    );
+    assert!(menu_items(&page).contains(&"Rename".to_string()));
+    shot(&page, "menu-on-a-file");
+    close_menu(&page);
+    click(&page, "empty space", &empty_space(0));
+    press(&page, 0, "fx-more");
+    assert_eq!(menu_items(&page)[0], "Paste");
+    shot(&page, "more-menu-on-the-folder");
+    close_menu(&page);
+    click(&page, "README.md", &row(0, "README.md"));
 
     // A light theme.
     s.call(
