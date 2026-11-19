@@ -638,8 +638,11 @@ impl Daemon {
                 ));
             }
             // Where its conversation stands now: a reply written after this
-            // is by the model it was started on.
+            // is by the model it was started on. What the program has
+            // written is read first: a last reply not yet copied would
+            // otherwise count as written after the choice.
             let session = meta.session_id.clone().unwrap_or_default();
+            self.archive.poll_session(&session);
             let line = self.archive.session(&session).map_or(0, |s| s.lines);
             {
                 let mut m = p.meta.lock().unwrap();
