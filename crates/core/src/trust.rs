@@ -399,7 +399,7 @@ pub(crate) fn fleet_id_of(key: &[u8]) -> String {
 }
 
 /// Sign one call with a given key: `<time>.<nonce>.<mac>`.
-pub(crate) fn sign_with(key: &[u8], purpose: &str, body: &[u8]) -> String {
+pub fn sign_with(key: &[u8], purpose: &str, body: &[u8]) -> String {
     let ts = now_ms().to_string();
     let nonce = &random_token()[..16];
     let tag = mac(

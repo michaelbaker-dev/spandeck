@@ -26,6 +26,8 @@ reqwest.workspace = true
 # (crates/core/src/http.rs). Already in the tree through reqwest.
 webpki-root-certs = "1"
 hmac = "0.13"
+# The sums in a zip of files (files.rs). Already in the lock file, for flate2.
+crc32fast = "1"
 
 [dev-dependencies]
 tempfile.workspace = true

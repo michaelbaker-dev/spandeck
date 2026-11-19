@@ -43,6 +43,7 @@ use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite;
 
 mod fence;
+mod files;
 mod lanes;
 mod tls;
 use lanes::{Lane, Lines, Scope};
@@ -344,6 +345,7 @@ pub async fn start(daemon: Daemon) -> anyhow::Result<Vec<SocketAddr>> {
         .route("/api/ws", get(ws_upgrade))
         .route("/api/ping", get(ping_upgrade))
         .route("/api/font/{id}", get(font))
+        .route("/api/files/get", get(files::get))
         .fallback(get(asset))
         .layer(DefaultBodyLimit::max(100 << 20))
         .with_state(web.clone());
