@@ -23,8 +23,10 @@
   --veil: rgba(15, 19, 24, .62); --zone: rgba(108, 182, 255, .18); --mic: #e5484d; --mark: #d6dde6; --mark-white: #fff; --ink: #10151b;
 }
 /* For any other colours they are mixed from them, so a light theme is light
-   everywhere. A pane with a look of its own mixes its own. */
-:root[data-themed], .pane[data-themed] {
+   everywhere. A pane with a look of its own mixes its own, and so does its
+   conversation (and its picture on a tile), which is drawn in the terminal's
+   colours (look.js, chatLook). */
+:root[data-themed], .pane[data-themed], .chat-bar[data-themed], .chat-body[data-themed], .thumb[data-themed] {
   --accent-bg: color-mix(in srgb, var(--blue) 36%, var(--bg)); --accent-line: color-mix(in srgb, var(--blue) 62%, var(--bg));
   --toggle-bg: var(--accent-bg); --toggle-line: var(--accent-line); --on-accent: var(--text); --strong: var(--text);
   --red-bg: color-mix(in srgb, var(--red) 36%, var(--bg)); --red-line: color-mix(in srgb, var(--red) 42%, var(--bg));
@@ -804,7 +806,7 @@ a.btn.wide { width: 100%; justify-content: center; text-align: center; }
   #app.kbd .phone-pane > .chat-bar { display: none; }
 }
 
-.chat-body { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; position: relative; font-size: calc(15px * var(--ui-scale)); line-height: 1.5; color: var(--text); }
+.chat-body { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; position: relative; font-size: calc(15px * var(--ui-scale)); line-height: 1.5; color: var(--text); background: var(--bg); }
 .chat-log { flex: 1 1 0; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-anchor: none; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; padding: 14px max(14px, calc((100% - 820px) / 2)) 12px; }
 .chat-log > * { flex: none; min-width: 0; }
 .chat-log:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
@@ -882,6 +884,8 @@ button.ask-opt.on { border-color: var(--accent-line); background: var(--accent-b
 .chat-row { display: flex; align-items: flex-end; gap: 6px; }
 .chat-box { flex: 1 1 0; min-width: 0; min-height: 44px; max-height: 40dvh; resize: none; font-size: max(16px, calc(15px * var(--ui-scale))); line-height: 1.35; padding: 10px 12px; border-radius: 22px; background: var(--panel); scrollbar-width: none; }
 .chat-box::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
+/* (The browser's own grey for it cannot be read on every background a look may give.) */
+[data-themed] .chat-box::placeholder { color: var(--muted); }
 .chat-row button { flex: none; min-height: 44px; min-width: 44px; justify-content: center; border-radius: 22px; }
 .chat-plus { font-size: 20px; padding: 0; } .chat-send { padding: 0 13px; font-weight: 600; } .chat-mic { padding: 0; } .chat-mic.on { outline: 2px solid var(--mic); --ico: var(--ico-stop); }
 .chat-slash { display: flex; flex-wrap: wrap; gap: 6px; } button.chip.slash { background: none; min-height: 32px; color: var(--text); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }

@@ -55,7 +55,7 @@ Object.assign(KEYS, {
   'cursor.style': { kind: 'one', options: [['block', 'Block'], ['bar', 'Bar'], ['underline', 'Underline']], group: 'cursor', label: 'Shape' },
   'cursor.blink': { kind: 'switch', group: 'cursor', label: 'Blink' },
 });
-export const GROUPS = [['term', 'Terminal colours'], ['ansi', 'The 16 colours programs use'], ['deck', 'Deck colours'], ['font', 'Terminal font'],
+export const GROUPS = [['term', 'Terminal and conversation colours'], ['ansi', 'The 16 colours programs use'], ['deck', 'Deck colours'], ['font', 'Terminal font'],
   ['ui', 'Deck font'], ['cursor', 'Cursor'], ['read', 'Readability']];
 
 const COLOUR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
@@ -238,7 +238,19 @@ function setFrame(el, look) {
   el.style.setProperty('--term-bg', look['term.background']);
 }
 function clearFrame(el) {
-  for (const prop of [...Object.values(DECK_VARS), '--focus-w', '--term-bg']) el.style.removeProperty(prop);
+  for (const prop of [...Object.values(DECK_VARS), '--focus-w', '--term-bg', '--accent-bg']) el.style.removeProperty(prop);
+}
+// The shade that text is written on (the owner's bubble in a conversation, a
+// pressed button) is mixed by the style sheet from blue and the background.
+// On a background that is neither dark nor light that mix comes out too
+// near the text; then it is moved away from the text until the text reads
+// at 4.5:1, and given here in place of the style sheet's. Only for a frame
+// whose shades are mixed (`data-themed`): Spandeck Dark's are written out.
+function setShades(el, look) {
+  const bg = look['deck.bg'], text = look['deck.text'];
+  const mixed = mix(bg, look['deck.blue'], 0.36);
+  const shade = readable(mixed, text, 4.5, luminance(text) >= luminance(bg) ? '#000000' : '#ffffff');
+  if (shade !== mixed) el.style.setProperty('--accent-bg', shade); else el.style.removeProperty('--accent-bg');
 }
 
 export function applyPage(look) {
@@ -255,7 +267,7 @@ export function applyPage(look) {
   if (narrow()) root.style.setProperty('--mono-px', termSize(look).px + 'px'); else root.style.removeProperty('--mono-px');
   // The shades worked out from these colours (a pressed button, a chip's
   // border) are written out for Spandeck Dark and computed for any other.
-  if (sameFrame(look, BASE)) delete root.dataset.themed; else root.dataset.themed = '1';
+  if (sameFrame(look, BASE)) { delete root.dataset.themed; root.style.removeProperty('--accent-bg'); } else { root.dataset.themed = '1'; setShades(root, look); }
   // This device's own reading size for a conversation (below), in place of
   // the deck's there and nowhere else.
   const chat = chatSize(look);
@@ -266,9 +278,36 @@ export function applyPage(look) {
 
 // A pane with a look of its own carries its colours on its own frame.
 export function applyPaneFrame(el, look, page) {
-  if (page && !sameFrame(look, page)) { setFrame(el, look); el.dataset.themed = '1'; }
+  if (page && !sameFrame(look, page)) { setFrame(el, look); el.dataset.themed = '1'; setShades(el, look); }
   else { clearFrame(el); delete el.dataset.themed; }
   el.style.setProperty('--lig', look['font.ligatures'] ? 'normal' : 'none');
+}
+
+// A pane has two faces, and its look is drawn in both. In its conversation
+// the page behind the words and the words themselves are the terminal's
+// background and text; the rest of what a conversation is drawn with (quiet
+// text, lines, bubbles, buttons) is worked out from those two as an imported
+// terminal theme's deck colours are, and the state colours stay the look's
+// own, each moved only as far as it takes to be told from what is behind it.
+// A look whose terminal and deck agree (Spandeck Dark, and most themes) is
+// given back as it is: its conversation is drawn in its deck colours.
+const sameColour = (a, b) => rgb(a).join() === rgb(b).join();
+export function chatLook(look) {
+  if (sameColour(look['term.background'], look['deck.bg']) && sameColour(look['term.foreground'], look['deck.text'])) return look;
+  const d = deckFromTerminal(look);
+  for (const c of ['blue', 'green', 'amber', 'red', 'violet', 'focus']) d['deck.' + c] = readable(look['deck.' + c], d['deck.panel'], 3, d['deck.text']);
+  return { ...look, ...d };
+}
+// The body of a pane's conversation (and a pane's picture on a tile): the
+// colours above, where they are not the page's already; the scroll bars and
+// form controls of a light or a dark surface; and code in the pane's own
+// terminal font, when it has one.
+export function applyChatFrame(el, look, page) {
+  const chat = chatLook(look);
+  applyPaneFrame(el, chat, page);
+  if (chat !== look) el.style.setProperty('color-scheme', chat['deck.scheme']); else el.style.removeProperty('color-scheme');
+  const [mine, pages] = [fontList(look['font.family']), fontList(page['font.family'])];
+  if (mine !== pages) el.style.setProperty('--mono-font', mine + ', ' + SYMBOLS); else el.style.removeProperty('--mono-font');
 }
 
 // ---- fonts ----

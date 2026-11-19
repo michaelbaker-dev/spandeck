@@ -41,6 +41,7 @@ import { sendAct } from './typed.js';
 import { micFor } from './mic.js';
 import { rolePick } from './roles.js';
 import { retryIn } from './api.js';
+import { applyPaneFrame, applyChatFrame } from './look.js';
 
 let env = null;
 const convs = new Map();   // "station/pane id" -> Conv
@@ -1975,6 +1976,14 @@ class Conv {
     return this.frameEl;
   }
 
+  // The look this pane is shown in, as its terminal is given it (term.js):
+  // its frame and its bar carry the look's deck colours, and what is said is
+  // drawn on the terminal's background in the terminal's text (look.js).
+  setLook(look, page) {
+    for (const el of [this.frameEl, this.bar]) if (el) applyPaneFrame(el, look, page);
+    applyChatFrame(this.body, look, page);
+  }
+
   dispose() {
     this.disposed = true;
     // (Its window for what the program shows goes with it.)
@@ -2123,6 +2132,16 @@ export function conversation(st, p, where) {
   c.drawBar();
   c.drawDock();
   return c;
+}
+
+// Every conversation on the page is shown in its pane's look. `lookOf(st,
+// pane)` gives { look, page }: the pane's look and the page's around it.
+export function chatLooks(lookOf) {
+  for (const c of convs.values()) {
+    if (!c.body.isConnected) continue;
+    const { look, page } = lookOf(c.st, c.p);
+    c.setLook(look, page);
+  }
 }
 
 // What is in sight changed its size (a phone's keyboard): every log on the
