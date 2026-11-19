@@ -796,9 +796,10 @@ impl Daemon {
     }
 
     /// The pane a call is about: named in the call, else the caller's own.
+    /// A name an agent gives is a pane of its own project first.
     fn target_pane(&self, caller: &Caller, params: &Value) -> Result<String> {
         match (opt(params, "pane"), &caller.pane) {
-            (Some(id), _) => Ok(self.pane(id)?.id.clone()),
+            (Some(id), from) => Ok(self.pane_from(from.as_deref(), id)?.id.clone()),
             (None, Some(own)) => Ok(own.clone()),
             (None, None) => Err(invalid("missing parameter: pane")),
         }

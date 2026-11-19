@@ -1726,6 +1726,18 @@ instruction to build what the report recommended.
     of the whole hours that hold the period, first event to last, and the document names
     the hours. (They were the pane's whole life, and the document said so.) No migration:
     a cut finer than the hour would need the time of each model call kept.
+- **A bare pane name is a pane of the caller's own project first** (19 Nov 2026: `spandeck
+  send critic` from a pane of `hero3` failed because `pairtest` on the same station had a
+  `critic` too). In every call of an agent's that names a pane (`msg.send`, `wait`,
+  `pane.get`, `pane.text`, `diff`, `orders.view`) a name with no project is looked for among
+  the running panes of the calling pane's project, and only when that project has none on
+  the whole station. A name several panes still share is refused with the full address of
+  each to choose from (`project/name@station`; two panes one address would name, by id).
+  The owner outside any pane is answered as before, with that list. Who may reach whom is
+  unchanged: another project's pane still needs the link. A message sent to a bare name is
+  stored under the pane's full name (`project/name@station`) when the pane is in a project:
+  mail is kept by name, and a `critic` of another project is never shown it. Not changed:
+  a bare name sent to another station is resolved there as before, by that station.
 - **Watch is the conversation.** A project's Watch shows its agents as a strip (state, how
   long, one line of what each is doing; no terminal thumbnail), who is waiting for whom
   when that can be told from the messages and the states and never otherwise, and the

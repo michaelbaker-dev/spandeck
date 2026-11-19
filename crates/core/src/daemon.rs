@@ -624,6 +624,71 @@ pub struct HandoffState {
     pub rids_kept_ms: Option<u64>,
 }
 
+/// A running pane, as a name is looked up among them.
+pub(crate) struct Named {
+    pub id: String,
+    pub name: String,
+    pub project: Option<String>,
+}
+
+/// Which running pane a name means: its place in `panes`, `None` when no
+/// pane has the name, or, when several have it, the full address of each
+/// to choose from (`project/name@station`).
+///
+/// `own` is the project of the pane that asks (`None`: the owner outside
+/// every pane, or a pane of no project). A bare name is first a pane of
+/// that project: every project has a `builder` and a `critic`, and an
+/// agent that writes to `critic` means its own. Only when its project has
+/// none is the name looked for on the whole station, as `name` or as
+/// `project/name`.
+pub(crate) fn by_name(
+    panes: &[Named],
+    name: &str,
+    own: Option<&str>,
+    station: &str,
+) -> std::result::Result<Option<usize>, Vec<String>> {
+    let pick = |found: Vec<usize>| match found[..] {
+        [] => Ok(None),
+        [one] => Ok(Some(one)),
+        _ => {
+            let address = |p: &Named| match &p.project {
+                Some(project) => format!("{project}/{}@{station}", p.name),
+                None => format!("{}@{station}", p.name),
+            };
+            let mut all: Vec<String> = found
+                .iter()
+                .map(|i| {
+                    let mine = address(&panes[*i]);
+                    let shared = found.iter().any(|j| j != i && address(&panes[*j]) == mine);
+                    // Two panes one address would name: each by its id.
+                    if shared {
+                        format!("{}@{station}", panes[*i].id)
+                    } else {
+                        mine
+                    }
+                })
+                .collect();
+            all.sort();
+            Err(all)
+        }
+    };
+    let among = |keep: &dyn Fn(&Named) -> bool| -> Vec<usize> {
+        (0..panes.len()).filter(|i| keep(&panes[*i])).collect()
+    };
+    if let Some(own) = own {
+        let ours = among(&|p| p.name == name && p.project.as_deref() == Some(own));
+        if !ours.is_empty() {
+            return pick(ours);
+        }
+    }
+    pick(among(&|p| {
+        p.name == name
+            || p.project
+                .as_ref()
+                .is_some_and(|project| format!("{project}/{}", p.name) == name)
+    }))
+}
+
 impl Daemon {
     pub fn start(paths: Paths, cfg: Config, opts: StartOpts) -> anyhow::Result<Daemon> {
         std::fs::create_dir_all(&paths.state_dir)?;
@@ -1072,29 +1137,43 @@ impl Daemon {
     // ----------------------------------------------------------------- panes
 
     pub fn pane(&self, id: &str) -> Result<Arc<PaneEntry>> {
+        self.pane_from(None, id)
+    }
+
+    /// The pane `id` means to the caller in pane `from` (`None`: the owner,
+    /// outside every pane): an id, `id@station` for this station, or a
+    /// name. A name is looked for among the caller's own project's panes
+    /// first (`by_name`).
+    pub fn pane_from(&self, from: Option<&str>, id: &str) -> Result<Arc<PaneEntry>> {
         let panes = self.panes.read().unwrap();
         if let Some(p) = panes.get(id) {
             return Ok(p.clone());
         }
-        // Accept `id@station` for this station, and a unique name.
         let bare = id.strip_suffix(&format!("@{}", self.station)).unwrap_or(id);
         if let Some(p) = panes.get(bare) {
             return Ok(p.clone());
         }
-        let mut by_name = panes.values().filter(|p| {
-            let m = p.meta.lock().unwrap();
-            m.exit.is_none()
-                && (m.name == bare
-                    || m.project
-                        .as_ref()
-                        .is_some_and(|proj| format!("{proj}/{}", m.name) == bare))
-        });
-        match (by_name.next(), by_name.next()) {
-            (Some(p), None) => Ok(p.clone()),
-            (Some(_), Some(_)) => Err(invalid(format!(
-                "more than one pane is called {bare}; use its id"
+        let own = from
+            .and_then(|f| panes.get(f))
+            .and_then(|p| p.meta.lock().unwrap().project.clone());
+        let running: Vec<Named> = panes
+            .values()
+            .filter_map(|p| {
+                let m = p.meta.lock().unwrap();
+                m.exit.is_none().then(|| Named {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                    project: m.project.clone(),
+                })
+            })
+            .collect();
+        match by_name(&running, bare, own.as_deref(), &self.station) {
+            Ok(Some(i)) => Ok(panes[&running[i].id].clone()),
+            Ok(None) => Err(Error::NoPane(id.to_string())),
+            Err(addresses) => Err(invalid(format!(
+                "more than one pane is called {bare}: {}. Use one of these addresses",
+                addresses.join(", ")
             ))),
-            _ => Err(Error::NoPane(id.to_string())),
         }
     }
 
@@ -3242,5 +3321,52 @@ pub fn restore_db_before_upgrade(paths: &Paths) {
     }
     if let Err(e) = std::fs::rename(&saved, &db) {
         tracing::error!(error = %e, "could not put back the database saved before the upgrade");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reason for this test: `spandeck send critic "…"` from a pane of
+    /// `hero3` failed because `pairtest` on the same station had a
+    /// `critic` too (19 Nov 2026). A bare name is the asking pane's own
+    /// project's pane first; the owner outside any pane, with several to
+    /// choose from, is given their full addresses.
+    #[test]
+    fn a_bare_name_is_a_pane_of_the_askers_own_project_first() {
+        let pane = |id: &str, name: &str, project: Option<&str>| Named {
+            id: id.into(),
+            name: name.into(),
+            project: project.map(String::from),
+        };
+        let panes = [
+            pane("p-1", "critic", Some("pairtest")),
+            pane("p-2", "builder", Some("hero3")),
+            pane("p-3", "critic", Some("hero3")),
+            pane("p-4", "user", Some("pairtest")),
+            pane("p-5", "shell", None),
+            pane("p-6", "shell", None),
+        ];
+        let find = |name: &str, own: Option<&str>| by_name(&panes, name, own, "spark2");
+        assert_eq!(find("critic", Some("hero3")), Ok(Some(2)));
+        assert_eq!(find("critic", Some("pairtest")), Ok(Some(0)));
+        // None of that name in its own project: the station's, if one.
+        assert_eq!(find("user", Some("hero3")), Ok(Some(3)));
+        assert_eq!(find("pairtest/critic", Some("hero3")), Ok(Some(0)));
+        assert_eq!(find("nobody", Some("hero3")), Ok(None));
+        // The owner, and a pane of a project that has no critic.
+        let both = vec![
+            "hero3/critic@spark2".to_string(),
+            "pairtest/critic@spark2".to_string(),
+        ];
+        assert_eq!(find("critic", None), Err(both.clone()));
+        assert_eq!(find("critic", Some("other")), Err(both));
+        assert_eq!(find("builder", None), Ok(Some(1)));
+        // Two panes that one address would name are told apart by id.
+        assert_eq!(
+            find("shell", None),
+            Err(vec!["p-5@spark2".to_string(), "p-6@spark2".to_string()])
+        );
     }
 }

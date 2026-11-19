@@ -285,6 +285,7 @@ impl Daemon {
         let agent = caller.authority == Authority::Agent;
         let mut auth = None;
         let mut local_pane = None;
+        let mut recipient = to.to_string();
         if remote {
             let dest = station.unwrap_or_default();
             if self.fleet.peer(dest).is_none() {
@@ -321,17 +322,32 @@ impl Daemon {
                 });
             }
         } else if name != "you" {
-            let Ok(target) = self.pane(name) else {
-                return Err(Error::NotFound(format!(
-                    "no pane called {name} on this station"
-                )));
+            // A bare name is the sender's own project's pane first; a name
+            // several panes have is refused with their addresses.
+            let target = match self.pane_from(caller.pane.as_deref(), name) {
+                Ok(target) => target,
+                Err(Error::NoPane(_)) => {
+                    return Err(Error::NotFound(format!(
+                        "no pane called {name} on this station"
+                    )))
+                }
+                Err(e) => return Err(e),
             };
             // An agent reaches its own project, and a project linked to it.
-            let theirs = target.meta.lock().unwrap().project.clone();
+            let (theirs, their_name) = {
+                let m = target.meta.lock().unwrap();
+                (m.project.clone(), m.name.clone())
+            };
             if let (true, Some(own), Some(theirs)) = (agent, &project, &theirs) {
                 if own != theirs && !self.linked(own, theirs, &self.station) {
                     return Err(not_linked(own, theirs));
                 }
+            }
+            // Mail is kept by name, and every project may have a pane of
+            // this name: what was written as a bare name is stored as the
+            // pane's full name, so no other project's pane is shown it.
+            if let (Some(theirs), true) = (&theirs, name == their_name) {
+                recipient = format!("{theirs}/{their_name}@{}", self.station);
             }
             local_pane = Some(target.id.clone());
         }
@@ -340,7 +356,7 @@ impl Daemon {
             .send_marked(
                 NewMessage {
                     sender,
-                    recipient: to.to_string(),
+                    recipient,
                     kind: kind.to_string(),
                     body: body.to_string(),
                     refs,

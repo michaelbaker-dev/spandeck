@@ -45,6 +45,13 @@ fn a_message_is_a_record_and_only_a_nudge_is_typed() {
     let repo = project(&s, "demo", &[], "");
     let reader = agent(&s, "demo", &repo, "reader", reads_mail());
     s.wait_text(&reader, "[fake] session");
+    // Another project on the station has a `reader` too. (`spandeck send
+    // critic` from a pane of `hero3` failed because `pairtest` had a
+    // `critic` as well: 19 Nov 2026.) The writer's "reader" is its own
+    // project's.
+    let other_repo = project(&s, "other", &[], "");
+    let other_reader = agent(&s, "other", &other_repo, "reader", json!({"steps": []}));
+    s.wait_text(&other_reader, "[fake] session");
     let writer = agent(
         &s,
         "demo",
@@ -80,8 +87,43 @@ fn a_message_is_a_record_and_only_a_nudge_is_typed() {
         (m["from"].as_str(), m["to"].as_str(), m["status"].as_str()),
         (
             Some("demo/writer@alpha"),
-            Some("reader@alpha"),
+            Some("demo/reader@alpha"),
             Some("read")
+        )
+    );
+    // The other project's reader was not shown it, and every call of an
+    // agent's that names a pane reads a bare name the same way.
+    let as_pane = |pane: &str, method: &str, params: Value| {
+        s.call_as_pane(pane, method, params)
+            .unwrap_or_else(|e| panic!("{method}: {}", e.message))
+    };
+    assert_eq!(
+        as_pane(
+            &other_reader,
+            "msg.inbox",
+            json!({"all": true, "peek": true})
+        ),
+        json!([])
+    );
+    for (asks, means) in [(&writer, &reader), (&other_reader, &other_reader)] {
+        let got = as_pane(asks, "pane.get", json!({"pane": "reader"}));
+        assert_eq!(got["id"], json!(means), "{got}");
+        let waited = as_pane(
+            asks,
+            "wait",
+            json!({"pane": "reader", "states": ["idle", "done"], "timeout_ms": 5000}),
+        );
+        assert_eq!(waited["id"], json!(means), "{waited}");
+    }
+    // The owner, outside every pane, is told the addresses to choose from.
+    let refused = s
+        .try_call("msg.send", json!({"to": "reader", "body": "which of you?"}))
+        .unwrap_err();
+    assert_eq!(
+        (refused.code.as_str(), refused.message.as_str()),
+        (
+            "invalid",
+            "more than one pane is called reader: demo/reader@alpha, other/reader@alpha. Use one of these addresses"
         )
     );
     s.call_as_pane(
@@ -901,14 +943,14 @@ fn a_projects_record_is_written_by_the_station_from_what_it_holds() {
                 .then_some(())
         })
     };
-    read("demo/builder", "reviewer");
-    read("demo/reviewer", "builder");
+    read("demo/builder", "demo/reviewer");
+    read("demo/reviewer", "demo/builder");
     // The owner's part: a message, and a restart.
     s.call(
         "msg.send",
         json!({"to": "builder", "body": "thank you both"}),
     );
-    read("you", "builder");
+    read("you", "demo/builder");
     s.call("pane.restart", json!({"pane": reviewer}));
     wait_for("the restart in the log", 10, || {
         (!s.log("pane.restarted").is_empty()).then_some(())
