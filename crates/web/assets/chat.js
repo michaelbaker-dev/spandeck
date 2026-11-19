@@ -484,7 +484,8 @@ class Conv {
     const sub = [p.agent === 'shell' ? 'shell' : p.agent_name, p.role ? 'role: ' + p.role : null, this.st, p.project].filter(Boolean).join(' · ');
     const state = stateOf(p);
     const pct = [p.usage ? 1 : 0, p.usage?.context_pct ?? null, p.usage?.context_tokens ?? null];
-    const sig = JSON.stringify([phone, title, sub, p.cwd || '', state, p.needs_reason, face, this.available, this.available === false ? this.reason : '', next.length, next[0] && keyOf(next[0].st, next[0].p), this.where, p.name, pct, p.rapid?.says]);
+    const files = env.files ? env.files(this.st, p) : null;
+    const sig = JSON.stringify([phone, !!files, title, sub, p.cwd || '', state, p.needs_reason, face, this.available, this.available === false ? this.reason : '', next.length, next[0] && keyOf(next[0].st, next[0].p), this.where, p.name, pct, p.rapid?.says]);
     if (sig === this.barSig) return;
     this.barSig = sig;
     const pick = (to) => h('button', { type: 'button', class: face === to ? 'on' : '', 'aria-pressed': String(face === to), onclick: (e) => { e.currentTarget.blur(); if (face !== to) setFace(this.st, p, to); } }, to === 'chat' ? 'Chat' : 'Terminal');
@@ -499,7 +500,9 @@ class Conv {
       h('div', { class: 'chat-title', title: `${p.name} · ${p.address}` }, h('b', {}, title), h('span', { class: 'muted' }, sub),
         // The folder its program was started in. A long path loses its
         // beginning, not its end (the mark keeps the first "/" in place).
-        p.cwd ? h('span', { class: 'muted mono chat-cwd', title: `The folder ${p.agent === 'shell' ? 'this shell' : 'this agent'} was started in: ${p.cwd}`, 'aria-label': `Folder: ${p.cwd}` }, '\u200e' + p.cwd) : null),
+        // With the file explorer (files.js) a tap on it shows that folder's files.
+        p.cwd ? h('span', { class: 'muted mono chat-cwd' + (files ? ' opens' : ''), title: `The folder ${p.agent === 'shell' ? 'this shell' : 'this agent'} was started in: ${p.cwd}${files ? '. Tap to see its files.' : ''}`, 'aria-label': `Folder: ${p.cwd}`,
+          ...(files ? { role: 'button', tabIndex: 0, onclick: (e) => { e.stopPropagation(); files(); }, onkeydown: (e) => { if (e.key === 'Enter') files(); } } : {}) }, '\u200e' + p.cwd) : null),
       this.available === false
         ? h('span', { class: 'chat-why', role: 'note' }, 'Terminal only: ' + this.why())
         : h('div', { class: 'chat-switch', role: 'group', 'aria-label': 'Show this pane as' }, pick('chat'), pick('terminal')),

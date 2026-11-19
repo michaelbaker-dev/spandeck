@@ -49,12 +49,15 @@ addEventListener('mousedown', (e) => { if (openMenu && !openMenu.contains(e.targ
 addEventListener('keydown', (e) => { if (e.key === 'Escape' && openMenu) { e.stopPropagation(); closeMenu(); } }, true);
 addEventListener('blur', closeMenu);
 
-export function toast(text, kind = 'info') {
-  const t = h('div', { class: 'toast ' + kind, role: 'status' }, text);
+// `act`: one thing that can be done about what was said ({label, run}, as
+// Undo after a delete): the toast then stays ten seconds and has its button.
+export function toast(text, kind = 'info', act = null) {
+  const t = h('div', { class: 'toast ' + kind + (act ? ' has-act' : ''), role: 'status' }, h('span', {}, text),
+    act ? h('button', { type: 'button', class: 'mini toast-act', onclick: () => { t.remove(); act.run(); } }, act.label) : null);
   let box = document.getElementById('toasts');
   if (!box) { box = h('div', { id: 'toasts' }); overlays().append(box); }
   box.append(t);
-  setTimeout(() => t.remove(), kind === 'error' ? 7000 : 3500);
+  setTimeout(() => t.remove(), act ? 10000 : kind === 'error' ? 7000 : 3500);
 }
 
 // Put text on the clipboard. The deck is usually opened over plain http on the

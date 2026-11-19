@@ -15,7 +15,7 @@
 // font that stood in for it, so it measures again and then does as above.
 
 import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, usageGauge, heldWords, rapidLine, RELEASE_SAYS, trustAsksWords, trustAnsweredWords, hooksAsksWords, hooksAnsweredWords } from './ui.js';
-import { paneIcon, iconName, hideIcon } from './icons.js';
+import { paneIcon, iconName, hideIcon, fileIcon } from './icons.js';
 import { keyTyped, paneWrote, keysNotSent } from './perf.js';
 import { HOLD_MS, isTyping, isPaste, holdTake, heldTooLong, keysWords, wasWere, offWords, droppedWords, sendAct } from './typed.js';
 import { retryIn } from './api.js';
@@ -1050,6 +1050,7 @@ export class PaneTerm {
     const rpc = (m, extra = {}) => this.api.on(this.station, m, { pane: p.id, ...extra }).catch(e => toast(e.message, 'error'));
     this.strip.className = 'strip ' + s;
     const agents = this.opts.agentsOf ? this.opts.agentsOf(p) : [];
+    const files = this.opts.onFiles ? this.opts.onFiles(this) : null;
     this.el.classList.toggle('agents-open', this.agentsOpen);
     if (this.agentsOpen) {
       this.drawer.replaceChildren(
@@ -1069,7 +1070,9 @@ export class PaneTerm {
       this.guest ? h('span', { class: 'chip guest', title: `A guest in this layout: this pane is ${this.guest}` }, this.guest) : null,
       h('span', { class: 'strip-activity' }, activity),
       // The folder its program was started in; a long path loses its beginning.
-      p.cwd ? h('span', { class: 'strip-note strip-cwd mono', title: `The folder ${p.agent === 'shell' ? 'this shell' : 'this agent'} was started in: ${p.cwd}`, 'aria-label': `Folder: ${p.cwd}` }, '\u200e' + p.cwd) : null,
+      // With the file explorer (files.js) the folder opens it, and so does the button before it.
+      files ? h('button', { class: 'strip-files', title: `Files on ${this.station}, at this pane's folder`, 'aria-label': `Files of ${p.name}`, onclick: files }, fileIcon('folder')) : null,
+      p.cwd ? h('span', { class: 'strip-note strip-cwd mono' + (files ? ' opens' : ''), title: `The folder ${p.agent === 'shell' ? 'this shell' : 'this agent'} was started in: ${p.cwd}${files ? '. Click to see its files.' : ''}`, 'aria-label': `Folder: ${p.cwd}`, ...(files ? { role: 'button', tabIndex: 0, onclick: files, onkeydown: (e) => { if (e.key === 'Enter') files(); } } : {}) }, '\u200e' + p.cwd) : null,
       p.rapid ? h('span', { class: 'strip-note rapid-line', title: p.rapid.more }, p.rapid.says) : null,
       p.needs_reason && s === 'needs_you' ? h('span', { class: 'strip-reason', title: trustAsksWords(p) || hooksAsksWords(p) || p.needs_reason }, p.needs_reason) : null,
       // The program asks whether to trust the folder, and spandeck can

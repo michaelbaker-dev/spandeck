@@ -1191,3 +1191,126 @@ html.kbd .chat-card.held > .ask-opts, html.kbd .chat-card.held > .ask-plan { fle
 .made-playing { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; } .made-player { width: 100%; max-height: 60dvh; border-radius: 16px; background: #000; }
 .made-acts { gap: 8px; flex-wrap: wrap; } .made-acts button { min-height: 40px; flex: 1 1 auto; justify-content: center; }
 .made-zoom { max-width: 100%; max-height: 66dvh; overflow: auto; border-radius: 10px; touch-action: pan-x pan-y pinch-zoom; } .made-large { display: block; cursor: zoom-in; } .made-large.close { max-width: none; max-height: none; width: 220%; cursor: zoom-out; }
+
+/* ---- the file explorer (files.js): a panel at the right of the window, beside
+   the panes, which get narrower; on a phone a sheet over the whole screen.
+   Every colour is one of the theme's. ---- */
+body { --files-w: 440px; }
+body.files-open #app { margin-right: var(--files-w); }
+#files-panel { position: fixed; top: 0; right: 0; bottom: 0; width: var(--files-w); z-index: 40; display: flex; flex-direction: column; min-width: 0; background: var(--panel); color: var(--text); border-left: 1px solid var(--line); padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) 0; animation: fx-in .16s ease-out; }
+@keyframes fx-in { from { transform: translateX(28px); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { #files-panel { animation: none; } }
+.fx [hidden] { display: none !important; }
+.fx-file-input { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; pointer-events: none; }
+.fx-grip { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 2; }
+.fx-grip:hover, .fx-grip:focus-visible, body.fx-sizing .fx-grip { background: var(--zone); outline: none; box-shadow: inset 3px 0 0 var(--blue); }
+body.fx-sizing { cursor: col-resize; }
+.fx-head { flex: none; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--line); }
+.fx-title { font-size: calc(14px * var(--ui-scale)); }
+.fx-for { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.fx-move { flex: 0 1 auto; min-width: 0; overflow: hidden; border-color: var(--amber-line); color: var(--amber); padding: 2px 8px; }
+.fx-move bdi { overflow: hidden; text-overflow: ellipsis; max-width: 10em; }
+.fx-close { flex: none; background: none; border-color: transparent; color: var(--muted); padding: 2px 8px; font-size: calc(14px * var(--ui-scale)); }
+.fx-close:hover { color: var(--text); }
+.fx-nav { flex: none; padding: 4px 6px; background: none; border-color: transparent; color: var(--muted); }
+.fx-nav:hover:not(:disabled) { color: var(--text); border-color: var(--line); background: var(--panel2); }
+.fx-nav.on { color: var(--blue); border-color: var(--blue-line); background: var(--sel-bg); }
+.fx-ico { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; }
+.fx-views { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.fx-view { flex: 1 1 0; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.fx-view + .fx-view { border-top: 3px solid var(--line); }
+.fx-view.active { box-shadow: inset 3px 0 0 var(--blue); }
+.fx-bar { flex: none; display: flex; align-items: center; gap: 2px; padding: 6px 8px 2px 12px; }
+.fx-station { flex: 1 1 auto; width: auto; min-width: 0; margin-right: 6px; padding: 3px 6px; font-weight: 600; }
+.fx-path { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-width: 0; padding: 2px 8px 4px 12px; }
+.fx-crumbs { flex: 1 1 0; min-width: 0; display: flex; align-items: center; overflow-x: auto; scrollbar-width: none; white-space: nowrap; min-height: 26px; cursor: text; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); padding: 0 4px; }
+.fx-crumbs::-webkit-scrollbar { display: none; }
+.fx-seg { flex: none; background: none; border: none; border-radius: 4px; padding: 2px 4px; color: var(--muted); font-family: var(--mono-font); font-size: calc(12px * var(--ui-scale)); }
+.fx-seg:hover { color: var(--text); background: var(--panel2); } .fx-seg.here { color: var(--text); font-weight: 600; }
+.fx-seg:focus-visible { outline-offset: -2px; }
+.fx-sep { flex: none; color: var(--dim); font-family: var(--mono-font); }
+.fx-path-box { flex: 1 1 0; width: auto; min-width: 0; padding: 3px 6px; white-space: nowrap; }
+.fx-path-err, .fx-name-err, .fx-move-err { color: var(--red); } .fx-path-err { flex: 1 0 100%; } .fx-path-err:empty, .fx-name-err:empty, .fx-move-err:empty { display: none; }
+.fx-tools { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 2px 8px 6px 12px; }
+.fx-tools .mini { padding: 2px 7px; } .fx-tools .mini.on { border-color: var(--blue); background: var(--sel-bg); }
+.fx-gap { flex: none; width: 1px; align-self: stretch; margin: 2px 3px; background: var(--line); }
+.fx-cols { flex: none; display: flex; align-items: center; gap: 6px; padding: 2px 16px 2px 12px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--muted); font-size: calc(11px * var(--ui-scale)); text-transform: uppercase; letter-spacing: .04em; background: var(--panel2); }
+.fx-c-name { flex: 1 1 auto; padding-left: 40px; }
+.fx-tree { flex: 1 1 auto; min-height: 60px; overflow: hidden auto; overscroll-behavior: contain; padding: 2px 0 12px; background: var(--bg); outline: none; position: relative; }
+.fx-tree:focus-visible { box-shadow: inset 0 0 0 2px var(--blue); }
+.fx-row { display: flex; align-items: center; gap: 6px; min-height: 26px; padding: 1px 12px 1px calc(8px + var(--d, 0) * 16px); color: var(--text); cursor: default; white-space: nowrap; user-select: none; -webkit-user-select: none; }
+.fx-row[data-i]:hover { background: var(--panel2); }
+.fx-row.sel, .fx-row.sel[data-i]:hover { background: var(--sel-bg); }
+/* On the selected row the quiet words are in the text's colour: a theme's quiet colour on its selection is too faint (Solarized Light). */
+.fx-row.sel .fx-size, .fx-row.sel .fx-when, .fx-row.sel .fx-sub { color: var(--text); }
+.fx-tree:focus .fx-row.cursor { box-shadow: inset 0 0 0 1px var(--blue); }
+.fx-row.cut { opacity: .55; } .fx-row.dot-file .fx-name { color: var(--muted); }
+.fx-row.odd { color: var(--muted); } .fx-row.odd .fx-ico { opacity: .5; }
+.fx-row.fx-drop, .fx-row.fx-drop[data-i]:hover { background: var(--drop-bg); box-shadow: inset 0 0 0 1px var(--blue); }
+.fx-tree.fx-drop { box-shadow: inset 0 0 0 2px var(--blue); background: color-mix(in srgb, var(--blue) 10%, var(--bg)); }
+.fx-tri { flex: none; width: 16px; height: 20px; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: none; border: none; border-radius: 4px; color: var(--muted); }
+.fx-tri:hover { color: var(--text); background: var(--line); } .fx-tri.open svg { transform: rotate(90deg); } .fx-tri.none { visibility: hidden; }
+.fx-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.fx-name { overflow: hidden; text-overflow: ellipsis; }
+.fx-sub { color: var(--muted); font-size: calc(12px * var(--ui-scale)); overflow: hidden; text-overflow: ellipsis; }
+.fx-size { flex: none; width: 62px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.fx-when { flex: none; width: 96px; text-align: right; color: var(--muted); overflow: hidden; }
+.fx-name-box { width: 100%; padding: 1px 6px; } .fx-naming { background: var(--sel-bg); align-items: flex-start; white-space: normal; padding-top: 3px; padding-bottom: 3px; } .fx-naming .fx-ico, .fx-naming .fx-tri { margin-top: 3px; }
+.fx-name-err { overflow-wrap: anywhere; font-size: calc(12px * var(--ui-scale)); padding-top: 2px; }
+.fx-note, .fx-note-row { color: var(--muted); } .fx-note { padding: 16px 14px; } .fx-note-row { font-style: italic; padding-left: calc(46px + var(--d, 0) * 16px); white-space: normal; } .fx-note-row.bad { color: var(--red); font-style: normal; }
+.fx-fail { padding: 16px 14px; } .fx-fail p { color: var(--amber); white-space: pre-wrap; word-break: break-word; }
+.fx-stale { padding: 4px 12px; background: var(--needs-bg); color: var(--text); white-space: normal; }
+.fx-more-rows { margin: 6px 12px; }
+.fx-dots { flex: none; background: none; border: none; color: var(--muted); min-width: 40px; min-height: 40px; justify-content: center; font-size: calc(18px * var(--ui-scale)); }
+.fx-tick { flex: none; width: 20px; height: 20px; margin: 0 4px 0 0; accent-color: var(--blue); }
+.fx-actbar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--line); background: var(--panel2); }
+.fx-count { flex: 1 0 100%; color: var(--muted); }
+/* What a kind of file is drawn in. */
+.k-folder, .k-folder-open, .k-archive { color: var(--amber); } .k-code, .k-link { color: var(--blue); } .k-image { color: var(--violet); }
+.k-audio, .k-data { color: var(--green); } .k-video, .k-pdf { color: var(--red); } .k-text { color: var(--text); } .k-binary { color: var(--muted); }
+.fx-foot { flex: none; max-height: 36%; overflow: auto; display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 8px 12px; border-top: 1px solid var(--line); background: var(--panel); }
+.fx-clip { align-self: flex-start; display: flex; align-items: center; gap: 6px; padding: 2px 4px 2px 10px; border: 1px solid var(--blue-line); border-radius: 999px; background: var(--info-bg); color: var(--info-text); font-size: calc(12px * var(--ui-scale)); }
+.fx-clip .mini { background: none; border: none; color: inherit; padding: 0 6px; }
+.fx-xfer { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; background: var(--panel2); min-width: 0; }
+.fx-xfer.failed { border-color: var(--red-line); } .fx-xfer.done { border-color: var(--green-line); }
+.fx-xfer-top { display: flex; align-items: center; gap: 6px; min-width: 0; } .fx-xfer-what { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-xfer-says { color: var(--muted); font-size: calc(12px * var(--ui-scale)); overflow-wrap: anywhere; } .fx-xfer-says.bad { color: var(--red); }
+.fx-meter { height: 4px; margin: 5px 0 3px; border-radius: 2px; background: var(--line); overflow: hidden; } .fx-meter i { display: block; height: 100%; background: var(--blue); transition: width .2s linear; }
+.fx-errs { margin-top: 4px; font-size: calc(12px * var(--ui-scale)); } .fx-errs summary { cursor: pointer; color: var(--amber); } .fx-errs ul { margin: 4px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
+.fx-link { color: var(--blue); }
+#overlays > .fx-badge { position: fixed; z-index: 60; pointer-events: none; padding: 2px 10px; border-radius: 999px; background: var(--accent-bg); border: 1px solid var(--accent-line); color: var(--on-accent); font-weight: 600; white-space: nowrap; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
+#overlays > .fx-badge[hidden] { display: none; }
+/* The preview: what a file holds is text in a box, never a part of the page. */
+.fx-preview-wrap { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.fx-where { font-size: calc(12px * var(--ui-scale)); }
+.fx-text { margin: 0; max-height: min(62vh, calc(var(--vv-height, 100dvh) - 260px)); min-height: 60px; overflow: auto; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--well); color: var(--text); font-size: var(--mono-px, 12.5px); white-space: pre; word-break: normal; tab-size: 4; }
+.fx-img { display: block; max-width: 100%; max-height: 62vh; margin: 0 auto; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: var(--well); }
+.fx-preview-note { margin: 8px 0 0; }
+.fx-clash p { overflow-wrap: anywhere; }
+/* A toast with something to press (Undo). */
+.toast.has-act { display: flex; align-items: center; gap: 12px; } .toast-act { flex: none; border-color: var(--blue); color: var(--blue); padding: 3px 10px; }
+/* The folder of a pane opens the panel. */
+.strip-files { flex: none; display: inline-flex; align-items: center; padding: 0 2px; background: none; border: none; color: var(--amber); }
+.strip-files:hover { filter: brightness(1.25); }
+.strip-cwd.opens, .chat-cwd.opens { cursor: pointer; } .strip-cwd.opens:hover, .chat-cwd.opens:hover { color: var(--text); text-decoration: underline; }
+.strip-cwd.opens:focus-visible, .chat-cwd.opens:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+/* A touch screen: a tap opens, so rows are tall enough for a finger. */
+.fx-touch .fx-cols { display: none; } .fx-touch .fx-row { min-height: 46px; }
+@media (max-width: 760px) {
+  body.files-open #app { margin-right: 0; }
+  #files-panel { left: 0; width: auto; top: var(--vv-top, 0px); bottom: auto; height: var(--vv-height, 100dvh); border-left: none; padding-left: env(safe-area-inset-left); background: var(--bg); }
+  .fx-grip, .fx-second { display: none; }
+  .fx-head { padding: 8px 10px 8px 14px; background: var(--panel); } .fx-title { font-size: calc(17px * var(--ui-scale)); }
+  .fx-close { min-height: 44px; min-width: 64px; justify-content: center; border-color: var(--line); background: var(--panel2); color: var(--text); font-weight: 600; }
+  .fx-move { min-height: 44px; }
+  .fx-bar, .fx-path, .fx-tools { background: var(--panel); padding-left: 10px; padding-right: 10px; }
+  .fx-bar { gap: 4px; padding-top: 8px; } .fx-nav { min-width: 44px; min-height: 44px; justify-content: center; } .fx-station { min-height: 44px; font-size: 16px; }
+  .fx-crumbs { min-height: 44px; } .fx-seg { min-height: 40px; padding: 2px 6px; font-size: calc(14px * var(--ui-scale)); } .fx-path-box { min-height: 44px; font-size: 16px; }
+  .fx-tools { gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--line); } .fx-tools .mini, .fx-actbar .mini { min-height: 44px; padding: 4px 12px; font-size: calc(14px * var(--ui-scale)); } .fx-tools .mini { padding: 4px 9px; } .fx-tools { gap: 5px; }
+  .fx-row { min-height: 52px; gap: 8px; padding-right: 4px; border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent); } .fx-name { font-size: calc(15px * var(--ui-scale)); }
+  .fx-tri { width: 36px; height: 44px; margin-left: -6px; } .fx-name-box { min-height: 40px; font-size: 16px; }
+  .fx-tick { width: 24px; height: 24px; margin: 0 6px 0 4px; }
+  .fx-actbar { padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
+  .fx-foot .mini, .fx-foot .btn { min-height: 40px; padding: 4px 12px; }
+  .fx-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+}

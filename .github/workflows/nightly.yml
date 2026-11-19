@@ -179,6 +179,19 @@ jobs:
         run: |
           cargo test -p spandeck --test tools -- --ignored --skip canary_ --skip live_
           cargo test -p spandeck --test tools_deck -- --ignored --skip canary_ --skip live_ --skip pictures_ --skip screenshots_
+      # The file explorer's panel, in a real browser with real stations and
+      # real files: opened from a pane, the tree, new, rename, delete with
+      # Undo, uploads in pieces, copy and paste, a selection dragged from one
+      # station to another, names and previews as text, a download's ticket,
+      # Move here, a phone, and three themes beside a layout of two panes.
+      # About ten seconds. With it the station side's own two-station test
+      # (a folder copied from one station to another and downloaded through
+      # the first), which no step ran.
+      - name: The file explorer (two stations; the panel on a computer and a phone, themes)
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p spandeck --test files -- --ignored
+          cargo test -p spandeck --test filespanel -- --ignored
   build:
     strategy:
       fail-fast: false

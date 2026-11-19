@@ -809,7 +809,8 @@ fn the_deck_has_the_tick_the_note_the_one_tap_and_the_list() {
     page.terminal_face();
     page.wait(
         "the pane to say its question was answered",
-        "(n => !!n && n.innerText.includes(\"spandeck answered Antigravity's folder-trust question, as you chose for this folder\"))(document.querySelector('.strip-note'))",
+        // (Any note of the strip: the folder the pane was started in is one too, and comes first.)
+        "[...document.querySelectorAll('.strip-note')].some(n => n.innerText.includes(\"spandeck answered Antigravity's folder-trust question, as you chose for this folder\"))",
     );
     shoot(&page, "desktop-2-pane-note");
 

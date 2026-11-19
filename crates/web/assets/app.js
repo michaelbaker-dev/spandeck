@@ -20,6 +20,7 @@ import { lookEditor } from './lookedit.js';
 import { phoneLook } from './phonelook.js';
 import { toolsPanel } from './tools.js';
 import { rolesPanel, rolePick } from './roles.js';
+import { initFiles, openFiles, filesSync } from './files.js';
 import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook, refreshAsked, refreshCorrected } from './perf.js';
 import { qrSvg } from './qr.js';
 import { initFailover } from './failover.js';
@@ -722,6 +723,11 @@ async function copyScreen(st, p) {
 }
 
 // `term` is the terminal the menu was opened on, when it was opened on one.
+// A pane's program was started again: every terminal showing it attaches to the new one.
+function reattach(st, id) { for (const t of S.terms.values()) if (t.station === st && t.pane.id === id) { if (t.chan !== null) api.detach(t.chan); t.chan = null; t.attach(); } }
+// The file explorer (files.js), opened at a pane's folder on its station.
+const filesFor = (st, p) => openFiles(st, p);
+
 function paneMenu(e, st, p, where, term) {
   const s = stateOf(p), agent = p.agent !== 'shell', alive = !p.exited;
   const act = (m, extra) => () => rpc(st, m, { pane: p.id, ...extra }).then((r) => {
@@ -729,7 +735,7 @@ function paneMenu(e, st, p, where, term) {
     // from before themes does not know how, so it is also asked for here.
     if (m === 'pane.close' && lookState.doc.panes[paneLookKey(st, p)]) api.call('look.set', { level: 'pane', key: paneLookKey(st, p), choice: null }).catch(() => {});
     // A restarted pane is a new program behind the same name: show it.
-    if (m === 'pane.restart') for (const t of S.terms.values()) if (t.station === st && t.pane.id === p.id) { if (t.chan !== null) api.detach(t.chan); t.chan = null; t.attach(); }
+    if (m === 'pane.restart') reattach(st, p.id);
     return r;
   });
   const ctx = isPhone() ? null : layCtx, inLay = ctx && ctx.has(st, p), pin = panePin(st, p);
@@ -775,6 +781,7 @@ function paneMenu(e, st, p, where, term) {
     // What the pane's conversation adds: its background tasks, its cleared
     // notes, and the numbers of the screen (chat.js).
     ...chatMenu(st, p),
+    hasCap(st, 'files') && { label: 'Files…', hint: 'this station\'s files, at its folder', action: () => filesFor(st, p) },
     { label: 'Show changes (diff)', action: () => diffPanel(st, p) },
     agent && { label: 'Standing orders for this pane', action: () => ordersPanel(st, p) },
     agent && p.project && alive && { label: 'Start a review loop on its work', action: () => rpc(st, 'recipe.review', { pane: p.id }).then(() => toast('Review loop started')) },
@@ -1239,6 +1246,7 @@ function palette() {
     // is on screen, or on the station serving this deck.
     { label: `New pane on ${here}…`, run: () => newPaneDialog(here) },
     { label: `New project on ${here}…`, run: () => newProjectDialog(here) },
+    ...(hasCap(here, 'files') ? [{ label: `Files on ${here}…`, run: () => openFiles(here, null) }] : []),
     { label: 'Approval requests', run: approvalsPanel },
     { label: 'Inbox', run: inboxPanel },
     { label: 'Usage: tokens and estimated cost', run: fleetUsageDialog },
@@ -2809,7 +2817,7 @@ function getTerm(st, p, where, mode) {
   let t = S.terms.get(key);
   if (!t) {
     const lost = where !== 'phone-fit' ? null : () => { const k = `${st}/${p.id}`; phoneFit.delete(k); phoneAuto.delete(k); phoneBefore.delete(k); phoneMine.delete(k); phoneTaken.add(k); update(); };
-    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', natural: where === 'phone', flow: where === 'phone' || where === 'phone-fit', onLost: lost, face: where === 'leaf' || where === 'zoom' ? (term) => chatToggle(st, term.pane) : null, agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where, term), onUsage: (term) => usageDialog(st, term.pane), onFocus: (term) => { S.focused = `${st}/${term.pane.id}`; }, onAttached: (term) => keyboardBack(st, term) });
+    t = new PaneTerm(api, st, p, { mode, typeWhileWatching: where === 'phone', natural: where === 'phone', flow: where === 'phone' || where === 'phone-fit', onLost: lost, face: where === 'leaf' || where === 'zoom' ? (term) => chatToggle(st, term.pane) : null, agentsOf: (pane) => agentRows(st, pane), onMenu: (e, term) => paneMenu(e, st, term.pane, where, term), onUsage: (term) => usageDialog(st, term.pane), onFiles: (term) => (hasCap(st, 'files') ? () => filesFor(st, term.pane) : null), onFocus: (term) => { S.focused = `${st}/${term.pane.id}`; }, onAttached: (term) => keyboardBack(st, term) });
     S.terms.set(key, t);
     t._fresh = true;
     t.setLink(linkPaneWords(api.link()));
@@ -4576,6 +4584,7 @@ function render() {
   // is where it was scrolled to.
   chatAfterRender();
   watchAfterRender();
+  filesSync();
   // Each terminal has its look before it is first drawn.
   applyLook();
   for (const t of S.terms.values()) {
@@ -4779,7 +4788,14 @@ initMic({
   stationsWith: (cap) => S.fleet.stations.filter(s => s.state === 'online' && (s.caps || []).includes(cap)).map(s => s.station),
   secureDeck: () => { const me = S.fleet.stations.find(s => s.self), t = me?.https; return t && t.on && t.name ? { origin: `https://${t.name}:${t.port}`, what: `${me.station}'s secure deck` } : null; },
 });
+initFiles({
+  api, isPhone, findPane,
+  stations: () => S.fleet.stations,
+  // Move agent here: the pane's program is started again in `cwd`.
+  movePane: (st, p, cwd) => api.on(st, 'pane.restart', { pane: p.id, cwd }).then((r) => { reattach(st, p.id); stationSoon(st, 60); return r; }),
+});
 initChat({
+  files: (st, p) => (hasCap(st, 'files') ? () => filesFor(st, p) : null),
   api, hasCap, isPhone, update, go, paneUrl, rpc, findPane, paneMenu, usage: usageDialog, online, onlineStations, panesOf, freeName, lastSessionNote, pref, setPref,
   AGENTS: AGENT_CHOICES,
   approvals: () => S.approvals,

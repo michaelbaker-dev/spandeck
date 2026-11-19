@@ -75,3 +75,56 @@ export const stationIcon = () => frame('station',
 
 export const pinIcon = () => frame('pin',
   el('path', { d: 'M5.5 2h5l-.8 4.2 2.3 2.3H4l2.3-2.3z', fill: '#f0b65a' }), line('M8 8.5V14', '#f0b65a', 1.4));
+
+// ---- the file explorer (files.js) ----
+// A file's picture by its kind, and the panel's own small signs. All are
+// drawn in the colour of the text around them (`currentColor`): the panel's
+// styles give each kind one of the theme's colours, so they follow a theme.
+const cc = (d, w = 1.3) => line(d, 'currentColor', w);
+const sheet = () => cc('M4 1.8h5l3 3v9.4H4zM9 1.8v3h3');
+const FILES = {
+  folder: () => [el('path', { d: 'M1.8 4.2c0-.6.4-1 1-1h3.1l1.4 1.5h5.9c.6 0 1 .4 1 1v6.6c0 .6-.4 1-1 1H2.8c-.6 0-1-.4-1-1z', fill: 'currentColor', 'fill-opacity': '.28', stroke: 'currentColor', 'stroke-width': 1.2, 'stroke-linejoin': 'round' })],
+  'folder-open': () => [cc('M1.8 12.3V4.2c0-.6.4-1 1-1h3.1l1.4 1.5h5c.6 0 1 .4 1 1v1.2', 1.2), el('path', { d: 'M1.9 12.6l1.7-5c.1-.4.5-.7 1-.7h9.3c.6 0 .9.5.7 1l-1.5 4.4c-.1.4-.5.7-1 .7H2.6c-.5 0-.8-.2-.7-.4z', fill: 'currentColor', 'fill-opacity': '.28', stroke: 'currentColor', 'stroke-width': 1.2, 'stroke-linejoin': 'round' })],
+  link: () => [cc('M6.8 9.2a2.6 2.6 0 0 0 3.7 0l2.2-2.2a2.6 2.6 0 0 0-3.7-3.7l-.9.9M9.2 6.8a2.6 2.6 0 0 0-3.7 0L3.3 9a2.6 2.6 0 0 0 3.7 3.7l.9-.9', 1.4)],
+  code: () => [cc('M5.5 4.5L2 8l3.5 3.5M10.5 4.5L14 8l-3.5 3.5M9 3.2l-2 9.6', 1.4)],
+  text: () => [sheet(), cc('M6 8h4M6 10.2h4M6 12.2h2.5', 1.1)],
+  image: () => [el('rect', { x: 1.8, y: 2.8, width: 12.4, height: 10.4, rx: 1.6, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.3 }), el('circle', { cx: 5.4, cy: 6.2, r: 1.2, fill: 'currentColor' }), cc('M2.4 12l3.4-3.2 2.4 2.2 2.3-2.6 3.2 3.4', 1.2)],
+  audio: () => [cc('M6 11.5V3.5l6.5-1.4v8', 1.3), el('circle', { cx: 4.4, cy: 11.6, r: 1.8, fill: 'currentColor' }), el('circle', { cx: 10.9, cy: 10.2, r: 1.8, fill: 'currentColor' })],
+  video: () => [el('rect', { x: 1.8, y: 3.2, width: 12.4, height: 9.6, rx: 1.6, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.3 }), el('path', { d: 'M6.6 5.9v4.2L10.4 8z', fill: 'currentColor' })],
+  archive: () => [el('rect', { x: 2.2, y: 2, width: 11.6, height: 12, rx: 1.6, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.3 }), cc('M8 2.4v1.2M8 5v1.2M8 7.6v1.2', 1.5), el('rect', { x: 6.8, y: 10, width: 2.4, height: 2.2, rx: 0.5, fill: 'currentColor' })],
+  pdf: () => [sheet(), el('rect', { x: 5.6, y: 8.2, width: 4.8, height: 3.6, rx: 0.6, fill: 'currentColor' })],
+  data: () => [cc('M6 2.6c-1.4 0-1.8.7-1.8 1.8v1.8c0 .9-.5 1.6-1.4 1.8.9.2 1.4.9 1.4 1.8v1.8c0 1.1.4 1.8 1.8 1.8M10 2.6c1.4 0 1.8.7 1.8 1.8v1.8c0 .9.5 1.6 1.4 1.8-.9.2-1.4.9-1.4 1.8v1.8c0 1.1-.4 1.8-1.8 1.8', 1.3)],
+  binary: () => [sheet()],
+  // The panel's signs.
+  up: () => [cc('M8 13V3.5M4 7.2l4-4 4 4', 1.5)],
+  home: () => [cc('M2.5 8L8 3l5.5 5M4 7v6h3V9.6h2V13h3V7', 1.3)],
+  refresh: () => [cc('M13 8a5 5 0 1 1-1.6-3.7M13 2.6v2.8h-2.8', 1.4)],
+  hidden: () => [cc('M1.8 8s2.3-4 6.2-4 6.2 4 6.2 4-2.3 4-6.2 4-6.2-4-6.2-4z', 1.2), el('circle', { cx: 8, cy: 8, r: 1.8, fill: 'currentColor' })],
+  edit: () => [cc('M3 13l.6-2.6 6.9-6.9 2 2-6.9 6.9zM9.4 4.6l2 2', 1.2)],
+  split: () => [el('rect', { x: 2, y: 2, width: 12, height: 12, rx: 1.8, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.3 }), cc('M2.4 8h11.2', 1.3)],
+  pane: () => [el('rect', { x: 1.8, y: 2.8, width: 12.4, height: 10.4, rx: 1.8, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.3 }), cc('M4.4 6.2l2 1.8-2 1.8M8 10h3', 1.3)],
+  tri: () => [el('path', { d: 'M6 4l4.5 4L6 12z', fill: 'currentColor' })],
+};
+export const fileIcon = (name) => frame('f-' + (FILES[name] ? name : 'binary'), ...(FILES[name] || FILES.binary)());
+
+// Which picture a file gets, by the end of its name. Nothing is read from
+// the file for this, and the name is only ever compared with this list.
+const EXT = {
+  code: 'rs js mjs cjs ts tsx jsx py rb go c h cc cpp hpp java kt swift sh bash zsh fish ps1 bat cmd pl php lua sql html htm css scss vue svelte zig nim ex exs erl hs ml clj scala dart r m mm cs fs',
+  text: 'txt md markdown rst log text org tex adoc',
+  image: 'png jpg jpeg gif webp svg bmp ico tif tiff heic heif avif',
+  audio: 'mp3 wav flac ogg oga m4a aac opus aiff mid midi',
+  video: 'mp4 mov mkv webm avi m4v mpg mpeg wmv',
+  archive: 'zip tar gz tgz bz2 xz zst 7z rar jar deb rpm dmg iso',
+  pdf: 'pdf',
+  data: 'json jsonl yaml yml toml xml csv tsv ini conf cfg env lock plist db sqlite',
+};
+const KIND_OF = new Map(Object.entries(EXT).flatMap(([kind, list]) => list.split(' ').map(x => [x, kind])));
+export function fileKind(entry, open = false) {
+  if (entry.kind === 'link') return 'link';
+  if (entry.kind === 'dir') return open ? 'folder-open' : 'folder';
+  if (entry.kind !== 'file') return 'binary';
+  const name = String(entry.name || '').toLowerCase(), dot = name.lastIndexOf('.');
+  if (dot <= 0) return /^(makefile|dockerfile|readme|license|notice)$/.test(name) ? 'text' : 'binary';
+  return KIND_OF.get(name.slice(dot + 1)) || 'binary';
+}
