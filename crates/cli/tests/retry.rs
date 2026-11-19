@@ -411,6 +411,10 @@ struct Tools {
     stdin: std::process::ChildStdin,
     out: BufReader<std::process::ChildStdout>,
     asked: u64,
+    heard: u64,
+    /// Answers that came before an older call's (each call is answered
+    /// when it is ready, under its id).
+    early: HashMap<u64, (bool, String)>,
 }
 
 impl Tools {
@@ -431,6 +435,8 @@ impl Tools {
             out: BufReader::new(child.stdout.take().unwrap()),
             child,
             asked: 0,
+            heard: 0,
+            early: HashMap::new(),
         }
     }
 
@@ -443,16 +449,25 @@ impl Tools {
     /// The answer to the oldest call not yet heard: whether it worked, and
     /// its text.
     fn hear(&mut self) -> (bool, String) {
-        let mut line = String::new();
-        self.out.read_line(&mut line).unwrap();
-        let v: Value = serde_json::from_str(&line).unwrap();
-        (
-            v["result"]["isError"] == json!(false),
-            v["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-        )
+        self.heard += 1;
+        loop {
+            if let Some(answer) = self.early.remove(&self.heard) {
+                return answer;
+            }
+            let mut line = String::new();
+            self.out.read_line(&mut line).unwrap();
+            let v: Value = serde_json::from_str(&line).unwrap();
+            self.early.insert(
+                v["id"].as_u64().unwrap(),
+                (
+                    v["result"]["isError"] == json!(false),
+                    v["result"]["content"][0]["text"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+            );
+        }
     }
 
     fn call(&mut self, name: &str, args: Value) -> (bool, String) {

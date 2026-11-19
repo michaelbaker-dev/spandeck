@@ -168,9 +168,60 @@ fn call_tool(paths: &Paths, name: &str, args: &Value) -> Result<Value, String> {
     Ok(result)
 }
 
+/// The tools that change what other agents see. An agent that asks for
+/// several of them at once has them done in the order it asked, one after
+/// another (two messages sent together arrive in that order).
+const IN_ORDER: [&str; 6] = [
+    "send",
+    "reply",
+    "ack",
+    "task_result",
+    "note_add",
+    "delegate",
+];
+
+/// One tool call, and its answer as one line on stdout.
+fn answer_tool(paths: &Paths, id: &Value, name: &str, args: &Value) {
+    let result = match call_tool(paths, name, args) {
+        Ok(v) => {
+            json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default()}], "isError": false})
+        }
+        Err(e) => json!({"content": [{"type": "text", "text": e}], "isError": true}),
+    };
+    say(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
+}
+
+/// One whole line, whichever thread it is from. A client that has gone
+/// away is found out by the loop that reads it.
+fn say(resp: &Value) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{resp}");
+    let _ = out.flush();
+}
+
+/// A tool call never waits for another that is still running: answers go
+/// out as they are ready, each under its request's id.
+///
+/// A bug that happened (seven agents on one station, 18 Nov 2026; the
+/// times are in Claude Code's own session files): requests were read and
+/// answered one at a time, so every call an agent made while a `wait` of
+/// its own was still running sat unread until that wait ended. Claude Code
+/// stops waiting for a tool after 120 seconds and leaves it running: an
+/// agent that had asked to wait half an hour was then told, for each
+/// `inbox`, `ack` and `reply` it tried, that the tool was "still running
+/// after 120s". The station answered every one of those calls in
+/// milliseconds once it was asked.
 pub fn run(paths: &Paths) -> anyhow::Result<()> {
     let stdin = std::io::stdin();
-    let mut out = std::io::stdout();
+    let (in_order, queued) = std::sync::mpsc::channel::<(Value, String, Value)>();
+    let changes = {
+        let paths = paths.clone();
+        std::thread::spawn(move || {
+            for (id, name, args) in queued {
+                answer_tool(&paths, &id, &name, &args);
+            }
+        })
+    };
     for line in stdin.lock().lines() {
         let line = line?;
         let Ok(req) = serde_json::from_str::<Value>(&line) else {
@@ -191,17 +242,21 @@ pub fn run(paths: &Paths) -> anyhow::Result<()> {
                 let name = req
                     .pointer("/params/name")
                     .and_then(|n| n.as_str())
-                    .unwrap_or("");
+                    .unwrap_or("")
+                    .to_string();
                 let args = req
                     .pointer("/params/arguments")
                     .cloned()
                     .unwrap_or(json!({}));
-                Some(Ok(match call_tool(paths, name, &args) {
-                    Ok(v) => {
-                        json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default()}], "isError": false})
-                    }
-                    Err(e) => json!({"content": [{"type": "text", "text": e}], "isError": true}),
-                }))
+                // (A call with no id is a notification: nobody is answered.)
+                let Some(id) = id else { continue };
+                if IN_ORDER.contains(&name.as_str()) {
+                    let _ = in_order.send((id, name, args));
+                } else {
+                    let paths = paths.clone();
+                    std::thread::spawn(move || answer_tool(&paths, &id, &name, &args));
+                }
+                continue;
             }
             m if m.starts_with("notifications/") => None,
             _ => Some(Err((-32601, format!("method not found: {method}")))),
@@ -209,14 +264,16 @@ pub fn run(paths: &Paths) -> anyhow::Result<()> {
         let (Some(id), Some(result)) = (id, result) else {
             continue;
         };
-        let resp = match result {
+        say(&match result {
             Ok(r) => json!({"jsonrpc": "2.0", "id": id, "result": r}),
             Err((code, message)) => {
                 json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
             }
-        };
-        writeln!(out, "{resp}")?;
-        out.flush()?;
+        });
     }
+    // The agent's program has gone. What it asked to be changed is still
+    // done; a wait it left running is not waited for.
+    drop(in_order);
+    let _ = changes.join();
     Ok(())
 }

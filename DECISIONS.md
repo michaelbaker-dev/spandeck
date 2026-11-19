@@ -798,9 +798,9 @@ Once in that run a nudge was typed into a Codex whose screen was scrolled back i
 
 **Tests.** Every change: the notice word for word, a body that copies spandeck's rows and gives orders, the cut and the count, and what is read on a store (`messages.rs`); the two real screens, each sign by itself, and a Codex that only quotes them (`agents/picker.rs`); on a real station with the stand-in agent, a busy agent given two messages in one notice, once, the whole one read and the cut one left for `inbox`, nothing typed; and `wait` by each `until` through a pane that needs the owner (`phase6.rs`). Merge tier (`holds.rs`): a stand-in Codex drawing the scrolled-back rows is typed nothing for 3.5 s, says why, and is nudged once when it is back. **None of it has been run with the real programs yet.**
 
-## A nudge is never typed into a question a program asks as it starts (19 Nov 2026)
+## A nudge is never typed into a question a program asks as it starts; an agent's tools answer while its `wait` runs (19 Nov 2026)
 
-A fault from the runs of 18 Nov 2026, read from what was recorded at the time. No Guarantee is weakened; one line is added under Messages.
+Two faults from the runs of 18 Nov 2026, each read from what was recorded at the time. No Guarantee is weakened; one line is added under Messages.
 
 ### The nudge and a program's first questions
 
@@ -812,6 +812,15 @@ The station's log, a Codex 0.169.0 pane started with a role: the role stored at 
 - **Safety over speed, and what is not covered.** A question spandeck cannot read is protected only by the times above. A program that never runs a hook and whose screen keeps a row that begins with a question's words has its mail held for as long as the row shows, and the pane does not say why. A late folder-trust question (past the watch's 20 seconds, with no notice before it) is typed nothing now but is still not said on the pane unless it is read as a list. None of it has been run with a real Codex or Claude Code.
 
 **Tests.** Every change: the rule by its times (`wake.rs`). Merge tier (`foldertrust.rs`): the stand-in draws the notice for 31 seconds, then the folder's question (answered by the station on the owner's tick), then the review of hooks (nobody's), with a message stored at the start: nothing is typed at any of them, and the message is typed after the owner answers the last (on the code before, the nudge answered the review of hooks); a question first drawn 21 seconds after the start, with mail waiting, is typed nothing.
+
+### An agent's tools answer while its `wait` is still running
+
+An agent reported that `inbox`, `ack` and `reply` "often took two minutes or more". Claude Code's session files have the times: each slow call followed a `wait` the agent had asked for with 600 or 1800 seconds, and each was answered by Claude Code itself with "MCP tool \"spandeck/ack\" is still running after 120s. It was moved to the background". `spandeck mcp` read and answered one request at a time, so the call sat unread behind the wait. Of 237 `inbox`, `ack` and `reply` calls with a recorded time on that station, 8 took 120 s and 2 took 44 and 50 s (the wait ended first); the rest took 4 to 41 ms. The station was not slow: with seven stand-in agents taking turns without a pause, 1,558 rounds of `inbox`, `reply`, `ack` and a `wait` for what was already so had medians under 1 ms and a slowest call of 42 ms; `spandeck inbox` as a command, 3 ms and 23 ms.
+
+- **A tool call never waits for another that is still running** (`cli/src/mcp.rs`): each answer goes out when it is ready, under its request's id. The calls that change what others see (`send`, `reply`, `ack`, `task_result`, `note_add`, `delegate`) are still done one after another in the order asked; the rest, `wait` among them, each run by themselves.
+- **`wait` is unchanged**: it holds until what it waits for, or its time. A program that stops waiting for it (Claude Code after 120 seconds) leaves it running, and now loses nothing by that. A wait the program cancels is not stopped: it runs to its own end and its answer is dropped by the program.
+
+**Tests.** Every change (`phase6.rs`): a `wait` of ten minutes on a busy pane, then `reply`, `send`, `ack` and `inbox`: all four answered in under five seconds, the three changes in order. Merge tier (`soak.rs`): the measurement above, with a bound of two seconds a call.
 
 ## Only the station of the account writes the agents' settings in your home (16 Nov 2026)
 
