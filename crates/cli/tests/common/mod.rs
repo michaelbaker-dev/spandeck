@@ -937,7 +937,15 @@ pub mod browser {
                 .send(Message::text(call.to_string()))
                 .map_err(|e| e.to_string())?;
             loop {
-                let m = self.socket.read().map_err(|e| e.to_string())?;
+                use tokio_tungstenite::tungstenite::Error;
+                let m = match self.socket.read() {
+                    // A read that a signal cut short has lost nothing: it
+                    // is made again. (Once in six runs of phase6.rs with
+                    // every test at once on one processor, a page's answer
+                    // was "Interrupted system call".)
+                    Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    read => read.map_err(|e| e.to_string())?,
+                };
                 let Message::Text(text) = m else { continue };
                 let Ok(mut v) = serde_json::from_str::<Value>(text.as_str()) else {
                     continue;

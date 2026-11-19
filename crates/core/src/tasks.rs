@@ -398,7 +398,23 @@ impl Daemon {
             if acceptance.trim().is_empty() { String::new() } else { format!("Acceptance criteria: {acceptance}\n") },
         );
         let short = &task[task.len().saturating_sub(5)..];
+        // The task names its pane, and is running, before the pane's
+        // program starts. It used to be said after the pane's record was
+        // written (a wait of up to a second) and its instructions were: a
+        // helper that reported before that was refused ("only the pane
+        // working on a task can report its result"), and one that had also
+        // ended by then left a task that stayed running with nobody on it.
+        // A review loop waited on such a task for good (seen once in CI,
+        // on a machine with a slow disk).
+        let pane_id = new_id("p");
+        self.task_set_state(
+            &task,
+            "running",
+            json!({"workspace": workspace, "pane": pane_id, "resume": {"checkpoint": checkpoint}}),
+            &caller.who,
+        )?;
         let pane = self.spawn_pane(SpawnOpts {
+            id: Some(pane_id),
             name: Some(format!("{role}-{short}")),
             agent: Some(agent),
             program: settings.program.clone(),
@@ -436,12 +452,6 @@ impl Daemon {
             }
         };
         self.write_instructions(&pane.meta());
-        self.task_set_state(
-            &task,
-            "running",
-            json!({"workspace": workspace, "pane": pane.id, "resume": {"checkpoint": checkpoint}}),
-            &caller.who,
-        )?;
         Ok(json!({"task": task, "pane": pane.id, "workspace": workspace}))
     }
 
