@@ -1139,10 +1139,29 @@ fn review_roles(findings_by_round: Value) -> (Value, Value) {
 }
 
 fn recipe(s: &Station, phase: &str) -> Value {
-    wait_for(&format!("the review loop to reach {phase}"), 40, || {
-        let r = s.call("recipe.list", json!({"project": "demo"}))[0].clone();
-        (r["data"]["phase"] == json!(phase)).then_some(r)
-    })
+    // A wait that ran out says where the loop was, what its tasks were and
+    // what each pane showed: one did in CI, and said nothing.
+    let stood = || {
+        let mut all = format!(
+            "the loop: {}\ntasks: {}",
+            s.call("recipe.list", json!({"project": "demo"})),
+            s.call("task.list", json!({"project": "demo"}))
+        );
+        for p in s.call("pane.list", json!({})).as_array().unwrap() {
+            let id = p["id"].as_str().unwrap();
+            all.push_str(&format!("\n---- pane {p}\n{}", s.text(id).trim_end()));
+        }
+        all
+    };
+    wait_for_or(
+        &format!("the review loop to reach {phase}"),
+        40,
+        stood,
+        || {
+            let r = s.call("recipe.list", json!({"project": "demo"}))[0].clone();
+            (r["data"]["phase"] == json!(phase)).then_some(r)
+        },
+    )
 }
 
 /// Done when: the review loop recipe finishes with two fake agents.
