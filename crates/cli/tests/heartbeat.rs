@@ -436,8 +436,8 @@ fn picture(page: &browser::Page, name: &str) {
 /// there is no answer and for how long, what is shown is marked "as of" the
 /// time of the last answer, and the pane says typing is off; what is typed
 /// from then on is not sent, then or later; by twelve seconds a bar names
-/// the station, says the agents keep running, and offers the other
-/// station's deck; after a minute it says when the station last answered;
+/// the station, says the agents keep running, and lists the other
+/// station; after a minute it says the station has not answered for a minute;
 /// and when the link returns the page is connected again by itself within
 /// ten seconds, says it is back, attaches its pane again, and typing works.
 /// Then, with the page hidden: a stall of fifteen seconds is not judged and
@@ -500,11 +500,14 @@ fn the_page_says_when_its_link_is_silent_and_comes_back_by_itself() {
         assert!(barred < Duration::from_secs(13), "the bar after {barred:?}");
         let bar = bar.as_str().unwrap().to_string();
         assert!(
-            bar.contains("alpha has not answered for")
+            bar.contains("alpha is not answering")
                 && bar.contains("Your agents keep running there"),
             "{bar}"
         );
-        assert!(bar.contains("Open bravo's deck"), "{bar}");
+        // A signed-in page can carry on through another station, so the bar
+        // lists the fleet's other stations (failover.js). bravo cannot be
+        // reached by this browser, and the page says so and stays.
+        assert!(bar.contains("bravo"), "{bar}");
         // The connection was given up, not waited on for ever, and a new
         // one is being tried.
         wait_for("the silent connection to be given up", 5, || {
@@ -515,14 +518,16 @@ fn the_page_says_when_its_link_is_silent_and_comes_back_by_itself() {
         picture(&page, &format!("{tag}-3-bar-30s"));
         std::thread::sleep(Duration::from_secs(25));
         let late = page.wait(
-            "the bar to say when it last answered",
+            "the bar to say it has been a minute",
             &format!(
-                "(t => t.includes('last answered') ? t : '')({})",
+                "(t => t.includes('for 1 min') ? t : '')({})",
                 shown(".link-bar")
             ),
         );
         assert!(
-            late.as_str().unwrap().contains("alpha last answered 1 min"),
+            late.as_str()
+                .unwrap()
+                .contains("alpha is not answering for 1 min"),
             "{late}"
         );
         picture(&page, &format!("{tag}-4-bar-60s"));
