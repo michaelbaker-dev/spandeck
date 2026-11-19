@@ -146,6 +146,9 @@ const NOT_FORWARDED: &[&str] = &[
     // The password it carries is for the station it is given to, and is
     // never passed from one station to another (https.rs).
     "tailnet.operator",
+    // A download's ticket is taken by the station the browser asks, and
+    // by no other (files.rs).
+    "files.ticket",
 ];
 
 /// The owner's calls that only look, or only say what has been looked at,
@@ -160,6 +163,14 @@ const OWNER_LOOKS: &[&str] = &[
     "pane.titles",
     // The deck opened on the machine asks this by itself, once a minute.
     "tailnet.signin",
+    // What the page (or a download) does by itself while a copy, a zip, a
+    // download or an upload runs, for as long as it runs: asking how far a
+    // job is, reading the next piece, sending the next piece. An upload of
+    // an hour does not mean an hour at a keyboard.
+    "files.jobs",
+    "files.zip.status",
+    "files.read",
+    "files.put",
 ];
 
 const READ_METHODS: &[&str] = &[
@@ -264,6 +275,38 @@ const OWNER_READS: &[&str] = &[
     // back to the deck. Beside the others, so that a model that takes ten
     // seconds holds up nothing else the page asks of this station.
     "speech.transcribe",
+    // The file explorer's looks (files.rs). The owner's alone, like every
+    // `files.` method: a file can hold a secret.
+    "files.home",
+    "files.list",
+    "files.stat",
+    "files.read",
+    "files.jobs",
+    "files.zip.status",
+];
+
+/// Every method of the file explorer (files.rs), the owner's request of
+/// 19 Nov 2026. None is on the agents' list, the stations' list or the
+/// read-only one: another station reaches them only as the owner's
+/// forwarded request.
+pub const FILES_METHODS: &[&str] = &[
+    "files.home",
+    "files.list",
+    "files.stat",
+    "files.read",
+    "files.put",
+    "files.mkdir",
+    "files.create",
+    "files.rename",
+    "files.trash",
+    "files.restore",
+    "files.delete",
+    "files.transfer",
+    "files.jobs",
+    "files.job.cancel",
+    "files.zip",
+    "files.zip.status",
+    "files.ticket",
 ];
 
 /// Does this method only read? Such a call changes nothing, so a Control
@@ -400,6 +443,66 @@ mod roles_calls {
         for method in ["roles.set", "roles.reset", "roles.remove", "roles.send"] {
             assert!(!reads(method), "{method}");
         }
+    }
+}
+
+/// The file explorer (19 Nov 2026, the owner's request): a station's
+/// files are the owner's alone, since a file can hold a secret. No agent,
+/// no station acting for itself and no read-only caller has any `files.`
+/// method; another station reaches them only as the owner's forwarded
+/// request. And rule 7: `pane.restart` (with or without a folder) is the
+/// owner's.
+#[cfg(test)]
+mod files_calls {
+    use super::*;
+
+    #[test]
+    fn only_the_owner_reaches_a_stations_files() {
+        for method in FILES_METHODS {
+            for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
+                assert!(!allowed(who, method), "{who:?} {method}");
+            }
+            assert!(allowed(Authority::Owner, method), "{method}");
+        }
+        assert!(allowed(Authority::Peer, "rpc.forward"));
+        for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
+            assert!(!allowed(who, "pane.restart"), "{who:?}");
+        }
+        // What only looks is answered beside the page's other reads; a
+        // change never is.
+        for method in [
+            "files.home",
+            "files.list",
+            "files.stat",
+            "files.read",
+            "files.jobs",
+        ] {
+            assert!(reads(method), "{method}");
+        }
+        let none = json!({});
+        for method in [
+            "files.mkdir",
+            "files.create",
+            "files.rename",
+            "files.trash",
+            "files.restore",
+            "files.delete",
+            "files.transfer",
+            "files.zip",
+        ] {
+            assert!(!reads(method), "{method}");
+            assert!(
+                matches!(class(method, &none), Class::Once(_)),
+                "{method} is done once by its id"
+            );
+        }
+        // A piece of a file is never kept by a request id (it is a file's
+        // contents), and is safe a second time by its own id and offset.
+        assert!(!reads("files.put") && class("files.put", &none) == Class::Repeat);
+        // A ticket is a way in for a minute: never kept, never passed on.
+        assert_eq!(class("files.ticket", &none), Class::Never);
+        assert!(not_forwarded("files.ticket"));
+        assert!(!not_forwarded("files.put") && !not_forwarded("files.read"));
     }
 }
 
@@ -621,6 +724,20 @@ const REPEATABLE: &[&str] = &[
     "project.recipes",
     // Asking a release host again asks the same question.
     "agents.check",
+    // The file explorer's looks (files.rs).
+    "files.home",
+    "files.list",
+    "files.stat",
+    "files.read",
+    "files.jobs",
+    "files.zip.status",
+    // A piece of an upload is written at its offset: sent again, the same
+    // bytes go to the same place, and the last piece of a finished upload
+    // is answered as it was (by the upload's own id). Never kept by a
+    // request id: a piece is a file's contents.
+    "files.put",
+    // Cancelling what is cancelled.
+    "files.job.cancel",
 ];
 
 /// Changes that are done once by their request id, the answer kept for a
@@ -673,6 +790,18 @@ const DONE_ONCE: &[&str] = &[
     "agents.update",
     "agents.install",
     "agents.command",
+    // The file explorer's changes (files.rs): each answers with paths and
+    // counts, never with what a file holds. A second try of a folder made,
+    // a trashing or a copy started is the first one's answer, not a second
+    // folder, a second trashing or a second copy.
+    "files.mkdir",
+    "files.create",
+    "files.rename",
+    "files.trash",
+    "files.restore",
+    "files.delete",
+    "files.transfer",
+    "files.zip",
 ];
 
 /// How a request that carries an id is handled.
@@ -1547,9 +1676,18 @@ impl Daemon {
                 json!({"ok": true})
             }
             "pane.restart" => {
-                let pane = self.restart_pane(s(&params, "pane")?, flag(&params, "fresh"), by)?;
+                // With `cwd`: "Move agent here" (files.rs, daemon.rs).
+                let cwd = opt(&params, "cwd").map(PathBuf::from);
+                let pane = self.restart_pane_in(
+                    s(&params, "pane")?,
+                    cwd.as_deref(),
+                    flag(&params, "fresh"),
+                    by,
+                )?;
                 self.pane_view(&pane)
             }
+            // ---------------------------------------------- file explorer
+            m if FILES_METHODS.contains(&m) => self.files_call(m, params, by).await?,
             "speech.transcribe" => self.speech_transcribe(&params).await?,
             "pane.close" => {
                 let id = self.pane(s(&params, "pane")?)?.id.clone();
@@ -2740,6 +2878,19 @@ impl Daemon {
             && retry.as_ref().is_some_and(|r| r.again_ms.is_some())
         {
             return Err(unknown("no station keeps a record of such a request"));
+        }
+        // A piece of a file, either way: on the connections kept for large
+        // things, so that nothing else said between the two stations
+        // waits behind it, and a piece that is slow does not make the
+        // station out to be silent (fleet.rs, `call_bulk`). Both are safe
+        // to send again, and carry no id.
+        if matches!(method, "files.put" | "files.read") {
+            let request = json!({"method": method, "params": params});
+            return self
+                .fleet
+                .call_bulk(station, "rpc.forward", request, crate::files::BULK_LIMIT)
+                .await
+                .map_err(named);
         }
         let mut keeps = self.fleet.peer(station).is_some_and(|p| keeps_ids(&p.info));
         let asked_before = retry.as_ref().and_then(|r| r.again_ms);

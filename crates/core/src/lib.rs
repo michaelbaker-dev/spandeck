@@ -50,6 +50,7 @@ pub mod db;
 pub mod deck;
 pub mod discover;
 pub mod doctor;
+pub mod files;
 pub mod fleet;
 pub mod foldertrust;
 pub mod fonts;

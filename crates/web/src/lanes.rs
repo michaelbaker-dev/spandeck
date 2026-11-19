@@ -492,7 +492,13 @@ pub fn route(own: &str, method: &str, params: &Value) -> Route {
         // answer at another station. Nothing stands behind them.
         "wait" | "task.wait" | "hook.ingest" | "trust.approve" | "fleet.join" => (Lane::Held, None),
         m if spandeck_core::rpc::reads(m) => (Lane::Read, None),
-        // Everything for another station is that station's: one order.
+        // The file explorer's changes (a piece of an upload, a folder
+        // made, a trashing) keep their own order at their station, this
+        // one or another: a disk can be slow and a piece is large, and
+        // neither holds up a pane being started or anything else that is
+        // changed there. (Typing and Stop wait for no change at all.)
+        m if m.starts_with("files.") => (Lane::Write, Some(Scope::Write("files"))),
+        // Everything else for another station is that station's: one order.
         m => (
             Lane::Write,
             Some(Scope::Write(if station.is_some() { "" } else { shared(m) })),
@@ -521,6 +527,55 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Semaphore;
+
+    /// The files decision (19 Nov 2026), rule 5: an upload must not be
+    /// able to delay Stop or typing, and must not hold up the other
+    /// changes to its station; what only looks at files is a read.
+    #[test]
+    fn an_upload_stands_in_nobodys_way() {
+        let piece = json!({"id": "u", "dir": "/tmp", "name": "a", "data_b64": ""});
+        let far = json!({"station": "golf", "method": "files.put", "params": piece});
+        for (method, params, station) in [
+            ("files.put", &piece, None),
+            ("peer.call", &far, Some("golf")),
+        ] {
+            let r = route("here", method, params);
+            assert_eq!((r.lane, r.station.as_deref()), (Lane::Write, station));
+            let scope = r.scope.unwrap();
+            assert_eq!(scope, Scope::Write("files"));
+            // Not behind it: what is typed, a Stop, "stop every agent", a
+            // pane being started, a change for the fleet.
+            for other in [
+                Scope::Pane("p".into()),
+                Scope::AllPanes,
+                Scope::Write(""),
+                Scope::Write("deck"),
+            ] {
+                assert!(
+                    !scope.crosses(&other) && !other.crosses(&scope),
+                    "{other:?}"
+                );
+            }
+            // Two pieces keep their order.
+            assert!(scope.crosses(&Scope::Write("files")));
+        }
+        for method in [
+            "files.mkdir",
+            "files.trash",
+            "files.transfer",
+            "files.delete",
+        ] {
+            let r = route("here", method, &json!({}));
+            assert_eq!(r.scope, Some(Scope::Write("files")), "{method}");
+        }
+        for method in ["files.list", "files.read", "files.stat", "files.jobs"] {
+            assert_eq!(
+                route("here", method, &json!({})).lane,
+                Lane::Read,
+                "{method}"
+            );
+        }
+    }
 
     /// What the connection does with a request, without the station: the
     /// lane's rule and nothing else. `work` is the request's handler; one

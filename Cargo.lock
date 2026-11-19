@@ -2533,6 +2533,7 @@ version = "0.4.17"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "crc32fast",
  "hmac",
  "insta",
  "proptest",

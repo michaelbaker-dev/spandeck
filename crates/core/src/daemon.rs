@@ -572,6 +572,8 @@ pub struct Inner {
     pub relay: crate::relay::Relay,
     /// Requests that carry an id: done once, and answered again (rids.rs).
     pub rids: Arc<crate::rids::Rids>,
+    /// The file explorer: uploads in pieces, copies, zips (files.rs).
+    pub(crate) files: crate::files::FilesState,
 }
 
 #[derive(Clone)]
@@ -744,6 +746,7 @@ impl Daemon {
                 &cfg.station,
             )),
             rids: crate::rids::Rids::new(db.clone()),
+            files: crate::files::FilesState::new(&paths.state_dir.join("files")),
             approvals: crate::approvals::ApprovalBook::new(db.clone(), &cfg.station),
             trust,
             stops: crate::stops::StopsState::new(db.clone(), &cfg.station),
@@ -977,6 +980,13 @@ impl Daemon {
             }
             if n % 60 == 3 {
                 d.prune_ended();
+            }
+            // The explorer's leftovers (files.rs): finished jobs and
+            // unread zips every minute; old trash and part files nothing
+            // writes to at the start and every ten minutes.
+            if n % 6 == 4 {
+                let f = d.clone();
+                tokio::task::spawn_blocking(move || f.files_sweep(n % 60 == 4));
             }
             Box::pin(async {})
         });
@@ -2076,9 +2086,115 @@ impl Daemon {
     /// project and role. An agent goes back to its conversation unless
     /// `fresh` is set or there is none to go back to.
     pub fn restart_pane(&self, id: &str, fresh: bool, by: &str) -> Result<Arc<PaneEntry>> {
+        self.restart_pane_in(id, None, fresh, by)
+    }
+
+    /// May this pane's program be started again in `cwd`? The folder as
+    /// it will be recorded, or why not.
+    ///
+    /// What records a pane's folder: the pane's own record (what a reload
+    /// and a restart of the station read), and for a pane that fills a
+    /// place in a project, the project's file, which names the place's
+    /// folder as one inside the project's. So a project's pane moves
+    /// inside its project and nowhere else; and a helper on a task stays
+    /// in the folder the task was given, where its diff and its sign-off
+    /// are read.
+    fn move_target(&self, meta: &PaneMeta, cwd: &std::path::Path) -> Result<PathBuf> {
+        let name = &meta.name;
+        if !cwd.is_absolute() {
+            return Err(invalid(format!(
+                "{} is not an absolute path on {}",
+                cwd.display(),
+                self.station
+            )));
+        }
+        let real = std::fs::canonicalize(cwd)
+            .ok()
+            .filter(|p| p.is_dir())
+            .ok_or_else(|| {
+                invalid(format!(
+                    "{} is not a folder on {}",
+                    cwd.display(),
+                    self.station
+                ))
+            })?;
+        if let Some(task) = &meta.task {
+            return Err(invalid(format!(
+                "{name} is doing task {task} in the folder the task was given ({}): its changes and its sign-off are read there, so it is not moved. Start a pane in {} instead",
+                meta.cwd,
+                cwd.display()
+            )));
+        }
+        if let Some(project) = &meta.project {
+            let root = self
+                .project_path(project)
+                .map(PathBuf::from)
+                .ok_or_else(|| Error::NotFound(format!("project {project}")))?;
+            let root_real = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+            if !real.starts_with(&root_real) {
+                return Err(invalid(format!(
+                    "{name} is a pane of the project {project}, whose folder is {}: a project's pane can move to a folder inside its project, not out of it (its place in the project, its orders and the project's record go by that folder). Start a pane in {} instead",
+                    root.display(),
+                    cwd.display()
+                )));
+            }
+        }
+        // As it was given: the folder's own spelling, which is what the
+        // pane's program is started in and what the pane then shows.
+        Ok(cwd.to_path_buf())
+    }
+
+    /// A project's file names the folder of each of its places: a pane
+    /// that fills one and was moved is started there again when the
+    /// project is next opened.
+    fn move_slot(&self, meta: &PaneMeta, cwd: &std::path::Path) {
+        let (Some(project), Some(slot)) = (&meta.project, &meta.slot) else {
+            return;
+        };
+        let Ok((root, mut file)) = self.project_file(project) else {
+            return;
+        };
+        let root_real = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+        let cwd_real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let Ok(sub) = cwd_real.strip_prefix(&root_real) else {
+            return;
+        };
+        let sub = (!sub.as_os_str().is_empty()).then(|| sub.to_string_lossy().into_owned());
+        let Some(place) = file.panes.iter_mut().find(|p| &p.name == slot) else {
+            return;
+        };
+        if place.cwd != sub {
+            place.cwd = sub;
+            if let Err(e) = file.save(&root) {
+                tracing::warn!(project = %project, error = %e, "the pane's new folder was not written to the project's file");
+            }
+        }
+    }
+
+    /// `restart_pane`, and with `cwd` the "Move agent here" of the file
+    /// explorer: the program is started again in that folder, under the
+    /// same pane, as a new conversation (an agent's conversation belongs
+    /// to its folder; the one it was in stays in the archive).
+    pub fn restart_pane_in(
+        &self,
+        id: &str,
+        cwd: Option<&std::path::Path>,
+        fresh: bool,
+        by: &str,
+    ) -> Result<Arc<PaneEntry>> {
         let old = self.pane(id)?;
         let meta = old.meta();
-        let resume = if fresh { None } else { self.resumable(&meta) };
+        // Looked at before anything is ended: a move that is refused
+        // leaves the pane running as it was.
+        let moved = match cwd {
+            Some(cwd) => Some(self.move_target(&meta, cwd)?),
+            None => None,
+        };
+        let resume = if fresh || moved.is_some() {
+            None
+        } else {
+            self.resumable(&meta)
+        };
         if meta.exit.is_none() {
             let _ = old.term.signal(Signal::Hangup);
             let _ = old.term.signal(Signal::Kill);
@@ -2099,7 +2215,7 @@ impl Daemon {
                 name: Some(meta.name.clone()),
                 agent: Some(meta.agent),
                 program: self.launcher_program(&meta),
-                cwd: Some(PathBuf::from(&meta.cwd)),
+                cwd: Some(moved.clone().unwrap_or_else(|| PathBuf::from(&meta.cwd))),
                 cols: Some(meta.spec.cols),
                 rows: Some(meta.spec.rows),
                 project: meta.project.clone(),
@@ -2116,8 +2232,18 @@ impl Daemon {
                 resume: resume.clone(),
                 slot: meta.slot.clone(),
                 // The same rule for the program started again, and only
-                // for a pane that was started with the choice.
-                trust_choice: meta.trust_choice.clone(),
+                // for a pane that was started with the choice. In another
+                // folder, the owner's standing choice for that folder.
+                trust_choice: match &moved {
+                    Some(cwd) => self.folder_trust_at_start(
+                        None,
+                        meta.agent,
+                        cwd,
+                        meta.project.as_deref(),
+                        by,
+                    ),
+                    None => meta.trust_choice.clone(),
+                },
                 hooks_trust_choice: meta.hooks_trust_choice.clone(),
                 ..Default::default()
             })
@@ -2142,13 +2268,20 @@ impl Daemon {
             m.model_chosen = meta.model_chosen.clone();
         }
         self.write_instructions(&p.meta());
+        if let Some(cwd) = &moved {
+            self.move_slot(&meta, cwd);
+        }
         self.record(
             "pane.restarted",
             Some(&p.id),
             meta.project.as_deref(),
             meta.task.as_deref(),
             Some(by),
-            json!({"resumed": resume.is_some(), "session_id": resume}),
+            match &moved {
+                Some(cwd) => json!({"resumed": false, "session_id": null,
+                                    "moved_from": meta.cwd, "cwd": cwd.display().to_string()}),
+                None => json!({"resumed": resume.is_some(), "session_id": resume}),
+            },
         );
         self.emit("pane.updated", Some(&p.id), None, json!({}));
         Ok(p)
@@ -3146,6 +3279,8 @@ impl Daemon {
         // It supplies a release to a station of its fleet that cannot
         // download one (supply_fleet.rs).
         caps.push(crate::supply_fleet::CAP);
+        // The owner's file explorer: the `files.` methods (files.rs).
+        caps.push(crate::files::CAP);
         // Request ids are kept: a change may be tried again by its id.
         if self.flag_on(crate::rids::FLAG, true) {
             caps.push(crate::rids::CAP);
