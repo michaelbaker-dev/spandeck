@@ -95,6 +95,11 @@
 //! given, in seconds (default: what spandeck installs, an hour).
 //! `"trust_screen"` beside the steps: the same, shown before the session
 //! starts, where the real programs ask.
+//! A list of them there: one after another, as Codex asks about the folder
+//! and then about hooks. `"update_notice": true` beside the steps: before
+//! those, Codex 0.169.0's notice of a newer version (agents/foldertrust.rs,
+//! `before_first`). It waits: Esc skips it, Enter takes "Update now"
+//! ("[fake] updating", and the program ends), anything else is swallowed.
 //! After the steps it idles at a prompt; each input line runs `on_input`.
 
 use std::io::{Read, Write};
@@ -902,6 +907,52 @@ impl Agent {
         }
     }
 
+    /// Codex's notice of a newer version (see the top of this file).
+    fn update_notice(&mut self) {
+        let rows = [
+            "  Update available · 0.169.0 → 0.170.0",
+            "",
+            "› 1. Update now (runs `npm install -g @openai/codex`)",
+            "  2. Skip",
+            "  3. Skip until next version",
+            "",
+            "  enter continue · esc skip",
+        ];
+        let mut o = std::io::stdout();
+        let _ = o.write_all(b"\x1b[2J\x1b[H");
+        let _ = o.write_all(rows.join("\r\n").as_bytes());
+        let _ = o.flush();
+        loop {
+            let key = match self.input.recv() {
+                Ok(b) => b,
+                Err(_) => std::process::exit(0),
+            };
+            match key {
+                b'\r' | b'\n' => {
+                    let _ = o.write_all(b"\x1b[2J\x1b[H");
+                    out("[fake] updating");
+                    restore_terminal();
+                    std::process::exit(0);
+                }
+                0x1b => {
+                    // Esc alone; an arrow or a paste's marks are not it.
+                    let wait = Duration::from_millis(50);
+                    if self.input.recv_timeout(wait).is_err() {
+                        let _ = o.write_all(b"\x1b[2J\x1b[H");
+                        let _ = o.flush();
+                        return;
+                    }
+                    while let Ok(b) = self.input.recv_timeout(wait) {
+                        if b.is_ascii_alphabetic() || b == b'~' {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn trust_screen(&mut self, spec: &Value) {
         use spandeck_agents::foldertrust::{drawn, Focus};
         let program = spec["as"].as_str().unwrap_or("claude");
@@ -1153,8 +1204,13 @@ fn main() {
     }
 
     // Where the real programs ask about the folder: before anything else.
-    if let Some(spec) = script.get("trust_screen") {
-        agent.trust_screen(spec);
+    if script["update_notice"] == json!(true) {
+        agent.update_notice();
+    }
+    match script.get("trust_screen") {
+        Some(Value::Array(specs)) => specs.iter().for_each(|spec| agent.trust_screen(spec)),
+        Some(spec) => agent.trust_screen(spec),
+        None => {}
     }
     match &resume {
         Some(id) => out(&format!("[fake] RESUMED {id}")),

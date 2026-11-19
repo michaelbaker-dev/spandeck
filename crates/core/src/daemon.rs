@@ -1813,6 +1813,14 @@ impl Daemon {
         // And any list a program draws to choose from (picker.rs).
         let lists = self.picker_look(&trust);
         trust.extend(lists);
+        // What follows such a screen is given time to be drawn before a
+        // mail nudge is typed (wake.rs, `starting`).
+        let now = now_ms();
+        for id in &trust {
+            if let Ok(p) = self.pane(id) {
+                p.wake.at_screen(now);
+            }
+        }
         for p in self.list_panes() {
             let (agent, hooks_seen, exited, state, reason) = {
                 let m = p.meta.lock().unwrap();

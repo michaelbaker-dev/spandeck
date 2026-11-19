@@ -457,6 +457,7 @@ impl Daemon {
         // it is still the first.
         if !behind && screen::before_first(m.agent, &p.term.lines()) {
             w.hold(now);
+            p.wake.at_screen(now);
             return None;
         }
         let read = || screen::read(m.agent, &p.term.lines(), &self.folder_names(&m.cwd));
@@ -501,6 +502,34 @@ impl Daemon {
                 Moving::Failed => asks("own_choice_is_no"),
             },
             _ => asks("own_choice_is_no"),
+        }
+    }
+
+    /// Is the pane's screen one its program asks something on when it
+    /// starts: the notice of a newer version, the folder-trust question,
+    /// the review of hooks? Read from the screen as it is now, whatever
+    /// any watch of the first screen has decided (one that closed after
+    /// its time knows nothing of a question that came late). The mail
+    /// nudge asks, and types nothing into such a screen: its Enter would
+    /// answer it (messages.rs, `nudge_pane`).
+    ///
+    /// `greeted`: the program's session has started, or a hook of it ran. Its screen is then
+    /// such a question only when it ends with the question's own choices;
+    /// before that, any row that begins with one's words is enough.
+    pub(crate) fn start_question(&self, p: &PaneEntry, agent: AgentKind, greeted: bool) -> bool {
+        use spandeck_agents::hookstrust;
+        let lines = p.term.lines();
+        if screen::before_first(agent, &lines) {
+            return true;
+        }
+        // The folder's names are not needed: any level is a question.
+        let folder = screen::read(agent, &lines, &[]).map(|s| s.level);
+        let hooks = hookstrust::read(agent, &lines).map(|s| s.level);
+        if greeted {
+            folder.is_some_and(|l| l >= Level::Choices)
+                || hooks.is_some_and(|l| l >= Level::Choices)
+        } else {
+            folder.is_some() || hooks.is_some()
         }
     }
 
