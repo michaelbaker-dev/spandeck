@@ -173,6 +173,10 @@ pub struct PaneMeta {
     /// Sub-agents the agent itself has running (its own, not spandeck helpers).
     #[serde(default)]
     pub subagents: Vec<SubAgent>,
+    /// Those of them its hooks said were over, with the program's own id
+    /// (subagents.rs): the newest few, each for the session it was in.
+    #[serde(default)]
+    pub subagents_over: Vec<crate::subagents::SubOver>,
     /// How hard the model is asked to think, as the agent's hooks last
     /// said. `None`: it has not said.
     #[serde(default)]
@@ -294,6 +298,9 @@ pub struct SubAgent {
     /// What the agent calls it: "Explore", "general-purpose", and so on.
     pub kind: String,
     pub since_ms: u64,
+    /// The program's own id for it, when its hooks give one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 pub struct PaneEntry {
@@ -1547,6 +1554,7 @@ impl Daemon {
             turn: TurnStats::default(),
             controller: None,
             subagents: vec![],
+            subagents_over: vec![],
             effort: None,
             effort_at_ms: 0,
             model_said: None,

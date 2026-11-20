@@ -104,6 +104,7 @@ pub mod snapshot;
 pub mod speech;
 pub mod startscreen;
 pub mod stops;
+pub mod subagents;
 pub mod supply;
 pub mod supply_fleet;
 pub mod sync;

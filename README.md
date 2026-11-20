@@ -140,7 +140,11 @@ Workspaces, the other kind of tab, are kept in the browser only and can hold any
 
 **Who is doing what.** A pane whose agent has others working under it shows an
 **Agents** button; it slides a panel in from the right listing the helpers it gave tasks
-to, and each agent's own sub-agents, with what each is doing. The **Watch** tab shows
+to, and each agent's own sub-agents, with what each is doing. In a pane's Chat, a chip
+in its header ("3 sub-agents · 2 working") is there while the agent has sub-agents of
+its own, for Claude Code, Codex, OpenCode and Antigravity alike: it opens a drawer
+beside the conversation with a row for each (what it was asked, and its latest step),
+and a row opens that sub-agent's own conversation, to read only. The **Watch** tab shows
 every agent in a project as a row that says what it is doing, who is waiting for whom
 where that is known, and what the agents and you say to each other as one thread, the
 newest at the bottom. On a project layout,

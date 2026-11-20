@@ -107,6 +107,14 @@ pub struct AgentEvent {
     /// (Claude Code's hooks: `effort.level`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// A sub-agent's start or stop: the program's own id for it, when the
+    /// event carries one that is a plain word (`agent_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_id: Option<String>,
+    /// A sub-agent's stop: where the program says its own record is
+    /// (`agent_transcript_path`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_transcript: Option<String>,
     /// The vendor's own event name, kept for replies and debugging.
     pub raw_event: String,
 }

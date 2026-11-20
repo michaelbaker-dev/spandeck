@@ -102,7 +102,7 @@ answer is as fresh as the file whoever asks.
   "live": {
     "state": "working", "state_since_ms": 1794736800100, "needs_reason": null,
     "tool": "Bash", "tool_since_ms": 1794736805000,
-    "subagents": [{"kind": "Explore", "since_ms": 1794736851000}],
+    "subagents": [{"kind": "Explore", "since_ms": 1794736851000, "id": "a3f9c1d2e4b5a6c70"}],
     "paused": false, "exited": false, "resumed": false, "hooks_seen": true,
     "held": null,
     "trust": null,
@@ -348,14 +348,14 @@ kind as a quiet line with its name, never as an error.
 |---|---|
 | `state`, `state_since_ms`, `needs_reason` | The pane's state as everywhere in the deck: `idle`, `working`, `needs_you`, `done`, `error`. |
 | `tool`, `tool_since_ms` | The tool running now, from the agent's hooks, or `null`. For "Working · Bash · 42 s". The command is the `summary` of the last `tool` item with `status: "running"`. |
-| `subagents` | `[{kind, since_ms}]`: the agent's own sub-agents running now. |
+| `subagents` | `[{kind, since_ms, id?}]`: the agent's own sub-agents running now, as its hooks say (`id`: the program's own id for one, when its hook gave it; 20 Nov 2026). Non-empty while sub-agents run. The rows to show are in `tasks`. |
 | `paused`, `exited`, `resumed`, `hooks_seen` | As in the pane list. `resumed`: the program was started into a saved conversation. |
 | `trust` | `null`, or the pane's folder-trust question (16 Nov 2026): `{chosen, asks, answered, folder}`. `asks` is `null` or `{since_ms, button, why}`: the program asks whether to trust the folder and nothing was pressed (`why`: `not_chosen`, `own_choice_is_no`, `not_the_known_screen`, `switched_off`); with `button: true` show "Trust this folder", which is `pane.trust_folder {pane, remember}` (the owner's only; it moves the program's marker to the trusting choice if need be, checks, and confirms). `answered` is `null` or `{at_ms, how, by}` (`how`: `standing`, by spandeck on the owner's choice; `tap`). `chosen` is `null` or `{by, why}`: the choice the pane was started with. The same `trust` is in `pane.list` and `pane.get`. A station from before this has no `trust`. |
 | `hooks_trust` | In `pane.list` and `pane.get` only (16 Nov 2026): `null`, or the pane's review of hooks (Codex's "Hooks need review"): `{chosen, asks, answered}` shaped as in `trust`. `asks.why` is `not_only_spandecks` (the hooks may not all be spandeck's: `button` is false and `asks.says`, also the pane's `needs_reason`, says which source was found), or `not_chosen`, `you_typed`, `not_the_known_screen`, `marker_did_not_move`; with `button: true` show "Trust spandeck's hooks", which is `pane.trust_hooks {pane}` (the owner's only). A station from before this has no `hooks_trust`. |
 | `held` | `null`, or why the agent takes no mail until the owner releases it: `{stopped, restored, mail}`. `stopped` is `null` or `{at_ms, by, reached}`: the owner (or a "stop every agent") stopped it; `reached: false` means the program was not reading and the stop did not reach it ("use Kill"). `restored` is `null` or `{at_ms, why}`: the station started it again after a restart (`why`: `crash`, `stop`, `upgrade`). `mail` is how many messages wait. Show it with a Release button: `pane.release {pane}` (the owner's only; `{all: true}` for every pane on the station), answered `{ok, pane, released, still_paused, saved}`. Sending the pane anything (`pane.send_text`, `pane.paste`, `pane.input`) releases it too. `paused` is apart: Release never changes it. The same `held` is in `pane.list` and `pane.get`. A station from before this has no `held`. |
 | `approvals` | Requests held for the owner for this pane, oldest first. Each: `{kind: "approval", id: "approval:<approval id>", approval, what, summary, tool, ts_ms, item}`. `approval` is the id `approval.answer {id, allow, reason?}` takes, as today. `what` is the kind of request (`permission`, `route`). `item` is the `id` of the `tool` item the request is about, or `null`: draw the card anyway. It is set only when the station is sure which call it is: the call with the id the hook gave, else the newest running call of that tool with the same command or file. It can name an item on a line after this answer's `cursor`, which the next answer brings. They are not in `items`: they are not in the session file. |
 | `questions` | A question or a plan the station holds for the owner for this pane, oldest first (eight at most). Below. A station from before 16 Nov 2026 has no such field. |
-| `tasks` | What the agent has running beside its turn, and what of it is over (17 Nov 2026). Below. A station from before has no such field: count `subagents`. |
+| `tasks` | The agent's sub-agents, what else it has running beside its turn, and what of it is over (17 Nov 2026; a sub-agent's row says more since 20 Nov 2026). Below. A station from before has no such field: count `subagents`. |
 | `model` | `null` for a shell; else what the model chip shows and offers (17 Nov 2026). Below. |
 | `cleared` | The ids of the notes of this conversation the owner cleared (`pane.notes.clear`, below): leave those items out. |
 | `unread`, `read_line` | Whether the agent has said something after the read mark, and the mark. Below. |
@@ -415,13 +415,17 @@ until when, never what it says (agents read the pane list). The pane's state is 
 and its `needs_reason` reads `asks you a question: answer it in Chat (in the terminal from
 14:12 UTC)` (or `asks you to approve its plan: …`).
 
-### `live.tasks`: background tasks
+### `live.tasks`: sub-agents and background tasks
 
 ```json
 "tasks": {
   "running": [
     {"id": "21.0", "kind": "agent", "name": "Explore", "title": "Look for other tally scripts",
-     "status": "running", "background": true, "started_ms": 1794736851000, "transcript": true},
+     "status": "running", "state": "working", "background": true, "started_ms": 1794736851000,
+     "transcript": true, "depth": 1, "current": true, "now": "Bash · grep -rn tally scripts/"},
+    {"id": "sub:a3f9c1d2e4b5a6c70", "kind": "agent", "name": "general-purpose", "title": "Read tally.py",
+     "status": "running", "state": "working", "background": false, "started_ms": 1794736861000,
+     "transcript": true, "parent": "21.0", "depth": 2, "current": true, "now": "Read · scripts/tally.py"},
     {"id": "30.0", "kind": "shell", "title": "cargo watch -x test", "status": "running",
      "background": true, "started_ms": 1794736900000, "transcript": false},
     {"id": "pane:p_01jz", "kind": "helper", "name": "builder-3f2a", "title": "build the importer",
@@ -437,30 +441,59 @@ and its `needs_reason` reads `asks you a question: answer it in Chat (in the ter
 |---|---|
 | `running` | Everything that runs, oldest first (50 at most). Its length is the "N running tasks" of the view. |
 | `finished`, `finished_total` | The 30 newest that are over, newest first, and how many there are in all (the station keeps 200 a session). |
-| `id` | For a task of the agent's own: the `id` of the item of the call that started it. `pane:<pane id>` for a helper pane; `child:<id>` for a conversation the program began itself. |
+| `id` | For a task of the agent's own: the `id` of the item of the call that started it. `pane:<pane id>` for a helper pane; `child:<id>` for a conversation (or thread) the program began itself; `sub:<id>` for a sub-agent that a sub-agent of Claude Code's began; `hook:<id>` for one only the agent's hooks tell of. Opaque: give it back as `task`. |
 | `kind` | `agent` (a sub-agent), `shell` (a command left running), `helper` (a pane the agent started through spandeck: `pane` is its id, `name` its name). |
-| `name`, `title` | A sub-agent's kind, and what it was asked or the command, in one line (200 characters). Either may be empty. |
+| `name`, `title` | A sub-agent's kind (or role, or name: the program's own word), and what it was asked or the command, in one line (200 characters). Either may be empty: **a row never says more than its program did.** With both empty a view says only that a sub-agent is running. |
+| `state` | An `agent` row (20 Nov 2026): `working`, `done`, `failed` or `stopped`, made from `status` (`stopped`: interrupted, denied, lost, killed). For a helper it is its pane's state, as before. A station from before has none: use `status`. |
+| `parent`, `depth` | An `agent` row: `depth` is 1 for a sub-agent of the pane's agent, 2 for one that a sub-agent began, and so on; `parent` is then the `id` of the row it was begun under (absent at depth 1). A parent may be in the other list, or cut from it. |
+| `current` | An `agent` row: it is at work, or it is of the turn now (begun since the last message someone sent). **The view's chip counts the `current` rows and no others**: a finished sub-agent leaves the chip with the next message. |
+| `now` | A working `agent` row: its latest step in one line (100 characters), from the end of its own record: `<tool> · <what>` ("Bash · cargo test"), `Thinking`, or the first words of what it wrote. Absent where no record of its own was read. |
+| `said` | A finished `agent` row: the first line of the last thing it wrote (or of what the program kept as its output). Absent where none was read. |
+| `from` | `hooks`: the row is what the agent's hooks said and nothing else (a kind and since when). For a `child:` row: the program (`codex`, `opencode`, `antigravity`). |
 | `status` | `running`; for a task left in the background, the program's own word when it reported it over (`completed`, `failed`, …; `done` when it gave none); for a sub-agent that was waited for, its result's (`ok`, `error`, `denied`, `interrupted`); `lost`: the file has it as running, and the pane's program has ended or was started again since it began; for a helper its pane's state, or `ended`. |
 | `started_ms`, `ended_ms` | When the records say; on the station's clock for a helper. Absent when a record carries no time. |
 | `transcript` | The sub-agent has a conversation of its own that can be read: `pane.conversation.detail {pane, task: <id>, session}`, below. |
 | `can_stop` | A helper only: its turn can be stopped with `pane.stop {pane: <its pane>}`. No other task has a stop: an agent's own sub-agents and commands stop with its turn. |
-| `sure` | `false`: the program's store does not say whether this one still runs (Antigravity); it is `running` while its transcript was written to in the last fifteen seconds. |
+| `sure` | `false`: the program's store does not say whether this one still runs (an Antigravity store with no `status`; a Codex thread whose file ends with no mark of its turn); it is `running` while its record was written to in the last fifteen seconds. |
 
-Where the rows come from: Claude Code's session file (a sub-agent: its `Agent`/`Task` call, in the
-background when the result says `async_launched`/`isAsync`, over with its
-`<task-notification>`, tied by `tool-use-id` or `task-id`; a command: a call whose result has
-`backgroundTaskId`); the conversations OpenCode and Antigravity began under this one
-(`session_v2.parent_id`, `parent_conversation_id`; read at most every two seconds); and for
-every agent the panes whose `parent_pane` is this pane. Codex's file has none: its sub-agents
-are in `subagents`, when its hooks report them. A view shows `subagents` as rows when
-`running` has no `agent`.
+`finished` has the `current` sub-agents first, then the newest of the rest.
 
-**A sub-agent's transcript: `pane.conversation.detail {pane, task, session?}`** answers
+Where the rows come from, per program (20 Nov 2026; what was seen and what was not is in
+DECISIONS.md, "Sub-agents are shown in a drawer of the agent's pane, for every program"):
+
+- **Claude Code**: its session file (a sub-agent: its `Agent`/`Task` call, in the background
+  when the result says `async_launched`/`isAsync`, over with its `<task-notification>`, tied
+  by `tool-use-id` or `task-id`; a command: a call whose result has `backgroundTaskId`), and
+  the files it keeps beside the session for each sub-agent: `subagents/agent-<id>.meta.json`
+  (`agentType`, `description`, `toolUseId`, `spawnDepth`, `parentAgentId`, `finished`) ties a
+  sub-agent to its call before any result is written, and is the only word of one that a
+  sub-agent began (`sub:<id>`); `now` and `said` are from the end of `agent-<id>.jsonl`.
+- **Codex**: the threads whose own file names this conversation as the one they were begun
+  under (`session_meta.parent_thread_id`), and theirs; at work between `task_started` and
+  `task_complete`/`turn_aborted` at the end of that file. Its reviewer of approvals
+  (`thread_source: guardian_review`) is not a row.
+- **OpenCode**: `session_v2` rows with this `parent_id` (`agent`, `time_busy`, `time_idle`,
+  `idle_outcome`), with what its `job` table says of each.
+- **Antigravity**: `conversation_summaries` rows with this `parent_conversation_id`
+  (`status`, `agent_name`, `killed`); `title` is the role the parent gave it.
+- **Every program with hooks**: a sub-agent its hooks report and no record names is a
+  `hook:` row (`from: "hooks"`), and one they said is over stays as a finished row.
+- **Every agent**: the panes whose `parent_pane` is this pane.
+
+A store is asked, and a folder listed, at most every two seconds; the end of a record is read
+again only when it has grown, at most once a second, for the first 24 sub-agents. A view of a
+station from before 20 Nov 2026 shows `subagents` as rows when `running` has no `agent`.
+
+**A sub-agent's own conversation: `pane.conversation.detail {pane, task, session?}`** answers
 `{pane, session, task, items, cut}`: `items` are items as everywhere (the last 200), read from
-the sub-agent's own file (Claude Code: the last 2 MB of
-`<session file without .jsonl>/subagents/agent-<agentId>.jsonl`) or the child conversation's
-store, when asked for and kept nowhere. `cut`: its beginning is not here. There is no detail
-of an item of it and no watch. `not_found`: no such task, or it has no transcript.
+the sub-agent's own record (Claude Code: the last 2 MB of
+`<session file without .jsonl>/subagents/agent-<agentId>.jsonl`; Codex: the last 2 MB of the
+thread's file; OpenCode and Antigravity: the child conversation's store; a `hook:` row: the
+file its hook named, only where that is one of the program's own), when asked for and kept
+nowhere. `cut`: its beginning is not here. There is no detail of an item of it and no watch:
+ask again when its row's `now` or `status` changes. **It is to read only**: no method sends a
+sub-agent anything. `not_found`: no such task, or it has no record to read (`transcript` is
+false).
 
 ### `live.model`: the model, and how hard it thinks
 
@@ -878,7 +911,8 @@ an item of another session), `unreachable` (the pane's station, through the gate
 | Diff of an edit | Yes | No | No | No | |
 | Thinking duration | Yes | No | Yes | No | |
 | Question, plan | Shown, with the answer once given; held for the owner and answered with `question.answer` (sessions started after 16 Nov 2026) | Not in its files; what Codex asks is in its terminal | The terminal | The terminal | |
-| Sub-agents as `tasks` | Yes | No (`live.subagents` still counts them from hooks) | No | No | |
+| Sub-agents: `tasks` items in the conversation | Yes | No | No | No | |
+| Sub-agents: rows of `live.tasks`, each with its own conversation | Yes: its call, its `meta.json`, its own file; nested ones | Yes: the threads begun under this one (not its reviewer); else what its hooks report | Yes: child conversations, with its `job` table | Yes: child conversations, with `status`, `agent_name`, `killed` | |
 | Compaction, turn end, interrupted, error | Yes | Turn end with duration; the others are written from Codex's public format and were not in the files read | Turn end with duration (`idle`, `succeeded`); an error (a failed message, or a failed `idle` whose message did not say why) | Turn end, with no duration: an answer that calls no tool is the last of its turn (the program's own hooks guide: a turn stops with `NO_TOOL_CALL`); an error a step carries | From the screen: a turn's end when the station saw one |
 | What is left out | | Its notes to itself | Reasoning is a length of time, never its words | The program's wrapping of what the owner wrote (`<USER_REQUEST>`), its notes beside it (the time, a setting changed), and thinking's words | |
 | `live`, approvals, `unread` | Yes | Yes (approvals where Codex's hooks hold them) | `live` and `unread` (no hooks: its state is read from its screen, approvals are answered in its terminal) | `live` and `unread` (its hooks say working and done; it has no hook that holds an approval) | `live` only |

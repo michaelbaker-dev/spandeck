@@ -210,23 +210,18 @@ impl Daemon {
                     }
                 }
                 EventKind::SubagentStart => {
-                    if m.subagents.len() < 24 {
-                        m.subagents.push(crate::daemon::SubAgent {
-                            kind: ev.message.clone().unwrap_or_else(|| "sub-agent".into()),
-                            since_ms: now,
-                        });
-                    }
+                    crate::subagents::started(&mut m.subagents, ev, now);
                 }
                 EventKind::SubagentStop => {
-                    let kind = ev.message.clone().unwrap_or_else(|| "sub-agent".into());
-                    match m.subagents.iter().position(|s| s.kind == kind) {
-                        Some(i) => {
-                            m.subagents.remove(i);
-                        }
-                        None => {
-                            m.subagents.pop();
-                        }
-                    }
+                    let session = m.session_id.clone();
+                    let m = &mut *m;
+                    crate::subagents::stopped(
+                        &mut m.subagents,
+                        &mut m.subagents_over,
+                        ev,
+                        session,
+                        now,
+                    );
                 }
                 EventKind::TurnEnd | EventKind::TurnFailed | EventKind::Interrupted => {
                     m.tool = None;

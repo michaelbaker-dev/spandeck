@@ -16,6 +16,16 @@ fn s(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(|x| x.as_str()).map(|x| x.to_string())
 }
 
+/// An id a program gave that may name a file or a row: letters, digits,
+/// `-` and `_`, and not long.
+pub fn plain_word(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// Shared by every agent that speaks the Claude-style hook dialect
 /// (Claude Code, Codex, the fake agent).
 pub(crate) fn normalize_claude_dialect(agent: AgentKind, p: &Value) -> Option<AgentEvent> {
@@ -156,20 +166,27 @@ pub(crate) fn normalize_claude_dialect(agent: AgentKind, p: &Value) -> Option<Ag
         // turn. Claude Code also runs helpers of its own a few seconds after a
         // turn ends, and their events used to flip a finished pane back to
         // "working", where it stayed until the next prompt.
-        "SubagentStart" => (
-            EventKind::SubagentStart,
-            None,
-            None,
-            s(p, "agent_type"),
-            None,
-        ),
-        "SubagentStop" => (
-            EventKind::SubagentStop,
-            None,
-            None,
-            s(p, "agent_type"),
-            None,
-        ),
+        //
+        // The program also reports helpers of its own this way, with an
+        // empty `agent_type` (Claude Code 2.1.329): they are no sub-agent
+        // the owner or the agent asked for, and are not events here. A
+        // payload with no `agent_type` at all is an older program's.
+        "SubagentStart" | "SubagentStop" => {
+            if s(p, "agent_type").is_some_and(|t| t.trim().is_empty()) {
+                return None;
+            }
+            (
+                if raw == "SubagentStart" {
+                    EventKind::SubagentStart
+                } else {
+                    EventKind::SubagentStop
+                },
+                None,
+                None,
+                s(p, "agent_type").map(|t| cap(&t, 80)),
+                None,
+            )
+        }
         "PreCompact" | "PostCompact" => (
             EventKind::Compact,
             None,
@@ -187,6 +204,7 @@ pub(crate) fn normalize_claude_dialect(agent: AgentKind, p: &Value) -> Option<Ag
         _ => return None,
     };
 
+    let sub = matches!(kind, EventKind::SubagentStart | EventKind::SubagentStop);
     Some(AgentEvent {
         kind,
         agent,
@@ -204,6 +222,17 @@ pub(crate) fn normalize_claude_dialect(agent: AgentKind, p: &Value) -> Option<Ag
             .and_then(|l| l.as_str())
             .filter(|l| l.len() <= 16 && l.chars().all(|c| c.is_ascii_alphanumeric()))
             .map(String::from),
+        // A sub-agent's own id and where its record is (Claude Code's and
+        // Codex's `SubagentStart`/`SubagentStop`: `agent_id`,
+        // `agent_transcript_path`). The id is used only as a plain word.
+        sub_id: sub
+            .then(|| s(p, "agent_id"))
+            .flatten()
+            .filter(|id| plain_word(id)),
+        sub_transcript: sub
+            .then(|| s(p, "agent_transcript_path"))
+            .flatten()
+            .filter(|t| !t.is_empty() && t.len() <= 1024),
         raw_event: raw,
     })
 }
@@ -433,5 +462,71 @@ mod notification_tests {
             .unwrap();
             assert_eq!(ev.state, None, "{name}");
         }
+    }
+
+    // The owner's request of 20 Nov 2026: a sub-agent is a row of its own,
+    // so its start and its stop are told apart by the program's own id.
+    // Payloads in the shapes Claude Code 2.1.329 and codex-cli 0.170.0 send.
+    #[test]
+    fn a_sub_agent_event_carries_its_id_and_an_internal_one_is_no_event() {
+        let ev = |agent, v: Value| normalize_claude_dialect(agent, &v);
+        let stop = ev(
+            AgentKind::Claude,
+            json!({"hook_event_name": "SubagentStop", "session_id": "s", "agent_id": "a3f9c1d2e4b5a6c70",
+                "agent_type": "Explore", "agent_transcript_path": "/h/.claude/projects/p/s/subagents/agent-a3f9c1d2e4b5a6c70.jsonl",
+                "last_assistant_message": "Two scripts."}),
+        )
+        .unwrap();
+        assert_eq!(
+            (stop.kind, stop.message.as_deref(), stop.sub_id.as_deref()),
+            (
+                EventKind::SubagentStop,
+                Some("Explore"),
+                Some("a3f9c1d2e4b5a6c70")
+            )
+        );
+        assert!(stop
+            .sub_transcript
+            .unwrap()
+            .ends_with("agent-a3f9c1d2e4b5a6c70.jsonl"));
+        let start = ev(
+            AgentKind::Codex,
+            json!({"hook_event_name": "SubagentStart", "session_id": "s", "turn_id": "t1",
+                "agent_id": "019ab3c4-0000-7000-8000-00000000c0de", "agent_type": "worker"}),
+        )
+        .unwrap();
+        assert_eq!(
+            start.sub_id.as_deref(),
+            Some("019ab3c4-0000-7000-8000-00000000c0de")
+        );
+        // An id that could name another file is not one.
+        let odd = ev(
+            AgentKind::Claude,
+            json!({"hook_event_name": "SubagentStart", "agent_id": "../../x", "agent_type": "Explore"}),
+        )
+        .unwrap();
+        assert_eq!(odd.sub_id, None);
+        // The program's own helper: an empty type.
+        for name in ["SubagentStart", "SubagentStop"] {
+            assert!(ev(
+                AgentKind::Claude,
+                json!({"hook_event_name": name, "agent_id": "a1", "agent_type": ""})
+            )
+            .is_none());
+        }
+        // An older program: no type and no id.
+        let old = ev(
+            AgentKind::Claude,
+            json!({"hook_event_name": "SubagentStart"}),
+        )
+        .unwrap();
+        assert_eq!((old.message, old.sub_id), (None, None));
+        // No other event has them.
+        let end = ev(
+            AgentKind::Claude,
+            json!({"hook_event_name": "Stop", "agent_id": "a1", "agent_transcript_path": "/x"}),
+        )
+        .unwrap();
+        assert_eq!((end.sub_id, end.sub_transcript), (None, None));
     }
 }

@@ -110,6 +110,16 @@ jobs:
       - name: Chat for every pane, and one chat for all of them (phone and computer, the keyboard)
         if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test chat -- --ignored
+      # Sub-agents in a drawer of the agent's pane, in a real browser: the
+      # chip in the pane's header only while the agent has sub-agents; the
+      # drawer beside the conversation with a row for each and a "Now"
+      # that follows it; open or closed remembered across a reload; one
+      # opened to read only, with nothing typed into it or under it; a
+      # narrow pane; a phone's sheet; markup in what a sub-agent was asked
+      # shown as text. About ten seconds.
+      - name: Sub-agents in a drawer of the agent's pane (a computer and a phone)
+        if: ${{ !cancelled() }}
+        run: cargo test -p spandeck --test subagents -- --ignored
       # The microphone of the message box, with stand-ins for the browser's
       # dictation and recorder: a start that throws, one that is never
       # answered, results without end, a stop that is never heard, a hold
