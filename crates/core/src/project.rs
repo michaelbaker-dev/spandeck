@@ -97,9 +97,28 @@ pub struct Layout {
     pub hidden: Vec<LayoutNode>,
 }
 
+/// A station that keeps a layout's views (a `View` leaf) says so in `caps`.
+/// A deck offers Files and Watch in a project's layout only where the
+/// station that keeps the layout does.
+pub const VIEW_CAP: &str = "view_panes";
+
+/// What a view's id begins with. A pane's id is `p-…`, so no pane has one.
+const VIEW_PREFIX: &str = "view.";
+
+/// The kind a view's id names (`view.files.k3f9` is `files`), or `None`
+/// when it is not a view's id. A kind this version does not know is still a
+/// kind: the leaf is kept as it is, and the deck says it cannot show it.
+pub fn view_kind(id: &str) -> Option<&str> {
+    let (kind, token) = id.strip_prefix(VIEW_PREFIX)?.split_once('.')?;
+    let word = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric());
+    (word(kind) && word(token)).then_some(kind)
+}
+
 /// A pane, or two parts side by side (`row`) or one above the other (`col`).
 /// A leaf names any pane: one with a name in a project, or one with no
-/// project by its id; on this station or another.
+/// project by its id; on this station or another. Or it is a view (the
+/// owner's request, 20 Nov 2026): the file browser or Watch, shown in the
+/// layout's cell. A view runs nothing and is no pane of any station.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged, try_from = "RawNode")]
 pub enum LayoutNode {
@@ -114,6 +133,32 @@ pub enum LayoutNode {
         /// the whole fleet names the station of each leaf (see deck.rs).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         station: Option<String>,
+    },
+    /// A view. It is written as a pane named by id is, with an id no pane
+    /// has (`view.<kind>.<token>`), so that a station from before views
+    /// (0.4.19 and earlier) reads it as a pane it does not have and passes
+    /// it on: the kind is in the one field every version keeps. Such a
+    /// station drops what it does not know (`folder`, `watch`, `hidden`),
+    /// and each of the three has a meaning when it is missing.
+    View {
+        id: String,
+        /// Empty: the station the layout is stored on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        station: Option<String>,
+        /// Files: the folder it opens at. Empty: the layout's project's
+        /// folder, or with no project the station's home folder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder: Option<String>,
+        /// Watch: the project whose agents it shows. Empty: the layout's
+        /// own project. (Not called `project`: a station from before views
+        /// refuses a leaf that has an id and a project.)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        watch: Option<String>,
+        /// Not on screen for now. Kept on the leaf and not in the layout's
+        /// `hidden` list: a deck from before views takes a hidden pane it
+        /// cannot find out of the layout.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        hidden: bool,
     },
     /// A pane that is in no project.
     PaneId {
@@ -138,6 +183,9 @@ struct RawNode {
     id: Option<String>,
     project: Option<String>,
     station: Option<String>,
+    folder: Option<String>,
+    watch: Option<String>,
+    hidden: Option<bool>,
     dir: Option<String>,
     ratio: Option<u16>,
     a: Option<Box<LayoutNode>>,
@@ -163,6 +211,13 @@ impl TryFrom<RawNode> for LayoutNode {
             (None, Some(_), false) if n.project.is_some() => {
                 Err("a pane named by id is in no project; name it by pane and project".into())
             }
+            (None, Some(id), false) if id.starts_with(VIEW_PREFIX) => Ok(LayoutNode::View {
+                id,
+                station: n.station,
+                folder: n.folder,
+                watch: n.watch,
+                hidden: n.hidden.unwrap_or(false),
+            }),
             (None, Some(id), false) => Ok(LayoutNode::PaneId {
                 id,
                 station: n.station,
@@ -198,6 +253,30 @@ impl LayoutNode {
             LayoutNode::PaneId { id, station } => {
                 if !valid_name(id) {
                     return Err(format!("{id:?} is not a pane id"));
+                }
+                station_ok(station)
+            }
+            LayoutNode::View {
+                id,
+                station,
+                folder,
+                watch,
+                ..
+            } => {
+                if !valid_name(id) || view_kind(id).is_none() {
+                    return Err(format!(
+                        "{id:?} is not a view's id: view.<kind>.<letters and digits>"
+                    ));
+                }
+                // A folder is a path on its station, as that station writes
+                // it: text, bounded, with nothing that is not printable.
+                if let Some(f) = folder {
+                    if f.is_empty() || f.len() > 4096 || f.chars().any(char::is_control) {
+                        return Err("a view's folder is a path of at most 4096 bytes".into());
+                    }
+                }
+                if watch.as_deref().is_some_and(|p| !valid_name(p)) {
+                    return Err("a view watches a project, by its name".into());
                 }
                 station_ok(station)
             }
@@ -800,5 +879,226 @@ mod tests {
             station: None,
         }];
         assert!(bad.validate().is_err(), "a hidden pane's name is checked");
+    }
+
+    /// A layout holds more than programs (the owner's request, 20 Nov 2026):
+    /// a Files leaf and a Watch leaf come back from a project file and from
+    /// the deck document as they went in, a kind this version does not know
+    /// is kept, and what is not a view's id, a path or a project's name is
+    /// refused.
+    #[test]
+    fn a_layouts_views_are_saved_with_it_and_checked() {
+        let text = "name = \"api\"\n[[layout]]\nname = \"all\"\n[layout.tree]\ndir = \"col\"\nratio = 600\n\
+                    [layout.tree.a]\npane = \"dev\"\n[layout.tree.b]\ndir = \"row\"\nratio = 500\n\
+                    [layout.tree.b.a]\nid = \"view.files.k3f9\"\nfolder = \"/home/me/api/out\"\nhidden = true\n\
+                    [layout.tree.b.b]\nid = \"view.watch.x1\"\nstation = \"spark2\"\nwatch = \"web\"\n";
+        let file: ProjectFile = toml::from_str(text).unwrap();
+        let layout = &file.layouts[0];
+        assert_eq!(layout.validate(), Ok(()));
+        let Some(LayoutNode::Split { b, .. }) = &layout.tree else {
+            panic!("not a split: {layout:?}");
+        };
+        let LayoutNode::Split {
+            a: files, b: watch, ..
+        } = &**b
+        else {
+            panic!("not a split: {b:?}");
+        };
+        assert_eq!(
+            (&**files, &**watch),
+            (
+                &LayoutNode::View {
+                    id: "view.files.k3f9".into(),
+                    station: None,
+                    folder: Some("/home/me/api/out".into()),
+                    watch: None,
+                    hidden: true,
+                },
+                &LayoutNode::View {
+                    id: "view.watch.x1".into(),
+                    station: Some("spark2".into()),
+                    folder: None,
+                    watch: Some("web".into()),
+                    hidden: false,
+                }
+            )
+        );
+        let written = toml::to_string_pretty(&file).unwrap();
+        assert_eq!(toml::from_str::<ProjectFile>(&written).unwrap(), file);
+        // As the Control Deck sends it, and as the deck document holds it.
+        let sent = serde_json::to_value(layout).unwrap();
+        assert_eq!(
+            sent["tree"]["b"],
+            serde_json::json!({"dir": "row", "ratio": 500,
+                "a": {"id": "view.files.k3f9", "folder": "/home/me/api/out", "hidden": true},
+                "b": {"id": "view.watch.x1", "station": "spark2", "watch": "web"}})
+        );
+        assert_eq!(&serde_json::from_value::<Layout>(sent).unwrap(), layout);
+
+        assert_eq!(view_kind("view.files.k3f9"), Some("files"));
+        assert_eq!(view_kind("view.later.a1"), Some("later"));
+        for not in [
+            "p-01abc",
+            "view.files",
+            "view..a1",
+            "view.files.",
+            "view.fi-les.a",
+            "view.files.a.b",
+        ] {
+            assert_eq!(view_kind(not), None, "{not}");
+        }
+        let view = |id: &str, folder: Option<&str>, watch: Option<&str>| Layout {
+            name: "x".into(),
+            lines: false,
+            tree: Some(LayoutNode::View {
+                id: id.into(),
+                station: None,
+                folder: folder.map(String::from),
+                watch: watch.map(String::from),
+                hidden: false,
+            }),
+            hidden: vec![],
+        };
+        // A kind from a later version is kept, not refused.
+        assert_eq!(view("view.later.a1", None, None).validate(), Ok(()));
+        assert!(view("view.files", None, None).validate().is_err());
+        assert!(view("view.files.a1", Some(""), None).validate().is_err());
+        assert!(view("view.files.a1", Some("/a\nb"), None)
+            .validate()
+            .is_err());
+        assert!(view("view.files.a1", Some(&"a".repeat(4097)), None)
+            .validate()
+            .is_err());
+        assert!(view("view.watch.a1", None, Some("<b>")).validate().is_err());
+        // Any path the station writes is one, a Windows one too.
+        assert_eq!(
+            view("view.files.a1", Some("C:\\Users\\me\\My Files"), None).validate(),
+            Ok(())
+        );
+    }
+
+    /// A layout with views, as a station from before views reads it and
+    /// writes it again. This is that station's reader (0.4.19's
+    /// `LayoutNode`), kept here so the saved form cannot drift from what it
+    /// takes: it reads a view as a pane it does not have, refuses nothing,
+    /// and writes the leaf back with its id and station, which is all a
+    /// newer station needs to know the leaf for the view it is.
+    #[test]
+    fn a_station_from_before_views_reads_a_view_as_a_pane_and_passes_it_on() {
+        mod before {
+            use serde::{Deserialize, Serialize};
+            #[derive(Debug, Serialize, Deserialize)]
+            pub struct Layout {
+                pub name: String,
+                #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+                pub lines: bool,
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                pub tree: Option<Node>,
+                #[serde(default, skip_serializing_if = "Vec::is_empty")]
+                pub hidden: Vec<Node>,
+            }
+            #[derive(Debug, Serialize, Deserialize)]
+            #[serde(untagged, try_from = "Raw")]
+            pub enum Node {
+                Pane {
+                    pane: String,
+                    #[serde(default, skip_serializing_if = "Option::is_none")]
+                    project: Option<String>,
+                    #[serde(default, skip_serializing_if = "Option::is_none")]
+                    station: Option<String>,
+                },
+                PaneId {
+                    id: String,
+                    #[serde(default, skip_serializing_if = "Option::is_none")]
+                    station: Option<String>,
+                },
+                Split {
+                    dir: String,
+                    ratio: u16,
+                    a: Box<Node>,
+                    b: Box<Node>,
+                },
+            }
+            #[derive(Deserialize)]
+            pub struct Raw {
+                pane: Option<String>,
+                id: Option<String>,
+                project: Option<String>,
+                station: Option<String>,
+                dir: Option<String>,
+                ratio: Option<u16>,
+                a: Option<Box<Node>>,
+                b: Option<Box<Node>>,
+            }
+            impl TryFrom<Raw> for Node {
+                type Error = String;
+                fn try_from(n: Raw) -> Result<Node, String> {
+                    let split =
+                        n.dir.is_some() || n.ratio.is_some() || n.a.is_some() || n.b.is_some();
+                    match (n.pane, n.id, split) {
+                        (None, None, true) => match (n.dir, n.ratio, n.a, n.b) {
+                            (Some(dir), Some(ratio), Some(a), Some(b)) => {
+                                Ok(Node::Split { dir, ratio, a, b })
+                            }
+                            _ => Err("a split needs dir, ratio, a and b".into()),
+                        },
+                        (Some(pane), None, false) => Ok(Node::Pane {
+                            pane,
+                            project: n.project,
+                            station: n.station,
+                        }),
+                        (None, Some(_), false) if n.project.is_some() => {
+                            Err("a pane named by id is in no project".into())
+                        }
+                        (None, Some(id), false) => Ok(Node::PaneId {
+                            id,
+                            station: n.station,
+                        }),
+                        _ => Err("a layout part is a split, or one pane".into()),
+                    }
+                }
+            }
+        }
+        let layout: Layout = serde_json::from_value(serde_json::json!({
+            "name": "all", "tree": {"dir": "row", "ratio": 500,
+                "a": {"id": "view.files.k3f9", "station": "spark2", "folder": "/home/me/out", "hidden": true},
+                "b": {"dir": "col", "ratio": 500,
+                    "a": {"id": "view.watch.x1", "station": "spark2", "watch": "web"},
+                    "b": {"pane": "dev", "station": "spark2"}}},
+            "hidden": [{"pane": "dev", "station": "spark2"}]}))
+        .unwrap();
+        assert_eq!(layout.validate(), Ok(()));
+        // The deck document and a call's answer are JSON; a project's file is TOML.
+        let json = serde_json::to_string(&layout).unwrap();
+        let old: before::Layout = serde_json::from_str(&json).expect("0.4.19 reads it");
+        let file = toml::to_string_pretty(&layout).unwrap();
+        let _: before::Layout = toml::from_str(&file).expect("0.4.19 reads the project's file");
+        let rewritten = serde_json::to_value(&old).unwrap();
+        assert_eq!(
+            rewritten,
+            serde_json::json!({"name": "all", "tree": {"dir": "row", "ratio": 500,
+                "a": {"id": "view.files.k3f9", "station": "spark2"},
+                "b": {"dir": "col", "ratio": 500,
+                    "a": {"id": "view.watch.x1", "station": "spark2"},
+                    "b": {"pane": "dev", "station": "spark2"}}},
+            "hidden": [{"pane": "dev", "station": "spark2"}]})
+        );
+        // What comes back from such a station is still both views: at their
+        // defaults, and showing.
+        let back: Layout = serde_json::from_value(rewritten).unwrap();
+        assert_eq!(back.validate(), Ok(()));
+        let Some(LayoutNode::Split { a, .. }) = &back.tree else {
+            panic!("not a split: {back:?}");
+        };
+        assert_eq!(
+            **a,
+            LayoutNode::View {
+                id: "view.files.k3f9".into(),
+                station: Some("spark2".into()),
+                folder: None,
+                watch: None,
+                hidden: false,
+            }
+        );
     }
 }

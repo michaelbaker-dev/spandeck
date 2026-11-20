@@ -153,6 +153,36 @@ export function ago(ms) {
 
 export const STATE_LABEL = { idle: 'idle', working: 'working', needs_you: 'needs you', done: 'done', error: 'error' };
 export function stateOf(p) { return p.exited ? 'exited' : p.state; }
+// What a dot's colour means: the state of a pane or a station, never what
+// kind of pane it is (the owner, 20 Nov 2026: "its hard to tell the pane
+// type"). Each row is the classes of a dot as app.css draws it (`.dot`, and
+// what follows it there), how it looks in words, and what it says. This list
+// is the one place the key to the dots is written.
+export const DOT_KEY = [
+  ['', 'Grey', 'Idle: nothing is happening, or a station with nothing working'],
+  ['working', 'Blue, pulsing', 'Working'],
+  ['needs_you', 'Amber, with a ring', 'Needs you: a question or a permission'],
+  ['done', 'Green', 'Done: the turn ended'],
+  ['error', 'Red', 'Error'],
+  // (`.dot.approval` and `.dot.message` are one rule there; a card is also `.approval`, so the key draws this one.)
+  ['message', 'Violet', 'An approval or a message is waiting'],
+  ['exited', 'Hollow', 'Exited: the program has ended'],
+  ['unreachable', 'Dashed red', 'Unreachable: the station does not answer'],
+];
+// What kind a pane is, as one short word (the same day): an agent or a shell
+// by the face it is shown in, and the two kinds of a layout's leaf that show
+// a view and run nothing. The word is the tag; the sentence is its name for
+// a screen reader and for a pointer that rests on it.
+export const KINDS = {
+  chat: ['Chat', 'Shown as its conversation'],
+  term: ['Term', 'Shown as its terminal'],
+  files: ['Files', 'The file browser: it runs nothing'],
+  watch: ['Watch', 'The agents of a project: it runs nothing'],
+};
+export function kindTag(kind) {
+  const [word, says] = KINDS[kind] || [kind, 'A kind of pane this version of spandeck does not know'];
+  return h('span', { class: 'kind-tag k-' + (KINDS[kind] ? kind : 'other'), title: says, role: 'img', 'aria-label': `Kind: ${word}. ${says}` }, word);
+}
 // The one line a pane carries while its state changes more often than a
 // program changes it (`p.rapid`, set by the page: app.js, `stateFlood`).
 // Quiet: it is not announced, and its words do not change while it shows.

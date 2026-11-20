@@ -2367,10 +2367,10 @@ fn a_phone_steps_through_a_layout_from_its_map() {
         json!([
             "build, layout",
             "Watch proj",
-            "dev, Shell, idle",
-            "dev2, Shell, idle",
-            "lead, Shell, idle",
-            "scratch, Shell, idle",
+            "dev, Shell, idle, Term",
+            "dev2, Shell, idle, Term",
+            "lead, Shell, idle, Term",
+            "scratch, Shell, idle, Term",
             "all, layout"
         ]),
     );

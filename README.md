@@ -135,6 +135,25 @@ arranged. They are saved in the project file, so they are the same on every devi
   size it had. It keeps running while hidden. **Show only this** hides all the others;
   **Show all** brings them back. What is hidden is saved with the layout.
 - A pane in a layout that is not running shows a button to start the project's panes.
+- **Add pane** asks first what kind of pane: an agent or a shell, which run a program,
+  or **Files** or **Watch**, which show something and run nothing. A Files pane is the
+  file browser at a folder of a station (the project's folder unless you say another):
+  everything the Files panel does works in it, and the two share one clipboard. It
+  opens at the same folder on every device; where you browse to in it is kept by the
+  browser, and "Open here from now on" in its menu changes where it opens. A Watch pane
+  is the project's Watch in a cell; a tap on an agent there goes to its pane in the
+  layout. Both are saved with the layout, are hidden, moved and taken out like any
+  pane, and taking one out deletes and stops nothing. On a phone each is a step of the
+  layout, full screen.
+- A station on spandeck 0.4.19 or earlier shows a Files or Watch pane as "This pane was
+  closed" and keeps it; if a layout is saved there, the pane goes back to its default
+  folder or project. Update the station to see it.
+
+**What kind a pane is** is a word at the end of its row in the list on the left, and
+in its header: `Chat` or `Term` for an agent, by how it is shown; `Term` for a shell;
+`Files` and `Watch` for the two above, listed under their layout. The dot beside it is
+the pane's state and nothing else; "What the dots mean", at the foot of the list, is
+the key.
 
 Workspaces, the other kind of tab, are kept in the browser only and can hold any pane.
 

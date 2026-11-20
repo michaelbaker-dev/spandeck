@@ -51,6 +51,10 @@ fn without_station(node: LayoutNode, station: &str) -> Option<LayoutNode> {
         | LayoutNode::PaneId {
             station: Some(ref s),
             ..
+        }
+        | LayoutNode::View {
+            station: Some(ref s),
+            ..
         } if s == station => None,
         LayoutNode::Split { dir, ratio, a, b } => {
             match (without_station(*a, station), without_station(*b, station)) {
@@ -819,6 +823,37 @@ mod tests {
                 "gone"
             ),
             None
+        );
+    }
+
+    /// A view goes with its station like a pane, and a view of a station
+    /// that stays is kept whole (20 Nov 2026).
+    #[test]
+    fn a_layout_keeps_the_views_of_the_stations_that_stay() {
+        let view = |id: &str, st: &str| LayoutNode::View {
+            id: id.into(),
+            station: Some(st.into()),
+            folder: Some("/srv/out".into()),
+            watch: None,
+            hidden: true,
+        };
+        let pane = |st: &str| LayoutNode::PaneId {
+            id: "p-1".into(),
+            station: Some(st.into()),
+        };
+        let split = |a, b| LayoutNode::Split {
+            dir: "row".into(),
+            ratio: 500,
+            a: Box::new(a),
+            b: Box::new(b),
+        };
+        let tree = split(
+            view("view.files.a1", "kept"),
+            split(pane("gone"), view("view.watch.b2", "gone")),
+        );
+        assert_eq!(
+            without_station(tree, "gone"),
+            Some(view("view.files.a1", "kept"))
         );
     }
 }

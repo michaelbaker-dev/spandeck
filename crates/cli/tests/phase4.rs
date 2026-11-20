@@ -470,7 +470,7 @@ fn the_list_makes_layouts_in_projects_and_global_ones_takes_any_pane_and_pins() 
     assert_eq!(
         page.js(&format!("[{}.getAttribute('aria-label'), {}.querySelector('.ico-wrap').title, {}.querySelector('svg.ico').getAttribute('aria-hidden'), {}.getAttribute('aria-label').split(', ').slice(0, 2)]",
             pane_row(&dev), pane_row(&dev), pane_row(&dev), pane_row(&json!(helper)))),
-        json!(["dev, Shell, idle", "Shell", "true", ["helper", "Agent"]])
+        json!(["dev, Shell, idle, Term", "Shell", "true", ["helper", "Agent"]])
     );
 
     // A project's menu makes a layout in that project.
@@ -536,7 +536,7 @@ fn the_list_makes_layouts_in_projects_and_global_ones_takes_any_pane_and_pins() 
     let pinned = "JSON.stringify([...document.querySelectorAll('.side-pinned .side-row')].map(x => x.getAttribute('aria-label')))";
     page.wait(
         "the pinned rows",
-        &format!("{pinned} === '[\"dev, Shell, idle\",\"build, layout\"]'"),
+        &format!("{pinned} === '[\"dev, Shell, idle, Term\",\"build, layout\"]'"),
     );
     assert_eq!(
         a.call("deck.get", json!({}))["pins"],
@@ -548,7 +548,7 @@ fn the_list_makes_layouts_in_projects_and_global_ones_takes_any_pane_and_pins() 
     page.visit(&b);
     page.wait(
         "the same list on bravo",
-        &format!("{pinned} === '[\"dev, Shell, idle\",\"build, layout\"]' && JSON.stringify([...document.querySelectorAll('.side-globals .side-layout .side-name')].map(x => x.innerText)) === '[\"my-work\",\"all\"]'"),
+        &format!("{pinned} === '[\"dev, Shell, idle, Term\",\"build, layout\"]' && JSON.stringify([...document.querySelectorAll('.side-globals .side-layout .side-name')].map(x => x.innerText)) === '[\"my-work\",\"all\"]'"),
     );
     page.js("[...document.querySelectorAll('.side-globals .side-layout')].find(x => x.querySelector('.side-name').innerText === 'all').click()");
     page.wait(
