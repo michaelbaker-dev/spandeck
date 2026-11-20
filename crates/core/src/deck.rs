@@ -102,7 +102,20 @@ impl Daemon {
         self.paths.config_dir.join("deck.json")
     }
 
+    /// The deck document, each station in it named as it is called now: a
+    /// pin or a leaf saved under a name a station had before (by a station
+    /// that had not heard of the rename, say) is that station's.
     pub fn deck(&self) -> Deck {
+        let mut deck = self.deck_unrenamed();
+        let names = self.fleet.names();
+        if !names.list().is_empty() {
+            crate::rename::deck_renamed(&mut deck, &|s| names.now_called(s));
+        }
+        deck
+    }
+
+    /// The document as it is written.
+    pub(crate) fn deck_unrenamed(&self) -> Deck {
         std::fs::read(self.deck_file())
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())

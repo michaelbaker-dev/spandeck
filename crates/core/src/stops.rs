@@ -387,6 +387,19 @@ impl StopBook {
         self.db.put(Op::StopDel { id: id.to_string() });
     }
 
+    /// A station was renamed: what waits for it in memory waits for it
+    /// under its new name (the database's rows are the caller's to change).
+    pub fn rename_station(&self, from: &str, to: &str) {
+        for r in self.rows.lock().unwrap().iter_mut() {
+            if r.station == from {
+                r.station = to.to_string();
+            }
+            if r.scope == from {
+                r.scope = to.to_string();
+            }
+        }
+    }
+
     /// A station was removed from the fleet: what waited for it in memory
     /// goes (the database's rows are the caller's to delete).
     pub fn forget_station(&self, station: &str) {

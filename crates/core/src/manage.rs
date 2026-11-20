@@ -117,6 +117,9 @@ impl Daemon {
                 // Where its deck is served over HTTPS: whose deck an
                 // origin is must be known while that station is off.
                 "https": crate::https::brief(&p.info),
+                // Whether it knows of renames, for the sentence that says
+                // which stations will go on showing an old name.
+                "rename": p.info["caps"].as_array().is_some_and(|c| c.iter().any(|c| c == crate::names::CAP)),
             });
             known.push(keep);
         }
@@ -182,7 +185,14 @@ impl Daemon {
             .iter()
             .map(|k| json!({"station": k.station, "addr": k.addr, "version": k.version, "protocol": k.protocol, "last_seen_ms": k.last_seen_ms, "info": k.info}))
             .collect();
-        json!({"known": known, "forgotten": self.forgotten_stations()})
+        let mut roster = json!({"known": known, "forgotten": self.forgotten_stations()});
+        // The renames this station knows: a member that was off when a
+        // station was renamed reads it here, from whichever station it
+        // sees first.
+        if self.rename_on() {
+            roster["renamed"] = json!(self.fleet.names().list());
+        }
+        roster
     }
 
     /// After a look at the fleet: make this station's roster the union of
@@ -225,6 +235,12 @@ impl Daemon {
                 if !valid_name(station) || station == self.station || !placed {
                     continue;
                 }
+                // A name a station had before it was renamed is not a
+                // member: a station that has not heard of the rename goes
+                // on listing it, and is not believed.
+                if self.station_now(station) != station {
+                    continue;
+                }
                 if mine.is_some_and(|i| known[i].last_seen_ms >= seen) {
                     continue;
                 }
@@ -240,6 +256,7 @@ impl Daemon {
                         "os": k.pointer("/info/os").and_then(|v| v.as_str()).filter(|o| o.len() <= 32),
                         "service": k.pointer("/info/service").and_then(|v| v.as_bool()),
                         "https": k.get("info").map(crate::https::brief),
+                        "rename": k.pointer("/info/rename").and_then(|v| v.as_bool()),
                     }),
                 };
                 match mine {

@@ -571,6 +571,21 @@ impl Daemon {
         if station == self.station {
             return self.remove_self(stop, by).await;
         }
+        // A name this station had, or a name a member had: only a name.
+        // Nothing is closed and no key is replaced.
+        if self.is_here(station) {
+            if let Some(out) = self.remove_former(station, Some(&self.station)) {
+                return Ok(out);
+            }
+        }
+        if let Some(now) = self.fleet.names().former(station) {
+            let member = self.fleet_members().iter().any(|p| p.station == now);
+            if member {
+                if let Some(out) = self.remove_former(station, Some(&now)) {
+                    return Ok(out);
+                }
+            }
+        }
         let peer = self
             .fleet_members()
             .into_iter()
@@ -581,15 +596,55 @@ impl Daemon {
                 )),
                 None => Error::NotFound(format!("no station called {station} is known here")),
             })?;
+        // Before anything is sent to that address: who answers there? An
+        // entry can be a name a station had before it was renamed where
+        // nobody was told (by hand, on a version from before renames),
+        // and its address is then the live station's. That station is in
+        // the fleet under its own name and must not be told to leave, nor
+        // the fleet's key replaced for a name: the name is taken off the
+        // list, and that is all (the incident of 20 Nov 2026).
+        let there = self
+            .fleet
+            .call_open(&peer.addr, "station.hello", json!({}))
+            .await
+            .ok()
+            .and_then(|h| h["station"].as_str().map(String::from));
+        let other_name = there.clone().filter(|name| name != station).or_else(|| {
+            // It does not say: another member listed at that address
+            // that answers is the station there.
+            self.fleet
+                .others_at(&peer.addr, station)
+                .into_iter()
+                .find(|p| p.state == "online")
+                .map(|p| p.station)
+        });
+        let members = self.fleet_members();
+        if let Some(live) = other_name.filter(|live| {
+            members
+                .iter()
+                .any(|p| p.station == *live && p.state != "unreachable")
+        }) {
+            if let Some(out) = self.remove_former(station, Some(&live)) {
+                return Ok(out);
+            }
+        }
         // 1. The station itself, if it answers: panes closed, its own key.
-        let left = if peer.state == "unreachable" {
+        // Never a machine that answers there under another name.
+        let left = if peer.state == "unreachable" || there.is_none() {
             Err("it could not be reached".to_string())
+        } else if there.as_deref() != Some(station) {
+            Err(format!(
+                "another station ({}) answers at its address, and was not touched",
+                there.unwrap_or_default()
+            ))
         } else {
             self.fleet
                 .call_addr(
                     &peer.addr,
                     "rpc.forward",
-                    json!({"method": "station.leave", "params": {"stop": stop}}),
+                    // It is told which station is meant, and one that is
+                    // not that station refuses.
+                    json!({"method": "station.leave", "params": {"stop": stop, "station": station}}),
                 )
                 .await
         };

@@ -46,6 +46,26 @@ days, not hours.
   it as text, and accepts a member's address only if it is one it would look at by
   itself: an address in its own config, or a device under your Tailscale login. A
   station cannot make another one send a call or a key to an address it chose.
+- **Renaming a station is yours alone, and what stations say about names is data**
+  (20 Nov 2026). `station.rename` is on no agent's list and no station's; from another
+  station's deck it arrives as your forwarded request, like a restart. It writes one
+  line of that station's own config file and restarts it in place. Stations tell each
+  other which stations were renamed (`fleet.renamed`, and in the roster): a station's
+  signed call only, each name checked, the list capped, and all it can do is make a
+  former name find a station and move what is stored under it; a station that knows
+  its own name is never told it is called otherwise. A station is taken for one this
+  fleet lists under another name only when it answers a signed call at that entry's
+  address with a value asked just then, signed with the fleet's key together with its
+  name; that signature is given to a station's call and never to an agent. Any holder
+  of the fleet key could say false things about names, as it could do anything else in
+  the fleet: the key is the trust, as before. `fleet.remove` asks who answers at an
+  address before it sends anything there, and a station told to leave under a name
+  that is not its own refuses. A name given to a newcomer (`trust.approve` with `as`)
+  is part of your approval and travels with the key.
+- **Add a machine shows one link** (20 Nov 2026): the address Tailscale SSH prints for
+  you to confirm a connection at, and only when it is at `https://login.tailscale.com/`
+  and made of the characters such an address has. The station checks it and the page
+  checks it again; everything else the other machine prints is shown as text.
 - **A station that is slow or away costs only itself.** What a station does with
   another station it does in a task of that station's own, cut off after eight
   seconds, never two at once, and less often while that station keeps failing. So a

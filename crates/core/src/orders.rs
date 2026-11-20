@@ -210,6 +210,13 @@ impl Daemon {
             all.extend(repo);
             problems.extend(p2);
         }
+        // An order for this station under a name it had is still its
+        // order: a prohibition does not lapse because a station was renamed.
+        for o in &mut all {
+            if o.station.as_deref().is_some_and(|st| self.is_here(st)) {
+                o.station = Some(self.station.clone());
+            }
+        }
         let subject = Subject {
             station: &self.station,
             labels: &self.cfg.labels,

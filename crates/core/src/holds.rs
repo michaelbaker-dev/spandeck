@@ -344,7 +344,7 @@ impl Daemon {
 
     /// Does a "stop every agent" with this scope stop agents here?
     pub fn stop_is_for_here(&self, scope: &str) -> bool {
-        matches!(scope, "station" | "" | "fleet") || scope == self.station
+        matches!(scope, "station" | "" | "fleet") || self.is_here(scope)
     }
 
     /// Tell whoever sent what a stop threw away: an event that names the

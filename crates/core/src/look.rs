@@ -344,7 +344,19 @@ impl Daemon {
         self.paths.config_dir.join("look.json")
     }
 
+    /// The look document, each station in its keys named as it is called
+    /// now (see `deck`).
     pub fn look(&self) -> Look {
+        let mut look = self.look_unrenamed();
+        let names = self.fleet.names();
+        if !names.list().is_empty() {
+            crate::rename::look_renamed(&mut look, &|s| names.now_called(s));
+        }
+        look
+    }
+
+    /// The document as it is written.
+    pub(crate) fn look_unrenamed(&self) -> Look {
         std::fs::read(self.look_file())
             .ok()
             .and_then(|b| serde_json::from_slice::<Look>(&b).ok())

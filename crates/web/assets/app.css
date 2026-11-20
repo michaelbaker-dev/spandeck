@@ -711,6 +711,11 @@ button.quiet { background: none; color: var(--muted); }
 .add-tile.error { border-color: var(--red); }
 .add-last { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .add-row { cursor: pointer; justify-content: center; } .add-row.phone-station { border-style: dashed; }
+.add-confirm { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line); border-left: 4px solid var(--amber, var(--blue)); border-radius: 6px; background: var(--panel2); }
+.add-confirm p { margin: 4px 0; } .add-confirm-link { overflow-wrap: anywhere; }
+.join-name-row { margin-top: 8px; } .join-name-row .field { margin: 6px 0; } .join-name-fact { margin: 6px 0; }
+.twins-line { margin-top: 10px; } .twins-line .mini { margin-left: 6px; }
+.rename-station .rename-why:empty { display: none; }
 .add-worked { color: var(--green); } .add-quiet { margin-top: 12px; font-size: calc(12px * var(--ui-scale)); }
 .add-dialog .add-off { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); font-size: calc(12px * var(--ui-scale)); }
 .add-off button { display: inline; padding: 0; border: none; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; min-height: 0; white-space: normal; text-align: left; }

@@ -61,6 +61,11 @@ struct Request {
     /// The fleet-mates a station says it brings with it. Names only, for the
     /// owner to read: what joins is whoever holds that fleet's key.
     with: Vec<String>,
+    /// A station that says it can be given a name as it is let in.
+    rename: bool,
+    /// The name the owner gave it with the approval: handed over with the
+    /// key, and taken by the station before it is seen in this fleet.
+    named: Option<String>,
     collect_hash: [u8; 32],
     decision: Decision,
     expires_ms: u64,
@@ -79,6 +84,7 @@ struct Relayed {
     from: String,
     code: String,
     with: Vec<String>,
+    rename: bool,
     expires_ms: u64,
 }
 
@@ -95,6 +101,8 @@ struct Outgoing {
     by: String,
     /// The fleet-mates that come along if it is approved.
     with: Vec<String>,
+    /// The name this station asked to join under (`--as`), if not its own.
+    named: Option<String>,
 }
 
 pub struct TrustState {
@@ -251,7 +259,7 @@ impl TrustState {
             .map(|r| {
                 json!({"id": r.id, "kind": r.kind, "name": r.name, "from": r.from,
                     "code": r.code, "with": r.with, "collect_hash": hex(&r.collect_hash),
-                    "expires_ms": r.expires_ms})
+                    "rename": r.rename, "expires_ms": r.expires_ms})
             })
             .collect()
     }
@@ -292,6 +300,8 @@ impl TrustState {
                     from: text("from").chars().take(64).collect(),
                     code: text("code").chars().take(16).collect(),
                     with: clean_names(v.get("with")),
+                    rename: v["rename"] == json!(true),
+                    named: None,
                     collect_hash,
                     decision: Decision::Waiting,
                     expires_ms,
@@ -809,7 +819,11 @@ impl Daemon {
             map.retain(|_, r| r.expires_ms > now);
             map.values()
                 .filter(|r| r.decision == Decision::Waiting)
-                .map(|r| json!({"id": r.id, "kind": r.kind, "name": r.name, "with": r.with, "from": r.from, "code": r.code, "expires_ms": r.expires_ms, "at": self.station}))
+                .map(|r| {
+                    let mut v = json!({"id": r.id, "kind": r.kind, "name": r.name, "with": r.with, "from": r.from, "code": r.code, "expires_ms": r.expires_ms, "at": self.station});
+                    self.request_names(&mut v, r.kind, &r.name, &r.with, &r.from, r.rename);
+                    v
+                })
                 .collect()
         };
         // And those waiting at the other stations of the fleet.
@@ -818,7 +832,11 @@ impl Daemon {
             map.retain(|_, r| r.expires_ms > now);
             requests
                 .into_iter()
-                .chain(map.values().map(|r| json!({"id": r.id, "kind": r.kind, "name": r.name, "with": r.with, "from": r.from, "code": r.code, "expires_ms": r.expires_ms, "at": r.at})))
+                .chain(map.values().map(|r| {
+                    let mut v = json!({"id": r.id, "kind": r.kind, "name": r.name, "with": r.with, "from": r.from, "code": r.code, "expires_ms": r.expires_ms, "at": r.at});
+                    self.request_names(&mut v, r.kind, &r.name, &r.with, &r.from, r.rename);
+                    v
+                }))
                 .collect()
         };
         let outgoing = self.trust.outgoing.lock().unwrap().clone().map(|o| {
@@ -856,6 +874,7 @@ impl Daemon {
         name: &str,
         with: Option<&Value>,
         from: &str,
+        rename: bool,
     ) -> Result<Value> {
         let kind: &'static str = match kind {
             "station" => "station",
@@ -877,6 +896,8 @@ impl Daemon {
             from: from.to_string(),
             code: short_code(),
             with: with.clone(),
+            rename: rename && kind == "station",
+            named: None,
             collect_hash: Sha256::digest(collect.as_bytes()).into(),
             decision: Decision::Waiting,
             expires_ms: now + REQUEST_MS,
@@ -893,7 +914,11 @@ impl Daemon {
             }
             map.insert(req.id.clone(), req.clone());
         }
-        let (title, body) = request_notice(kind, &name, &with, from, &req.code, None);
+        let (title, mut body) = request_notice(kind, &name, &with, from, &req.code, None);
+        if let Some(clash) = self.name_clash_words(kind, &name, &with, from) {
+            body.push(' ');
+            body.push_str(&clash);
+        }
         self.notify("trust.request", None, None, &title, &body);
         self.record(
             "trust.request",
@@ -970,6 +995,8 @@ impl Daemon {
             from: from.to_string(),
             code: short_code(),
             with: vec![],
+            rename: false,
+            named: None,
             collect_hash: Sha256::digest(collect.as_bytes()).into(),
             decision: Decision::Approved,
             expires_ms: now + 120_000,
@@ -1009,8 +1036,10 @@ impl Daemon {
                     // With the key go the browsers signed out in this fleet:
                     // their tokens were made with this key, and a station that
                     // arrives must refuse them too.
+                    // And the name the owner gave it, if one: a station
+                    // from before this passes it over.
                     "station" => json!({"status": "approved", "key": hex(&self.trust.key()),
-                        "revoked": self.revoked_devices()}),
+                        "revoked": self.revoked_devices(), "name": r.named}),
                     _ => json!({"status": "approved", "token": self.trust.device_token(&r.id)}),
                 })
             }
@@ -1050,7 +1079,7 @@ impl Daemon {
             .unwrap()
             .values()
             .filter(|r| r.decision == Decision::Waiting && r.expires_ms > now)
-            .map(|r| json!({"id": r.id, "kind": r.kind, "name": r.name, "with": r.with, "from": r.from, "code": r.code, "expires_ms": r.expires_ms}))
+            .map(|r| json!({"id": r.id, "kind": r.kind, "name": r.name, "with": r.with, "from": r.from, "code": r.code, "expires_ms": r.expires_ms, "rename": r.rename}))
             .collect()
     }
 
@@ -1157,6 +1186,7 @@ impl Daemon {
                 from: text("from", 64),
                 code,
                 with: clean_names(r.get("with")),
+                rename: r["rename"] == json!(true),
                 // Never kept longer than a request made here would be.
                 expires_ms: r["expires_ms"].as_u64().unwrap_or(0).min(now + REQUEST_MS),
             });
@@ -1182,8 +1212,12 @@ impl Daemon {
             before != after
         };
         for r in &fresh {
-            let (title, body) =
+            let (title, mut body) =
                 request_notice(r.kind, &r.name, &r.with, &r.from, &r.code, Some(&r.at));
+            if let Some(clash) = self.name_clash_words(r.kind, &r.name, &r.with, &r.from) {
+                body.push(' ');
+                body.push_str(&clash);
+            }
             self.notify("trust.request", None, None, &title, &body);
         }
         if changed {
@@ -1203,8 +1237,10 @@ impl Daemon {
         approve: bool,
         by: &str,
         here_only: bool,
+        named: Option<&str>,
     ) -> Result<Value> {
-        match self.trust_decide(which, approve, by) {
+        let named = named.map(str::trim).filter(|n| !n.is_empty());
+        match self.trust_decide(which, approve, by, named) {
             Err(Error::NotFound(_)) if !here_only => {}
             answered => return answered,
         }
@@ -1229,12 +1265,27 @@ impl Daemon {
         } else {
             "trust.deny"
         };
+        // A name for the newcomer is given by the station that holds its
+        // request. One from before renames would pass the name over and
+        // let the station in under the name it asked with: not sent there.
+        if named.is_some()
+            && !self.fleet.peer(&r.at).is_some_and(|p| {
+                p.info["caps"]
+                    .as_array()
+                    .is_some_and(|c| c.iter().any(|c| c == crate::names::CAP))
+            })
+        {
+            return Err(invalid(format!(
+                "{} was the station asked, and it runs a spandeck from before a station could be named as it is let in: update {}, or approve the request without a name and rename the station afterwards",
+                r.at, r.at
+            )));
+        }
         let sent = self
             .fleet
             .call(
                 &r.at,
                 "rpc.forward",
-                json!({"method": method, "params": {"request": r.id, "here": true}}),
+                json!({"method": method, "params": {"request": r.id, "here": true, "as": named}}),
             )
             .await;
         let forget = || {
@@ -1268,18 +1319,42 @@ impl Daemon {
 
     /// The owner's answer to a request that waits at this station. `which`
     /// is a request id or the code shown.
-    pub fn trust_decide(&self, which: &str, approve: bool, by: &str) -> Result<Value> {
-        let found = {
-            let mut map = self.trust.requests.lock().unwrap();
-            let now = now_ms();
-            map.retain(|_, r| r.expires_ms > now);
-            let id = map
-                .values()
+    ///
+    /// `named`: the name the owner gives a station as it is let in. A
+    /// station whose name is a member's, capitals aside, is let in only
+    /// under another name (or refused), where it can take one.
+    pub fn trust_decide(
+        &self,
+        which: &str,
+        approve: bool,
+        by: &str,
+        named: Option<&str>,
+    ) -> Result<Value> {
+        let waiting = |map: &BTreeMap<String, Request>| {
+            map.values()
                 .find(|r| {
                     r.decision == Decision::Waiting
                         && (r.id == which || r.code.eq_ignore_ascii_case(which.trim()))
                 })
-                .map(|r| r.id.clone());
+                .cloned()
+        };
+        // The name is settled before anything is decided: a refusal for
+        // the name leaves the request waiting.
+        let mut given = None;
+        let asked = {
+            let mut map = self.trust.requests.lock().unwrap();
+            let now = now_ms();
+            map.retain(|_, r| r.expires_ms > now);
+            waiting(&map)
+        };
+        if let (Some(r), true) = (&asked, approve) {
+            if r.kind == "station" {
+                given = self.name_for_newcomer(r, named)?;
+            }
+        }
+        let found = {
+            let mut map = self.trust.requests.lock().unwrap();
+            let id = waiting(&map).map(|r| r.id);
             id.and_then(|id| {
                 let r = map.get_mut(&id)?;
                 r.decision = if approve {
@@ -1287,6 +1362,7 @@ impl Daemon {
                 } else {
                     Decision::Denied
                 };
+                r.named = given.clone();
                 Some(r.clone())
             })
         };
@@ -1310,7 +1386,7 @@ impl Daemon {
             None,
             None,
             None,
-            json!({"kind": r.kind, "name": r.name, "from": r.from, "with": r.with, "by": by}),
+            json!({"kind": r.kind, "name": r.name, "from": r.from, "with": r.with, "by": by, "as": r.named}),
         );
         self.emit("trust.updated", None, None, json!({}));
         // The other stations of the fleet stop listing it.
@@ -1319,7 +1395,217 @@ impl Daemon {
             // An add from the Control Deck may be waiting on this answer.
             self.add_decided(&r.code, approve);
         }
-        Ok(json!({"kind": r.kind, "name": r.name, "with": r.with, "approved": approve}))
+        Ok(
+            json!({"kind": r.kind, "name": r.name, "with": r.with, "approved": approve, "as": r.named}),
+        )
+    }
+
+    /// This station and the members of its fleet, by name.
+    fn member_names(&self) -> Vec<String> {
+        let mut all = vec![self.station.clone()];
+        all.extend(self.fleet_members().into_iter().map(|p| p.station));
+        all
+    }
+
+    /// The member whose name the name `name` would be taken for: the same
+    /// name, the same but for capitals, or a name that member had before
+    /// and that still finds it.
+    ///
+    /// `from`: the address that asks. A member of exactly that name that
+    /// does not answer and was last at that address is the asker itself,
+    /// coming back (spandeck was put on that machine again): no clash.
+    fn name_clash(&self, name: &str, from: Option<&str>) -> Option<String> {
+        let back = self.fleet_members().into_iter().any(|p| {
+            p.station == name
+                && p.state == "unreachable"
+                && from.is_some_and(|f| {
+                    p.addr.rsplit_once(':').map_or(p.addr.as_str(), |(h, _)| h) == f
+                })
+        });
+        if back {
+            return None;
+        }
+        let members = self.member_names();
+        if let Some(m) = members.iter().find(|m| crate::names::alike(m, name)) {
+            return Some(m.clone());
+        }
+        let names = self.fleet.names();
+        names
+            .list()
+            .iter()
+            .find(|r| crate::names::alike(&r.from, name))
+            .map(|r| names.now_called(&r.from))
+            .filter(|now| members.contains(now))
+    }
+
+    /// "RTX6000 has the same name as rtx6000, a station of this fleet,
+    /// capitals aside." For a request's notice; `None` when no name of it
+    /// is taken.
+    fn name_clash_words(
+        &self,
+        kind: &str,
+        name: &str,
+        with: &[String],
+        from: &str,
+    ) -> Option<String> {
+        if kind != "station" {
+            return None;
+        }
+        let said = |name: &str, member: &str| {
+            if name == member {
+                format!("A station of this fleet is already called {member}.")
+            } else if crate::names::alike(name, member) {
+                format!("{name} has the same name as {member}, a station of this fleet, capitals aside.")
+            } else {
+                format!(
+                    "{name} was the name of {member}, a station of this fleet, and still finds it."
+                )
+            }
+        };
+        let mut out: Vec<String> = vec![];
+        if let Some(member) = self.name_clash(name, Some(from)) {
+            out.push(format!(
+                "{} It is let in under another name, which you choose as you approve, or refused.",
+                said(name, &member)
+            ));
+        }
+        for mate in with {
+            if let Some(member) = self.name_clash(mate, None) {
+                out.push(format!(
+                    "{} Rename one of them afterwards.",
+                    said(mate, &member)
+                ));
+            }
+        }
+        (!out.is_empty()).then(|| out.join(" "))
+    }
+
+    /// What a request shows about names, for the deck and `spandeck
+    /// trust`: whether the asker's name is taken and by whom, a name to
+    /// offer, and whether it can be given one as it is let in.
+    fn request_names(
+        &self,
+        v: &mut Value,
+        kind: &str,
+        name: &str,
+        with: &[String],
+        from: &str,
+        rename: bool,
+    ) {
+        if kind != "station" {
+            return;
+        }
+        v["can_rename"] = json!(rename);
+        // What Tailscale calls the machine that asks: often the better
+        // name (the incident: a WSL distro whose hostname was the Windows
+        // machine's, and whose Tailscale name was `rtx6000-wsl`).
+        let tailscale = self
+            .fleet
+            .names
+            .lock()
+            .unwrap()
+            .get(from)
+            .and_then(|dns| dns.split('.').next().map(String::from))
+            .filter(|n| crate::names::valid(n) && n != name);
+        if let Some(member) = self.name_clash(name, Some(from)) {
+            v["clash"] = json!({"with": member, "exact": member == name});
+            v["suggest"] = json!(crate::names::suggest(
+                name,
+                tailscale.as_deref(),
+                &self.member_names(),
+                &self.fleet.names(),
+            ));
+        } else if let Some(t) = &tailscale {
+            v["tailscale"] = json!(t);
+        }
+        let mates: Vec<Value> = with
+            .iter()
+            .filter_map(|m| {
+                self.name_clash(m, None)
+                    .map(|member| json!({"name": m, "with": member}))
+            })
+            .collect();
+        if !mates.is_empty() {
+            v["with_clash"] = json!(mates);
+        }
+    }
+
+    /// The name a station is let in under: `Ok(None)` for its own.
+    /// Refused, in a sentence, when the name given cannot be its name, when
+    /// the station cannot take a name, or when its own name is a member's
+    /// and none was given.
+    fn name_for_newcomer(&self, r: &Request, named: Option<&str>) -> Result<Option<String>> {
+        let clash = self.name_clash(&r.name, Some(&r.from));
+        let named = named.filter(|n| *n != r.name);
+        let Some(named) = named else {
+            return match clash {
+                // It cannot be renamed from here: it is let in as it is,
+                // and the request said so.
+                Some(_) if !r.rename => Ok(None),
+                Some(member) => Err(invalid(format!(
+                    "{} Approve it under another name (in the Control Deck, or `spandeck approve {} --as {}`), or refuse it.",
+                    if member == r.name {
+                        format!("A station of this fleet is already called {member}.")
+                    } else if crate::names::alike(&member, &r.name) {
+                        format!("{} has the same name as {member}, a station of this fleet, capitals aside.", r.name)
+                    } else {
+                        format!("{} was the name of {member}, a station of this fleet, and still finds it.", r.name)
+                    },
+                    r.code,
+                    crate::names::suggest(&r.name, None, &self.member_names(), &self.fleet.names()),
+                ))),
+                None => Ok(None),
+            };
+        };
+        if !r.rename {
+            return Err(invalid(format!(
+                "{} runs a spandeck from before a station could be named as it is let in: approve it without a name, and rename it once it is updated",
+                r.name
+            )));
+        }
+        let mut taken = self.member_names();
+        taken.extend(r.with.iter().cloned());
+        match crate::names::refusal(named, &r.name, &taken, &self.fleet.names()) {
+            Some(no) => Err(invalid(no)),
+            None => Ok(Some(named.to_string())),
+        }
+    }
+
+    /// A station was renamed: what is held here under its old name.
+    pub(crate) fn trust_renamed(&self, from: &str, to: &str) {
+        let _ = self.trust.retired_change(|list| {
+            for r in list {
+                for s in &mut r.stations {
+                    if s.station == from {
+                        s.station = to.to_string();
+                    }
+                }
+            }
+        });
+        for r in self.trust.relayed.lock().unwrap().values_mut() {
+            if r.at == from {
+                r.at = to.to_string();
+            }
+        }
+        let mut taken = self.trust.relay_taken.lock().unwrap();
+        if let Some(seq) = taken.remove(from) {
+            let last = taken.entry(to.to_string()).or_insert(0);
+            *last = (*last).max(seq);
+        }
+        drop(taken);
+        // "approved at <station>", in the list of browsers signed in.
+        let mut devices = self.stored_devices();
+        let mut changed = false;
+        for d in &mut devices {
+            if d["at"] == json!(from) {
+                d["at"] = json!(to);
+                changed = true;
+            }
+        }
+        if changed {
+            self.db
+                .kv_set("trust.devices", &Value::Array(devices).to_string());
+        }
     }
 
     /// Sign a browser out of the fleet. It is refused here at once, and by
@@ -1379,7 +1665,31 @@ impl Daemon {
     /// station that is not seen here yet is looked for first (the owner's
     /// report of 17 Nov 2026: a station that had only just started was told
     /// to join, had not yet seen the station named, and gave up at once).
-    pub async fn fleet_join(&self, station: &str, by: &str) -> Result<Value> {
+    ///
+    /// `named`: the name this station asks to join under (`--as`). It
+    /// takes the name when it is let in, not before; the owner may give it
+    /// another with the approval.
+    pub async fn fleet_join(&self, station: &str, named: Option<&str>, by: &str) -> Result<Value> {
+        let named = named
+            .map(str::trim)
+            .filter(|n| !n.is_empty() && *n != self.station);
+        if let Some(name) = named {
+            if !self.rename_on() {
+                return Err(invalid(
+                    "renaming is switched off on this station (`rename = false` under [flags])",
+                ));
+            }
+            let mates: Vec<String> = self
+                .fleet_members()
+                .into_iter()
+                .map(|p| p.station)
+                .collect();
+            if let Some(no) =
+                crate::names::refusal(name, &self.station, &mates, &self.fleet.names())
+            {
+                return Err(invalid(no));
+            }
+        }
         let mut peer = self.join_target(station).await?;
         let with: Vec<String> = self
             .fleet_members()
@@ -1394,7 +1704,8 @@ impl Daemon {
                     .call_open(
                         &addr,
                         "fleet.join.request",
-                        json!({"station": self.station, "with": with}),
+                        json!({"station": named.unwrap_or(&self.station), "with": with,
+                            "rename": self.rename_on()}),
                     )
                     .await
             }
@@ -1431,6 +1742,7 @@ impl Daemon {
             problem: None,
             by: by.to_string(),
             with: with.clone(),
+            named: named.map(String::from),
         });
         self.record(
             "trust.join_asked",
@@ -1466,12 +1778,15 @@ impl Daemon {
     /// time, a round already under way that ended with nothing).
     async fn join_target(&self, asked: &str) -> Result<Peer> {
         let asked = asked.trim();
+        // By its name as written; a name that differs only by capitals
+        // finds a station only when it could mean no other (two stations
+        // called RTX6000 and rtx6000 are each asked by their own name).
         let seen = |d: &Daemon| {
             d.fleet.peer(asked).or_else(|| {
-                d.fleet
-                    .peers()
-                    .into_iter()
-                    .find(|p| p.station.eq_ignore_ascii_case(asked))
+                let peers = d.fleet.peers();
+                let found = crate::names::pick(peers.iter().map(|p| p.station.as_str()), asked)?
+                    .to_string();
+                peers.into_iter().find(|p| p.station == found)
             })
         };
         if let Some(peer) = seen(self).filter(|p| p.state != "unreachable") {
@@ -1720,6 +2035,24 @@ impl Daemon {
                     self.emit("fleet.updated", None, None, json!({}));
                     // Looking again is what hands the mates the key.
                     self.discover_peers().await;
+                    // The name it was let in under: the one the owner gave
+                    // with the approval, else the one it asked with.
+                    let named = v["name"]
+                        .as_str()
+                        .map(String::from)
+                        .or(o.named.clone())
+                        .filter(|n| *n != self.station);
+                    if let Some(name) = named {
+                        if let Err(e) = self.station_rename(&name, &o.by) {
+                            self.notify(
+                                "station.rename_failed",
+                                None,
+                                None,
+                                &format!("This station joined, but was not renamed {name}"),
+                                &format!("{e}. It is in the fleet as {}. Rename it from its menu on the fleet screen, or with `spandeck station rename`.", self.station),
+                            );
+                        }
+                    }
                     return;
                 }
                 Some("denied") => return ended(Some(format!("{} said no", o.station))),

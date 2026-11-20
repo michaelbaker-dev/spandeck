@@ -53,6 +53,9 @@ const SUPPLY_TIMEOUT: Duration = Duration::from_secs(3000);
 const SUPPLY_STALL: Duration = Duration::from_secs(120);
 /// How long an approved station has to show up.
 const SEEN_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a connection Tailscale SSH holds for the owner's confirmation
+/// is waited for: the time a person needs to open the address and confirm.
+const CONFIRM_WAIT: Duration = Duration::from_secs(240);
 const KEPT_LINES: usize = 300;
 
 /// A password held for one connection. Wiped when dropped. Deliberately has
@@ -133,6 +136,15 @@ struct Job {
     code: Option<String>,
     request: Option<String>,
     station: Option<String>,
+    /// Tailscale SSH is waiting for the owner to confirm this connection
+    /// ("requires an additional check"): the address it gave to confirm
+    /// at, when it gave one. Only ever an address at login.tailscale.com.
+    confirm: Option<String>,
+    /// That was seen in this job, whether or not an address came with it.
+    check_seen: bool,
+    /// The name the owner chose for the new station, to prefill the
+    /// approval with (the machine's Tailscale name, say).
+    name_as: Option<String>,
     started_ms: u64,
     cancel: Arc<tokio::sync::Notify>,
 }
@@ -163,6 +175,9 @@ impl Job {
             code: None,
             request: None,
             station: None,
+            confirm: None,
+            check_seen: false,
+            name_as: None,
             started_ms: now_ms(),
             cancel: Arc::new(tokio::sync::Notify::new()),
         }
@@ -206,6 +221,7 @@ impl Job {
                 "worked": p.worked, "next": p.next})),
             "lines": self.lines, "code": self.code, "request": self.request,
             "station": self.station, "started_ms": self.started_ms,
+            "confirm": self.confirm, "name_as": self.name_as,
         })
     }
 }
@@ -217,6 +233,9 @@ pub struct AddState {
 
 struct Candidate {
     id: String,
+    /// What the machine calls itself: the name its station takes by
+    /// default. Not always its Tailscale name (`name`).
+    host: String,
     name: String,
     os: String,
     address: String,
@@ -287,13 +306,22 @@ fn candidates(status: &Value, stations: &[Peer]) -> Vec<Candidate> {
         };
         // Already a station: something at its address answers as one, or a
         // station carries its name (a station is named after its machine).
+        // A station found at another machine's Tailscale address is that
+        // other machine, whatever it is called: two machines can have one
+        // name (the incident of 20 Nov 2026: a WSL distro on the Windows
+        // machine `rtx6000` called itself `RTX6000`, and was left out of
+        // this list as a station that it was not).
         let is_station = stations.iter().any(|s| {
             let at = host_of(&s.addr).to_lowercase();
+            let elsewhere = at
+                .parse::<IpAddr>()
+                .is_ok_and(|ip| is_tailscale_address(ip) && !ips.contains(&at));
             ips.contains(&at)
                 || (!dns.is_empty() && at == dns)
-                || [&short, &host]
-                    .iter()
-                    .any(|n| !n.is_empty() && n.eq_ignore_ascii_case(&s.station))
+                || (!elsewhere
+                    && [&short, &host]
+                        .iter()
+                        .any(|n| !n.is_empty() && n.eq_ignore_ascii_case(&s.station)))
         });
         let address = ips
             .iter()
@@ -309,6 +337,7 @@ fn candidates(status: &Value, stations: &[Peer]) -> Vec<Candidate> {
         }
         out.push(Candidate {
             id,
+            host: host.chars().filter(|c| !c.is_control()).take(64).collect(),
             name,
             os: match os.as_str() {
                 "macOS" => "macOS",
@@ -322,6 +351,31 @@ fn candidates(status: &Value, stations: &[Peer]) -> Vec<Candidate> {
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// The address Tailscale SSH prints for the owner to confirm a connection
+/// at ("To authenticate, visit: https://login.tailscale.com/a/…"), if this
+/// line holds one. What ssh prints is text from somewhere else, so this is
+/// the only thing in it that is ever made a link, and only when it is an
+/// address at `https://login.tailscale.com/`: the letters, digits and the
+/// few marks such an address has, cut at the first thing that is not.
+fn tailscale_confirm_link(line: &str) -> Option<String> {
+    const HOST: &str = "https://login.tailscale.com/";
+    let at = line.find(HOST)?;
+    let path: String = line[at + HOST.len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_'))
+        .take(120)
+        .collect();
+    (!path.is_empty()).then(|| format!("{HOST}{path}"))
+}
+
+/// Does this line say Tailscale SSH is holding the connection until the
+/// owner confirms it?
+fn tailscale_check(line: &str) -> bool {
+    let said = line.to_lowercase();
+    said.contains("requires an additional check")
+        || (said.contains("to authenticate, visit") && tailscale_confirm_link(line).is_some())
 }
 
 /// Only text reaches the Control Deck: no escape sequences, no endless lines.
@@ -416,8 +470,48 @@ impl Daemon {
             "machines": found.unwrap_or_default().iter().map(|c| json!({
                 "id": c.id, "name": c.name, "os": c.os, "address": c.address,
                 "tailscale_ssh": c.tailscale_ssh,
+                // The name its station would take, and the name to offer
+                // for it when that is another: its Tailscale name.
+                "host": c.host,
+                "name_as": self.add_name_offer(&c.host, &c.name),
             })).collect::<Vec<_>>(),
         })
+    }
+
+    /// The name to offer for a machine's station: its Tailscale name when
+    /// that is not what the station would call itself, or a free name
+    /// when a station of this fleet already has that one, capitals aside.
+    fn add_name_offer(&self, host: &str, tailscale: &str) -> Option<String> {
+        let mut taken = vec![self.station.clone()];
+        taken.extend(self.fleet_members().into_iter().map(|p| p.station));
+        let names = self.fleet.names();
+        let own = host.split('.').next().unwrap_or(host);
+        let clash = taken.iter().any(|t| crate::names::alike(t, own));
+        if !clash && (own == tailscale || !crate::names::valid(tailscale)) {
+            return None;
+        }
+        Some(crate::names::suggest(own, Some(tailscale), &taken, &names))
+    }
+
+    /// The name the owner typed for the station being added, checked: it
+    /// is offered again with the approval, which is where it is given.
+    pub fn add_name_checked(&self, name: Option<&str>) -> Result<Option<String>> {
+        let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) else {
+            return Ok(None);
+        };
+        let mut taken = vec![self.station.clone()];
+        taken.extend(self.fleet_members().into_iter().map(|p| p.station));
+        match crate::names::refusal(name, "", &taken, &self.fleet.names()) {
+            Some(no) => Err(invalid(no)),
+            None => Ok(Some(name.to_string())),
+        }
+    }
+
+    /// Kept with the job that has just begun.
+    pub fn add_name_as(&self, name: Option<String>) {
+        if let Some(j) = self.adding.job.lock().unwrap().as_mut() {
+            j.name_as = name;
+        }
     }
 
     pub fn add_status(&self) -> Value {
@@ -524,6 +618,7 @@ impl Daemon {
                 "ssh_off" => format!("SSH is not turned on on {name}: on a Mac turn on Remote Login in System Settings, General, Sharing; on Linux install and start the SSH server; or turn on Tailscale SSH there; then try again."),
                 "wrong_password" => format!("{name} did not accept that user name and password: check both and try again."),
                 "no_password_login" => format!("{name} refused without asking for a password, so it does not take passwords over SSH: turn on password login or Tailscale SSH there, or give this station's SSH key access, then try again."),
+                "confirm" => format!("Tailscale is still waiting for you to confirm this connection to {name}, and it was not confirmed in {} minutes, so nothing was done there. Open the address{}, confirm, then Try again: Tailscale remembers it for a while.", CONFIRM_WAIT.as_secs() / 60, if j.confirm.is_some() { " below" } else { " Tailscale printed (in the last lines below)" }),
                 "unreachable" => format!("{name} did not answer, so it is probably asleep or off: wake it, check that Tailscale is connected there, and try again."),
                 "host_key" => format!("{name} answered with a different SSH host key than the one saved for it before, so nothing was sent: if that machine was reinstalled, delete the line for {} from {known} and try again; if it was not, do not connect.", j.address),
                 "unsupported" => format!("spandeck has no release for {name}'s system: it runs on macOS and Linux on Apple silicon, arm64 and x86-64, and on Windows on x86-64."),
@@ -969,7 +1064,10 @@ impl Daemon {
 
     /// The command that reaches the machine. `add_machine_cmd` in the config
     /// replaces it. The script arrives on its standard input.
-    fn add_command(&self, job: &Job) -> Vec<String> {
+    ///
+    /// `patient`: a connection Tailscale SSH is holding until the owner
+    /// confirms it is given `CONFIRM_WAIT` to be made, not twelve seconds.
+    fn add_command(&self, job: &Job, patient: bool) -> Vec<String> {
         let known = self.known_hosts_file().display().to_string();
         let template: Vec<String> = self.cfg.add_machine_cmd.clone().unwrap_or_else(|| {
             [
@@ -996,7 +1094,11 @@ impl Daemon {
                 "-o",
                 "UpdateHostKeys=no",
                 "-o",
-                "ConnectTimeout=12",
+                if patient {
+                    "ConnectTimeout=240"
+                } else {
+                    "ConnectTimeout=12"
+                },
                 "-o",
                 "ServerAliveInterval=15",
                 "-o",
@@ -1694,15 +1796,51 @@ exit 0
 impl Daemon {
     /// Connect, install, start and ask to join. `Ok` is the join code the new
     /// station shows; `Err` is the kind of problem.
+    ///
+    /// A connection that ended while Tailscale SSH was waiting for the
+    /// owner to confirm it (the incident of 20 Nov 2026: twelve seconds,
+    /// then "probably asleep or off") is made once more and given
+    /// `CONFIRM_WAIT`: the dialog says what is waited for and shows the
+    /// address Tailscale gave. Still not confirmed, it ends saying so.
     async fn add_install(
         &self,
         job: &Job,
         password: Option<Secret>,
         join: JoinBy,
     ) -> std::result::Result<String, &'static str> {
+        let first = self.add_session(job, password, join, false).await;
+        let waiting = |d: &Daemon| {
+            let slot = d.adding.job.lock().unwrap();
+            slot.as_ref()
+                .is_some_and(|j| j.id == job.id && j.check_seen && j.stage == "confirm")
+        };
+        match first {
+            Err("unreachable" | "connect") if waiting(self) => {}
+            other => return other,
+        }
+        if !self.add_line(
+            &job.id,
+            "Tailscale is waiting for you to confirm this connection: connecting again, and waiting for you.",
+        ) {
+            return Err("cancelled");
+        }
+        match self.add_session(job, None, join, true).await {
+            Err("unreachable" | "connect" | "timeout") if waiting(self) => Err("confirm"),
+            other => other,
+        }
+    }
+
+    /// One SSH session of `add_install`.
+    async fn add_session(
+        &self,
+        job: &Job,
+        password: Option<Secret>,
+        join: JoinBy,
+        patient: bool,
+    ) -> std::result::Result<String, &'static str> {
         let id = job.id.as_str();
         let had_password = password.is_some();
-        let argv = self.add_command(job);
+        let argv = self.add_command(job, patient);
         let Some((program, args)) = argv.split_first() else {
             return Err("no_ssh");
         };
@@ -1950,6 +2088,8 @@ impl Daemon {
                         }
                         self.add_update(id, |j| {
                             j.stage = stage;
+                            // It is connected: nothing waits for the owner.
+                            j.confirm = None;
                             if step != "install" {
                                 j.note = None;
                             }
@@ -2078,6 +2218,20 @@ impl Daemon {
             }
             if is_err {
                 said.push(line.clone());
+            }
+            // Tailscale SSH holds the connection until the owner confirms
+            // it: the dialog says so, with the address to confirm at.
+            if tailscale_check(&line) || tailscale_confirm_link(&line).is_some() {
+                let link = tailscale_confirm_link(&line);
+                self.add_update(id, |j| {
+                    if matches!(j.stage, "connecting" | "confirm") {
+                        j.stage = "confirm";
+                        j.check_seen = true;
+                        if link.is_some() {
+                            j.confirm = link;
+                        }
+                    }
+                });
             }
             // The download answering "not found": no release for that system.
             missing |= line.contains("returned error: 404");
@@ -2694,6 +2848,81 @@ mod tests {
         ] {
             assert!(!is_tailscale_address(no.parse().unwrap()), "{no}");
         }
+    }
+
+    // The fault of 20 Nov 2026: Tailscale SSH held the connection for the
+    // owner's confirmation, and the add said the machine was asleep. What
+    // it printed is told for what it is, and the one address in it that
+    // may be shown as a link is Tailscale's own (rule 6: the rest is text).
+    #[test]
+    fn tailscale_waiting_for_the_owner_is_told_apart_and_only_its_own_address_is_a_link() {
+        assert!(tailscale_check(
+            "# Tailscale SSH requires an additional check."
+        ));
+        let line = "# To authenticate, visit: https://login.tailscale.com/a/1a2B3c_4-d";
+        assert!(tailscale_check(line));
+        assert_eq!(
+            tailscale_confirm_link(line).as_deref(),
+            Some("https://login.tailscale.com/a/1a2B3c_4-d")
+        );
+        // Cut at the first thing such an address does not have.
+        assert_eq!(
+            tailscale_confirm_link("visit: https://login.tailscale.com/a/abc\"><script>x</script>")
+                .as_deref(),
+            Some("https://login.tailscale.com/a/abc")
+        );
+        assert_eq!(
+            tailscale_confirm_link("https://login.tailscale.com/a/abc?next=https://evil.example")
+                .as_deref(),
+            Some("https://login.tailscale.com/a/abc")
+        );
+        // Never another site, however it is dressed.
+        for no in [
+            "To authenticate, visit: https://login.tailscale.com.evil.example/a/abc",
+            "To authenticate, visit: https://evil.example/login.tailscale.com/a/abc",
+            "To authenticate, visit: http://login.tailscale.com/a/abc",
+            "To authenticate, visit: https://login.tailscale.com/",
+            "ssh: connect to host 100.64.0.2 port 22: Operation timed out",
+        ] {
+            assert_eq!(tailscale_confirm_link(no), None, "{no}");
+            assert!(!tailscale_check(no), "{no}");
+        }
+    }
+
+    // The incident: a WSL distro on the Windows machine `rtx6000` called
+    // itself `RTX6000`. A station at another machine's Tailscale address is
+    // that other machine, so this one is still a machine to add.
+    #[test]
+    fn a_machine_is_not_left_out_for_having_the_name_of_a_station_elsewhere() {
+        let status = json!({"Self": {"UserID": 7}, "Peer": {
+            "a": {"ID": "n-wsl", "HostName": "RTX6000", "DNSName": "rtx6000-wsl.tail0.ts.net.",
+                "OS": "linux", "UserID": 7, "Online": true, "TailscaleIPs": ["100.103.9.89"]},
+            "b": {"ID": "n-win", "HostName": "rtx6000", "DNSName": "rtx6000.tail0.ts.net.",
+                "OS": "windows", "UserID": 7, "Online": true, "TailscaleIPs": ["100.64.0.7"]},
+            "c": {"ID": "n-lab", "HostName": "lab", "DNSName": "lab.tail0.ts.net.",
+                "OS": "linux", "UserID": 7, "Online": true, "TailscaleIPs": ["100.64.0.9"]}}});
+        let station = |name: &str, addr: &str| Peer {
+            station: name.into(),
+            addr: addr.into(),
+            version: "0".into(),
+            protocol: 0,
+            state: "online".into(),
+            last_seen_ms: 0,
+            info: json!({}),
+        };
+        // The Windows station is at its own address; a station called LAB
+        // was found at an address the owner wrote in a config (no Tailscale
+        // address says which machine that is, so its name still does).
+        let stations = [
+            station("rtx6000", "100.64.0.7:7391"),
+            station("LAB", "192.168.1.9:7391"),
+        ];
+        let found = candidates(&status, &stations);
+        let names: Vec<(&str, &str)> = found
+            .iter()
+            .map(|c| (c.name.as_str(), c.host.as_str()))
+            .collect();
+        assert_eq!(names, [("rtx6000-wsl", "RTX6000")]);
     }
 
     // Each failure the tile must explain is told apart by what ssh printed.

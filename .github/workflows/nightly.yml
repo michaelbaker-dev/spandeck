@@ -82,6 +82,17 @@ jobs:
         run: |
           cargo test -p spandeck --test phase5 a_machine_that_cannot_download_is_sent -- --ignored
           cargo test -p spandeck --test phase5 add_a_machine_on_a_phone -- --ignored
+      # A station is renamed (from another station's deck, from its own
+      # command line, by hand in its config file) with a pane, a layout, a
+      # look, mail and a waiting stop that name it, and a station that is
+      # off meanwhile; a name that is only a former name is "removed"
+      # without touching the station; a newcomer whose name is taken joins
+      # under another; two names that differ by capitals; and the dialogs
+      # in a real browser, with Tailscale SSH waiting for the owner. About
+      # a minute.
+      - name: A station is renamed, and no two stations have one name
+        if: ${{ !cancelled() }}
+        run: cargo test -p spandeck --test rename -- --ignored --nocapture
       # A station that cannot reach the release host takes another
       # station's own running program (tens of megabytes) and upgrades to
       # it, while calls between the two are timed: none may be held up by

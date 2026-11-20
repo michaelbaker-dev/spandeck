@@ -267,7 +267,20 @@ impl Daemon {
         self.paths.config_dir.join("tools.json")
     }
 
+    /// The tools document, each station in a tool's scope named as it is
+    /// called now: a tool given to a station is still given to it after
+    /// the station is renamed.
     pub fn tools_doc(&self) -> ToolsDoc {
+        let mut doc = self.tools_doc_unrenamed();
+        let names = self.fleet.names();
+        if !names.list().is_empty() {
+            crate::rename::tools_renamed(&mut doc, &|s| names.now_called(s));
+        }
+        doc
+    }
+
+    /// The document as it is written.
+    fn tools_doc_unrenamed(&self) -> ToolsDoc {
         std::fs::read(self.tools_file())
             .ok()
             .and_then(|b| serde_json::from_slice::<ToolsDoc>(&b).ok())
@@ -320,7 +333,9 @@ impl Daemon {
                     "the tools saved here are from a newer spandeck than this station runs; update this station to change them",
                 ));
             }
-            let before = doc.tools.clone();
+            // What is written: a scope still under a name a station had
+            // is saved under the name it has, as a change.
+            let before = self.tools_doc_unrenamed().tools;
             change(&mut doc)?;
             doc.validate().map_err(invalid)?;
             if doc.tools == before {

@@ -323,12 +323,25 @@ impl Daemon {
             .ok()
     }
 
+    /// A project's layouts as read, each station a leaf names called what
+    /// it is called now. The file in the owner's folder is not rewritten
+    /// for a rename: it says the new name the next time it is saved.
+    fn project_renamed(&self, file: &mut ProjectFile) {
+        let names = self.fleet.names();
+        if !names.list().is_empty() {
+            for layout in &mut file.layouts {
+                crate::rename::layout_renamed(layout, &|s| names.now_called(s));
+            }
+        }
+    }
+
     pub fn project_file(&self, name: &str) -> Result<(PathBuf, ProjectFile)> {
         let path = self
             .project_path(name)
             .ok_or_else(|| Error::NotFound(format!("project {name}")))?;
         let path = PathBuf::from(path);
-        let file = project_load(name, &path)?;
+        let mut file = project_load(name, &path)?;
+        self.project_renamed(&mut file);
         Ok((path, file))
     }
 
@@ -558,7 +571,10 @@ impl Daemon {
                 )
             })
             .map_err(|_| Error::NotFound(format!("project {name}")))?;
-        let file = project_load(name, Path::new(&path));
+        let mut file = project_load(name, Path::new(&path));
+        if let Ok(file) = &mut file {
+            self.project_renamed(file);
+        }
         let panes: Vec<Value> = self
             .list_panes()
             .iter()

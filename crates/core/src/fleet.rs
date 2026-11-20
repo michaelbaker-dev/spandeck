@@ -183,6 +183,13 @@ pub struct FleetState {
     pub own_addrs: tokio::sync::watch::Sender<Option<OwnAddrs>>,
     /// Addresses whose last calls got no answer at all: see `not_answering`.
     silent: Mutex<Silence>,
+    /// The renames this station knows (names.rs): a former name of a
+    /// station finds it wherever a station is looked up by name.
+    renamed: std::sync::RwLock<crate::names::Names>,
+    /// Held while renames are taken and what is stored is moved.
+    pub(crate) renaming: Mutex<()>,
+    /// Held by the one task that finishes this station's own rename.
+    pub(crate) settling: tokio::sync::Mutex<()>,
 }
 
 /// Calls in a row to one address that got no answer (no connection, or
@@ -323,7 +330,56 @@ impl FleetState {
             perf,
             own_addrs: tokio::sync::watch::Sender::new(None),
             silent: Mutex::new(Silence::default()),
+            renamed: Default::default(),
+            renaming: Mutex::new(()),
+            settling: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// A name leaves the list, and the roster is told nothing: it was a
+    /// name, not a station.
+    pub(crate) fn forget_quietly(&self, station: &str) -> bool {
+        self.peers.lock().unwrap().remove(station).is_some()
+    }
+
+    /// The renames this station knows.
+    pub fn names(&self) -> crate::names::Names {
+        self.renamed.read().unwrap().clone()
+    }
+
+    pub(crate) fn names_set(&self, names: crate::names::Names) {
+        *self.renamed.write().unwrap() = names;
+    }
+
+    /// What the station once called `name` is called now.
+    pub fn now_called(&self, name: &str) -> String {
+        self.renamed.read().unwrap().now_called(name)
+    }
+
+    /// A station's entry goes under its new name, where its old name's
+    /// was: the list does not show it twice, once as a station that never
+    /// answers. Says whether the list changed.
+    pub(crate) fn renamed_entry(&self, from: &str, to: &str) -> bool {
+        let mut peers = self.peers.lock().unwrap();
+        let Some(mut old) = peers.remove(from) else {
+            return false;
+        };
+        if !peers.contains_key(to) {
+            old.station = to.to_string();
+            peers.insert(to.to_string(), old);
+        }
+        true
+    }
+
+    /// Other members listed at the address where `station` has just
+    /// answered: the same machine under a name it had before.
+    pub(crate) fn others_at(&self, addr: &str, station: &str) -> Vec<Peer> {
+        let peers = self.peers.lock().unwrap();
+        peers
+            .values()
+            .filter(|p| p.addr == addr && p.station != station && p.state != "not_linked")
+            .cloned()
+            .collect()
     }
 
     /// A call to this address was answered (whatever the answer), or was
@@ -380,13 +436,21 @@ impl FleetState {
         self.silent.lock().unwrap().probe(&addr, now_ms())
     }
 
+    /// The station of that name: the name exactly as it is written, or,
+    /// when no station has it, the station that name was a former name of.
+    /// Never a name that merely looks alike: two stations whose names
+    /// differ by capitals are two stations.
     pub fn peer(&self, station: &str) -> Option<Peer> {
-        self.peers.lock().unwrap().get(station).cloned()
+        let peers = self.peers.lock().unwrap();
+        if let Some(p) = peers.get(station) {
+            return Some(p.clone());
+        }
+        let now = self.now_called(station);
+        peers.get(&now).cloned()
     }
 
     fn addr_of(&self, station: &str) -> Option<String> {
-        let peers = self.peers.lock().unwrap();
-        peers.get(station).map(|p| p.addr.clone())
+        self.peer(station).map(|p| p.addr)
     }
 
     pub(crate) fn forget(&self, station: &str) {
@@ -1129,7 +1193,29 @@ impl Daemon {
                     if h.get("fleet").and_then(|f| f.as_str())
                         == Some(self.trust.fleet_id().as_str()) =>
                 {
-                    let info = self.fleet.call_addr(addr, "station.info", json!({})).await;
+                    // Asked with a value made for this one question: a
+                    // station that knows of renames signs it and its name
+                    // with the fleet's key (`proof`), and only then is it
+                    // taken for a station this one lists under another
+                    // name (rename.rs). What it says of that itself is
+                    // dropped: the mark is this station's own.
+                    let nonce = crate::paths::random_token();
+                    let info = self
+                        .fleet
+                        .call_addr(addr, "station.info", json!({"nonce": nonce}))
+                        .await
+                        .map(|mut info| {
+                            let proved = self.name_proved(&nonce, &info);
+                            if let Some(o) = info.as_object_mut() {
+                                o.remove("proved");
+                                // Checked, and kept nowhere.
+                                o.remove("proof");
+                                if proved {
+                                    o.insert("proved".into(), json!(true));
+                                }
+                            }
+                            info
+                        });
                     // It holds this fleet's key and still refuses the
                     // signed call: when its clock is surely more than
                     // two minutes from this one's, that is why. It
@@ -1180,6 +1266,14 @@ impl Daemon {
             let station = info.get("station")?.as_str()?.to_string();
             (station != self.station).then_some((station, info))
         });
+        // A station of this fleet says which stations were renamed, itself
+        // included: taken before it is listed, so that it is never listed
+        // twice, once under the name it had.
+        if let Some((_, info)) = &answered {
+            if info.get("not_linked").is_none() && info.get("clock_refused").is_none() {
+                changed |= self.renames_told(info.pointer("/roster/renamed"), "the roster");
+            }
+        }
         {
             let mut peers = self.fleet.peers.lock().unwrap();
             match answered {
@@ -1256,6 +1350,12 @@ impl Daemon {
                 }
             }
         }
+        // The machine at an address where this station lists a member
+        // under another name: the same station, renamed where no station
+        // was told (by hand, on a version from before renames).
+        if let Some(peer) = &member {
+            changed |= self.renamed_at(peer);
+        }
         // It answers: messages waiting for it are sent now, not when the
         // wait after the last failed try is over (relay.rs).
         if let Some(peer) = &member {
@@ -1300,6 +1400,8 @@ impl Daemon {
     /// What this station and one station of its fleet owe each other at
     /// every look. Each call is to that station alone.
     async fn station_sync(&self, peer: &Peer) {
+        // First: a station that was off when a station was renamed.
+        self.renames_offer(peer).await;
         // A newer copy of a synced document is taken before this station's
         // is offered: see sync.rs.
         self.sync_pull(peer).await;
@@ -1378,7 +1480,24 @@ impl Daemon {
         // Is a newer spandeck published? The newest any station learned,
         // and beside each station what that means for it (newrelease.rs).
         let update = self.fleet_update(&mut stations);
-        json!({"station": self.station, "version": VERSION, "stations": stations, "update": update, "stops": self.stops(20)})
+        // A station's former names, on its row; and for the page, which
+        // name each former name finds (a bookmark, a notice's link).
+        let names = self.fleet.names();
+        let mut former = serde_json::Map::new();
+        for r in names.list() {
+            let now = names.now_called(&r.from);
+            if now != r.from {
+                former.insert(r.from.clone(), json!(now));
+            }
+        }
+        for s in &mut stations {
+            let was = names.former_of(s["station"].as_str().unwrap_or_default());
+            if !was.is_empty() {
+                s["former"] = json!(was);
+            }
+        }
+        json!({"station": self.station, "version": VERSION, "stations": stations, "update": update, "stops": self.stops(20),
+            "former": former, "twins": self.name_twins()})
     }
 
     // ----------------------------------------------------------------- stop-all
@@ -1517,6 +1636,12 @@ impl Daemon {
         mut legs: crate::rpc::StopLegs,
         rid_key: Option<&str>,
     ) -> Result<Value> {
+        // A station named by a name it had before it was renamed.
+        let named = match scope {
+            "fleet" | "station" | "" => scope.to_string(),
+            name => self.station_now(name),
+        };
+        let scope = named.as_str();
         let issued = now_ms();
         // The fleet is its members: a machine that has not joined cannot
         // be sent a stop (it does not take this fleet's calls), and a row

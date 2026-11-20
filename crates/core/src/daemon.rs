@@ -805,6 +805,9 @@ impl Daemon {
             None => false,
         };
         daemon.flags_load();
+        // Before anything is restored or served: is this station's name
+        // the one it last ran under (rename.rs)?
+        daemon.rename_started();
         if !adopted {
             // Restore first, serve afterwards: no deck ever sees this
             // station with its panes missing.
@@ -1182,7 +1185,11 @@ impl Daemon {
         if let Some(p) = panes.get(id) {
             return Ok(p.clone());
         }
-        let bare = id.strip_suffix(&format!("@{}", self.station)).unwrap_or(id);
+        // `x@station`, by this station's name or one it had before.
+        let bare = match crate::relay::split_address(id) {
+            (name, Some(station)) if self.is_here(station) => name,
+            _ => id,
+        };
         if let Some(p) = panes.get(bare) {
             return Ok(p.clone());
         }
@@ -3355,6 +3362,11 @@ impl Daemon {
         // connect here (`page_failover`, the web crate's `deck_origin`).
         if self.flag_on(crate::https::VIA_FLAG, true) {
             caps.push(crate::https::VIA_CAP);
+        }
+        // It knows of renames: its own, the others', and a name given to a
+        // station as it is let in (rename.rs).
+        if self.rename_on() {
+            caps.push(crate::names::CAP);
         }
         caps
     }

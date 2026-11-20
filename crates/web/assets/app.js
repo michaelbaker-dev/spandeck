@@ -62,7 +62,8 @@ function parseRoute() {
   if (parts[0] === 'l' && parts[1]) return { view: 'layout', layout: 'global:' + parts[1] };
   if (parts[0] === 'perf') return { view: 'perf' };
   if (parts[0] === 's' && parts[1]) {
-    const station = parts[1];
+    // A bookmark or a notice's link from before a station was renamed.
+    const station = stationNow(parts[1]);
     if (parts[2] === 'p' && parts[3]) return { view: 'pane', station, pane: parts[3] };
     if (parts[2] === 'l' && parts[3] && parts[4]) return { view: 'layout', station, layout: `${station}/${parts[3]}/${parts[4]}` };
     if (parts[2] === 'w' && parts[3]) return { view: 'watch', station, project: parts[3] };
@@ -71,6 +72,36 @@ function parseRoute() {
   return { view: 'fleet' };
 }
 const go = (hash) => { if (location.hash !== hash) location.hash = hash; else render(); };
+// What a station is called now, by a name it had before it was renamed
+// (the station serving this page says which names those are). A name from
+// another machine: only ever compared, and put in as text.
+function stationNow(name) {
+  const former = S.fleet && S.fleet.former;
+  const now = former && Object.prototype.hasOwnProperty.call(former, name) ? former[name] : null;
+  return typeof now === 'string' && now ? now : name;
+}
+// What this browser keeps by a pane's station (which face a pane shows, a
+// phone's fit) follows a station to its new name, once.
+let renamedSeen = '';
+function renamedHere() {
+  const former = (S.fleet && S.fleet.former) || {};
+  const key = JSON.stringify(former);
+  if (key === renamedSeen) return;
+  renamedSeen = key;
+  for (const store of ['spandeck.face', 'spandeck.phonefit.off']) {
+    try {
+      const kept = JSON.parse(localStorage.getItem(store) || 'null');
+      if (!kept || typeof kept !== 'object' || Array.isArray(kept)) continue;
+      let changed = false;
+      for (const k of Object.keys(kept)) {
+        const at = k.indexOf('/');
+        const now = at > 0 ? stationNow(k.slice(0, at)) : null;
+        if (now && now !== k.slice(0, at)) { const to = now + k.slice(at); if (!(to in kept)) kept[to] = kept[k]; delete kept[k]; changed = true; }
+      }
+      if (changed) localStorage.setItem(store, JSON.stringify(kept));
+    } catch (e) { /* no storage: nothing is kept */ }
+  }
+}
 const stationUrl = (s) => `#/s/${encodeURIComponent(s)}`;
 const paneUrl = (s, p) => `#/s/${encodeURIComponent(s)}/p/${encodeURIComponent(p)}`;
 const layoutUrl = (s, project, name) => `#/s/${encodeURIComponent(s)}/l/${encodeURIComponent(project)}/${encodeURIComponent(name)}`;
@@ -222,6 +253,7 @@ function askFleet() {
   if (fleetAsking) { fleetNext ||= fleetAsking.then(() => askFleet()); return fleetNext; }
   fleetAsking = ask(null, 'fleet.view').then((v) => {
     S.fleet = v;
+    renamedHere();
     // This device's own list of the fleet's stations (failover.js).
     fo.keep(v);
     // What was held of a station that is no longer listed is let go.
@@ -1120,7 +1152,10 @@ const cameWith = (w) => !(w || []).length ? '' : ` and ${w.length} other station
 function trustPanel() {
   dialog('Stations and browsers', (close) => {
     const t = S.trust || {};
-    const answer = (r, yes) => rpc(api.station, yes ? 'trust.approve' : 'trust.deny', { request: r.id }).then(close);
+    // A station is let in under the name in its card's box, when there is
+    // one: its own name may be a station's already.
+    const boxes = new Map();
+    const answer = (r, yes) => rpc(api.station, yes ? 'trust.approve' : 'trust.deny', yes && boxes.get(r.id) ? { request: r.id, as: boxes.get(r.id).value.trim() || undefined } : { request: r.id }).then(close);
     return h('div', {},
       h('h3', {}, 'Asking to be let in'),
       (t.requests || []).length ? h('div', { class: 'list' }, t.requests.map(r => h('div', { class: 'note unread' },
@@ -1128,6 +1163,7 @@ function trustPanel() {
         h('div', {}, 'It shows the code ', h('b', { class: 'code' }, r.code), '. Approve only if you started this and the codes match: it will be able to control every station.',
           (r.with || []).length ? ` Its whole fleet joins this one: every station that holds its key, whatever names it gives. Browsers signed in to those stations sign in again; browsers signed in to this fleet are not affected.` : '',
           r.at && r.at !== t.station ? ` Your answer is passed to ${r.at}, the station that was asked, which hands over the key.` : ''),
+        r.kind === 'station' ? joinName(r, boxes) : null,
         h('div', { class: 'row end' }, h('button', { class: 'mini', onclick: () => answer(r, false) }, 'Refuse'), h('button', { class: 'mini primary', onclick: () => answer(r, true) }, 'Approve')))))
         : h('p', { class: 'muted' }, 'Nothing is waiting.'),
       t.outgoing ? h('p', { class: t.outgoing.problem ? 'warn-text' : '' }, t.outgoing.problem
@@ -1142,6 +1178,76 @@ function trustPanel() {
       h('p', { class: 'muted small' }, 'The same list on every station of the fleet: a browser approved at one is accepted by all, and signing one out here signs it out everywhere.'),
       h('p', { class: 'muted' }, `Fleet ${t.fleet || ''}. To add a station that is running, choose "Add … to this fleet" on its tile; to add a machine that has no spandeck yet, use Add a machine. Either way you approve its code here or at any station of this fleet. If it is in a fleet of its own, every station of that fleet joins with it: there is one fleet afterwards.`));
   });
+}
+
+// The name a station joins under, in its request's card: a box, filled
+// with a free name when the station's own is a member's already (capitals
+// aside), and the fact said. Every name here is text from another machine.
+function joinNameWords(r) {
+  const c = r.clash;
+  const taken = !c ? '' : c.exact ? `A station of this fleet is already called ${c.with}.`
+    : String(c.with).toLowerCase() === String(r.name).toLowerCase() ? `${r.name} has the same name as ${c.with}, a station of this fleet, capitals aside.`
+      : `${r.name} was the name of ${c.with}, a station of this fleet, and still finds it.`;
+  const mates = (r.with_clash || []).map(m => `${m.name}, which comes with it, and ${m.with} of this fleet have one name, capitals aside: rename one afterwards.`).join(' ');
+  return { taken, mates };
+}
+function joinName(r, boxes, preset) {
+  const { taken, mates } = joinNameWords(r);
+  if (!r.can_rename) {
+    return taken || mates ? h('p', { class: 'warn-text join-name-fact' }, [taken, taken ? `${r.name} runs a spandeck from before a station could be named as it is let in: it can only be let in as ${r.name} and renamed once it is updated, or refused.` : '', mates].filter(Boolean).join(' ')) : null;
+  }
+  const input = h('input', { class: 'join-name', autocapitalize: 'none', autocorrect: 'off', spellcheck: false, autocomplete: 'off', maxLength: 64,
+    value: preset || (r.clash ? r.suggest || '' : ''), placeholder: r.name, 'aria-label': `Name for ${r.name} in this fleet` });
+  boxes.set(r.id, input);
+  return h('div', { class: 'join-name-row' },
+    taken || mates ? h('p', { class: 'warn-text join-name-fact' }, [taken, taken ? 'It is let in under another name, or refused.' : '', mates].filter(Boolean).join(' ')) : null,
+    field(r.clash ? 'Its name in this fleet' : 'Its name in this fleet (leave empty to keep its own)', input,
+      r.clash ? 'Letters, digits, - _ and . only. It takes the name as it joins.' : r.tailscale ? `It calls itself ${r.name}; Tailscale calls that machine ${r.tailscale}.` : null));
+}
+
+// "RTX6000 and rtx6000 differ only by capitals": a fleet from before names
+// had to differ keeps working as it did, and one quiet line offers to end
+// the doubt.
+function twinsLine() {
+  const twins = (S.fleet.twins || []).filter(p => Array.isArray(p) && p.length === 2);
+  if (!twins.length) return null;
+  const station = (name) => S.fleet.stations.find(s => s.station === name);
+  return h('div', { class: 'twins' }, twins.map(([a, b]) => h('p', { class: 'muted hint twins-line' },
+    `${a} and ${b} differ only by capitals. Each is found by its own spelling. `,
+    [a, b].map(name => { const s = station(name); return s && s.state === 'online' && (s.caps || []).includes('rename')
+      ? h('button', { type: 'button', class: 'mini', onclick: () => renameStationDialog(s) }, `Rename ${name}…`) : null; }))));
+}
+
+// Rename a station. It keeps running: the dialog says what follows it to
+// the new name and what does not, and the station says no in a sentence.
+function renameStationDialog(s) {
+  const st = s.station;
+  const input = h('input', { class: 'rename-name', autocapitalize: 'none', autocorrect: 'off', spellcheck: false, autocomplete: 'off', maxLength: 64, value: st, 'aria-label': `New name for ${st}` });
+  const why = h('p', { class: 'warn-text rename-why', role: 'alert' });
+  const others = S.fleet.stations.filter(x => x.station !== st && x.state !== 'not_linked');
+  const old = others.filter(x => x.state === 'online' && !(x.caps || []).includes('rename')).map(x => x.station);
+  const d = dialog(`Rename ${st}`, (close) => {
+    const ok = h('button', { class: 'primary', type: 'submit' }, 'Rename');
+    const submit = (e) => {
+      e.preventDefault();
+      const name = input.value.trim();
+      if (!name || name === st) return input.focus();
+      ok.disabled = true; why.textContent = '';
+      api.on(st, 'station.rename', { name }).then((r) => { close(); toast(r.says || `${st} is now ${name}`); refreshSoon(2500); },
+        (e2) => { ok.disabled = false; why.textContent = e2.message; input.focus(); });
+    };
+    return h('form', { class: 'consequences rename-station', onsubmit: submit },
+      field(`New name for ${st}`, input, 'Letters, digits, - _ and . only, and not the name of another station, capitals aside.'),
+      why,
+      h('ul', {},
+        h('li', {}, `${st} keeps running: every pane, agent, conversation and terminal stays open. spandeck there restarts in place to take the name, as for an update, so this page reconnects for a moment.`),
+        h('li', {}, `Layouts, pins, looks, messages, stops and links between projects that name ${st} name it by its new name, on every station. ${st} still finds it for a year: an address an agent remembers, a bookmark, a notice's link.`),
+        h('li', {}, 'Its address for secure access (HTTPS) is its Tailscale name and does not change. A vault token it holds keeps working and keeps its old label at the vault.'),
+        old.length ? h('li', { class: 'warn-text' }, `${old.join(', ')} ${old.length === 1 ? 'runs' : 'run'} a spandeck from before stations could be renamed: ${old.length === 1 ? 'it' : 'they'} will list ${st} as well, as a station that does not answer, until updated.`) : null),
+      h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel'), ok));
+  });
+  setTimeout(() => { input.focus(); input.select(); }, 0);
+  return d;
 }
 
 function approvalsPanel() {
@@ -2305,6 +2411,7 @@ function stationMenu(e, s) {
     { label: 'Performance…', action: () => go('#/perf') },
     stationKey(s.station) && { label: `Tailscale key: ${stationKey(s.station).text}…`, action: () => keyDialog(keyName(s.station), stationKey(s.station), stationMore(s.station)) },
     s.state === 'not_linked' && { label: `Add ${s.station} to this fleet…`, action: () => addMachineDialog({ station: s.station, kind: 'join' }) },
+    up && (s.caps || []).includes('rename') && { label: 'Rename…', action: () => renameStationDialog(s) },
     up && { label: 'Restart spandeck here (keeps terminals)', action: () => confirmBox(`Restart spandeck on ${s.station}?`, 'Every terminal and agent keeps running. If it does not come back healthy, the restart is undone.', 'Restart', () => rpc(s.station, 'station.restart', {}).then(() => toast(`${s.station} is restarting`))) },
     up && { label: 'Check for a newer spandeck now', action: checkReleaseNow },
     up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : r.fleet ? r.note : `${s.station} is updating to ${r.release}`))) },
@@ -2453,10 +2560,22 @@ function stationTile(s) {
 const JOIN_STEPS = [['connecting', 'Connect over SSH'], ['joining', 'Have it ask to join this fleet']];
 const UNINSTALL_STEPS = [['connecting', 'Connect over SSH'], ['stopping', 'Close its panes, stop spandeck and stop it starting at login'], ['removing', 'Delete its programs']];
 const ADD_STEPS = [['connecting', 'Connect over SSH'], ['installing', 'Download and install spandeck'], ['starting', 'Start it, now and at login'], ['joining', 'Ask to join this fleet']];
-const ADD_STAGE = { connecting: 'Connecting over SSH…', installing: 'Installing spandeck…', starting: 'Starting spandeck…', joining: 'Asking to join this fleet…', approve: 'Waiting for your approval', joined: 'Approved. Waiting for it to appear…', needs_password: 'It asks for a password', failed: 'It was not added', stopping: 'Stopping spandeck there…', removing: 'Deleting its programs…' };
+const ADD_STAGE = { confirm: 'Tailscale is waiting for you to confirm this connection', connecting: 'Connecting over SSH…', installing: 'Installing spandeck…', starting: 'Starting spandeck…', joining: 'Asking to join this fleet…', approve: 'Waiting for your approval', joined: 'Approved. Waiting for it to appear…', needs_password: 'It asks for a password', failed: 'It was not added', stopping: 'Stopping spandeck there…', removing: 'Deleting its programs…' };
 let addDlg = null;
 const addActive = () => (S.adding && S.adding.stage !== 'done' ? S.adding : null);
-const addAnswer = (a, yes) => rpc(api.station, yes ? 'trust.approve' : 'trust.deny', { request: a.request });
+// The name the owner chose for the new station goes with the approval.
+const addAnswer = (a, yes, as) => rpc(api.station, yes ? 'trust.approve' : 'trust.deny', yes && (as === undefined ? a.name_as : as) ? { request: a.request, as: as === undefined ? a.name_as : as } : { request: a.request }).catch(() => { /* said by rpc */ });
+// The one thing in what ssh prints that is ever a link: the address
+// Tailscale gives to confirm a connection at, and only at its own site.
+// The station checked it; the page checks it again.
+const TS_CONFIRM = /^https:\/\/login\.tailscale\.com\/[A-Za-z0-9\/_-]{1,120}$/;
+function addConfirm(a) {
+  const link = typeof a.confirm === 'string' && TS_CONFIRM.test(a.confirm) ? a.confirm : null;
+  return h('div', { class: 'add-confirm', role: 'status' },
+    h('p', {}, h('b', {}, 'Tailscale is waiting for you to confirm this connection.'), ` ${a.name} is reached over Tailscale SSH, which asks you to sign in again before it lets ${api.station} connect. Nothing is wrong with ${a.name}.`),
+    link ? h('p', {}, 'Open ', h('a', { class: 'add-confirm-link', href: link, target: '_blank', rel: 'noopener noreferrer' }, link), ' and confirm. This goes on by itself once you have; it waits a few minutes.')
+      : h('p', {}, 'Tailscale printed the address to confirm at in the lines below. This goes on by itself once you have confirmed; it waits a few minutes.'));
+}
 const addClear = () => api.call('fleet.add_cancel').catch(() => {}).then(() => { S.adding = null; refreshSoon(30); });
 
 // Called when the station's answer about an add arrives.
@@ -2481,6 +2600,7 @@ function addBody(a) {
     h('div', { class: 'row end' }, h('button', { class: 'mini', onclick: (e) => { e.stopPropagation(); addAnswer(a, false); } }, 'Refuse'), h('button', { class: 'mini primary', onclick: (e) => { e.stopPropagation(); addAnswer(a, true); } }, 'Approve'))];
   if (a.stage === 'failed') return [a.problem?.worked ? h('div', {}, a.problem.worked) : null, h('div', { class: 'warn-text' }, a.problem?.text || (a.kind === 'uninstall' ? 'It was not uninstalled.' : 'It was not added.'))];
   if (a.stage === 'needs_password') return [h('div', {}, `It asks for a password for ${a.user}. Open this to enter it.`)];
+  if (a.stage === 'confirm') return [h('div', {}, 'Tailscale is waiting for you to confirm this connection. Open this for the address.')];
   // A release being sent over SSH is progress, said in the station's own words.
   return [h('div', {}, a.note || addStageWords(a)), h('div', { class: 'muted add-last' }, a.lines?.length ? a.lines[a.lines.length - 1] : '')];
 }
@@ -2489,7 +2609,7 @@ function addTile() {
   const a = addActive();
   if (!a) return h('button', { class: 'tile add-tile', onclick: () => addMachineDialog(), title: 'Install spandeck on another of your machines and bring it into this fleet' },
     h('span', { class: 'add-plus', 'aria-hidden': 'true' }, '+'), h('span', {}, 'Add a machine'));
-  const mark = a.stage === 'failed' ? 'error' : a.stage === 'approve' || a.stage === 'needs_password' ? 'needs_you' : 'working';
+  const mark = a.stage === 'failed' ? 'error' : a.stage === 'approve' || a.stage === 'needs_password' || a.stage === 'confirm' ? 'needs_you' : 'working';
   return h('div', { class: 'tile add-tile busy ' + mark, role: 'button', tabIndex: 0, onclick: () => addMachineDialog(), onkeydown: (e) => { if (e.key === 'Enter') addMachineDialog(); } },
     h('div', { class: 'tile-head' }, h('span', { class: 'dot ' + mark }), h('b', {}, a.name), h('span', { class: 'chip' }, a.kind === 'uninstall' ? 'being uninstalled' : 'being added'), h('span', { class: 'grow' }), h('span', { class: 'muted' }, a.os || '')),
     addBody(a));
@@ -2523,6 +2643,10 @@ function addMachineDialog(target) {
   try { lastUser = localStorage.getItem('spandeck.addUser') || ''; } catch (e) { /* no storage */ }
   const user = h('input', { ...plain, placeholder: 'the short name of your account there', value: lastUser, 'aria-label': 'User name on that machine' });
   const pass = h('input', { ...plain, type: 'password', placeholder: 'password', 'aria-label': 'Password on that machine' });
+  // The name the new station is to have in this fleet. Filled with the
+  // machine's Tailscale name when the station would call itself otherwise.
+  const nameAs = h('input', { ...plain, class: 'add-name', maxLength: 64, placeholder: 'the name the machine gives itself', 'aria-label': 'Name of the new station in this fleet' });
+  const approveBoxes = new Map();
   const log = h('pre', { class: 'add-log', 'aria-label': 'What the machine printed' });
   const box = h('div', { class: 'add-dialog' });
   const setLog = (lines) => { const end = log.scrollHeight - log.scrollTop - log.clientHeight < 30; log.textContent = (lines || []).join('\n'); if (end) log.scrollTop = log.scrollHeight; };
@@ -2533,6 +2657,7 @@ function addMachineDialog(target) {
     // again; nothing is installed a second time.
     const station = typeof what === 'object' && !what.again ? what : null;
     const params = what.again ? { again: true, user: user.value.trim() } : station ? { station: station.station, user: user.value.trim() } : { machine: what, user: user.value.trim() };
+    if (!station && !what.again && nameAs.value.trim()) params.name = nameAs.value.trim();
     if (station && station.kind === 'uninstall') params.erase = station.erase !== undefined ? !!station.erase : erase.checked;
     // The password goes in this one request and is dropped from the page.
     if (password) params.password = password;
@@ -2613,8 +2738,11 @@ function addMachineDialog(target) {
       m && !listOpen
         ? h('div', { class: 'list-row add-machine add-picked first' }, about(m), h('button', { class: 'mini add-change', type: 'button', 'aria-label': 'Pick another machine', onclick: () => { listOpen = true; redraw(); } }, 'Change'))
         : [h('p', { class: 'muted' }, 'Your Mac, Linux and Windows machines that are online and not stations yet:'),
-          h('div', { class: 'list' }, info.machines.map(x => h('button', { class: 'list-row add-machine' + (x.id === picked ? ' first' : ''), type: 'button', 'aria-pressed': x.id === picked, onclick: () => { picked = x.id; listOpen = false; redraw(); user.focus(); } }, about(x))))],
-      m ? form(field(`Your user name on ${m.name}`, user, userHint(m.name, ' and runs the spandeck install script there')),
+          h('div', { class: 'list' }, info.machines.map(x => h('button', { class: 'list-row add-machine' + (x.id === picked ? ' first' : ''), type: 'button', 'aria-pressed': x.id === picked, onclick: () => { picked = x.id; listOpen = false; nameAs.value = x.name_as || ''; nameAs.dataset.forMachine = x.id; redraw(); user.focus(); } }, about(x))))],
+      m ? form([field(`Your user name on ${m.name}`, user, userHint(m.name, ' and runs the spandeck install script there')),
+        field('Its name in this fleet', nameAs, m.name_as
+          ? `The machine calls itself ${m.host || m.name}, which is the name its station would take. ${m.name_as === m.name ? `Tailscale calls it ${m.name}.` : `${m.name_as} is free.`} You give it this name as you approve it; empty keeps its own.`
+          : `Empty keeps the name the machine gives itself (${m.host || m.name}).`)],
         'Connect and install', () => { if (user.value.trim()) start(m.id, m.name); else user.focus(); }) : h('div', { class: 'row end' }, closeBtn('Cancel')),
       whoConnects(),
       // The switch for this feature, away from the buttons that act: beside
@@ -2637,7 +2765,9 @@ function addMachineDialog(target) {
       another ? h('div', { class: 'row end add-another' }, another) : null);
     if (a.stage === 'needs_password') return [h('p', {}, `${a.name} asks for a password: neither Tailscale SSH nor an SSH key let ${api.station} in as ${a.user}.${un ? ` Nothing has been deleted on ${a.name} yet.` : ''}`), passForm(un ? 'Connect and uninstall' : station ? 'Connect and ask' : 'Connect and install')];
     if (a.stage === 'failed') return [
-      addProblem(a, un ? 'It was not uninstalled.' : 'It was not added.'), log,
+      addProblem(a, un ? 'It was not uninstalled.' : 'It was not added.'),
+      a.problem?.kind === 'confirm' && typeof a.confirm === 'string' && TS_CONFIRM.test(a.confirm) ? h('p', {}, h('a', { class: 'add-confirm-link', href: a.confirm, target: '_blank', rel: 'noopener noreferrer' }, a.confirm)) : null,
+      log,
       a.problem?.kind === 'wrong_password' ? passForm('Try again')
         : h('div', { class: 'row end' }, h('button', { onclick: () => { addClear(); d.close(); } }, 'Close'), h('button', { class: 'primary', onclick: () => {
           user.value = a.user;
@@ -2651,7 +2781,8 @@ function addMachineDialog(target) {
       (a.with || []).length ? h('p', {}, h('b', {}, `Its fleet comes with it: ${a.station}${cameWith(a.with)}.`), ' Every station that holds its fleet\'s key joins, whatever names it gives; one that is off joins when it is next seen. Browsers signed in to those stations from other devices sign in again.')
         : a.kind === 'join' && !a.brings_mates ? h('p', { class: 'warn-text' }, `${a.name} runs a version of spandeck that joins alone: any station it shares a fleet with stays behind.`) : null,
       h('p', { class: 'muted' }, 'Approve only if you started this: it will be able to control every station.'),
-      h('div', { class: 'row end' }, h('button', { onclick: () => addAnswer(a, false) }, 'Refuse'), h('button', { class: 'primary', onclick: () => addAnswer(a, true) }, 'Approve')), log];
+      addJoinName(a),
+      h('div', { class: 'row end' }, h('button', { onclick: () => addAnswer(a, false) }, 'Refuse'), h('button', { class: 'primary', onclick: () => addAnswer(a, true, approveBoxes.get(a.request) ? approveBoxes.get(a.request).value.trim() : undefined) }, 'Approve')), log];
     if (a.stage === 'joined') return [h('p', {}, `Approved. Waiting for ${a.station || a.name} to appear…`), log];
     if (a.stage === 'done' && un) return [
       h('p', {}, 'spandeck was uninstalled on ', h('b', {}, a.name), `. ${a.erase ? 'Its history, archive and settings were deleted too.' : 'Its history, archive and settings are still there, and are picked up if you add it back.'} Your project folders there were not touched.`),
@@ -2660,21 +2791,30 @@ function addMachineDialog(target) {
     if (a.stage === 'done') return [h('p', {}, h('b', {}, a.station || a.name), ' is in your fleet.'),
       h('div', { class: 'row end' }, h('button', { onclick: () => { addClear(); d.close(); } }, 'Done'), h('button', { class: 'primary', onclick: () => { addClear(); d.close(); go(stationUrl(a.station || a.name)); } }, 'Open it'))];
     const steps = un ? UNINSTALL_STEPS : station ? JOIN_STEPS : ADD_STEPS;
-    const at = steps.findIndex(s => s[0] === a.stage);
+    // Waiting for the owner at Tailscale is still the first step.
+    const at = a.stage === 'confirm' ? 0 : steps.findIndex(s => s[0] === a.stage);
     return [
       h('p', {}, un ? `Uninstalling spandeck on ${a.name}, as ${a.user}.` : station ? `Asking ${a.name} to join, as ${a.user}.` : `Adding ${a.name} as ${a.user}.`),
       h('ol', { class: 'add-steps' }, steps.map(([, label], i) => h('li', { class: i < at ? 'done' : i === at ? 'now' : '' }, h('span', { 'aria-hidden': 'true' }, i < at ? '✓' : i === at ? '›' : '·'), label + (i === at ? '…' : '') + (i === at && a.stage === 'joining' ? ' (looking for its stations)' : '')))),
+      a.stage === 'confirm' ? addConfirm(a) : null,
       // What the steps do not say: the machine cannot download and is sent the release.
       a.note ? h('p', { class: 'add-note' }, a.note) : null,
       log,
       h('div', { class: 'row end' }, h('button', { class: 'danger', onclick: () => addClear() }, 'Stop'), closeBtn('Hide'))];
   }
 
+  // The request this job waits on, as the station lists it: whether its
+  // name is taken, and the box for the name it is let in under.
+  function addJoinName(a) {
+    const r = ((S.trust || {}).requests || []).find(x => x.id === a.request);
+    return r ? joinName(r, approveBoxes, a.name_as) : null;
+  }
+
   function redraw() {
     const a = again ? null : S.adding;
     if (a) setLog(a.lines);
     // Only a change of step redraws: the boxes being typed in are left alone.
-    const key = JSON.stringify(a ? [a.id, a.stage, a.problem?.kind, a.code, a.note] : [picked, listOpen, target, info && [info.enabled, info.tailscale, info.error, info.machines.map(x => x.id)]]);
+    const key = JSON.stringify(a ? [a.id, a.stage, a.problem?.kind, a.code, a.note, a.confirm] : [picked, listOpen, target, info && [info.enabled, info.tailscale, info.error, info.machines.map(x => x.id)]]);
     if (key === shown) return;
     shown = key;
     box.replaceChildren(...(a ? view(a) : picker()).flat().filter(Boolean));
@@ -3746,6 +3886,7 @@ function fleetView() {
   const stations = S.fleet.stations.slice().sort((a, b) => (b.needs_you || 0) - (a.needs_you || 0) || (b.self ? 1 : 0) - (a.self ? 1 : 0));
   return shell(h('main', { class: 'station-main' }, h('div', { class: 'fleet' }, stopRows(),
     h('div', { class: 'tiles' }, stations.map(stationTile), addTile()),
+    twinsLine(),
     stations.length <= 1 ? h('p', { class: 'muted hint' }, 'Other stations appear here on their own: any machine under your Tailscale login that runs spandeckd.') : null)));
 }
 
@@ -4405,7 +4546,7 @@ function phoneList() {
     pins.length ? h('section', { class: 'phone-pinned' }, h('h2', {}, 'Pinned'), pins.map(x => x.p ? row(x.st, x.p) : x.lay ? layRow(x.lay, layShort(x.lay)) : h('div', { class: 'phone-row muted' }, x.gone))) : null,
     homeSwitch(),
     byStation ? null : h('section', { class: 'phone-recents' }, h('h2', {}, 'Recents'), recentRows()),
-    byStation ? h('section', {}, h('h2', {}, 'Stations'), stationsByName().map(station), addRow()) : null,
+    byStation ? h('section', {}, h('h2', {}, 'Stations'), stationsByName().map(station), addRow(), twinsLine()) : null,
     byStation && globals.length ? h('section', { class: 'phone-layouts' }, h('h2', {}, 'Layouts'), globals.map(x => layRow(x, 'every station'))) : null,
     stopRows(),
     byStation ? h('section', {}, h('button', { class: 'wide', onclick: fleetUsageDialog }, 'Usage: tokens and estimated cost'),

@@ -270,6 +270,8 @@ impl Daemon {
         task: Option<String>,
         mark: Option<&SendMark>,
     ) -> Result<Value> {
+        // A station named by a name it had before is that station.
+        let to = &self.address_now(to);
         let (name, station) = split_address(to);
         let remote = station.is_some_and(|s| s != self.station);
         let project = caller
@@ -987,6 +989,16 @@ impl Daemon {
         env: &crate::relay::Envelope,
         from: Option<&str>,
     ) -> crate::relay::RelayAck {
+        // A message on its way while a station was renamed, or sent by a
+        // station that has not heard: both of its ends are read as the
+        // stations are called now, so one addressed to this station under
+        // a name it had is this station's.
+        let mut renamed = env.clone();
+        renamed.recipient = self.address_now(&env.recipient);
+        renamed.sender = self.address_now(&env.sender);
+        let env = &renamed;
+        let from = from.map(|f| self.station_now(f));
+        let from = from.as_deref();
         let (name, _) = split_address(&env.recipient);
         let from = from.or(split_address(&env.sender).1).unwrap_or_default();
         let theirs = self

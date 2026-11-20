@@ -119,12 +119,21 @@ impl Daemon {
             return;
         }
         let floor = theirs.get("*").copied().unwrap_or(0);
+        // A station that was renamed since is the same station: a change
+        // recorded under the name it had is held by a copy that records it
+        // under the name it has.
+        let held = |station: &str| {
+            let now = self.station_now(station);
+            theirs
+                .iter()
+                .filter(|(s, _)| s.as_str() == station || self.station_now(s) == now)
+                .map(|(_, at)| *at)
+                .max()
+                .unwrap_or(0)
+        };
         let lost: Vec<&str> = mine
             .iter()
-            .filter(|(station, at)| {
-                station.as_str() != "*"
-                    && theirs.get(*station).copied().unwrap_or(0).max(floor) < **at
-            })
+            .filter(|(station, at)| station.as_str() != "*" && held(station).max(floor) < **at)
             .map(|(station, _)| station.as_str())
             .collect();
         if !lost.is_empty() {

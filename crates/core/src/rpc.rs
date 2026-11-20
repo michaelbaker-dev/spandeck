@@ -78,6 +78,10 @@ const PEER_METHODS: &[&str] = &[
     "trust.relay",
     "trust.sync",
     "fleet.rekey",
+    // A station saying which stations were renamed (rename.rs): it can
+    // only add to what a former name finds. Renaming a station is the
+    // owner's `station.rename`, which is on no list here.
+    "fleet.renamed",
     "project.link.record",
     "project.link.findings",
     "notify.relay",
@@ -1363,7 +1367,28 @@ impl Daemon {
         let by = caller.who.as_str();
         Ok(match method {
             // ------------------------------------------------------- station
-            "station.info" => self.info(),
+            "station.info" => {
+                let mut info = self.info();
+                // Asked by a station of this fleet with a value made for
+                // the asking: the value and this station's name, signed
+                // with the fleet's key. Only to a station's signed call:
+                // an agent reads this answer too, and is given no such
+                // signature to carry anywhere.
+                if caller.authority == Authority::Peer {
+                    if let Some(proof) = opt(&params, "nonce").and_then(|n| self.name_proof(n)) {
+                        info["proof"] = json!(proof);
+                    }
+                }
+                info
+            }
+            // The owner renames this station (rename.rs). The owner's
+            // alone: on no agent's list and no station's; from another
+            // station's deck it arrives as the owner's forwarded request,
+            // like `station.restart`.
+            "station.rename" => self.station_rename(s(&params, "name")?, by)?,
+            // A station of this fleet saying which stations were renamed.
+            // A peer's signed call only.
+            "fleet.renamed" => self.fleet_renamed(caller, &params)?,
             "station.doctor" => {
                 let d = self.clone();
                 let mut checks = tokio::task::spawn_blocking(move || d.doctor())
@@ -2434,7 +2459,9 @@ impl Daemon {
             }
             "peer.call" => {
                 // Gateway: the Control Deck you opened fans out to its peers.
-                let station = s(&params, "station")?;
+                // By its name, or a name it had before it was renamed.
+                let named = self.station_now(s(&params, "station")?);
+                let station = named.as_str();
                 // Refused here, before anything leaves this station: a
                 // password must not travel to another one.
                 if station != self.station
@@ -2468,13 +2495,18 @@ impl Daemon {
                     method == "trust.approve",
                     by,
                     flag(&params, "here"),
+                    // The name the owner gives a station as it is let in.
+                    opt(&params, "as").filter(|_| method == "trust.approve"),
                 )
                 .await?
             }
             // A station of this fleet saying which requests wait there. A
             // peer's signed call only.
             "trust.relay" => self.trust_relayed(caller, &params)?,
-            "fleet.join" => self.fleet_join(s(&params, "station")?, by).await?,
+            "fleet.join" => {
+                self.fleet_join(s(&params, "station")?, opt(&params, "as"), by)
+                    .await?
+            }
             "device.revoke" => {
                 self.device_revoke(s(&params, "device")?, &caller.who)
                     .await?
@@ -2903,7 +2935,18 @@ impl Daemon {
             "station.close_all" => self.close_all(by),
             // What a station does when it is removed: panes closed, a key
             // of its own. `fleet.remove` is what the owner asks for.
-            "station.leave" => self.station_leave(flag(&params, "stop"), by)?,
+            "station.leave" => {
+                // Whoever asks says which station it means to remove. One
+                // that answers at that station's address under another
+                // name is not it, and closes nothing.
+                if let Some(meant) = opt(&params, "station").filter(|m| !self.is_here(m)) {
+                    return Err(invalid(format!(
+                        "this station is {}, not {meant}: nothing was closed and it has not left the fleet",
+                        self.station
+                    )));
+                }
+                self.station_leave(flag(&params, "stop"), by)?
+            }
             "fleet.remove" => {
                 self.fleet_remove(s(&params, "station")?, flag(&params, "stop"), caller)
                     .await?
@@ -2931,9 +2974,12 @@ impl Daemon {
                     }
                     _ => None,
                 };
+                // The name the owner wants the new station to have: checked
+                // now, given with the approval.
+                let name_as = self.add_name_checked(opt(&params, "name"))?;
                 // A machine to install on, or a station that is running
                 // already and is only to be made to ask.
-                match opt(&params, "station") {
+                let started = match opt(&params, "station") {
                     // "Try again" after the join step failed: the machine
                     // of the last job is only made to ask again.
                     _ if flag(&params, "again") => {
@@ -2961,7 +3007,11 @@ impl Daemon {
                             by,
                         )?
                     }
+                };
+                if !flag(&params, "again") || name_as.is_some() {
+                    self.add_name_as(name_as);
                 }
+                started
             }
             // Uninstall spandeck on a station, over SSH from this one. The
             // owner's alone, at the station they are using, like adding.
@@ -3504,6 +3554,22 @@ mod tests {
         }
         assert!(allowed(Authority::Owner, "question.answer"));
         assert!(!not_forwarded("question.answer") && !reads("question.answer"));
+        // Renaming a station (20 Nov 2026, rule 7): the owner's alone, on
+        // no agent's list and no station's, never run a second time for
+        // a second try (it restarts the station), and it reaches another
+        // station as the owner's forwarded request. What stations tell
+        // each other of renames is a station's call and nobody else's
+        // but the owner's own.
+        for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
+            assert!(!allowed(who, "station.rename"), "{who:?}");
+        }
+        assert!(allowed(Authority::Owner, "station.rename"));
+        assert!(!not_forwarded("station.rename") && !reads("station.rename"));
+        assert_eq!(class("station.rename", &json!({"name": "x"})), Class::Never);
+        assert!(allowed(Authority::Peer, "fleet.renamed"));
+        for who in [Authority::Agent, Authority::ReadOnly] {
+            assert!(!allowed(who, "fleet.renamed"), "{who:?}");
+        }
         // The one command run with an administrator's right (17 Nov 2026,
         // https.rs): the owner's alone, never kept, and never passed from
         // one station to another, since it carries a password.

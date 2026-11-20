@@ -93,7 +93,9 @@ impl Daemon {
         station: Option<&str>,
         by: &str,
     ) -> Result<Value> {
-        let station = station.unwrap_or(&self.station);
+        // By its name, or one it had before it was renamed.
+        let named = station.map(|s| self.station_now(s));
+        let station = named.as_deref().unwrap_or(&self.station);
         self.need_project(project)?;
         if station == self.station {
             if project == with {
@@ -133,7 +135,8 @@ impl Daemon {
         station: Option<&str>,
         by: &str,
     ) -> Result<Value> {
-        let station = station.unwrap_or(&self.station);
+        let named = station.map(|s| self.station_now(s));
+        let station = named.as_deref().unwrap_or(&self.station);
         let mut out = json!({"project": project, "with": with, "station": station});
         if self.link_drop(project, with, station)? {
             self.link_changed("project.unlinked", project, with, station, by);
@@ -190,6 +193,7 @@ impl Daemon {
     /// Another station records a link the owner made (or removed) there.
     /// `project` is ours, `with` is the project on the calling station.
     pub(crate) fn link_record(&self, peer: &str, params: &Value) -> Result<Value> {
+        let peer = &self.station_now(peer);
         let get = |k: &str| {
             params
                 .get(k)

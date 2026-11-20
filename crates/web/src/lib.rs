@@ -696,6 +696,7 @@ async fn device_request(
                 .unwrap_or("a browser"),
             None,
             ip,
+            false,
         )
     })
     .await
@@ -800,6 +801,8 @@ async fn peer_rpc(
                     .unwrap_or(&from),
                 params.get("with"),
                 &asker,
+                // It can be given a name as it is let in (rename.rs).
+                params.get("rename") == Some(&json!(true)),
             ),
         ),
         "fleet.join.collect" => Some(web.daemon.trust_collect(
@@ -1459,7 +1462,7 @@ impl Conn {
         let station = params
             .get("station")
             .and_then(|s| s.as_str())
-            .filter(|s| *s != daemon.station)
+            .filter(|s| !daemon.is_here(s))
             .map(String::from);
         // The conversation view's live stream: the first page as the
         // reply, then every change on this channel, the pane's file
@@ -1888,7 +1891,7 @@ impl Running {
         let attach_to = (lane == Lane::Attach)
             .then(|| req.params.get("station").and_then(|s| s.as_str()))
             .flatten()
-            .filter(|s| *s != conn.daemon().station)
+            .filter(|s| !conn.daemon().is_here(s))
             .map(String::from);
         // Not asked of a station that is not answering (it would wait out
         // four seconds to connect), but for the one that finds out.

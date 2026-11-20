@@ -167,6 +167,11 @@ enum Cmd {
         /// this one is in come with it: afterwards there is one fleet.
         #[arg(long, value_name = "STATION")]
         join: Option<String>,
+        /// With --join: the name this station joins under, when its own is
+        /// taken in that fleet (a name is letters, digits, - _ and .). It
+        /// takes the name when it is let in.
+        #[arg(long = "as", value_name = "NAME", requires = "join")]
+        named: Option<String>,
         /// Remove a station from the fleet: its panes are closed, and the
         /// fleet gets a new key so that station can no longer act on the
         /// others. Browsers signed in from other devices sign in again.
@@ -179,7 +184,13 @@ enum Cmd {
     },
     /// Approve a station or browser that asked to be let in, by the code it
     /// shows. Works at any station of the fleet, whichever one was asked.
-    Approve { code: String },
+    Approve {
+        code: String,
+        /// Let a station in under this name. Needed when its own name is
+        /// already a station's in this fleet, capitals aside.
+        #[arg(long = "as", value_name = "NAME")]
+        named: Option<String>,
+    },
     /// Refuse a station or browser that asked to be let in.
     Deny { code: String },
     /// Requests waiting for you at any station of the fleet, and the
@@ -206,6 +217,11 @@ enum Cmd {
     },
     /// Replace the running daemon with a new binary, keeping every terminal.
     Upgrade { binary: PathBuf },
+    /// This station's own settings: its name.
+    Station {
+        #[command(subcommand)]
+        cmd: StationCmd,
+    },
     /// Restart the daemon in place, keeping every terminal.
     Restart {
         /// Another station in the fleet, by name.
@@ -1519,15 +1535,15 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             });
         }
         cmd @ (Cmd::Approve { .. } | Cmd::Deny { .. }) => {
-            let (method, code) = match cmd {
-                Cmd::Approve { code } => ("trust.approve", code),
-                Cmd::Deny { code } => ("trust.deny", code),
+            let (method, code, named) = match cmd {
+                Cmd::Approve { code, named } => ("trust.approve", code, named),
+                Cmd::Deny { code } => ("trust.deny", code, None),
                 _ => unreachable!(),
             };
-            let v = c.call(method, json!({"request": code}))?;
+            let v = c.call(method, json!({"request": code, "as": named}))?;
             show(j, &v, |v| {
                 format!(
-                    "{} {} {}{}{}",
+                    "{} {} {}{}{}{}",
                     if v["approved"] == json!(true) {
                         "approved"
                     } else {
@@ -1535,6 +1551,10 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     },
                     v["kind"].as_str().unwrap_or(""),
                     v["name"].as_str().unwrap_or(""),
+                    match v["as"].as_str() {
+                        Some(named) => format!(" as {named}"),
+                        None => String::new(),
+                    },
                     came_with(&v["with"]),
                     match v["at"].as_str() {
                         Some(at) => format!("  (it was asked at {at}, which decided)"),
@@ -1552,7 +1572,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 let mut out = vec![format!("fleet {}", v["fleet"].as_str().unwrap_or(""))];
                 for r in v["requests"].as_array().into_iter().flatten() {
                     out.push(format!(
-                        "waiting: {} {}{} from {}{}  code {}   (spandeck approve {})",
+                        "waiting: {} {}{} from {}{}  code {}   (spandeck approve {}{})",
                         r["kind"].as_str().unwrap_or(""),
                         r["name"].as_str().unwrap_or(""),
                         came_with(&r["with"]),
@@ -1562,8 +1582,36 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                             _ => String::new(),
                         },
                         r["code"].as_str().unwrap_or(""),
-                        r["code"].as_str().unwrap_or("")
+                        r["code"].as_str().unwrap_or(""),
+                        match r["suggest"].as_str() {
+                            Some(name) if r["can_rename"] == json!(true) => format!(" --as {name}"),
+                            _ => String::new(),
+                        }
                     ));
+                    // Its name is a station's already: said, never passed over.
+                    if let Some(with) = r["clash"]["with"].as_str() {
+                        let name = r["name"].as_str().unwrap_or("");
+                        out.push(format!(
+                            "         {}{}",
+                            if r["clash"]["exact"] == json!(true) {
+                                format!("a station of this fleet is already called {with}")
+                            } else {
+                                format!("{name} has the same name as {with}, a station of this fleet, capitals aside")
+                            },
+                            if r["can_rename"] == json!(true) {
+                                ": it is let in under another name (--as), or refused"
+                            } else {
+                                ": it runs a spandeck from before a station could be named as it is let in, so it can only be let in as it is and renamed once it is updated, or refused"
+                            }
+                        ));
+                    }
+                    for m in r["with_clash"].as_array().into_iter().flatten() {
+                        out.push(format!(
+                            "         {} (which comes with it) and {} of this fleet have one name, capitals aside: rename one afterwards",
+                            m["name"].as_str().unwrap_or(""),
+                            m["with"].as_str().unwrap_or("")
+                        ));
+                    }
                 }
                 for d in v["devices"].as_array().into_iter().flatten() {
                     out.push(format!(
@@ -1596,11 +1644,12 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Cmd::Fleet {
             join: Some(station),
+            named,
             ..
         } => {
             // The station looks for the one named by itself, and goes on
             // looking for a while when it does not see it yet.
-            let v = c.call("fleet.join", json!({"station": station}))?;
+            let v = c.call("fleet.join", json!({"station": station, "as": named}))?;
             show(j, &v, |v| v["next"].as_str().unwrap_or("").to_string());
         }
         Cmd::Fleet { join: None, .. } => {
@@ -1623,6 +1672,22 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             if station.as_deref().is_some_and(|s| s.is_empty()) =>
         {
             anyhow::bail!("--station needs a name");
+        }
+        Cmd::Station {
+            cmd: StationCmd::Rename { name, station },
+        } => {
+            if station.as_deref().is_some_and(|s| s.is_empty()) {
+                anyhow::bail!("--station needs a name");
+            }
+            let v = on_station(
+                &mut c,
+                station.as_deref(),
+                "station.rename",
+                json!({"name": name}),
+            )?;
+            show(j, &v, |v| {
+                v["says"].as_str().unwrap_or("renamed").to_string()
+            });
         }
         Cmd::Restart { station } => {
             let v = on_station(&mut c, station.as_deref(), "station.restart", json!({}))?;
@@ -2198,6 +2263,10 @@ fn came_with(with: &Value) -> String {
 
 /// What `fleet.remove` did, in the owner's words.
 fn removed_summary(v: &Value) -> String {
+    // Only a name a station had before: nothing was removed.
+    if let Some(says) = v["says"].as_str().filter(|_| v["removed"] == json!(false)) {
+        return says.to_string();
+    }
     let st = v["station"].as_str().unwrap_or("");
     let names = |k: &str| -> Vec<&str> {
         v[k].as_array()
@@ -2275,19 +2344,39 @@ fn fleet_lines(v: &Value) -> String {
         .into_iter()
         .flatten()
         .map(|s| {
+            let was: Vec<&str> = s["former"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|n| n.as_str())
+                .collect();
             format!(
-                "{:<18} {:<14} {:<8} working {}  need you {}  {}",
+                "{:<18} {:<14} {:<8} working {}  need you {}  {}{}",
                 s["station"].as_str().unwrap_or(""),
                 s["state"].as_str().unwrap_or(""),
                 s["version"].as_str().unwrap_or(""),
                 s["working"],
                 s["needs_you"],
-                s["update"]["says"].as_str().unwrap_or("")
+                s["update"]["says"].as_str().unwrap_or(""),
+                if was.is_empty() {
+                    String::new()
+                } else {
+                    format!("  (was {})", was.join(", "))
+                }
             )
             .trim_end()
             .to_string()
         })
         .collect();
+    for pair in v["twins"].as_array().into_iter().flatten() {
+        let (a, b) = (
+            pair[0].as_str().unwrap_or(""),
+            pair[1].as_str().unwrap_or(""),
+        );
+        lines.push(format!(
+            "{a} and {b} differ only by capitals. Each is found by its own spelling; to end the doubt, rename one: `spandeck station rename NEW-NAME --station {a}`."
+        ));
+    }
     let update = &v["update"];
     match update["state"].as_str() {
         Some("available") => lines.push(format!(
@@ -2302,6 +2391,21 @@ fn fleet_lines(v: &Value) -> String {
         _ => {}
     }
     lines.join("\n")
+}
+
+#[derive(Subcommand)]
+enum StationCmd {
+    /// Give this station another name. Every pane, agent and terminal
+    /// stays open; layouts, looks, messages and stops follow it to the new
+    /// name on every station, and the old name still finds it for a year.
+    Rename {
+        /// The new name: letters, digits, - _ and . only, and not the
+        /// name of another station, capitals aside.
+        name: String,
+        /// Another station in the fleet, by its present name.
+        #[arg(long)]
+        station: Option<String>,
+    },
 }
 
 fn on_station(

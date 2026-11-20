@@ -72,6 +72,12 @@ fleet-mates, they all come with it: there is only ever one fleet), then approve 
 the first station, or on any station already in its fleet. Stations under your Tailscale
 login see each other without this, but neither controls the other until you approve.
 
+No two stations of a fleet have one name, capitals aside. A station takes its machine's
+name unless its `config.toml` says `station = "..."`; when that name is already a
+station's, its request says so and you give it another as you approve (the box on its
+card, or `spandeck approve <code> --as <name>`), or it names itself as it asks:
+`spandeck fleet --join <station> --as <name>`.
+
 To update a station without losing its terminals: install the new release, then
 `spandeck upgrade ~/.local/bin/spandeck`. If the new version does not start properly,
 the station goes back to the one it was running and keeps every terminal.
@@ -153,6 +159,17 @@ From the Control Deck, right-click a station (or use the commands on any station
 | Start spandeck where it is not running | Start spandeck there | `spandeck start NAME` |
 | End every pane on a station | Close all panes here… | `spandeck pane close --all [--station NAME]` |
 | Take a station out of the fleet | Remove this station from the fleet… | `spandeck fleet --remove NAME [--stop]` |
+| Give a station another name | Rename… | `spandeck station rename NEW-NAME [--station NAME]` |
+
+**Renaming a station** keeps it running: every pane, agent and terminal stays open, and
+spandeck there restarts in place to take the name, as for an update. Layouts, pins, looks,
+messages, stops and links between projects that named it follow it to the new name on
+every station, and the old name still finds it for a year (an address an agent remembers,
+`--station`, a bookmark). A name is letters, digits, `-`, `_` and `.`, and may not be
+another station's, capitals aside. A station on a spandeck from before this lists the old
+name as well, as a station that does not answer, until it is updated: the rename says
+which stations those are. Its HTTPS address is its Tailscale name and does not change.
+Editing `station =` in a station's `config.toml` and restarting it is the same rename.
 
 A station that cannot reach GitHub is still updated: it asks the stations of your fleet,
 takes the release from the closest one that has it or can download it (checked against
@@ -276,7 +293,10 @@ there.
    reach GitHub either, gets it from a station of your fleet that can, or, if none can
    and it is the same kind of machine, sends its own copy. The dialog says which.
 5. The new station asks to join, and the tile shows its code with **Approve** and
-   **Refuse**. Approve it, and the tile becomes the new station.
+   **Refuse**. Approve it, and the tile becomes the new station. **Its name in this
+   fleet** is a box in the same dialog: it is filled with the machine's Tailscale name
+   when the machine calls itself something else, or with a free name when a station
+   already has that one; empty keeps the machine's own.
 
 A machine that already runs spandeck but is not in this fleet has a tile of its own, with
 **Add … to this fleet**. That does steps 3 and 5 only: nothing is installed, the station
@@ -295,6 +315,7 @@ If it does not work, the tile says why and what to do. The usual reasons:
 | SSH is not turned on | On a Mac: System Settings, General, Sharing, Remote Login. On Linux: install and start the SSH server. Or turn on Tailscale SSH there: `tailscale set --ssh`. |
 | It did not accept that user name and password | Check both. The user name is the short account name (`whoami` on that machine). |
 | It did not answer | The machine is asleep or off, or Tailscale is not connected there. |
+| Tailscale is waiting for you to confirm this connection | Tailscale SSH asks you to sign in again before it lets the station connect. Open the address the dialog shows (it is at `login.tailscale.com`) and confirm: it goes on by itself, and waits four minutes. If that ran out: confirm, then **Try again**; Tailscale remembers it for a while. |
 | It answered with a different SSH host key | If you reinstalled that machine, delete its line from `~/.local/state/spandeck/known_hosts`. If you did not, do not connect. |
 | No release for its system | spandeck runs on macOS and Linux, on Apple silicon, arm64 and x86-64. |
 | It could not reach GitHub | The machine needs internet access to download the release. |
@@ -520,6 +541,12 @@ is working. To keep it awake whenever spandeckd runs, add `stay_awake = true` to
   the same machine, and with stand-ins for Tailscale and the release page. It has not
   yet installed spandeck on a second physical machine, used a real password login, or
   met Tailscale SSH or macOS Remote Login.
+- **Renaming a station**: tested with three and four daemons on one machine, where
+  every station is at one address and a different port. It has not been run across two
+  machines, on a Mac or on Windows (there the daemon is started again by the pane host
+  instead of replaced in place), or with a real station on 0.4.19 in the fleet: a
+  station with `rename = false` stands in for one. Tailscale SSH's "additional check"
+  is a stand-in that prints what Tailscale prints; the real one has not been met.
 - **Removing a station**: tested with three daemons on one machine. "Also stop spandeck
   there" has not been run against a real login service on any system (systemd, launchd
   or the Windows Scheduled Task), and ending a pane's whole session has not been tried
