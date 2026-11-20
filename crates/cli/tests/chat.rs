@@ -3053,25 +3053,27 @@ mod in_a_browser {
             "the tasks link",
             "(b => b && b.innerText)(document.querySelector('.phone-chat .chat-tasks'))",
         );
-        assert_eq!(link, json!("2 running tasks"));
+        // (Since 20 Nov 2026 a sub-agent is named as one, in the words of
+        // the chip a computer has in the pane's header; its row is the
+        // drawer's row, and it opens over the pane: `subagents.rs`.)
+        assert_eq!(link, json!("1 sub-agent · 1 working · 1 other task"));
         page.js("document.querySelector('.phone-chat .chat-tasks').click()");
-        let rows = page.wait("the tasks sheet", "(l => l && l.querySelectorAll('.task-row').length === 2 && [...l.querySelectorAll('.task-row')].map(r => [r.dataset.kind, r.querySelector('b').innerText, r.querySelector('.task-what .muted').innerText.replace(/ · \\d.*$/, ''), !!r.querySelector('.task-open'), !!r.querySelector('.task-stop')]))(document.querySelector('.dialog.chat-sheet .task-list'))");
+        let rows = page.wait("the tasks sheet", "(l => l && l.querySelectorAll('.sub-row').length === 1 && l.querySelectorAll('.task-row').length === 1 && [...l.querySelectorAll('.sub-row')].map(r => [r.dataset.state, r.querySelector('b').innerText, r.querySelector('.sub-w').innerText, r.tagName]).concat([...l.querySelectorAll('.task-row')].map(r => [r.dataset.kind, r.querySelector('b').innerText, r.querySelector('.task-what .muted').innerText.replace(/ · \\d.*$/, ''), !!r.querySelector('.task-open'), !!r.querySelector('.task-stop')])))(document.querySelector('.dialog.chat-sheet .task-list'))");
         assert_eq!(
             rows,
             json!([
                 [
-                    "agent",
+                    "working",
+                    "Explore",
                     "Look for other tally scripts",
-                    "Agent · Explore",
-                    true,
-                    false
+                    "BUTTON"
                 ],
                 ["shell", "cargo watch -x test", "Shell", false, false]
             ])
         );
         shoot(&page, "extras-tasks-sheet");
-        page.js("document.querySelector('.task-row .task-open').click()");
-        let side = page.wait("the sub-agent's transcript", "(l => l && l.querySelector('.chat-text') && [l.querySelector('.chat-bubble').innerText, l.querySelector('.chat-text .md').innerText.trim(), !!l.closest('.dialog').querySelector('.chat-box'), (r => r.height > 10 && r.top > 40 && r.bottom < 844)(l.querySelector('.chat-text .md').getBoundingClientRect())])(document.querySelector('.dialog .side-log'))");
+        page.js("document.querySelector('.dialog.chat-sheet .sub-row').click()");
+        let side = page.wait("the sub-agent's transcript", "(l => l && l.querySelector('.chat-text') && [l.querySelector('.chat-bubble').innerText, l.querySelector('.chat-text .md').innerText.trim(), !!l.closest('.sub-view').querySelector('.chat-box'), (r => r.height > 10 && r.top > 40 && r.bottom < 844)(l.querySelector('.chat-text .md').getBoundingClientRect())])(document.querySelector('.phone-chat .sub-view .side-log'))");
         assert_eq!(
             side,
             json!([
@@ -3082,6 +3084,11 @@ mod in_a_browser {
             ])
         );
         shoot(&page, "extras-task-transcript");
+        page.js("document.querySelector('.sub-view .sub-back').click()");
+        page.wait(
+            "the sheet again",
+            "!document.querySelector('.sub-view') && !!document.querySelector('.dialog.chat-sheet .sub-row')",
+        );
         page.js(
             "[...document.querySelectorAll('.dialog .icon-btn')].reverse().forEach(b => b.click())",
         );

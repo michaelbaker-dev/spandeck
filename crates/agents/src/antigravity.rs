@@ -103,6 +103,8 @@ impl Adapter for Antigravity {
             message,
             source: None,
             effort: None,
+            sub_id: None,
+            sub_transcript: None,
             raw_event: raw,
         })
     }

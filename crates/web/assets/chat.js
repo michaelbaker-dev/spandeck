@@ -88,6 +88,8 @@ const NOTES = new Set(['away_summary', 'info', 'task', 'command_output', 'summar
 // What Claude Code puts at the end of its own recap.
 const RECAP_HINT = /\s*\(disable recaps in \/config\)\s*$/;
 const TASK_KIND = { agent: ['◇', 'Agent'], shell: ['>_', 'Shell'], helper: ['▣', 'Helper pane'] };
+// Which panes have their drawer of sub-agents open, in this browser.
+const SUBS = 'spandeck.subs';
 // "claude-fable-5-2" is "Fable 5.2" on the chip; a name of another shape
 // is shown as it is.
 export function modelName(model) {
@@ -491,7 +493,7 @@ class Conv {
     const state = stateOf(p);
     const pct = [p.usage ? 1 : 0, p.usage?.context_pct ?? null, p.usage?.context_tokens ?? null];
     const files = env.files ? env.files(this.st, p) : null;
-    const sig = JSON.stringify([phone, !!files, title, sub, p.cwd || '', state, p.needs_reason, face, this.available, this.available === false ? this.reason : '', next.length, next[0] && keyOf(next[0].st, next[0].p), this.where, p.name, pct, p.rapid?.says, chipsSig(this.st, p)]);
+    const sig = JSON.stringify([phone, !!files, title, sub, p.cwd || '', state, p.needs_reason, face, this.available, this.available === false ? this.reason : '', next.length, next[0] && keyOf(next[0].st, next[0].p), this.where, p.name, pct, p.rapid?.says, chipsSig(this.st, p), this.subsSig()]);
     if (sig === this.barSig) return;
     this.barSig = sig;
     const pick = (to) => h('button', { type: 'button', class: face === to ? 'on' : '', 'aria-pressed': String(face === to), onclick: (e) => { e.currentTarget.blur(); if (face !== to) setFace(this.st, p, to); } }, to === 'chat' ? 'Chat' : 'Terminal');
@@ -516,6 +518,7 @@ class Conv {
         : h('div', { class: 'chat-switch', role: 'group', 'aria-label': 'Show this pane as' }, pick('chat'), pick('terminal')),
       next.length ? h('button', { type: 'button', class: 'chat-next', title: `Next: ${next[0].p.name} on ${next[0].st} (${next[0].why})`, 'aria-label': `Next of ${plural(next.length, 'pane')} that need you: ${next[0].p.name}, ${next[0].why}`,
         onclick: () => env.go(env.paneUrl(next[0].st, next[0].p.id)) }, 'Next ›', h('span', { class: 'count' }, next.length)) : null,
+      this.subsChip(),
       this.ringEl(),
       h('button', { type: 'button', class: 'icon-btn chat-more', 'aria-label': 'Pane menu', title: 'Pane menu', 'aria-haspopup': 'menu', onclick: menu }, '⋯'),
       rapidLine(p),
@@ -962,9 +965,13 @@ class Conv {
       const el = status[status.length - 1];
       if (from && L.now_ms) this.clocks.push({ el: el.querySelector('.act-time'), base: L.now_ms - from });
     }
-    const tasks = this.tasksNow();
-    if (tasks.running.length) status.push(this.node(cache, used, 'subs', tasks.running.length, () => h('button', { type: 'button', class: 'chat-tasks', 'aria-haspopup': 'dialog', onclick: () => this.tasksSheet() }, plural(tasks.running.length, 'running task'))));
-    if (this.tasksBox) this.tasksBox();
+    // What runs beside the turn: on a computer the sub-agents are the
+    // chip in the pane's header, and this link is for what else runs; on
+    // a phone it is the chip, with the same words.
+    const S = this.subsNow(), ownChip = env.isPhone() && S.cur.length > 0;
+    const tasksSay = this.available !== true ? '' : ownChip ? this.subsWords(S, false) + (S.others.length ? ` · ${plural(S.others.length, 'other task')}` : '') : S.others.length ? plural(S.others.length, 'running task') : '';
+    if (tasksSay) status.push(this.node(cache, used, 'subs', tasksSay, () => h('button', { type: 'button', class: 'chat-tasks', 'aria-haspopup': 'dialog', onclick: () => this.tasksSheet() }, tasksSay)));
+    this.drawSubs();
     if ((this.peekOpen && (working || waits)) || slash) { status.push(this.peekEl); if (!this.peeked || slash) this.peek(); } else this.peeked = false;
     sync(this.acts, status);
 
@@ -1629,91 +1636,297 @@ class Conv {
 
   // What the agent has running beside its turn, and what of it is over:
   // as the station says (`live.tasks`: from the agent's own session file,
-  // and the panes it started through spandeck). Sub-agents its hooks
-  // report and its file does not (Codex; a station from before) are rows
-  // too, with what the hook said: a kind and since when.
+  // its program's own records of its sub-agents, its hooks, and the panes
+  // it started through spandeck). A station from before lists no row for
+  // a sub-agent only its hooks report: those are rows here, with what the
+  // hook said: a kind and since when.
   tasksNow() {
     const L = this.live || {}, T = L.tasks && typeof L.tasks === 'object' ? L.tasks : {};
     const rows = (a) => (Array.isArray(a) ? a.filter(t => t && typeof t.id === 'string') : []);
     const running = rows(T.running), finished = rows(T.finished);
     if (!running.some(t => t.kind === 'agent')) {
-      for (const [i, s] of (Array.isArray(L.subagents) ? L.subagents : []).entries()) running.push({ id: 'hook:' + i, kind: 'agent', name: String(s.kind || ''), title: '', status: 'running', started_ms: s.since_ms });
+      for (const [i, s] of (Array.isArray(L.subagents) ? L.subagents : []).entries()) running.push({ id: 'hook:' + i, kind: 'agent', name: String(s.kind || ''), title: '', status: 'running', started_ms: s.since_ms, from: 'hooks' });
     }
     return { running, finished, total: Math.max(Number(T.finished_total) || 0, finished.length) };
   }
 
+  // The sub-agents the chip counts and the drawer lists first: those at
+  // work, and those of the turn now that are over (`current`: they leave
+  // with the owner's next message): those at work first, then in the
+  // order they were begun. A sub-agent's own sub-agents come under it.
+  // Beside them: what else runs (a command left running, a
+  // helper pane), and everything from before.
+  subsNow() {
+    const T = this.tasksNow(), run = (t) => t.status === 'running';
+    const shown = [...T.running, ...T.finished].filter(t => t.kind === 'agent' && (run(t) || t.current === true));
+    const ids = new Set(shown.map(t => t.id)), cur = [];
+    const under = (parent, depth) => {
+      const kids = shown.filter(t => (typeof t.parent === 'string' && ids.has(t.parent) ? t.parent : null) === parent)
+        .sort((a, b) => (run(b) - run(a)) || ((a.started_ms || 0) - (b.started_ms || 0)) || (idOrder(a.id)[0] - idOrder(b.id)[0]) || (idOrder(a.id)[1] - idOrder(b.id)[1]));
+      for (const t of kids) { if (cur.length >= 60 || depth > 4) return; cur.push({ t, depth }); under(t.id, depth + 1); }
+    };
+    under(null, 0);
+    const earlier = T.finished.filter(t => !ids.has(t.id));
+    return { T, cur, working: cur.filter(c => run(c.t)).length, others: T.running.filter(t => t.kind !== 'agent'),
+      earlier, earlierTotal: Math.max(earlier.length, T.total - (T.finished.length - earlier.length)) };
+  }
+
+  // "3 sub-agents · 2 working": the chip's words. Open, the drawer says
+  // the rest.
+  subsWords(S, open) {
+    return plural(S.cur.length, 'sub-agent') + (open ? '' : S.working ? ` · ${S.working} working` : ' · finished');
+  }
+  subsSig() {
+    if (env.isPhone() || this.available !== true) return '';
+    const S = this.subsNow();
+    return S.cur.length ? `${S.cur.length}|${S.working}|${this.subsShown() ? 1 : 0}` : '';
+  }
+
+  // The chip in the pane's header: there only while there is a sub-agent
+  // to show. It opens the drawer, and closes it.
+  subsChip() {
+    if (env.isPhone() || this.available !== true) return null;
+    const S = this.subsNow();
+    if (!S.cur.length) return null;
+    const open = this.subsShown();
+    return h('button', { type: 'button', class: 'chat-subs' + (open ? ' on' : ''), 'aria-expanded': String(open), title: open ? 'Close the list of sub-agents' : `What ${this.p.name}'s sub-agents are working on`,
+      onclick: (e) => { e.currentTarget.blur(); this.subsToggle(!open); } },
+      h('span', { class: 'dot ' + (S.working ? 'working' : 'done'), 'aria-hidden': 'true' }), this.subsWords(S, open));
+  }
+
+  // Open or closed is remembered for this pane, in this browser.
+  subsOpen() {
+    if (this.subsWant === undefined) { try { this.subsWant = JSON.parse(localStorage.getItem(SUBS) || '{}')[this.key] === 1; } catch (e) { this.subsWant = false; } }
+    return this.subsWant;
+  }
+  subsToggle(open, all) {
+    this.subsWant = open; this.subsAll = open && all === true;
+    try {
+      const kept = JSON.parse(localStorage.getItem(SUBS) || '{}');
+      if (open) kept[this.key] = 1; else delete kept[this.key];
+      const keys = Object.keys(kept);
+      for (const k of keys.slice(0, Math.max(0, keys.length - 200))) delete kept[k];
+      localStorage.setItem(SUBS, JSON.stringify(kept));
+    } catch (e) { /* private browsing: remembered for this page only */ }
+    this.barSig = null;
+    this.drawBar(); this.drawSubs();
+  }
+  // Whether the drawer is in the pane now: on a computer, wanted, and
+  // with something to list (asked for from the pane's menu, anything).
+  subsShown() {
+    if (env.isPhone() || this.available !== true || !this.subsOpen()) return false;
+    return this.subsAll === true || this.subsNow().cur.length > 0;
+  }
+
+  // "Background tasks" of the pane's menu, and the link above the message
+  // box: the drawer on a computer, a sheet on a phone, with the same rows.
   tasksSheet() {
-    const list = h('div', { class: 'task-list' });
+    if (!env.isPhone()) return this.subsToggle(true, true);
+    if (this.tasksClose) return;
+    const list = this.subsList();
+    const box = dialog('Sub-agents and background tasks', () => list.el, { onClose: () => { this.tasksBox = null; this.tasksClose = null; } });
+    box.body.parentNode.classList.add('sheet', 'chat-sheet');
+    this.tasksBox = () => { if (!list.el.isConnected) { this.tasksBox = null; return; } list.draw(); };
+    this.tasksClose = box.close;
+    list.draw();
+  }
+
+  // The rows: each sub-agent (how it is, what it is called, how long,
+  // what it was asked, and its latest step or what it said last), then
+  // what else runs, then what is from before, folded. Everything a row
+  // says is the station's, put on the page as text.
+  subsList() {
+    const el = h('div', { class: 'task-list subs-list' });
     let showDone = false;
-    const row = (t, now) => {
-      const [mark, kind] = TASK_KIND[t.kind] || ['·', String(t.kind || 'task')];
+    const HOW = { lost: 'no longer running (its program ended or was started again)', ok: 'finished', completed: 'completed', done: 'finished', error: 'failed', failed: 'failed', interrupted: 'stopped', ended: 'its pane has ended' };
+    const took = (t, now) => (typeof t.started_ms === 'number' ? (t.status === 'running' ? now - t.started_ms : typeof t.ended_ms === 'number' ? t.ended_ms - t.started_ms : null) : null);
+    // A row is made again only when what it says is other than it was:
+    // one that is focused stays focused while its time goes on.
+    const made = new Map();
+    const keep = (key, sig, make, when) => {
+      let n = made.get(key);
+      if (!n || n.sig !== sig) { n = { sig, el: make() }; made.set(key, n); }
+      const at = n.el.querySelector('.sub-time, .task-when');
+      if (at && at.textContent !== when) at.textContent = when;
+      return n.el;
+    };
+    const sub = (t, depth, now) => {
       const run = t.status === 'running';
-      const took = typeof t.started_ms === 'number' ? (run ? now - t.started_ms : typeof t.ended_ms === 'number' ? t.ended_ms - t.started_ms : null) : null;
-      const how = run ? '' : { lost: 'no longer running (its program ended or was started again)', ok: 'finished', completed: 'completed', done: 'finished', error: 'failed', failed: 'failed', interrupted: 'stopped', ended: 'its pane has ended' }[t.status] || String(t.status || '');
-      const title = String(t.title || '') || (t.kind === 'helper' ? String(t.name || '') : t.name ? `${t.name} sub-agent` : t.from ? 'A sub-agent\'s conversation' : kind);
-      return h('div', { class: 'task-row' + (run ? ' running' : ''), dataset: { task: t.id, kind: String(t.kind || '') } },
+      const state = run ? 'working' : ['done', 'failed', 'stopped'].includes(t.state) ? t.state : ({ error: 'failed', failed: 'failed', interrupted: 'stopped', denied: 'stopped', lost: 'stopped' }[t.status] || 'done');
+      const ms = took(t, now), time = ms !== null && ms >= 0 ? dur(ms) : '';
+      const name = String(t.name || '') || 'Sub-agent', asked = String(t.title || '');
+      const when = [run ? '' : state, time, t.status === 'lost' ? 'its program ended' : '', t.sure === false ? (run ? 'written to just now' : 'not written to lately') : ''].filter(Boolean).join(' · ');
+      return keep(t.id, JSON.stringify([state, name, asked, t.now, t.said, !!t.transcript, depth, this.reading?.id === t.id]), () => subEl(t, depth, run, state, name, asked), when);
+    };
+    const subEl = (t, depth, run, state, name, asked) => {
+      // Where the program says less the row says less: never a guess.
+      const last = run ? (t.now ? `Now: ${t.now}` : '') : t.said ? `Reported back: ${t.said}` : state === 'done' ? 'Reported back' : '';
+      const kids = [
+        h('span', { class: 'sub-top' }, h('span', { class: 'dot ' + { working: 'working', done: 'done', failed: 'error', stopped: 'exited' }[state], 'aria-hidden': 'true' }), h('b', {}, name), h('span', { class: 'sub-time muted' })),
+        h('span', { class: 'sub-w' }, asked || (run ? 'A sub-agent is running. What it was asked is not reported.' : 'What it was asked is not reported.')),
+        last ? h('span', { class: 'sub-w sub-now' }, last) : null,
+      ].filter(Boolean);
+      const at = { class: `sub-row ${state}` + (this.reading?.id === t.id ? ' sel' : ''), dataset: { task: t.id, state, depth: String(depth) }, style: depth ? `--sub-depth: ${Math.min(depth, 4)}` : null };
+      const says = `${name}, ${state}${asked ? ': ' + asked : ''}`;
+      return t.transcript
+        ? h('button', { type: 'button', ...at, 'aria-label': `${says}. Read its conversation.`, onclick: () => this.subRead(t) }, ...kids)
+        : h('div', { ...at, 'aria-label': says }, ...kids);
+    };
+    const row = (t, now) => {
+      if (t.kind === 'agent') return sub(t, 0, now);
+      const [mark, kind] = TASK_KIND[t.kind] || ['·', String(t.kind || 'task')];
+      const run = t.status === 'running', ms = took(t, now);
+      const how = run ? '' : HOW[t.status] || String(t.status || '');
+      const title = String(t.title || '') || (t.kind === 'helper' ? String(t.name || '') : kind);
+      const when = [t.kind === 'helper' && t.title ? `${kind} ${t.name || ''}`.trim() : kind, ms !== null && ms >= 0 ? dur(ms) : '', how].filter(Boolean).join(' · ');
+      return keep(t.id, JSON.stringify([t.kind, run, title, t.pane, !!t.can_stop, t.name]), () => h('div', { class: 'task-row' + (run ? ' running' : ''), dataset: { task: t.id, kind: String(t.kind || '') } },
         h('span', { class: 'task-mark', 'aria-hidden': 'true' }, mark),
         h('div', { class: 'task-what' },
           h('b', {}, title),
-          h('span', { class: 'muted' }, [t.kind === 'helper' && t.title ? `${kind} ${t.name || ''}`.trim() : t.kind === 'agent' && t.name && t.title ? `${kind} · ${t.name}` : kind, took !== null && took >= 0 ? dur(took) : '', how, t.sure === false ? (run ? 'written to just now' : 'not written to lately') : ''].filter(Boolean).join(' · ')),
-          t.kind === 'agent' && t.transcript ? h('button', { type: 'button', class: 'mini task-open', onclick: () => this.sideSheet(t) }, 'View transcript') : null,
+          h('span', { class: 'muted task-when' }),
           t.kind === 'helper' && t.pane ? h('button', { type: 'button', class: 'mini task-open', onclick: () => { this.tasksClose?.(); env.go(env.paneUrl(this.st, t.pane)); } }, 'Open its pane') : null),
         // Only a helper's turn can be stopped by itself: it is a pane,
         // and the station stops a pane's turn. An agent's own sub-agents
         // and commands stop with its turn.
         t.kind === 'helper' && t.can_stop && t.pane ? h('button', { type: 'button', class: 'task-stop', 'aria-label': `Stop ${t.name || 'this helper'}'s turn`, title: 'Stop this helper\'s turn. Its pane stays.',
-          onclick: () => env.rpc(this.st, 'pane.stop', { pane: t.pane }).then(() => toast(`Stopped ${t.name || 'the helper'}`)).catch(() => {}) }, '■') : null);
+          onclick: () => env.rpc(this.st, 'pane.stop', { pane: t.pane }).then(() => toast(`Stopped ${t.name || 'the helper'}`)).catch(() => {}) }, '■') : null), when);
     };
+    // (What does not change between two answers is the same node.)
+    const fixed = new Map(), one = (key, sig, make) => { let n = fixed.get(key); if (!n || n.sig !== sig) { n = { sig, el: make() }; fixed.set(key, n); } return n.el; };
     const draw = () => {
-      if (!list.isConnected && list.dataset.drawn) { this.tasksBox = null; return; }
-      list.dataset.drawn = '1';
-      const T = this.tasksNow(), now = (this.live?.now_ms || 0) + (performance.now() - this.liveAt);
-      sync(list, [
-        h('h3', {}, `Running${T.running.length ? ' · ' + T.running.length : ''}`),
-        ...(T.running.length ? T.running.map(t => row(t, now)) : [h('p', { class: 'muted' }, 'Nothing is running in the background.')]),
-        T.total ? h('button', { type: 'button', class: 'task-fold', 'aria-expanded': String(showDone), onclick: () => { showDone = !showDone; draw(); } }, `Finished · ${T.total}`, h('span', { class: 'chev', 'aria-hidden': 'true' }, showDone ? '▾' : '›')) : null,
-        ...(showDone ? T.finished.map(t => row(t, now)) : []),
-        showDone && T.total > T.finished.length ? h('p', { class: 'muted small' }, `The ${T.finished.length} newest are listed.`) : null,
-        h('p', { class: 'muted small' }, `What ${this.p.name} left running, its sub-agents, and the panes it started through spandeck. Its own sub-agents and commands stop when its turn is stopped; a helper pane has a stop of its own.`),
+      const S = this.subsNow(), now = (this.live?.now_ms || 0) + (performance.now() - this.liveAt);
+      sync(el, [
+        ...(S.cur.length ? S.cur.map(c => sub(c.t, c.depth, now)) : [one('none', this.p.name, () => h('p', { class: 'muted sub-none' }, `${this.p.name} has no sub-agent at work.`))]),
+        S.others.length ? one('also', S.others.length, () => h('h3', {}, `Also running · ${S.others.length}`)) : null,
+        ...S.others.map(t => row(t, now)),
+        S.earlierTotal ? one('fold', `${S.earlierTotal}|${showDone}`, () => h('button', { type: 'button', class: 'task-fold', 'aria-expanded': String(showDone), onclick: () => { showDone = !showDone; draw(); el.querySelector('.task-fold')?.focus(); } }, `Earlier · ${S.earlierTotal}`, h('span', { class: 'chev', 'aria-hidden': 'true' }, showDone ? '▾' : '›'))) : null,
+        ...(showDone ? S.earlier.map(t => row(t, now)) : []),
+        showDone && S.earlierTotal > S.earlier.length ? one('newest', S.earlier.length, () => h('p', { class: 'muted small' }, `The ${S.earlier.length} newest are listed.`)) : null,
+        one('note', '', () => h('p', { class: 'muted small sub-note' }, 'Where the agent program says less, a row shows only that a sub-agent is running and what it was asked. A sub-agent stops when its agent\'s turn is stopped; a helper pane has a stop of its own.')),
       ].filter(Boolean));
+      for (const k of [...made.keys()]) if (!el.querySelector(`[data-task="${CSS.escape(k)}"]`)) made.delete(k);
     };
-    const box = dialog('Background tasks', () => list, { onClose: () => { this.tasksBox = null; this.tasksClose = null; } });
-    box.body.parentNode.classList.add('sheet', 'chat-sheet');
-    this.tasksBox = draw;
-    this.tasksClose = box.close;
-    draw();
+    return { el, draw };
+  }
+
+  // The drawer, in the pane beside the conversation; and one sub-agent's
+  // own conversation over it while one is read. Drawn again with every
+  // answer of the station.
+  drawSubs() {
+    if (this.tasksBox) this.tasksBox();
+    const shown = this.subsShown();
+    if (shown && !this.drawer) {
+      const list = this.subsList();
+      this.drawer = h('aside', { class: 'chat-drawer', 'aria-label': `${this.p.name}'s sub-agents` },
+        h('div', { class: 'drawer-head' }, h('b', {}, 'Sub-agents'), h('button', { type: 'button', class: 'mini drawer-close', 'aria-label': 'Close sub-agents', onclick: () => this.subsToggle(false) }, 'Close')),
+        h('div', { class: 'drawer-body' }, list.el));
+      this.drawer.list = list;
+      // A narrow pane has no room beside its conversation: the drawer
+      // lies over it there.
+      if (typeof ResizeObserver === 'function') { this.drawerSized = new ResizeObserver(() => this.body.classList.toggle('subs-over', this.body.clientWidth < 620)); this.drawerSized.observe(this.body); }
+      clearInterval(this.subsClock);
+      this.subsClock = setInterval(() => { if (this.disposed || !this.drawer) clearInterval(this.subsClock); else if (this.drawer.isConnected) this.drawer.list.draw(); }, 1000);
+    }
+    if (!shown && this.drawer) { this.drawer.remove(); this.drawer = null; if (this.drawerSized) this.drawerSized.disconnect(); clearInterval(this.subsClock); }
+    this.body.classList.toggle('subs-open', shown);
+    if (shown) {
+      this.body.classList.toggle('subs-over', this.body.isConnected && this.body.clientWidth < 620);
+      if (this.drawer.parentNode !== this.body) this.body.append(this.drawer);
+      this.drawer.list.draw();
+    }
+    const sig = this.subsSig();
+    if (sig !== this.subsDrawn) { this.subsDrawn = sig; this.drawBar(); }
+    if (this.reading) this.subFresh();
   }
 
   // A sub-agent's own conversation, drawn by what draws every
-  // conversation, to read only: nothing can be sent to it or answered.
-  async sideSheet(t) {
-    const log = h('div', { class: 'chat-log side-log', role: 'log', 'aria-label': 'The sub-agent\'s conversation' }, quiet('Loading…'));
-    const box = dialog(`${t.name || 'Sub-agent'} · ${String(t.title || '').slice(0, 60)}`, () => h('div', { class: 'chat-body side-body' }, log));
-    box.body.parentNode.classList.add('sheet', 'chat-sheet');
+  // conversation, to read only: nothing can be sent to it or answered,
+  // and while it is open nothing can be typed into the pane under it.
+  subRead(t) {
+    this.tasksClose?.();
+    this.subBack(false);
+    const name = String(t.name || '') || 'Sub-agent', who = this.p.name;
+    const log = h('div', { class: 'chat-log side-log', role: 'log', tabIndex: 0, 'aria-label': `${name}'s conversation, to read only` }, quiet('Loading…'));
+    const about = h('span', { class: 'muted sub-about' });
+    const dotEl = h('span', { class: 'dot', 'aria-hidden': 'true' });
+    const view = h('section', { class: 'sub-view', 'aria-label': `${name}, a sub-agent of ${who}`, onkeydown: (e) => { if (e.key === 'Escape') { e.stopPropagation(); this.subBack(true); } } },
+      h('header', { class: 'sub-head' },
+        h('button', { type: 'button', class: 'mini sub-back', 'aria-label': `Back to ${who}`, onclick: () => this.subBack(true) }, '‹ ' + who),
+        dotEl, h('b', {}, name), about, h('span', { class: 'sub-ro' }, 'read only')),
+      log,
+      h('p', { class: 'sub-foot', role: 'note' }, `You cannot write to a sub-agent. Write to ${who} to steer it.`));
+    this.reading = { id: t.id, t, view, log, about, dotEl, sig: '', at: 0, phone: env.isPhone() };
+    for (const el of [this.log, this.dock]) el.inert = true;
+    this.body.classList.add('sub-reading');
+    this.body.append(view);
+    view.querySelector('.sub-back').focus();
+    this.subFresh();
+    if (this.drawer) this.drawer.list.draw();
+  }
+
+  // Back to the agent's own conversation (on a phone, to the list).
+  subBack(list) {
+    const R = this.reading;
+    if (!R) return;
+    this.reading = null;
+    clearTimeout(R.timer);
+    R.view.remove();
+    for (const el of [this.log, this.dock]) el.inert = false;
+    this.body.classList.remove('sub-reading');
+    if (this.drawer) this.drawer.list.draw();
+    if (list && R.phone) this.tasksSheet();
+  }
+
+  // What is read is read again when its row says something new (its
+  // step, how it is), no more often than every second and a half.
+  subFresh() {
+    const R = this.reading;
+    if (!R) return;
+    const S = this.subsNow(), now = (this.live?.now_ms || 0) + (performance.now() - this.liveAt);
+    const t = [...S.T.running, ...S.T.finished].find(x => x.id === R.id) || R.t;
+    const run = t.status === 'running', state = run ? 'working' : String(t.state || 'done');
+    const ms = typeof t.started_ms === 'number' ? (run ? now - t.started_ms : typeof t.ended_ms === 'number' ? t.ended_ms - t.started_ms : null) : null;
+    R.dotEl.className = 'dot ' + ({ working: 'working', done: 'done', failed: 'error', stopped: 'exited' }[state] || 'done');
+    R.about.textContent = [`sub-agent of ${this.p.name}`, run ? '' : state, ms !== null && ms >= 0 ? dur(ms) : ''].filter(Boolean).join(' · ');
+    const sig = `${t.status}|${t.now || ''}|${t.said || ''}|${t.ended_ms || ''}`;
+    if (sig === R.sig && R.at) return;
+    const wait = 1500 - (performance.now() - R.at);
+    if (R.at && wait > 0) { clearTimeout(R.timer); R.timer = setTimeout(() => this.subFresh(), wait); return; }
+    R.sig = sig; R.at = performance.now();
+    this.subLoad(R);
+  }
+
+  async subLoad(R) {
     let r;
-    try { r = await env.api.on(this.st, 'pane.conversation.detail', { pane: this.p.id, task: t.id, session: this.session }); } catch (e) { log.replaceChildren(quiet('Its transcript could not be read: ' + e.message, 'warn')); return; }
+    try { r = await env.api.on(this.st, 'pane.conversation.detail', { pane: this.p.id, task: R.id, session: this.session }); } catch (e) {
+      if (this.reading === R && !R.drawn) R.log.replaceChildren(quiet('Its conversation could not be read: ' + e.message, 'warn'));
+      return;
+    }
+    if (this.reading !== R) return;
     const items = (Array.isArray(r.items) ? r.items : []).filter(x => x && typeof x.id === 'string');
     // The same drawing, with nothing behind it to ask: a row opens to
     // nothing more, and no note is cleared from here.
-    const v = Object.create(this);
-    Object.assign(v, { open: new Set(), revs: new Map(), full: new Map(), details: new Map(), showCleared: true, heldFor: () => null, whole: () => {},
-      detailEl: () => h('div', { class: 'chat-detail muted' }, 'What a sub-agent\'s call was given and what came back are in its file, not shown here.'),
-      clearNote: () => {} });
+    const v = R.v || (R.v = Object.assign(Object.create(this), { open: new Set(), revs: new Map(), full: new Map(), details: new Map(), nodes: new Map(), showCleared: true, heldFor: () => null, whole: () => {},
+      detailEl: () => h('div', { class: 'chat-detail muted' }, 'What a sub-agent\'s call was given and what came back are in its own record, not shown here.'),
+      clearNote: () => {} }));
     const draw = () => {
       const out = [];
-      if (r.cut) out.push(quiet('The start of this transcript is too far back to show here.'));
-      if (!items.length) out.push(quiet('Nothing is written in its transcript yet.'));
+      if (r.cut) out.push(quiet('The start of this conversation is too far back to show here.'));
+      if (!items.length) out.push(quiet('Nothing is written in its record yet.'));
       for (let i = 0; i < items.length;) {
         if (RUN.has(items[i].kind)) { let j = i; while (j < items.length && RUN.has(items[j].kind)) j += 1; out.push(v.runEl(items.slice(i, j))); i = j; continue; }
         out.push(v.itemEl(items[i], true));
         i += 1;
       }
-      log.replaceChildren(...out);
+      R.log.replaceChildren(...out);
     };
     v.touch = (id) => { v.revs.set(id, (v.revs.get(id) || 0) + 1); draw(); };
     v.drawLog = draw;
+    // (Someone reading further up stays there; at its end, it follows.)
+    const atEnd = !R.drawn || R.log.scrollHeight - R.log.scrollTop - R.log.clientHeight < 40;
     draw();
-    box.body.scrollTop = box.body.scrollHeight;
+    R.drawn = true;
+    if (atEnd) R.log.scrollTop = R.log.scrollHeight;
   }
 
   // ---- the model, and how hard it thinks ----
@@ -2095,7 +2308,7 @@ export function chatMenu(st, p) {
   if (!c || !c.body.isConnected) return [];
   const T = c.tasksNow(), cleared = Array.isArray(c.live?.cleared) ? c.live.cleared.length : 0;
   return [
-    T.running.length || T.total ? { label: 'Background tasks', hint: T.running.length ? `${T.running.length} running` : `${T.total} finished`, action: () => c.tasksSheet() } : null,
+    T.running.length || T.total ? { label: 'Sub-agents and background tasks', hint: T.running.length ? `${T.running.length} running` : `${T.total} finished`, action: () => c.tasksSheet() } : null,
     cleared || c.showCleared ? { label: c.showCleared ? 'Hide cleared notes again' : 'Show cleared notes', hint: cleared ? String(cleared) : undefined, action: () => { c.showCleared = !c.showCleared; c.drawLog(); } } : null,
     cleared ? { label: 'Bring cleared notes back', action: () => c.restoreNotes() } : null,
     { label: 'About this screen', hint: 'layout numbers', action: () => aboutScreen(c) },

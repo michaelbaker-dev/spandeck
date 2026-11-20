@@ -92,6 +92,9 @@ const CLEARED_MAX: usize = 200;
 /// newest finished ones.
 const TASKS_RUNNING_MAX: usize = 50;
 const TASKS_FINISHED_MAX: usize = 30;
+/// How many sub-agents' rows are given a "now" (or what one said last):
+/// the end of a record is read for each.
+const STEPS_MAX: usize = 24;
 /// A sub-agent's transcript is read from its end: this much of the file.
 const SIDE_BYTES: u64 = 2 << 20;
 
@@ -373,6 +376,34 @@ impl Daemon {
             .and_then(|s| self.archive.session(s))
             .map(|s| s.path)
             .and_then(|path| path.strip_suffix(".jsonl").map(String::from));
+        // Where the turn now (or the last one) began: a sub-agent of it
+        // is `current`, and so is one still at work. A view's chip counts
+        // those and no others.
+        let (turn_line, turn_ms) = session.map_or((0, None), |s| self.archive.conversation_turn(s));
+        let alive = meta.exit.is_none();
+        // What Claude Code wrote beside the session for each sub-agent.
+        let sides = stem
+            .as_deref()
+            .map(crate::subagents::claude_sides)
+            .unwrap_or_default();
+        // Only the first rows are given a "now": the end of a record is
+        // read for each.
+        let steps = std::cell::Cell::new(STEPS_MAX);
+        let step = |row: &mut Value, file: Option<&std::path::Path>, dialect: Dialect| {
+            let Some(file) = file.filter(|_| steps.get() > 0) else {
+                return;
+            };
+            steps.set(steps.get() - 1);
+            let (now, said) = crate::subagents::step_of(file, dialect);
+            if row["status"] == json!("running") {
+                row["now"] = json!(now);
+            } else {
+                row["said"] = json!(said);
+            }
+        };
+        // The program's own id of each sub-agent listed, and its row.
+        let mut known: std::collections::HashMap<String, (String, bool, bool)> = Default::default();
+        let mut unlinked = 0;
         for job in jobs {
             let mut row = serde_json::to_value(&job).unwrap_or(Value::Null);
             // A task the file still has as running cannot be: its program
@@ -381,44 +412,213 @@ impl Daemon {
                 (Some(began), Some(program)) => began < program,
                 _ => false,
             };
-            if job.status == "running" && (meta.exit.is_some() || before) {
+            if job.status == "running" && (!alive || before) {
                 row["status"] = json!("lost");
             }
-            let side = job.kind == "agent"
-                && side_file(stem.as_deref(), job.task_id.as_deref()).is_some_and(|f| f.exists());
-            row["transcript"] = json!(side);
-            if row["status"] == json!("running") {
+            let run = row["status"] == json!("running");
+            if job.kind == "agent" {
+                let id = claude_agent_id(&job, &sides);
+                let file = side_file(stem.as_deref(), id.as_deref()).filter(|f| f.exists());
+                let current = run || job.line >= turn_line;
+                row["transcript"] = json!(file.is_some());
+                row["state"] = json!(crate::subagents::state_of(
+                    row["status"].as_str().unwrap_or("")
+                ));
+                row["depth"] = json!(1);
+                row["current"] = json!(current);
+                // (The rows of the turn now come first to what is read
+                // for a "now": an older one says how it ended and no more.)
+                if current {
+                    step(&mut row, file.as_deref(), Dialect::Claude);
+                }
+                // A record with no time of its own: when the hooks told
+                // of this one's start, and of its stop.
+                if let Some(id) = &id {
+                    let began = meta
+                        .subagents
+                        .iter()
+                        .find(|s| s.id.as_ref() == Some(id))
+                        .map(|s| s.since_ms);
+                    let ended = meta.subagents_over.iter().find(|o| o.id == *id);
+                    if row["started_ms"].is_null() {
+                        row["started_ms"] =
+                            json!(began.or(ended.map(|o| o.since_ms).filter(|s| *s > 0)));
+                    }
+                    if !run && row["ended_ms"].is_null() {
+                        row["ended_ms"] = json!(ended.map(|o| o.ended_ms));
+                    }
+                }
+                match id {
+                    Some(id) => {
+                        known.insert(id, (job.id.clone(), run, current));
+                    }
+                    None if run => unlinked += 1,
+                    None => {}
+                }
+            } else {
+                row["transcript"] = json!(false);
+            }
+            if run {
+                running.push(row);
+            } else {
+                finished.push(row);
+            }
+        }
+        // The sub-agents Claude Code's sub-agents began: no call in the
+        // session's file names them, only the file each has beside it. A
+        // parent is listed before its own (the less deep first), and one
+        // whose parent is not listed is left out.
+        let mut nested: Vec<&crate::subagents::Side> =
+            sides.iter().filter(|s| !s.kind.is_empty()).collect();
+        nested.sort_by_key(|s| s.depth);
+        for side in nested {
+            let Some(parent) = side.parent.as_ref().and_then(|p| known.get(p)).cloned() else {
+                continue;
+            };
+            if known.contains_key(&side.id) {
+                continue;
+            }
+            let file = side_file(stem.as_deref(), Some(&side.id)).filter(|f| f.exists());
+            // The program writes `finished` when one is over. One that
+            // has none and whose parent is over was let go with it.
+            let run = !side.finished && parent.1 && alive;
+            let id = format!("sub:{}", side.id);
+            let status = if run {
+                "running"
+            } else if side.finished {
+                "done"
+            } else {
+                "interrupted"
+            };
+            let mut row = json!({
+                "id": id, "kind": "agent", "name": side.kind, "title": side.title,
+                "status": status, "state": crate::subagents::state_of(status),
+                "background": false,
+                "started_ms": file.as_deref().and_then(crate::subagents::first_ms),
+                "ended_ms": if run { Value::Null } else { json!(side.modified_ms) },
+                "transcript": file.is_some(), "parent": parent.0, "depth": side.depth.max(2),
+                "current": parent.2,
+            });
+            if parent.2 {
+                step(&mut row, file.as_deref(), Dialect::Claude);
+            }
+            known.insert(side.id.clone(), (id, run, parent.2));
+            if run {
                 running.push(row);
             } else {
                 finished.push(row);
             }
         }
         // A program that keeps a conversation of its own for each
-        // sub-agent (OpenCode, Antigravity): what its store says of them.
+        // sub-agent (Codex, OpenCode, Antigravity): what its store says
+        // of them.
         for child in session.map_or(vec![], |s| self.store_children(meta, s)) {
             let dialect = meta.agent.as_str();
-            // Antigravity's store does not say whether one is still at
-            // work: it is taken to be while its transcript was written to
-            // in the last fifteen seconds, and the row says which it is.
+            // Where the store does not say whether one is still at work
+            // (an Antigravity from before it did; a Codex file whose end
+            // has no mark of its turn), it is taken to be while its
+            // record was written to in the last fifteen seconds, and the
+            // row says which it is.
             let now = now_ms();
             let (run, sure) = match child.running {
                 Some(r) => (r, true),
                 None => (now.saturating_sub(child.modified_ms) < 15_000, false),
             };
-            let run = run && meta.exit.is_none();
-            let row = json!({
-                "id": format!("child:{}", child.id), "kind": "agent",
+            let run = run && alive;
+            let status = if run {
+                "running"
+            } else {
+                child.ended.unwrap_or("done")
+            };
+            let current = run || turn_ms.is_none_or(|t| child.started_ms >= t);
+            let id = format!("child:{}", child.id);
+            let mut row = json!({
+                "id": id, "kind": "agent",
                 "title": summary_line(&child.title),
-                "status": if run { "running" } else { "done" },
+                "status": status, "state": crate::subagents::state_of(status),
                 "background": false, "started_ms": child.started_ms,
                 "ended_ms": if run { Value::Null } else { json!(child.modified_ms) },
                 "transcript": true, "from": dialect, "sure": sure,
+                "depth": child.depth.max(1), "current": current,
             });
+            if !child.name.is_empty() {
+                row["name"] = json!(child.name);
+            }
+            if let Some(parent) = &child.parent {
+                row["parent"] = json!(format!("child:{parent}"));
+            }
+            match (&child.path, meta.agent) {
+                _ if !current => {}
+                (Some(path), agent) => {
+                    if let Some(dialect) = Dialect::of(agent.as_str()) {
+                        step(&mut row, Some(path), dialect);
+                    }
+                }
+                (None, spandeck_agents::AgentKind::OpenCode) if run && steps.get() > 0 => {
+                    steps.set(steps.get() - 1);
+                    let lines = stores::opencode_tail(
+                        &spandeck_archive::usage::opencode_db(&self.home),
+                        &child.id,
+                        6,
+                    );
+                    row["now"] = json!(
+                        spandeck_archive::conversation::latest_step(
+                            Dialect::OpenCode,
+                            lines.iter().map(|l| l.as_str())
+                        )
+                        .0
+                    );
+                }
+                _ => {}
+            }
+            if let Some(said) = child.said.as_ref().filter(|_| !run) {
+                row["said"] = json!(said);
+            }
+            known.insert(child.id.clone(), (id, run, current));
             if run {
                 running.push(row);
             } else {
                 finished.push(row);
             }
+        }
+        // What the hooks say and nothing above has: a sub-agent that
+        // runs (a program whose records were not found, or not yet), and
+        // one the hooks said was over. A running row above with no id of
+        // its own yet is taken to be one of those the hooks report.
+        let hooked = meta
+            .subagents
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.id.as_ref().is_none_or(|id| !known.contains_key(id)))
+            .skip(unlinked);
+        for (n, s) in hooked.filter(|_| alive) {
+            let id = s.id.clone().unwrap_or_else(|| n.to_string());
+            running.push(json!({
+                "id": format!("hook:{id}"), "kind": "agent", "name": s.kind, "title": "",
+                "status": "running", "state": "working", "background": false,
+                "started_ms": s.since_ms, "transcript": false, "from": "hooks",
+                "depth": 1, "current": true,
+            }));
+        }
+        for o in meta
+            .subagents_over
+            .iter()
+            .filter(|o| o.session.as_deref() == session && session.is_some())
+            .filter(|o| !known.contains_key(&o.id))
+        {
+            let file = self.over_file(meta, stem.as_deref(), o);
+            let current = turn_ms.is_none_or(|t| o.ended_ms >= t);
+            let mut row = json!({
+                "id": format!("hook:{}", o.id), "kind": "agent", "name": o.kind, "title": "",
+                "status": "done", "state": "done", "background": false,
+                "started_ms": if o.since_ms > 0 { json!(o.since_ms) } else { Value::Null },
+                "ended_ms": o.ended_ms, "transcript": file.is_some(), "from": "hooks",
+                "depth": 1, "current": current,
+            });
+            if let Some(dialect) = Dialect::of(meta.agent.as_str()).filter(|_| current) {
+                step(&mut row, file.as_deref(), dialect);
+            }
+            finished.push(row);
         }
         // Panes this one started through spandeck (`delegate`): helpers,
         // each a pane of its own, which is where it is read and stopped.
@@ -454,19 +654,39 @@ impl Daemon {
         }
         let total = finished.len();
         running.truncate(TASKS_RUNNING_MAX);
-        let finished: Vec<Value> = finished
-            .into_iter()
-            .rev()
-            .take(TASKS_FINISHED_MAX)
-            .collect();
+        // The newest that are over; a sub-agent of the turn now is among
+        // them before an older task is.
+        let mut finished: Vec<Value> = finished.into_iter().rev().collect();
+        finished.sort_by_key(|t| t["current"] != json!(true));
+        finished.truncate(TASKS_FINISHED_MAX);
         json!({"running": running, "finished": finished, "finished_total": total})
+    }
+
+    /// The record a hook named for a sub-agent that is over, where it is
+    /// one of the pane's program's own (subagents.rs, `over_file`).
+    fn over_file(
+        &self,
+        meta: &PaneMeta,
+        stem: Option<&str>,
+        over: &crate::subagents::SubOver,
+    ) -> Option<std::path::PathBuf> {
+        let root = match meta.agent {
+            spandeck_agents::AgentKind::Codex => {
+                Some(spandeck_agents::sessions::codex_sessions_dir(&self.home))
+            }
+            _ => stem.map(|s| std::path::Path::new(s).join("subagents")),
+        };
+        crate::subagents::over_file(over.transcript.as_deref(), root.as_deref())
     }
 
     /// The conversations the pane's program began for sub-agents of this
     /// one, from its own store, read at most every two seconds.
     fn store_children(&self, meta: &PaneMeta, session: &str) -> Vec<stores::Child> {
         use spandeck_agents::AgentKind;
-        if !matches!(meta.agent, AgentKind::OpenCode | AgentKind::Antigravity) {
+        if !matches!(
+            meta.agent,
+            AgentKind::OpenCode | AgentKind::Antigravity | AgentKind::Codex
+        ) {
             return vec![];
         }
         type Seen = std::collections::HashMap<String, (std::time::Instant, Vec<stores::Child>)>;
@@ -482,6 +702,17 @@ impl Daemon {
             AgentKind::OpenCode => stores::opencode_children(
                 &spandeck_archive::usage::opencode_db(&self.home),
                 session,
+            ),
+            // (A child is begun after its parent: only what was written
+            // since the session's own file was begun is looked at.)
+            AgentKind::Codex => stores::codex_children(
+                &spandeck_agents::sessions::codex_sessions_dir(&self.home),
+                session,
+                self.archive
+                    .session(session)
+                    .and_then(|s| crate::subagents::first_ms(std::path::Path::new(&s.path)))
+                    .or(meta.proc_started_ms)
+                    .unwrap_or(0),
             ),
             _ => stores::antigravity_children(&stores::antigravity_dir(&self.home), session),
         };
@@ -718,6 +949,17 @@ impl Daemon {
                 .find(|c| c.id == id)
                 .ok_or_else(|| crate::daemon::Error::NotFound(format!("task {task}")))?;
             let (dialect, lines): (Dialect, Vec<String>) = match meta.agent {
+                // Codex's: the end of the thread's own file.
+                spandeck_agents::AgentKind::Codex => (
+                    Dialect::Codex,
+                    child
+                        .path
+                        .as_deref()
+                        .map(|file| stores::tail_lines(file, SIDE_BYTES))
+                        .ok_or_else(|| {
+                            crate::daemon::Error::NotFound("its file is not there".into())
+                        })?,
+                ),
                 spandeck_agents::AgentKind::OpenCode => (
                     Dialect::OpenCode,
                     stores::opencode_messages(
@@ -762,23 +1004,64 @@ impl Daemon {
                 json!({"task": {"id": task, "kind": "agent", "title": child.title}, "items": items, "cut": cut}),
             );
         }
-        let job = self
-            .archive
-            .conversation_tasks(session)
-            .into_iter()
-            .find(|j| j.id == task && j.kind == "agent")
-            .ok_or_else(|| crate::daemon::Error::NotFound(format!("task {task}")))?;
         let stem = self
             .archive
             .session(session)
             .and_then(|s| s.path.strip_suffix(".jsonl").map(String::from));
-        let file = side_file(stem.as_deref(), job.task_id.as_deref())
-            .filter(|f| f.exists())
-            .ok_or_else(|| {
-                crate::daemon::Error::NotFound(
-                    "this sub-agent's transcript is not on the station".into(),
-                )
-            })?;
+        let absent = || {
+            crate::daemon::Error::NotFound(
+                "this sub-agent's transcript is not on the station".into(),
+            )
+        };
+        let mut dialect = Dialect::Claude;
+        let (file, title) = if let Some(id) = task.strip_prefix("hook:") {
+            // One the hooks said was over: the record they named, where
+            // it is the program's own.
+            let over = meta
+                .subagents_over
+                .iter()
+                .find(|o| o.id == id && o.session.as_deref() == Some(session))
+                .ok_or_else(|| crate::daemon::Error::NotFound(format!("task {task}")))?;
+            dialect = Dialect::of(meta.agent.as_str()).unwrap_or(Dialect::Claude);
+            (
+                self.over_file(meta, stem.as_deref(), over)
+                    .ok_or_else(absent)?,
+                String::new(),
+            )
+        } else if let Some(id) = task.strip_prefix("sub:") {
+            // A sub-agent's own sub-agent: one the program wrote a file
+            // for beside this session, and no other.
+            let side = stem
+                .as_deref()
+                .map(crate::subagents::claude_sides)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| crate::daemon::Error::NotFound(format!("task {task}")))?;
+            (
+                side_file(stem.as_deref(), Some(&side.id))
+                    .filter(|f| f.exists())
+                    .ok_or_else(absent)?,
+                side.title,
+            )
+        } else {
+            let job = self
+                .archive
+                .conversation_tasks(session)
+                .into_iter()
+                .find(|j| j.id == task && j.kind == "agent")
+                .ok_or_else(|| crate::daemon::Error::NotFound(format!("task {task}")))?;
+            let sides = stem
+                .as_deref()
+                .map(crate::subagents::claude_sides)
+                .unwrap_or_default();
+            (
+                side_file(stem.as_deref(), claude_agent_id(&job, &sides).as_deref())
+                    .filter(|f| f.exists())
+                    .ok_or_else(absent)?,
+                job.title.clone(),
+            )
+        };
         use std::io::{Read, Seek, SeekFrom};
         let mut f = std::fs::File::open(&file).map_err(|e| invalid(e.to_string()))?;
         let len = f.metadata().map(|m| m.len()).unwrap_or(0);
@@ -798,7 +1081,6 @@ impl Daemon {
         if !text.ends_with('\n') {
             lines.pop();
         }
-        let dialect = Dialect::Claude;
         let mut items = spandeck_archive::conversation::side_items(
             dialect,
             lines.into_iter().filter(|l| !l.trim().is_empty()),
@@ -807,7 +1089,9 @@ impl Daemon {
         if items.len() > PAGE_MAX {
             items.drain(..items.len() - PAGE_MAX);
         }
-        Ok(json!({"task": job, "items": items, "cut": cut}))
+        Ok(
+            json!({"task": {"id": task, "kind": "agent", "title": title}, "items": items, "cut": cut}),
+        )
     }
 
     /// What the view needs beside the items, all of it already known to the
@@ -1099,6 +1383,22 @@ impl Daemon {
             None => Ok(()),
         }
     }
+}
+
+/// The program's own id of the sub-agent a call in the session's file
+/// began: what the call's result says (`agentId`), and before there is
+/// one, the file Claude Code wrote beside the session when the sub-agent
+/// began, which names the call (`toolUseId`).
+fn claude_agent_id(
+    job: &spandeck_archive::conversation::Job,
+    sides: &[crate::subagents::Side],
+) -> Option<String> {
+    job.task_id.clone().or_else(|| {
+        sides
+            .iter()
+            .find(|s| !job.tool_id.is_empty() && s.tool_use_id == job.tool_id && s.depth <= 1)
+            .map(|s| s.id.clone())
+    })
 }
 
 /// Where Claude Code keeps a sub-agent's own transcript: beside the

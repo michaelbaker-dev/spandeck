@@ -278,6 +278,48 @@ pub struct Job {
     /// The program's own id for it. Not served: it names a file.
     #[serde(skip)]
     pub task_id: Option<String>,
+    /// The session line of the call that started it. Not served.
+    #[serde(skip)]
+    pub line: u64,
+}
+
+/// What a sub-agent is doing now and what it last said, each in one line,
+/// from the end of its own record: `(now, said)`. `now` is its latest
+/// step ("Bash · cargo test", "Thinking", or the first words of what it
+/// wrote); `said` the first words of the last thing it wrote. Made only
+/// from the lines given: the caller bounds what is read.
+pub fn latest_step<'a>(
+    dialect: Dialect,
+    lines: impl Iterator<Item = &'a str>,
+) -> (Option<String>, Option<String>) {
+    let items = side_items(dialect, lines);
+    let words = |i: &Item| {
+        i.text
+            .as_deref()
+            .map(|t| one_line(t.trim(), 100))
+            .filter(|t| !t.is_empty())
+    };
+    let now = items.iter().rev().find_map(|i| match i.kind {
+        "tool" | "tasks" => {
+            let name = match i.kind {
+                "tasks" => "Agent",
+                _ => i.name.as_deref().unwrap_or("Tool"),
+            };
+            Some(match i.summary.as_deref().filter(|s| !s.is_empty()) {
+                Some(s) => one_line(&format!("{name} · {s}"), 100),
+                None => one_line(name, 100),
+            })
+        }
+        "thinking" => Some("Thinking".to_string()),
+        "text" => words(i),
+        _ => None,
+    });
+    let said = items
+        .iter()
+        .rev()
+        .filter(|i| i.kind == "text")
+        .find_map(words);
+    (now, said)
 }
 
 /// What a program printed for a command of its own: the session line it
@@ -1744,6 +1786,9 @@ struct Conv {
     /// What the program last printed for a model command of its own, and
     /// for an effort command: the line, and the name it gave.
     words: ModelWords,
+    /// Where the turn now (or the last one) began: the line of the last
+    /// message someone sent, and when it was written.
+    turn: (u64, Option<u64>),
     title: Option<String>,
     unknown: u64,
     unknown_kinds: Vec<(String, u64)>,
@@ -1762,6 +1807,7 @@ impl Conv {
             open: vec![],
             jobs: vec![],
             words: ModelWords::default(),
+            turn: (0, None),
             title: None,
             unknown: 0,
             unknown_kinds: vec![],
@@ -1801,6 +1847,7 @@ impl Conv {
                         ended_ms: None,
                         tool_id: r.tool_id.clone(),
                         task_id: r.task_id.clone(),
+                        line: self.slots[o.slot].line,
                     }),
                     None => {}
                 }
@@ -1835,6 +1882,9 @@ impl Conv {
                 if let Some(effort) = effort {
                     self.words.effort = Some((line, effort, ts));
                 }
+            }
+            if item.kind == "user" {
+                self.turn = (line, item.ts_ms);
             }
             if item.is_boundary() {
                 // A sub-agent that was being waited for when the turn ended
@@ -1881,6 +1931,7 @@ impl Conv {
                     ended_ms: None,
                     tool_id: item.tool_id.clone().unwrap_or_default(),
                     task_id: None,
+                    line,
                 });
             }
             self.slots.push(Slot {
@@ -2187,6 +2238,17 @@ impl crate::Archive {
         match self.conv(session) {
             Some(conv) => conv.lock().unwrap().jobs.clone(),
             None => vec![],
+        }
+    }
+
+    /// Where the session's turn now (or its last one) began: the line of
+    /// the last message someone sent, and when the record says it was
+    /// written. `(0, None)` before any.
+    pub fn conversation_turn(&self, session: &str) -> (u64, Option<u64>) {
+        self.poll_session(session);
+        match self.conv(session) {
+            Some(conv) => conv.lock().unwrap().turn,
+            None => (0, None),
         }
     }
 

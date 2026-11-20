@@ -27,6 +27,9 @@
 //!       result are written to the session file in Claude Code's shape.
 //!   {"work": ms}                         a long tool call; ESC interrupts it
 //!   {"subagent": {"type":"Explore","stop":false}}  the agent's own sub-agent starts (or stops)
+//!       ("id": the program's own id for it, as the real programs' hooks
+//!       carry one; "transcript": where its record is, at its stop;
+//!       "type": "" is a helper of the program's own)
 //!   {"turn_end": "last message"}         Stop (may be continued with mail)
 //!   {"needs_input": "message"}           the program waits at a prompt of its own
 //!                                        in its terminal and says so, as Claude
@@ -560,9 +563,22 @@ impl Agent {
             self.asks("ExitPlanMode", plan);
         } else if let Some(sub) = step.get("subagent") {
             let stop = sub.get("stop").and_then(|s| s.as_bool()).unwrap_or(false);
+            let mut payload = json!({"agent_type": sub.get("type").and_then(|t| t.as_str()).unwrap_or("Explore")});
+            // As Claude Code 2.1.329 and codex-cli 0.170.0 send them:
+            // the sub-agent's own id, and at its stop where its record is.
+            if let Some(id) = sub.get("id").and_then(|i| i.as_str()) {
+                payload["agent_id"] = json!(id);
+            }
+            if let Some(path) = sub.get("transcript").and_then(|i| i.as_str()) {
+                payload["agent_transcript_path"] = json!(path);
+            }
             self.hook(
-                if stop { "SubagentStop" } else { "SubagentStart" },
-                json!({"agent_type": sub.get("type").and_then(|t| t.as_str()).unwrap_or("Explore")}),
+                if stop {
+                    "SubagentStop"
+                } else {
+                    "SubagentStart"
+                },
+                payload,
             );
         } else if let Some(ms) = step.get("work").and_then(|s| s.as_u64()) {
             self.hook("PreToolUse", json!({"tool_name": "Bash", "tool_input": {"command": format!("sleep {ms}ms")}, "tool_use_id": "work"}));
