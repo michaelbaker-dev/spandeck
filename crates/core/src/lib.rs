@@ -12,6 +12,7 @@
 //!   recipes   the review loop, and the builder and critic pair
 //!   memory    shared project memory and the start digest
 //!   link      a station with no Tailscale, reached over the owner's own ssh (deck only)
+//!   paneenv   `[pane_env]`: variables set for every pane (a proxy, its certificates); only names are ever shown
 //!   links     project links: two projects whose agents message each other and share findings
 //!   orders    standing orders at five layers
 //!   fleet     discovery over Tailscale, trust, peer calls, stop-all
@@ -76,6 +77,7 @@ pub mod modelswitch;
 pub mod newrelease;
 pub mod notify;
 pub mod orders;
+pub mod paneenv;
 pub mod paths;
 pub mod perf;
 pub mod picker;

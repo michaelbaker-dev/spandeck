@@ -1484,12 +1484,28 @@ impl Daemon {
         // Taken before the program exists: what it writes first (a session
         // file, discover.rs) is never dated before its pane's start.
         let starting = now_ms();
+        // `[pane_env]` (paneenv.rs) is given to the process and is not in
+        // the pane's record, which is kept in the database: a value may be
+        // a credential. It comes first, so that what the pane is started
+        // with and what spandeck itself sets win over it. With no
+        // `[pane_env]` the process is started from the record's own spec.
+        let with_pane_env = match self.pane_env() {
+            vars if vars.is_empty() => None,
+            mut vars => {
+                vars.extend(spec.env.iter().cloned());
+                Some(SpawnSpec {
+                    env: vars,
+                    ..spec.clone()
+                })
+            }
+        };
+        let started_with = with_pane_env.as_ref().unwrap_or(&spec);
         let term = match self.pane_host() {
             Some(host) => {
                 let host = host.map_err(|e| invalid(format!("the pane host is not there: {e}")))?;
-                Pane::spawn_on(&host, &id, &spec, sink)
+                Pane::spawn_on(&host, &id, started_with, sink)
             }
-            None => Pane::spawn(&spec, sink),
+            None => Pane::spawn(started_with, sink),
         }
         .map_err(|e| invalid(format!("could not start {}: {e}", spec.program)))?;
         let now = now_ms();

@@ -8,11 +8,14 @@
 //!           carrier, and a port on 127.0.0.1 for that station's deck
 //!   helper  `spandeck link --stdio`, the short-lived program on the far
 //!           side that the carrier runs
+//!   add     `spandeck link add`: the owner's command line puts spandeck
+//!           on the far side over their own ssh and adds the `[[link]]`
 //!
 //! Nothing here runs unless the configuration has a `[[link]]` or someone
 //! runs `spandeck link`: a station without either has no task, no listener
 //! and no extra name it answers to.
 
+pub mod add;
 pub mod conn;
 pub mod helper;
 pub mod mux;
@@ -82,7 +85,8 @@ pub const SSH_OPTIONS: &[&str] = &[
 pub const SSH_REMOTE: &str =
     r#"sh -c 'PATH="$HOME/.local/bin:$PATH"; export PATH; exec spandeck link --stdio'"#;
 
-fn is_ssh(program: &str) -> bool {
+/// Is this program `ssh` (by any path, with or without `.exe`)?
+pub fn is_ssh(program: &str) -> bool {
     std::path::Path::new(program)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -175,6 +179,11 @@ impl Daemon {
             }
             *ports.entry(port).or_insert(0) += 1;
             drop(ports);
+            // For `spandeck doctor`: this station is one a link reaches.
+            if self.db.kv_get("link.attached").is_none() {
+                self.db
+                    .kv_put("link.attached", &crate::paths::now_ms().to_string());
+            }
             self.record(
                 "link.attached",
                 None,
@@ -226,8 +235,7 @@ impl Daemon {
             .ok_or_else(|| {
                 let names: Vec<&str> = links.iter().map(|l| l.name.as_str()).collect();
                 Error::NotFound(if names.is_empty() {
-                    "this station has no links: add a [[link]] to its config.toml and restart it"
-                        .into()
+                    "this station has no links: `spandeck link add` makes one".into()
                 } else {
                     format!("no link named {name}; there is: {}", names.join(", "))
                 })

@@ -311,8 +311,66 @@ next login.
 ## Without Tailscale
 
 Where a machine cannot have Tailscale (a company laptop and a server you reach with
-`ssh`, say), a station can show another station's Control Deck over your own SSH. On the
-machine you sit at, add to `~/.config/spandeck/config.toml` and restart spandeck:
+`ssh`, say), a station can show another station's Control Deck over your own SSH. Only
+your home folder on the server is used: no root, no system service, and the server
+needs no route to GitHub.
+
+Install spandeck on the machine you sit at (a Mac, Linux or Windows), start it, and in
+a terminal there:
+
+```
+spandeck link add me@devbox            # the destination, as you would say it to ssh
+spandeck link add -p 2222 -J me@bastion me@devbox     # ssh's own options come before it
+```
+
+It runs your own `ssh` once, with your `~/.ssh/config`, keys and bastion; if ssh asks
+for a password, a code or whether to trust the host's key, it asks you. Then it:
+
+- looks at the far machine, and where there is no spandeck sends the release for that
+  kind of machine through the ssh session (your machine downloads it and checks it
+  against its published SHA-256; the far machine downloads nothing) and installs it in
+  `~/.local/bin` there. A spandeck that is there already is replaced only if you say
+  yes;
+- writes a config file there only if there is none;
+- names the proxy and certificate variables your login shell there sets (`HTTPS_PROXY`,
+  `NO_PROXY`, `NODE_EXTRA_CA_CERTS` and the like) and asks whether to copy them to
+  `[pane_env]` in the far config, so that agents there have them (`--pane-env` and
+  `--no-pane-env` answer in advance; the values stay on that machine);
+- sets up start at login there by the first way that works without an administrator (a
+  systemd user service with lingering, else one `@reboot` line in your crontab, else
+  nothing: the link starts spandeck when you connect), and says which;
+- adds the `[[link]]` to this machine's config, which the station running here takes
+  up without a restart, and prints the address of devbox's deck on this machine.
+
+That address is like `http://localhost:17400/#signin=…`. Open it in a browser on the
+same machine within two minutes: it signs that browser in to devbox and is of no use
+afterwards. devbox lists the browser under Access, where you can sign it out.
+
+```
+spandeck link list                   # each link: its port, how it stands, the far station, the round trip
+spandeck link open devbox            # sign this machine's browser in to devbox again, and print the address
+spandeck link down devbox            # hold the link closed
+spandeck link up devbox              # open it again, or try now
+spandeck link add --name devbox      # look at devbox again: offers a newer release, and what [pane_env] lacks
+spandeck link remove devbox          # take the link out of this machine's config; devbox is not touched
+spandeck link remove devbox --uninstall   # first stop and uninstall spandeck on devbox (--erase: its settings and history too)
+```
+
+`[pane_env]` is a table in a station's `config.toml`: variables set for every pane's
+process on that station.
+
+```toml
+[pane_env]
+HTTPS_PROXY = "http://proxy.corp.example:3128"
+NODE_EXTRA_CA_CERTS = "/etc/ssl/corp-root.pem"
+```
+
+spandeck shows the names and never the values, which may hold a password; keep that
+file readable by you alone.
+
+By hand, instead of `link add`: install spandeck on the far machine yourself (for your
+user; `~/.local/bin` is enough), and on the machine you sit at add to
+`~/.config/spandeck/config.toml` and restart spandeck:
 
 ```toml
 discovery = false              # this station does not look for stations through Tailscale
@@ -323,36 +381,27 @@ port = 17400                   # the port on this machine for devbox's deck (lef
 cmd  = ["ssh", "me@devbox"]    # your own ssh, with your own ~/.ssh/config, keys and bastion
 ```
 
-Then:
-
-```
-spandeck link list             # each link: its port, how it stands, the far station, the round trip
-spandeck link open devbox      # sign this machine's browser in to devbox, and print the address to open
-spandeck link down devbox      # hold the link closed
-spandeck link up devbox        # open it again, or try now
-```
-
-`spandeck link open` prints an address like `http://localhost:17400/#signin=…`. Open it
-in a browser on the same machine within two minutes: it signs that browser in to devbox
-and is of no use afterwards. devbox lists the browser under Access, where you can sign it
-out.
-
 What to know:
 
-- spandeck must already be installed on the far machine, for your user (`~/.local/bin`
-  is enough; no root). If no station is running there, the link starts one. It never
-  installs or updates anything there.
+- If no station is running on the far machine, the link starts one. A link by itself
+  never installs or updates anything there: only `spandeck link add` does, with you at
+  the terminal.
 - Nothing listens on the far machine for this, and SSH forwarding is not used. spandeck
-  runs your `ssh` with forwarding off and with `BatchMode`, so it never asks for a
-  password behind your back. When `ssh` needs you (a password, a code, a new host key),
-  `spandeck link list` says the command to run in a terminal.
+  runs your `ssh` with forwarding off and, once the link is added, with `BatchMode`, so
+  it never asks for a password behind your back. When `ssh` needs you (a password, a
+  code, a new host key), `spandeck link list` says the command to run in a terminal.
 - Any command that reaches a shell there works as `cmd`:
-  `["docker", "exec", "-i", "box"]`, `["kubectl", "exec", "-i", "pod", "--"]`.
+  `["docker", "exec", "-i", "box"]`, `["kubectl", "exec", "-i", "pod", "--"]`. Such a
+  link is written by hand; `link add` works over `ssh`.
+- Where nothing could be set up to start spandeck at login on the far machine, it is
+  down after a reboot until your machine connects, and on a host that ends your
+  programs at logout it ends when your last ssh session does. `link add` says so when
+  that is how it stands, and `spandeck doctor` there says which way is in force.
 - The two stations are not one fleet. You see devbox's own deck, with everything it
   does for devbox's panes; your machine's deck does not list devbox's panes, and agents
   on the two cannot message each other.
-- Not built yet: installing spandeck on the far machine over SSH, joining a linked
-  station to a fleet, a phone, a far machine that runs Windows.
+- Not built yet: `link add` for a far machine that runs Windows (the machine you sit at
+  may), joining a linked station to a fleet, a phone.
 
 ## Usage and cost
 
@@ -475,9 +524,15 @@ is working. To keep it awake whenever spandeckd runs, add `stay_awake = true` to
   there" has not been run against a real login service on any system (systemd, launchd
   or the Windows Scheduled Task), and ending a pane's whole session has not been tried
   on a Mac.
-- **Without Tailscale (a link)**: tested with two daemons on one machine and a carrier
-  that is not SSH. It has not been run over a real `ssh`, through a bastion, on a
-  company network, or with a Mac or a Windows PC as the machine you sit at.
+- **Without Tailscale (a link, and `spandeck link add`)**: tested with two daemons on one
+  machine. The link's carrier in the tests is not SSH, and `link add` is tested against
+  a stand-in: a script named `ssh` that runs what it is given in a shell with a
+  throwaway home folder, with stand-ins for `crontab`, `systemctl` and `loginctl`.
+  Neither has been run over a real `ssh` to a real `sshd`, with ssh asking for a
+  password, a code or a host key, through a bastion, on a company network, behind a
+  real proxy, with a login shell other than `sh`, against a real crontab or a real
+  systemd user service, with a Mac as the far machine, or with a Mac or a Windows PC as
+  the machine you sit at (the Windows side is type-checked only).
 - **Phone**: tested in a phone-sized desktop browser, not on a real phone. Dictation
   with the 🎤 button has not been tried on any device.
 

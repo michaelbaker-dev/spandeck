@@ -830,7 +830,7 @@ impl Daemon {
             .collect();
         // A station with links on a machine that has no Tailscale program
         // at all: nothing was read, and nothing is wrong.
-        let none = !self.cfg.link.is_empty()
+        let none = self.has_links()
             && t.as_ref().is_some_and(|t| t.state == "not_running")
             && !crate::fleet::has_tailscale();
         json!({

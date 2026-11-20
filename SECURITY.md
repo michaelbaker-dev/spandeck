@@ -321,7 +321,8 @@ days, not hours.
   station without one starts nothing and listens nowhere new. What is new, and how each
   part is kept safe:
   - *spandeck runs `ssh` by itself.* The host and the command are named only in that
-    station's `config.toml`. No call of the deck, of an agent or of another station can
+    station's `config.toml`, which you write or `spandeck link add` writes at your
+    command line. No call of the deck, of an agent or of another station can
     add or change a link. `ssh` is run with options that come before yours and win:
     nothing is forwarded (no ports, no agent, no X11), no command of your configuration
     is run, no terminal is asked for, nothing can prompt (`BatchMode`), and a host whose
@@ -332,7 +333,8 @@ days, not hours.
     reaches its station as any `spandeck` command there does, through the station's
     private local socket with the token only that user can read. Whoever can run it
     could already run every other command. It opens no port. If no station is running
-    there it starts one, and says so; it installs, updates and replaces nothing.
+    there it starts one (your login service there, where it has one), and says so; it
+    installs, updates and replaces nothing.
   - *A parser that faces the far side.* The link's frames are a small fixed format with
     a longest frame, a largest number of streams and a window for each stream; anything
     outside them ends the link. The station you are at opens streams and refuses every
@@ -351,6 +353,52 @@ days, not hours.
   - *Who may ask.* The calls of a link are taken only on a station's private local
     socket and only with that station's own token. An agent, another station, a
     signed-in browser and a request passed on between stations are all refused them.
+  - *`spandeck link add`: an `ssh` you answer yourself, run by spandeck at your command
+    line.* It is a command, not a call: nothing in the deck, no agent and no other
+    station can start it or name its host. It runs your own `ssh` once, with your
+    `~/.ssh/config` and `known_hosts`, with forwarding off and no command of your
+    configuration's, and this once without `BatchMode` and without insisting the host's
+    key is known: you are at the terminal, and what `ssh` asks (a password, a code,
+    whether to trust a key) it asks you. spandeck reads none of your answers and keeps
+    nothing. Only a destination and ssh's own options are taken from what you type: a
+    command for the far side, and options that would turn ssh into something else
+    (`-N`, `-f`, `-t`, `-W` and the like), are refused before anything runs. What the
+    far machine prints is text: cleaned, cut short, printed, never run. The one thing
+    taken from it is the name of its platform, which must be one that has a release.
+  - *A release sent to a machine you named.* Where the far machine has no spandeck, the
+    station on your machine gets the release for that platform exactly as Add a machine
+    does (the published archive, refused unless it matches its published SHA-256; a
+    copy kept from an earlier download; its own program only for a machine of its own
+    kind; never anything older than itself) and your command line writes it into the
+    ssh session. It is checked by SHA-256 on arrival and installed under your home
+    folder there. The far machine downloads nothing. The call that hands over the
+    release (`link.release`) names a platform and nothing else, answers with a file on
+    your own machine, and is yours alone at the command line, as is the one that reads
+    the config file's links again (`link.reload`). Your command line checks that the
+    file is the size and SHA-256 the station said before it sends it. A spandeck that is
+    already there is replaced only when you say yes; the default is No. As for an update
+    through the fleet, releases are not signed: the far machine is protected by the
+    check your own machine made against the release host, and by the ssh session.
+  - *On the far machine it changes only your home folder*: the program in
+    `~/.local/bin`, a config file only where there is none, a systemd user service or
+    one marked line in your crontab (shown to you, never written twice, never written
+    when the crontab could not be read), and with `--uninstall` it removes them again.
+    It asks for no administrator and uses none.
+  - *`[pane_env]`: values at rest.* A station's `config.toml` can name variables that
+    every pane's process is given (a company proxy, the company's certificates). A
+    value may be a credential, such as a proxy password. It is kept in that file and
+    nowhere else: it is not logged, not shown, in no answer of the API and not in the
+    pane's record in the database; `spandeck doctor` names the variables and never their
+    values. `link add` copies such variables from your login shell on the far machine
+    only when you say yes (the default is No), names them to you by name only, and has
+    the far machine's own spandeck read and write them: no value crosses the link or
+    appears on a command line. It leaves the far config file readable by you alone. A
+    config file you wrote yourself keeps the permissions you gave it: if you put a
+    password in `[pane_env]` by hand, make the file yours alone (`chmod 600`). The
+    programs in a pane have these variables as they have the rest of their environment,
+    and can print them: an agent in a pane can read a proxy password it is given.
+    Names beginning `SPANDECK_` are refused, so the table cannot replace a pane's token
+    or socket.
 
   **What a far side that has been taken over can do to the machine you are at:** serve
   a hostile page at one `localhost` origin in your browser. That page can show false
@@ -371,6 +419,15 @@ days, not hours.
   listener at all is not built.
 - A link is as private as its carrier. Over `ssh` that is SSH's encryption. A carrier
   you name yourself (`cmd`) is yours to judge.
+- `spandeck link add` trusts the machine it is run at: a near machine that has been
+  taken over can send the far one anything, as it could over your `ssh` without
+  spandeck. During its one session `ssh` may accept a host key at your word; spandeck
+  cannot tell whether you looked at the fingerprint.
+- A password in `[pane_env]` is in a file in plain text, and in the environment of
+  every program in every pane of that station. Use it where the proxy leaves you no
+  other way, and prefer a proxy that needs no password in its address.
+- `link add` has been run only against a stand-in for `ssh`: not against a real `sshd`,
+  a bastion, a real `crontab` or a real user service manager.
 - Turning HTTPS on at a station publishes its name, `<machine>.<tailnet>.ts.net`, in
   the public certificate-transparency logs, for good: the machine's name and your
   tailnet's. The names resolve only inside your tailnet and nothing becomes reachable

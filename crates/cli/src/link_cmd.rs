@@ -19,6 +19,76 @@ pub enum LinkCmd {
     /// Sign this machine's browser in to the far station, and print the
     /// address of its Control Deck here.
     Open { name: String },
+    /// Put spandeck on a machine you reach with your own ssh, and add the
+    /// link to it: `spandeck link add me@devbox`. Run it in a terminal:
+    /// ssh asks you what it has to ask. It looks at the far machine,
+    /// sends spandeck there where there is none (nothing is downloaded
+    /// there), sets up start at login where that works without an
+    /// administrator, adds the `[[link]]` to this machine's config and
+    /// prints the address of the far station's Control Deck here. Run
+    /// again (`spandeck link add --name devbox`), it looks again and
+    /// offers a newer release.
+    Add {
+        /// The link's name. Default: the host's, from the destination.
+        #[arg(long)]
+        name: Option<String>,
+        /// Copy the proxy and certificate variables of your login shell
+        /// on the far machine to `[pane_env]` in its config, without
+        /// being asked.
+        #[arg(long, conflicts_with = "no_pane_env")]
+        pane_env: bool,
+        /// Do not, without being asked.
+        #[arg(long)]
+        no_pane_env: bool,
+        /// Where ssh connects, as you would say it to ssh: the
+        /// destination, and before it any of ssh's own options
+        /// (`-p 2222 -J me@bastion me@devbox`). The options above come
+        /// before these.
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "SSH"
+        )]
+        ssh: Vec<String>,
+    },
+    /// Take a link out of this machine's config, with what was kept for
+    /// it. The far machine is not touched unless `--uninstall` is given.
+    Remove {
+        name: String,
+        /// First stop spandeck on the far machine and take the program
+        /// and its start at login away, over your ssh. Its settings and
+        /// its state (history, archive, log) are kept.
+        #[arg(long)]
+        uninstall: bool,
+        /// With `--uninstall`: delete the settings and the state too.
+        #[arg(long, requires = "uninstall")]
+        erase: bool,
+    },
+    /// The far side of `link add`: the names of the proxy and certificate
+    /// variables of this user's login shell that `[pane_env]` does not
+    /// have. Not typed by hand.
+    #[command(hide = true)]
+    LoginEnv {
+        /// Write them to `[pane_env]` in this station's config.
+        #[arg(long)]
+        keep: bool,
+        /// Run inside the login shell.
+        #[arg(long)]
+        inner: bool,
+    },
+}
+
+/// What `spandeck link open` says: the address, and what it is good for.
+pub fn open_words(name: &str, v: &Value) -> String {
+    let station = match line(&v["station"]) {
+        s if s.is_empty() => name.to_string(),
+        s => s,
+    };
+    format!(
+        "{}\n\nOpen it in a browser on this machine within two minutes. It signs that browser in to {station}, once: the address is of no use afterwards.\n{station} lists the browser under Access{}, where it can be signed out.",
+        line(&v["url"]),
+        if v["again"] == json!(true) { " (the same entry as before)" } else { "" },
+    )
 }
 
 /// One line, without anything that moves the cursor: names and versions
@@ -81,7 +151,7 @@ fn row(l: &Value) -> String {
 fn list(v: &Value) -> String {
     let rows = v.as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
-        return "This station has no links. Add a [[link]] to its config.toml (name, cmd) and restart it.".into();
+        return "This station has no links. `spandeck link add me@host` makes one, over your own ssh.".into();
     }
     let mut out = vec![format!(
         "{:<16} {:<6} {:<14} {:<16} {:<9} {:<10} {}",
@@ -120,18 +190,11 @@ pub fn run(c: &mut Client, json_out: bool, cmd: Option<LinkCmd>) -> anyhow::Resu
         }
         Some(LinkCmd::Open { name }) => {
             let v = c.call("link.open", json!({"name": name}))?;
-            let station = match line(&v["station"]) {
-                s if s.is_empty() => name.clone(),
-                s => s,
-            };
-            show(
-                &v,
-                format!(
-                    "{}\n\nOpen it in a browser on this machine within two minutes. It signs that browser in to {station}, once: the address is of no use afterwards.\n{station} lists the browser under Access{}, where it can be signed out.",
-                    line(&v["url"]),
-                    if v["again"] == json!(true) { " (the same entry as before)" } else { "" },
-                ),
-            );
+            show(&v, open_words(&name, &v));
+        }
+        // These do not wait for a station to answer: main.rs runs them.
+        Some(LinkCmd::Add { .. } | LinkCmd::Remove { .. } | LinkCmd::LoginEnv { .. }) => {
+            unreachable!()
         }
     }
     Ok(0)

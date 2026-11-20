@@ -213,6 +213,19 @@ jobs:
       - name: A link to a station with no Tailscale (two stations, no SSH; a browser)
         if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test link -- --ignored
+      # `spandeck link add` and `remove`, with two stations, a stand-in for
+      # the owner's ssh (a script that runs what it is given in a shell with
+      # a throwaway home folder) and a release host: the release sent
+      # through the session and installed under the far home, the far
+      # station running, exactly one `[[link]]` more in the near config,
+      # the running near station taking it up without a restart, the far
+      # deck through the port; run again, nothing replaced; `[pane_env]` on
+      # a yes, its value in the far config file and nowhere else; remove,
+      # with and without uninstalling; an older spandeck left alone on No.
+      # About fifteen seconds.
+      - name: spandeck link add (two stations, a stand-in for ssh, a release host)
+        if: ${{ !cancelled() }}
+        run: cargo test -p spandeck --test linkadd -- --ignored
   build:
     strategy:
       fail-fast: false

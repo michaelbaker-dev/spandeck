@@ -81,6 +81,11 @@ pub struct Near {
     held: AtomicBool,
     /// A carrier of this link is running, or being ended.
     running: AtomicBool,
+    /// The `[[link]]` is no longer in the configuration: its carrier is
+    /// ended, its port closed, and its task is over.
+    gone: AtomicBool,
+    /// Told when it is gone, for the task that holds the port.
+    quit: Notify,
     file: std::path::PathBuf,
 }
 
@@ -243,7 +248,9 @@ impl Near {
     /// No carrier is to run now: the owner holds the link closed, or this
     /// program image is about to be replaced.
     fn parked(&self, d: &Daemon) -> bool {
-        self.held.load(Ordering::SeqCst) || d.link.stopping.load(Ordering::SeqCst)
+        self.held.load(Ordering::SeqCst)
+            || d.link.stopping.load(Ordering::SeqCst)
+            || self.gone.load(Ordering::SeqCst)
     }
 
     fn save(&self, f: impl FnOnce(&mut Saved)) {
@@ -368,11 +375,16 @@ impl Near {
 impl Daemon {
     /// Start a task for each `[[link]]`. Called only when there is one.
     pub(crate) fn link_start(&self) {
+        self.link_take(&self.cfg.link);
+    }
+
+    /// Start a task for each of these, beside the links there are.
+    fn link_take(&self, configs: &[LinkConfig]) {
         let dir = self.paths.state_dir.join("links");
         let _ = std::fs::create_dir_all(&dir);
         let _ = spandeck_terminal::sys::private_dir(&dir);
-        let mut links: Vec<Arc<Near>> = vec![];
-        for cfg in &self.cfg.link {
+        let mut links: Vec<Arc<Near>> = self.link.near.lock().unwrap().clone();
+        for cfg in configs {
             let trouble = self.link_trouble(cfg, &links);
             let file = dir.join(format!(
                 "{}.json",
@@ -421,6 +433,8 @@ impl Daemon {
                 kick: Notify::new(),
                 held: AtomicBool::new(saved.held),
                 running: AtomicBool::new(false),
+                gone: AtomicBool::new(false),
+                quit: Notify::new(),
                 file,
             });
             links.push(link.clone());
@@ -456,6 +470,61 @@ impl Daemon {
         None
     }
 
+    /// `link.reload`: read the `[[link]]`s of the config file again, as
+    /// the owner at this machine asks after `spandeck link add` or
+    /// `remove` changed it. A link that is new is started, one that is no
+    /// longer there is ended and its port closed, and one whose command or
+    /// port changed is ended and started as it is now. A link that is as
+    /// it was is not touched: its carrier goes on. The file is the only
+    /// thing read; the call names nothing.
+    pub(crate) fn link_reload(&self) -> Result<Value> {
+        let cfg = crate::paths::Config::load(&self.paths)
+            .map_err(|e| invalid(format!("the config file does not read: {e}")))?;
+        let now = self.link.near.lock().unwrap().clone();
+        let same = |l: &Near, c: &LinkConfig| {
+            l.name == c.name && l.cmd == c.cmd && c.port.is_none_or(|p| p == l.port)
+        };
+        let (mut removed, mut added) = (vec![], vec![]);
+        let mut kept: Vec<Arc<Near>> = vec![];
+        for link in now {
+            if cfg.link.iter().any(|c| same(&link, c)) {
+                kept.push(link);
+                continue;
+            }
+            link.gone.store(true, Ordering::SeqCst);
+            link.kick.notify_one();
+            link.quit.notify_one();
+            removed.push(link.name.clone());
+        }
+        *self.link.near.lock().unwrap() = kept.clone();
+        let fresh: Vec<LinkConfig> = cfg
+            .link
+            .iter()
+            .filter(|c| !kept.iter().any(|l| same(l, c)))
+            .cloned()
+            .collect();
+        added.extend(fresh.iter().map(|c| clean(&c.name, 32)));
+        if !fresh.is_empty() {
+            self.link_take(&fresh);
+        }
+        if !removed.is_empty() || !added.is_empty() {
+            self.record(
+                "link.reload",
+                None,
+                None,
+                None,
+                Some("you"),
+                json!({"added": added, "removed": removed}),
+            );
+        }
+        Ok(json!({"added": added, "removed": removed, "links": self.link_list()}))
+    }
+
+    /// Has this station any link now?
+    pub fn has_links(&self) -> bool {
+        !self.link.near.lock().unwrap().is_empty()
+    }
+
     /// End every carrier and wait until each is gone (two seconds at
     /// most), before this program image is replaced: the next image starts
     /// its own, and none is left behind as a process nobody collects.
@@ -489,6 +558,16 @@ impl Daemon {
 /// The local port: every connection is one stream to the far station's
 /// web listener, or, while the link is down, a short answer that says so.
 async fn listen(link: Arc<Near>) {
+    tokio::select! {
+        _ = listening(link.clone()) => {}
+        // The `[[link]]` was taken out of the configuration: the port is
+        // let go of.
+        _ = link.quit.notified() => {}
+    }
+}
+
+async fn listening(link: Arc<Near>) {
+    let mut tries = 0u32;
     let listener = loop {
         match tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, link.port)).await {
             Ok(l) => break l,
@@ -498,7 +577,11 @@ async fn listen(link: Arc<Near>) {
                     link.port
                 );
                 link.set(|s| s.port_trouble = Some(why));
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                // A link of the same name that is being ended may still
+                // hold it for a moment: soon again at first, then as before.
+                tries += 1;
+                let wait = if tries <= 8 { 250 } else { 5000 };
+                tokio::time::sleep(Duration::from_millis(wait)).await;
             }
         }
     };
@@ -579,6 +662,9 @@ enum Ended {
 async fn run(d: Daemon, link: Arc<Near>) {
     let mut attempt: u32 = 0;
     loop {
+        if link.gone.load(Ordering::SeqCst) {
+            return;
+        }
         if link.parked(&d) {
             if link.held.load(Ordering::SeqCst) {
                 link.state(HELD, "");
@@ -843,6 +929,9 @@ async fn beat(
                 };
             }
             _ = link.kick.notified() => {
+                if link.gone.load(Ordering::SeqCst) {
+                    return "its [[link]] was taken out of the configuration".into();
+                }
                 if link.held.load(Ordering::SeqCst) {
                     return "held closed by you".into();
                 }

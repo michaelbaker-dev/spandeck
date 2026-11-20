@@ -8,6 +8,20 @@ use crate::daemon::Daemon;
 use crate::db::Db;
 
 impl Daemon {
+    /// Has this user's crontab the line `spandeck link add` writes? Asked
+    /// only on a station with no login service, and only read.
+    fn starts_from_crontab(&self) -> bool {
+        if spandeck_terminal::sys::WINDOWS {
+            return false;
+        }
+        let listed = self.run_captured(
+            &["crontab".to_string(), "-l".to_string()],
+            std::time::Duration::from_secs(3),
+        );
+        matches!(listed.ended, Ended::Exited { ok: true })
+            && listed.text.contains(crate::link::add::CRON_MARK)
+    }
+
     pub fn doctor(&self) -> Value {
         let mut checks: Vec<Value> = vec![];
         let mut add = |name: &str, ok: bool, required: bool, detail: String| {
@@ -39,12 +53,26 @@ impl Daemon {
             );
         }
         let service = service_installed(&self.home);
+        // Without the login service: a line in the user's crontab (what
+        // `spandeck link add` puts there where a user's service cannot
+        // outlive a logout), or a link that starts the station when the
+        // near side connects. Which one is in force is said.
+        // Asked only of a station a link has reached: no other station
+        // runs anything new for this line.
+        let linked = !service && self.db.kv_get("link.attached").is_some();
+        let cron = linked && self.starts_from_crontab();
+        let by_link = linked && !cron;
         add(
             "service",
-            service,
+            service || cron,
             false,
             if service {
                 "spandeckd starts at login".into()
+            } else if cron {
+                "spandeckd starts when this machine starts, from a line in your crontab (`@reboot`)"
+                    .into()
+            } else if by_link {
+                "spandeckd does not start by itself: after a reboot this station is down until a link connects, which starts it. Where the machine ends a user's programs at logout, it also ends when the last ssh session does. `spandeck link add`, run again where the link is from, sets up start at login where the machine allows it".into()
             } else {
                 "spandeckd does not start at login: after a reboot this station stays down until someone starts it. Run `spandeck service --install`".into()
             },
@@ -109,9 +137,9 @@ impl Daemon {
         // does not look for stations through it (`discovery = false`) or
         // reaches them over links: nothing is wrong, and it is not said
         // as if something were.
-        let not_used = me.is_none()
-            && (!self.cfg.discovery || !self.cfg.link.is_empty())
-            && !crate::fleet::has_tailscale();
+        let links = self.has_links();
+        let not_used =
+            me.is_none() && (!self.cfg.discovery || links) && !crate::fleet::has_tailscale();
         add(
             "tailscale",
             me.is_some() || not_used,
@@ -122,7 +150,7 @@ impl Daemon {
                     m.login,
                     m.ips.first().cloned().unwrap_or_default()
                 ),
-                None if not_used && !self.cfg.link.is_empty() => {
+                None if not_used && links => {
                     "not installed, and not needed: this station reaches others over links (`spandeck link list`)"
                         .into()
                 }
@@ -201,15 +229,20 @@ impl Daemon {
         let https = self.https_view();
         let text = |k: &str| https[k].as_str().unwrap_or_default().to_string();
         let days = https["days_left"].as_i64();
+        // Its certificate is Tailscale's: on a machine that has no
+        // Tailscale and does not need it (above), having none is no more
+        // a fault than that.
+        let no_need = not_used && !matches!(text("state").as_str(), "on" | "off" | "starting");
         add(
             "secure deck (HTTPS)",
             match text("state").as_str() {
                 "on" => days.is_none_or(|d| d >= crate::https::WARN_BELOW_DAYS),
                 "off" | "starting" => true,
-                _ => false,
+                _ => no_need,
             },
             false,
             match text("state").as_str() {
+                _ if no_need => "not on, and not needed: its certificate would be Tailscale's, which this machine does not have. The deck works over HTTP, and a browser on this machine counts `localhost` as secure".to_string(),
                 "on" => format!(
                     "serving https://{}:{}{}{}",
                     text("name"),
@@ -227,6 +260,11 @@ impl Daemon {
                 _ => format!("not on: {}. The deck works over HTTP meanwhile", text("why")),
             },
         );
+
+        // `[pane_env]`: by name. With none, no line.
+        if let Some((ok, words)) = self.pane_env_words() {
+            add("pane environment", ok, false, words);
+        }
 
         for kind in spandeck_agents::catalogue::all().iter().map(|p| p.kind) {
             let program = self

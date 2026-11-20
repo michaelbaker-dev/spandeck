@@ -332,6 +332,11 @@ const LOCAL_METHODS: &[&str] = &[
     "link.up",
     "link.down",
     "link.open",
+    // `spandeck link add` and `remove`: the release for a platform, for
+    // the owner's command line to send over the ssh it has open; and the
+    // `[[link]]`s of the config file read again. Neither names a host.
+    "link.release",
+    "link.reload",
 ];
 
 /// Is this one of the calls taken only from this machine's own command
@@ -1094,6 +1099,8 @@ impl Daemon {
             "link.up" => self.link_hold(&params, false),
             "link.down" => self.link_hold(&params, true),
             "link.open" => self.link_open(&params).await,
+            "link.release" => self.link_release(&params).await,
+            "link.reload" => self.link_reload(),
             _ => Err(Error::NotFound(format!("unknown method {method}"))),
         }
     }

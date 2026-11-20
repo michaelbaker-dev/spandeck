@@ -36,7 +36,7 @@ use crate::supply::{self, Force, NoSupply, Source, Supplied};
 
 /// The script the README tells a person to run. The same text is sent to the
 /// machine being added, so the two cannot drift apart.
-const INSTALL_SH: &str = include_str!("../../../scripts/install.sh");
+pub(crate) const INSTALL_SH: &str = include_str!("../../../scripts/install.sh");
 /// The same for a Windows machine.
 const INSTALL_PS1: &str = include_str!("../../../scripts/install.ps1");
 
@@ -1444,7 +1444,7 @@ if ($out -match '"code":\s*"([A-Z0-9]+)"') {{ Say "code $($Matches[1])" }} else 
 /// Then the programs are deleted. The state and config folders are kept
 /// unless `erase` is set, and are deleted only if they look like spandeck's.
 /// Nothing else on the machine is touched.
-fn uninstall_script(erase: bool, os: &str) -> String {
+pub(crate) fn uninstall_script(erase: bool, os: &str) -> String {
     if os == "Windows" {
         let erase_lines = if erase {
             r#"foreach ($dir in @($state, $config)) {

@@ -4,6 +4,7 @@
 //! the CLI covers the API and nothing else.
 
 mod agents_cmd;
+mod link_add;
 mod link_cmd;
 mod mcp;
 mod roles_cmd;
@@ -801,6 +802,46 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         // The far side of a link: it finds the station itself, and starts
         // one if none is running.
         Cmd::Link { stdio: true, .. } => return Ok(spandeck_core::link::helper::main(&paths)),
+        // Run by the owner in a terminal: the station here may be down,
+        // and is asked as its owner (its own token, never a pane's).
+        Cmd::Link {
+            cmd:
+                Some(link_cmd::LinkCmd::Add {
+                    name,
+                    pane_env,
+                    no_pane_env,
+                    ssh,
+                }),
+            ..
+        } => {
+            let pane_env = match (pane_env, no_pane_env) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            };
+            return link_add::add(
+                &paths,
+                link_add::Add {
+                    name,
+                    pane_env,
+                    ssh,
+                },
+            );
+        }
+        Cmd::Link {
+            cmd:
+                Some(link_cmd::LinkCmd::Remove {
+                    name,
+                    uninstall,
+                    erase,
+                }),
+            ..
+        } => return link_add::remove(&paths, &name, uninstall, erase),
+        // The far side of `link add`: this user's login shell is asked.
+        Cmd::Link {
+            cmd: Some(link_cmd::LinkCmd::LoginEnv { keep, inner }),
+            ..
+        } => return Ok(spandeck_core::paneenv::login_env_main(&paths, keep, inner)),
         Cmd::Service { stop: true, .. } => return service_stop(&paths),
         Cmd::Service { install, .. } => {
             let exe = std::env::current_exe()?;

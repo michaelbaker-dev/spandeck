@@ -370,6 +370,12 @@ pub struct Config {
     /// station starts nothing and listens on nothing for links.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub link: Vec<crate::link::LinkConfig>,
+    /// `[pane_env]`: variables set for the process of every pane on this
+    /// station (paneenv.rs): a company proxy and its certificates, say,
+    /// which a station started at login does not have from a login shell.
+    /// None: nothing is set and nothing changes.
+    #[serde(skip_serializing_if = "crate::paneenv::PaneEnv::is_empty")]
+    pub pane_env: crate::paneenv::PaneEnv,
 }
 
 /// `[speech]`: a recording from the deck is turned into text by a program
@@ -493,6 +499,7 @@ impl Default for Config {
             prices: Default::default(),
             flags: BTreeMap::new(),
             link: vec![],
+            pane_env: Default::default(),
         }
     }
 }

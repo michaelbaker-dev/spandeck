@@ -11,7 +11,8 @@
 //! for the near side. Each `web` stream is then one TCP connection to
 //! that listener, bytes copied both ways.
 //!
-//! If no station is running here it starts one, detached, and says so.
+//! If no station is running here it starts one and says so: the account's
+//! login service where there is one, else a station of its own, detached.
 //! It never installs, updates or replaces anything.
 
 use std::sync::{Arc, Mutex};
@@ -67,6 +68,43 @@ fn connect(paths: &Paths) -> Option<Client> {
     Some(c)
 }
 
+/// Where this account's station has a login service (`spandeck service
+/// --install`: a systemd user unit, a launchd agent), that is what is
+/// started: a station it keeps running is better than one nobody
+/// watches. `false`: there is none, it is not this station's, or it would
+/// not start; the helper then starts the station itself, as before.
+fn start_login_service(paths: &Paths) -> bool {
+    if spandeck_terminal::sys::WINDOWS || !paths.is_the_station(&crate::paths::home_dir()) {
+        return false;
+    }
+    // The command `spandeck start` has another station run, less its last
+    // resort.
+    let line = "systemctl --user start spandeckd 2>/dev/null || launchctl kickstart gui/$(id -u)/dev.spandeck.spandeckd 2>/dev/null";
+    let Ok(mut child) = std::process::Command::new("sh")
+        .args(["-c", line])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let began = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if began.elapsed() < Duration::from_secs(10) => {
+                std::thread::sleep(Duration::from_millis(50))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
 /// The station on this machine: the one running, or one started now.
 fn station(paths: &Paths) -> Result<(Client, Value), String> {
     let answering = |paths: &Paths| {
@@ -84,16 +122,24 @@ fn station(paths: &Paths) -> Result<(Client, Value), String> {
     // Nothing answers on the socket: is nothing running, or is a station
     // only just starting? One that has its socket open is waited for.
     if connect(paths).is_none() {
-        let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
-        let mut cmd = std::process::Command::new(exe);
-        cmd.arg("daemon");
-        spandeck_terminal::sys::spawn_detached(&mut cmd).map_err(|e| {
-            format!("no station is running here, and one could not be started: {e}")
-        })?;
-        eprintln!(
-            "spandeck link: no station was running on {}, so one was started. It goes on running after this link closes.",
-            crate::paths::hostname()
-        );
+        if start_login_service(paths) {
+            eprintln!(
+                "spandeck link: no station was running on {}, so its login service was started.",
+                crate::paths::hostname()
+            );
+        } else {
+            let exe =
+                std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("daemon");
+            spandeck_terminal::sys::spawn_detached(&mut cmd).map_err(|e| {
+                format!("no station is running here, and one could not be started: {e}")
+            })?;
+            eprintln!(
+                "spandeck link: no station was running on {}, so one was started. It goes on running after this link closes.",
+                crate::paths::hostname()
+            );
+        }
     }
     let began = Instant::now();
     while began.elapsed() < START_WAIT {
