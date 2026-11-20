@@ -2202,6 +2202,71 @@ Adding the WSL machine printed "# Tailscale SSH requires an additional check. # 
 - Nothing renames a fleet-mate that arrives with a newcomer, or a station that is off.
 - A project's layout file, `orders.toml` and the vault's label are read, never rewritten, as said above.
 
+## A layout holds more than programs: Files and Watch (20 Nov 2026, the owner's request)
+
+"Can a pane be set as the file browser we built? Can a pane show the agents working? … its hard to tell the pane type." Until now a layout's leaf was always a pane that runs a program: an agent, shown as Chat or as its terminal, or a shell. Files was a panel at the side and Watch a screen of its own.
+
+**Built**: two kinds of leaf that show a view and run nothing; adding a pane by its kind; the kind as a word in the list on the left and in each pane's header; and a key to the dots. The page is `crates/web/assets/viewpanes.js`, with the panel's own listing (`files.js`) and the project's own Watch (`app.js`); the station's side is one more kind of leaf in `crates/core/src/project.rs`. No Guarantee is changed, no migration is added, no method is added and `PROTOCOL` is unchanged; a station that keeps a view whole says `view_panes` in `caps`.
+
+### What a view is
+
+- **Files** is the file browser at a folder of a station; **Watch** is a project's agents: who is working, who needs the owner, and what they say to each other. Each is the thing there already was, in a cell. Nothing was written twice: a Files pane is the panel's listing, with the page's one clipboard, its uploads and its jobs, so a file copied in the panel is pasted in a pane and the other way round; a Watch pane is the same drawing as `#/s/<station>/w/<project>`.
+- **A view is a leaf of the layout itself**, saved wherever that layout is saved: in the project's file for a project's layout, in the deck document for a global one. So it is the same from every station and in every browser, by the rules those two already keep.
+- **It is not a pane of any station.** It has no record there, no process and no token; nothing an agent can address or message; it is in no list of panes, counts in no number of them and is no part of restore. It starts nothing, and taking it out of a layout stops nothing and removes nothing on disk. Rule 7 is untouched: no call was added, for anybody.
+- **Like any leaf** it is added, moved, resized, hidden, shown and taken out, in a project's layout and in a global one, and it counts among the 16 a layout holds. It has no look of its own: it is drawn in the layout's.
+- **What it shows is asked for as before.** A Files pane makes the `files.` calls the panel makes, which are the owner's alone; a Watch pane is drawn from what the page already holds of that station, and is drawn again with every change the page hears of. A view of a station that does not answer says so in its cell, and the rest of the layout goes on.
+
+### The saved form
+
+A view is written as a pane named by id is, with an id no pane has:
+
+    { "id": "view.files.k3f9", "station": "spark2", "folder": "/home/me/video/out", "hidden": true }
+    { "id": "view.watch.x1",   "station": "spark2", "watch": "Video-Studio" }
+
+- `id` is `view.<kind>.<letters and digits>`. A pane's id is `p-…`, so the two are never confused, and the kind is in the id because the id is the one field every version keeps. A kind this version does not know is kept as it is and shown as a cell that says so.
+- `station`: as for any leaf. Left out in a project's layout, it is the station the layout is kept on.
+- `folder` (Files): where it opens. Left out: the layout's project's folder, or in a global layout the station's home folder. A path of at most 4096 bytes with no control character; it is text.
+- `watch` (Watch): the project. Left out: the layout's own project. It is not called `project`, because a station from before views refuses a leaf that has an id and a project.
+- `hidden`: not on screen for now. **On the leaf, not in the layout's `hidden` list**, where a hidden pane is: a deck from before views takes a hidden pane it cannot find out of the layout (see Hiding and showing panes), and it could never find a view.
+- **Where a Files pane was browsed to is the device's own** (kept by the browser, per layout and pane), like which pane of a layout a phone is showing. The folder it opens at is the layout's, and changes only when the owner says so: "Open here from now on" in the pane's menu, or "Station and folder…". Browsing is not saved to the layout because a project's layout is a file in the owner's repository, which would change at every folder opened, and a global one is a document the whole fleet takes a new copy of.
+
+### What an older version does with one
+
+Checked against 0.4.19's own code, which is kept in the tests (the station's reader in `project.rs`, the deck's in `crates/cli/tests/common/deck_0_4_19_layout.js`).
+
+- **A station from before views reads a view as a pane named by id that it does not have.** It refuses nothing: the layout loads, the project's file loads, the deck document is taken. Removing a station from the fleet and renaming one treat the leaf by its station as they treat a pane's, which is right for a view too. Closing a pane, restore and the looks never read a layout's tree.
+- **When such a station writes the layout again it keeps `id` and `station` and drops `folder`, `watch` and `hidden`.** So the view is still there, and still a view to every newer deck: at the project's folder (or home), watching the layout's own project, and showing. That is the whole loss. In a global layout a Watch whose `watch` was dropped has no project to fall back on: its cell says so and asks which. An older station writes the deck document whenever the owner changes a global layout or a pin at that station; it writes a project's file only for a project it keeps.
+- **A deck from before views shows the cell as "This pane was closed."**, with "Take out of this layout" and "Hide". It does not throw and it does not drop the leaf when it saves: it writes `id` and `station`, as above. Two things there do lose it, both the owner's own press: "Take out of this layout", and "Hide", after which that deck's own rule for a hidden pane it cannot find takes it out at the next draw. A phone on such a deck steps to the cell and says the pane is not running.
+- **A view is offered only where it will be kept.** In a project's layout the kinds Files and Watch are greyed, with the reason, unless the station that keeps the project says `view_panes`. A global layout is on every station, so there they are offered whenever the serving station has them (it always has), and the dialog names the stations of the fleet that are behind and what a change made there costs. A Files pane also needs the `files` ability of the station whose files it shows.
+- **Not closed:** per-item merge of the deck document would let an older station's write leave a newer field alone; it was already judged too much (see The same view from every station), and the loss here is a folder chosen again.
+
+### Adding a pane by its kind
+
+"Add pane" on a layout's head (and under the map of a layout on a phone) asks first what kind: under "Runs a program", an agent or a shell; under "Shows something, and runs nothing", Files or Watch. Then what that kind needs: for Files a station and a folder (empty is the default; a folder that is not there is said, and nothing is added); for Watch a station and a project; for an agent or a shell, one that is running and not yet in the layout, or "Start a new one…", which is the New pane dialog exactly as it was, and the pane it starts goes into the layout. Nothing was added to starting an agent anywhere else: "＋ Pane", "New pane here…" and "+ New session" are as they were, and so are dragging a pane in from the list and Ctrl+Shift+E and O. The mock-up's "Changes" card was not wanted and is not there.
+
+### The kind is a word, and the dot is the state
+
+- **Each pane's row in the list on the left ends in a small tag**: `Chat` or `Term` for an agent by the face it opens in here, `Term` for a shell. A layout's views are listed under the layout, each with `Files` or `Watch`, its folder's or its project's name, and for a Watch the state of its agents; the row opens the layout at that view. The phone's list by station has the same. The tag has no colour of its own; it gives way to the name (the name is cut short, never the tag) and it is in the row's accessible name.
+- **Each pane's header in a layout says its kind**: a terminal's strip has `Term` after the name, a conversation's bar already has its Chat | Terminal switch and is unchanged, and a view's head begins with `Files` or `Watch`.
+- **The dots are unchanged, and have a key.** "What the dots mean" at the foot of the list (on a phone, under the list by station) shows the eight as `app.css` draws them: grey, idle; blue and pulsing, working; amber with a ring, needs you; green, done; red, error; violet, an approval or a message waiting; hollow, exited; dashed red, unreachable. The words are in one place, `DOT_KEY` in `ui.js`, beside `KINDS` for the tags.
+
+### On a phone
+
+A layout is still one pane at a time, and a view is a step like any other: Files is the file browser with the screen to itself, as the panel is on a phone (a tap opens, ticks select); Watch is the Watch view. The line says the kind ("studio › Files · out · 3 of 4"), and so does the map. A tap on an agent in a Watch step goes to that agent's step.
+
+### In a Watch pane, a tap on an agent goes to it
+
+Its pane in the same layout when it is there, shown first if it was hidden, and marked for a moment so the eye finds it; otherwise the pane by itself, as on the Watch screen. A hidden Watch stays in sight as a chip like any hidden pane, and its chip stands out in amber when one of its agents needs the owner.
+
+### Limits, said plainly
+
+- A Files pane has no "Move agent here" (it is opened for no pane) and no second listing (two Files panes side by side do that). The side panel has both, and is as it was.
+- With the side panel closed, uploads, copies and downloads on their way are shown at the foot of each Files pane; with it open, in the panel only.
+- A Watch pane is one column at any width; the two-column Watch is the Watch screen ("Open Watch full size" in the pane's menu).
+- A page is not drawn again while a name is being typed in a Files pane or a file is being dragged, so what else is on the page waits those seconds.
+- Not verified in Safari or Firefox, on a real phone, or with a drag from a real desktop: the tests drive Chrome, and a drop is an event the page is handed. The narrow form of a Files pane uses a container query (Safari 16, Firefox 110).
+- Not built: a look of its own for a view; a "Changes" pane; a view pinned by itself; a view as a pane an agent could address.
+
 ## Guarantees (contracts the build must meet)
 
 ### Tasks

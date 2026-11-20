@@ -6,6 +6,8 @@
 //   #/s/<station>/l/<project>/<layout>   a project's layout
 //   #/s/<station>/w/<project>    Watch: a project's agents and who is talking
 //   #/l/<layout>                 a global layout (kept by the whole fleet)
+// A layout's leaf is a pane, or a view that runs nothing: Files or Watch
+// (viewpanes.js).
 // On a phone the same URLs show a small view: what needs you, the sessions,
 // one pane to talk to, and a layout stepped through a pane at a time.
 // A pane has two faces, its terminal and its conversation (chat.js): on a
@@ -13,14 +15,15 @@
 
 import { Api } from './api.js';
 import { PaneTerm } from './term.js';
-import { h, showMenu, closeMenu, toast, dialog, confirmBox, keepInView, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText, heldWords, rapidLine, hooksTick, hooksCard, hooksAnsweredWords, trustTick, trustCard, trustAnsweredWords, TRUST_WARNING } from './ui.js';
+import { h, showMenu, closeMenu, toast, dialog, confirmBox, keepInView, field, ago, dot, stateOf, stateRank, STATE_LABEL, copyText, fmtTokens, fmtCost, exact, usageBrief, usageTitle, contextText, heldWords, rapidLine, hooksTick, hooksCard, hooksAnsweredWords, trustTick, trustCard, trustAnsweredWords, TRUST_WARNING, kindTag, KINDS } from './ui.js';
 import { paneIcon, iconName, layoutIcon, watchIcon, stationIcon, pinIcon } from './icons.js';
 import { lookState, setDoc, pageLook, paneLook, applyPage, applyChatFrame, applyRemembered, rememberPage, loadFonts, fontListeners, termSize } from './look.js';
 import { lookEditor } from './lookedit.js';
 import { phoneLook } from './phonelook.js';
 import { toolsPanel } from './tools.js';
 import { rolesPanel, rolePick } from './roles.js';
-import { initFiles, openFiles, filesSync } from './files.js';
+import { initFiles, openFiles, filesSync, filesBusy } from './files.js';
+import { initViews, isView, viewKind, cleanView, viewLabel, viewName, viewState, viewCell, viewIcon, viewsBeforeRender, viewsAfterRender, addPaneDialog, dotKeyDialog } from './viewpanes.js';
 import { perfPage, gather, anyTrouble, keyInfo, keySteps, signInWords, lanOf, TS_MACHINES, clockWords, refreshTook, refreshAsked, refreshCorrected } from './perf.js';
 import { qrSvg } from './qr.js';
 import { initFailover } from './failover.js';
@@ -893,9 +896,10 @@ async function folderTrustDialog(st, project) {
 
 const AGENT_CHOICES = [['claude', 'Claude Code'], ['codex', 'Codex'], ['opencode', 'OpenCode'], ['antigravity', 'Antigravity'], ['shell', 'Shell']];
 
-function newPaneDialog(st, project, then) {
+// `preset.agent`: what Run starts at (a shell, when a shell was asked for).
+function newPaneDialog(st, project, then, preset = {}) {
   dialog('New pane on ' + st, (close) => {
-    const agent = h('select', {}, AGENT_CHOICES.map(([v, label]) => h('option', { value: v }, label)));
+    const agent = h('select', {}, AGENT_CHOICES.map(([v, label]) => h('option', { value: v, selected: v === preset.agent }, label)));
     const name = h('input', { 'aria-label': 'Name' });
     const proj = h('select', {}, h('option', { value: '' }, '(no project)'), (S.projects.get(st) || []).map(p => h('option', { value: p.name, selected: p.name === project }, p.name)));
     const cwd = h('input', { placeholder: 'default: the project folder, or your home folder' });
@@ -2910,8 +2914,10 @@ function sidebar() {
   const paneRow = (st, p, where) => {
     const cur = current(r.view === 'pane' && r.station === st && (r.pane === p.id || r.pane === p.name));
     const can = ctx && !p.exited;
+    // What kind it is, as a word at the end of its row: the face it opens in.
+    const kind = paneKind(st, p);
     return h('a', { class: 'side-row side-pane' + cur.class + (can && ctx.arrange ? ' draggable' : ''), href: paneUrl(st, p.id),
-      'aria-label': paneSays(p), 'aria-current': cur['aria-current'], dataset: { id: p.id, station: st },
+      'aria-label': `${paneSays(p)}, ${KINDS[kind][0]}`, 'aria-current': cur['aria-current'], dataset: { id: p.id, station: st },
       title: can ? (ctx.arrange ? 'Drag into the layout' : `Drag into ${ctx.lay.name}, or click to open`) : undefined,
       onmousedown: (e) => { if (can) sideDrag(e, st, p); },
       onclick: (e) => { if (ctx?.arrange || Date.now() - dragEnded < 300) e.preventDefault(); },
@@ -2921,7 +2927,13 @@ function sidebar() {
     p.paused ? h('span', { class: 'chip warn' }, 'paused') : null,
     p.held && !p.exited ? h('span', { class: 'chip warn', title: heldWords(p.held) }, 'held') : null,
     ctx && ctx.leafOf(st, p)?.hidden ? h('span', { class: 'chip', title: `Hidden in ${ctx.lay.name}` }, 'hidden')
-      : can && ctx.arrange && ctx.has(st, p) ? h('span', { class: 'chip' }, 'in layout') : null);
+      : can && ctx.arrange && ctx.has(st, p) ? h('span', { class: 'chip' }, 'in layout') : null,
+    kindTag(kind));
+  };
+  // A layout's views, under it: they are in no station's list of panes.
+  const viewRows = (lay) => {
+    const views = leaves(lay.cache.tree).filter(isView);
+    return views.length ? h('div', { class: 'side-kids side-views' }, views.map(n => sideView(lay, n, 'side-row side-view'))) : null;
   };
   const layRow = (lay, where) => {
     const cur = current(r.view === 'layout' && r.layout === lay.key);
@@ -2944,7 +2956,7 @@ function sidebar() {
         pr.branch ? h('span', { class: 'muted side-where' }, pr.branch) : null, linkedChip(st, pr, true),
         h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Project menu', onclick: (e) => projMenu(e, st, pr) }, '⋮')),
       folded.has(key) ? null : h('div', { class: 'side-kids' },
-        projectLayouts(st).filter(x => x.project === pr.name).map(x => layRow(x)),
+        projectLayouts(st).filter(x => x.project === pr.name).map(x => [layRow(x), viewRows(x)]),
         mine.some(p => !p.exited) ? watchRow(st, pr) : null,
         pr.open ? mine.map(p => paneRow(st, p)) : h('button', { class: 'mini side-open', onclick: () => rpc(st, 'project.open', { name: pr.name }) }, 'Open'),
         pr.problem ? h('div', { class: 'warn-text small' }, pr.problem) : null));
@@ -2980,8 +2992,23 @@ function sidebar() {
   h('div', { class: 'side-group side-stations' }, h('div', { class: 'side-section' }, h('b', {}, 'Stations')), stationsByName().map(station)),
   h('div', { class: 'side-group side-globals' }, h('div', { class: 'side-section' }, h('b', {}, 'Layouts'), h('span', { class: 'grow' }),
     h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'New global layout', title: 'New global layout: the same on every station', onclick: () => newLayoutDialog(null, null) }, '＋')),
-  globals.length ? globals.map(x => layRow(x)) : h('div', { class: 'muted small side-hint' }, 'No global layouts yet. A global layout can hold any pane from any station.')),
-  h('div', { class: 'side-actions' }, h('button', { onclick: () => newPaneDialog(online(r.station) ? r.station : api.station) }, '＋ Pane'), h('button', { onclick: () => newProjectDialog(online(r.station) ? r.station : api.station) }, '＋ Project')));
+  globals.length ? globals.map(x => [layRow(x), viewRows(x)]) : h('div', { class: 'muted small side-hint' }, 'No global layouts yet. A global layout can hold any pane from any station.')),
+  h('div', { class: 'side-actions' }, h('button', { onclick: () => newPaneDialog(online(r.station) ? r.station : api.station) }, '＋ Pane'), h('button', { onclick: () => newProjectDialog(online(r.station) ? r.station : api.station) }, '＋ Project')),
+  dotKeyLink());
+}
+// What kind a pane is, by the face it opens in here: a word (ui.js, KINDS).
+const paneKind = (st, p) => (faceOf(st, p) === 'chat' ? 'chat' : 'term');
+// The key to the dots, at the foot of the list.
+const dotKeyLink = () => h('button', { type: 'button', class: 'dot-key-link', dataset: { keep: 'dot-key' }, onclick: (e) => { e.currentTarget.blur(); dotKeyDialog(); } }, h('span', { class: 'dot', 'aria-hidden': 'true' }), 'What the dots mean');
+// One view of a layout as a row: its agents' state for a Watch, what it
+// shows, and its kind. It opens the layout at that view.
+function sideView(lay, n, cls) {
+  const kind = viewKind(n), state = viewState(lay, n), name = viewName(lay, n);
+  return h('a', { class: cls, href: layUrl(lay), dataset: { view: n.id },
+    'aria-label': `${name}, ${(KINDS[kind] || [kind])[0]}, in the layout ${lay.name}${state !== 'idle' ? ', ' + (STATE_LABEL[state] || state) : ''}${n.hidden ? ', hidden' : ''}`,
+    onclick: () => { viewWanted = { key: lay.key, id: n.id }; phoneAt.set(lay.key, ctxFor(lay).refOf(n)); if (location.hash === layUrl(lay)) setTimeout(render, 0); } },
+  h('span', { class: 'dot ' + state }), h('span', { class: 'ico-wrap' }, viewIcon(kind)), h('span', { class: 'side-name' }, name),
+  n.hidden ? h('span', { class: 'chip', title: `Hidden in ${lay.name}` }, 'hidden') : null, kindTag(kind));
 }
 
 // A terminal has been attached again (the page reconnected, or its pane's
@@ -3118,22 +3145,25 @@ let pendingLinks = null; // { selector, links } drawn after the next render
 // waiting for whom, where that can be told. Then the messages as one
 // thread, the newest at the bottom.
 const watchOpen = new Set(); // messages whose long text is shown whole
-// What the Watch on screen holds: every message seen while it is open (the
-// station's own list is its newest 60, of all its projects) and what
-// "Earlier messages" asked for.
-let watchHeld = { key: '' };
-let watchScroll = null; // where the thread was, for after the draw
+// What each Watch on the page holds, by its key: every message seen while it
+// is open (the station's own list is its newest 60, of all its projects) and
+// what "Earlier messages" asked for. There is the Watch a project is opened
+// as, and since 20 Nov 2026 a Watch in a cell of a layout (viewpanes.js), so
+// there can be more than one; one that has left the page is let go.
+const watchKept = new Map();
+let watchDrawn = new Map(); // key -> where its thread was, for after the draw
 const WATCH_FIRST = 60; // what the refresh asks for (`msg.recent`, `deck.snapshot`)
+const watchThread = (key) => [...document.querySelectorAll('.watch-thread')].find(t => t.dataset.key === key) || null;
 
 function watchHold(st, key) {
-  if (watchHeld.key !== key) watchHeld = { key, byId: new Map(), slots: new Map(), limit: 0, more: null, asking: false, prepend: false, atEnd: true };
-  for (const m of S.msgs.get(st) || []) if (m && m.id) watchHeld.byId.set(m.id, m);
-  return watchHeld;
+  let k = watchKept.get(key);
+  if (!k) { k = { key, byId: new Map(), slots: new Map(), limit: 0, more: null, asking: false, prepend: false, atEnd: true }; watchKept.set(key, k); }
+  for (const m of S.msgs.get(st) || []) if (m && m.id) k.byId.set(m.id, m);
+  return k;
 }
 // The station is asked for more of its newest messages (it has no "before
 // this one"): of every project, since what the owner sent is in none.
-async function watchEarlier(st) {
-  const k = watchHeld;
+async function watchEarlier(st, k) {
   if (k.asking) return;
   k.asking = true;
   update();
@@ -3146,7 +3176,7 @@ async function watchEarlier(st) {
     k.prepend = true;
   } catch (e) { toast(`${st} did not give its earlier messages: ${e.message}`, 'error'); }
   k.asking = false;
-  if (watchHeld === k) update();
+  if (watchKept.get(k.key) === k) update();
 }
 
 const watchClock = (ts) => {
@@ -3167,7 +3197,10 @@ function watchDoes(st, p) {
   return [now, what].filter(Boolean).join(' · ');
 }
 
-function watchView(st, project) {
+// `opts.at`: which Watch this is, when it is not the project's own page (a
+// layout's cell). `opts.open(p)`: where a tap on an agent goes, instead of
+// to its pane.
+function watchView(st, project, opts = {}) {
   const live = panesOf(st).filter(p => !p.exited);
   // Projects linked with this one on the same station: their agents are shown
   // too, marked with their project, since the two message each other.
@@ -3176,7 +3209,8 @@ function watchView(st, project) {
   const among = new Set([project, ...linked]);
   const byName = (name) => live.filter(p => p.project === name && p.agent !== 'shell').sort((a, b) => a.name.localeCompare(b.name));
   const agents = [project, ...linked].flatMap(byName);
-  const k = watchHold(st, `${st}/${project}`);
+  const k = watchHold(st, `${st}/${project}${opts.at ? '#' + opts.at : ''}`);
+  const opens = (p) => (opts.open ? { onclick: (e) => { if (e.button || e.metaKey || e.ctrlKey) return; e.preventDefault(); opts.open(p); } } : {});
   // An agent keeps its side and its colour while this Watch is open, whoever
   // starts or ends beside it.
   for (const p of agents) if (!k.slots.has(p.id)) k.slots.set(p.id, k.slots.size);
@@ -3217,7 +3251,7 @@ function watchView(st, project) {
   const row = (p) => {
     const s = stateOf(p), u = p.usage, does = watchDoes(st, p);
     const cost = u && u.cost_estimate !== null && u.cost_estimate !== undefined ? 'est. ' + fmtCost(u.cost_estimate) : u && u.total_tokens ? fmtTokens(u.total_tokens) + ' tokens' : '';
-    return h('a', { class: `watch-agent ${s} c${nth.get(p.id) % 4}` + (p.project !== project ? ' guest' : ''), href: paneUrl(st, p.id), role: 'listitem', dataset: { pane: p.id }, 'aria-label': `Open ${paneSays(p)}`, oncontextmenu: (e) => { e.preventDefault(); paneMenu(e, st, p, 'tile'); } },
+    return h('a', { class: `watch-agent ${s} c${nth.get(p.id) % 4}` + (p.project !== project ? ' guest' : ''), href: paneUrl(st, p.id), role: 'listitem', dataset: opts.at ? { agent: p.id } : { pane: p.id }, 'aria-label': `Open ${paneSays(p)}`, ...opens(p), oncontextmenu: (e) => { e.preventDefault(); paneMenu(e, st, p, 'tile'); } },
       h('div', { class: 'watch-agent-head' }, dot(p), h('b', { class: 'watch-agent-name' }, p.name),
         h('span', { class: 'muted small' }, `${p.agent_name || p.agent} · ${STATE_LABEL[s] || s} ${ago(p.state_since_ms)}`),
         p.project !== project ? h('span', { class: 'chip guest', title: `This agent is in ${p.project}, which is linked with ${project}` }, 'from ' + p.project) : null),
@@ -3230,8 +3264,8 @@ function watchView(st, project) {
   // And a scroll that comes with a change of room (the browser keeping its
   // place in a thread that shrank) is not the owner's.
   const atEnd = (e, sure) => {
-    const t = document.querySelector('.watch-thread');
-    if (!t || t.dataset.key !== k.key) return;
+    const t = watchThread(k.key);
+    if (!t) return;
     if (sure || k.room === watchRoomOf(t)) k.atEnd = t.scrollTop < 48;
     else if (k.atEnd) t.scrollTop = 0;
     k.room = watchRoomOf(t);
@@ -3255,15 +3289,15 @@ function watchView(st, project) {
       h('div', { class: 'watch-bubble' }, body, fold));
   };
 
-  const old = document.querySelector('.watch-thread'), same = old && old.dataset.key === k.key;
-  watchScroll = { atEnd: k.atEnd, fromEnd: same ? old.scrollHeight - old.scrollTop : 0, prepend: k.prepend };
+  const old = watchThread(k.key);
+  watchDrawn.set(k.key, { atEnd: k.atEnd, fromEnd: old ? old.scrollHeight - old.scrollTop : 0, prepend: k.prepend });
   k.prepend = false;
   const where = linked.length ? `${project} or ${linked.join(', ')}` : project;
-  const earlier = (words) => h('button', { type: 'button', class: 'watch-earlier', disabled: k.asking, onclick: () => watchEarlier(st) }, k.asking ? 'Asking…' : words);
+  const earlier = (words) => h('button', { type: 'button', class: 'watch-earlier', disabled: k.asking, onclick: () => watchEarlier(st, k) }, k.asking ? 'Asking…' : words);
   return h('div', { class: 'watch' },
     h('div', { class: 'watch-side' },
       h('div', { class: 'watch-strip', role: 'list', 'aria-label': `Agents in ${project}` }, agents.length ? agents.map(row) : h('p', { class: 'muted watch-none' }, `No agent is running in ${where}.`)),
-      agents.length ? h('div', { class: 'watch-open' }, agents.map(p => h('a', { class: 'btn', href: paneUrl(st, p.id) }, 'Open ' + p.name))) : null),
+      agents.length ? h('div', { class: 'watch-open' }, agents.map(p => h('a', { class: 'btn', href: paneUrl(st, p.id), ...opens(p) }, 'Open ' + p.name))) : null),
     h('div', { class: 'watch-talk' },
       waits.length ? h('div', { class: 'watch-waits', role: 'status' }, waits) : null,
       h('div', { class: 'watch-thread', dataset: { key: k.key }, onscroll: atEnd, role: 'log', 'aria-label': `Messages between the agents in ${project}`, tabindex: '0' },
@@ -3279,25 +3313,30 @@ function watchView(st, project) {
 const watchRoomOf = (t) => `${t.clientHeight}/${t.scrollHeight}`;
 const watchRoom = typeof ResizeObserver === 'function' ? new ResizeObserver((all) => {
   for (const { target: t } of all) {
-    if (t.dataset.key !== watchHeld.key) continue;
-    if (watchHeld.atEnd) t.scrollTop = 0;
-    watchHeld.room = watchRoomOf(t);
+    const k = watchKept.get(t.dataset.key);
+    if (!k) continue;
+    if (k.atEnd) t.scrollTop = 0;
+    k.room = watchRoomOf(t);
   }
 }) : null;
 function watchAfterRender() {
-  const w = watchScroll, box = document.querySelector('.watch-thread');
-  watchScroll = null;
+  const drawn = watchDrawn;
+  watchDrawn = new Map();
   watchRoom?.disconnect();
-  if (!w || !box) return;
-  watchRoom?.observe(box);
-  for (const b of box.querySelectorAll('.watch-body.folded')) b.nextSibling.hidden = b.scrollHeight <= b.clientHeight + 1;
-  // At the newest message it stays there. Reading further down, a message
-  // that arrives above must not move what is being read: the distance from
-  // the end is kept (Safari does not anchor a scroll by itself). Earlier
-  // messages are added below, which moves nothing.
-  if (w.atEnd) box.scrollTop = 0;
-  else if (!w.prepend && w.fromEnd) box.scrollTop = box.scrollHeight - w.fromEnd;
-  watchHeld.room = watchRoomOf(box);
+  for (const key of [...watchKept.keys()]) if (!drawn.has(key)) watchKept.delete(key);
+  for (const [key, w] of drawn) {
+    const box = watchThread(key);
+    if (!box) continue;
+    watchRoom?.observe(box);
+    for (const b of box.querySelectorAll('.watch-body.folded')) b.nextSibling.hidden = b.scrollHeight <= b.clientHeight + 1;
+    // At the newest message it stays there. Reading further down, a message
+    // that arrives above must not move what is being read: the distance from
+    // the end is kept (Safari does not anchor a scroll by itself). Earlier
+    // messages are added below, which moves nothing.
+    if (w.atEnd) box.scrollTop = 0;
+    else if (!w.prepend && w.fromEnd) box.scrollTop = box.scrollHeight - w.fromEnd;
+    watchKept.get(key).room = watchRoomOf(box);
+  }
 }
 
 // ---- layouts ----
@@ -3306,6 +3345,12 @@ function watchAfterRender() {
 // the deck document, which every station holds. Either may show any pane:
 // one in a project by its name there ({pane, project?, station?}), one in no
 // project by its id ({id, station?}). A leaf never names another layout.
+//
+// A leaf can also be a view, which runs nothing (the owner's request, 20 Nov
+// 2026): the file browser, or Watch. It is written as a pane named by id
+// is, with an id no pane has ({id: "view.files.k3f9", station?, folder?} and
+// {id: "view.watch.x1", station?, watch?}), and what shows it is in
+// viewpanes.js. Whether it is hidden is on the leaf itself, not in `hidden`.
 //
 // A pane of a layout can be hidden (the owner's request, 15 Nov 2026). The
 // tree is not changed: the leaf carries `hidden`, and what is drawn leaves it
@@ -3322,9 +3367,10 @@ let autoArrange = false;       // Arrange was turned on by a drag from the list,
 
 const isLeaf = (n) => !!n && n.dir === undefined;
 const leaves = (n, out = []) => { if (!n) return out; if (isLeaf(n)) out.push(n); else { leaves(n.a, out); leaves(n.b, out); } return out; };
-const cleanLeaf = (n) => n.id !== undefined ? { id: n.id, ...(n.station ? { station: n.station } : {}) }
+const cleanLeaf = (n) => isView(n) ? cleanView(n) : n.id !== undefined ? { id: n.id, ...(n.station ? { station: n.station } : {}) }
   : { pane: n.pane, ...(n.project ? { project: n.project } : {}), ...(n.station ? { station: n.station } : {}) };
-const leafSig = (n) => JSON.stringify(cleanLeaf(n));
+// What a leaf names, for finding it in `hidden` (a view's folder and whether it is hidden are not its name).
+const leafSig = (n) => JSON.stringify(isView(n) ? { id: n.id, ...(n.station ? { station: n.station } : {}) } : cleanLeaf(n));
 // Is any of this part on screen?
 const shows = (n) => !!n && (isLeaf(n) ? !n.hidden : shows(n.a) || shows(n.b));
 const fromServer = (n) => !n ? null : isLeaf(n) ? cleanLeaf(n) : { dir: n.dir, ratio: n.ratio / 1000, a: fromServer(n.a), b: fromServer(n.b) };
@@ -3338,7 +3384,7 @@ function treeFrom(def) {
   return tree;
 }
 function layoutBody(name, c) {
-  const hidden = leaves(c.tree).filter(n => n.hidden).map(cleanLeaf);
+  const hidden = leaves(c.tree).filter(n => n.hidden && !isView(n)).map(cleanLeaf);
   return { name, lines: !!c.lines, tree: toServer(c.tree), ...(hidden.length ? { hidden } : {}) };
 }
 
@@ -3455,14 +3501,16 @@ function ctxFor(lay) {
   const refOf = (n) => leafRef(lay, n);
   const set = (tree) => { lay.cache.tree = tree; saveLayout(lay); };
   const tree = () => lay.cache.tree;
-  const label = (n) => n.pane !== undefined ? n.pane : (leafPane(lay, n)?.name || 'closed pane');
+  const label = (n) => isView(n) ? viewLabel(lay, n) : n.pane !== undefined ? n.pane : (leafPane(lay, n)?.name || 'closed pane');
   const ctx = {
     lay, key: lay.key, arrange: arranging === lay.key, refOf, tree, label,
     stationOf: (n) => leafStation(lay, n),
     resolve: (n) => { const p = leafPane(lay, n); return p ? { st: leafStation(lay, n), p } : null; },
     guest: (n) => leafGuest(lay, n),
-    emptyText: 'This layout is empty. Press Arrange, or drag a pane here from the list on the left.',
+    emptyText: 'This layout is empty. Press Add pane, or drag a pane here from the list on the left.',
     missing: (n) => {
+      // Not a pane at all: Files or Watch, in this cell.
+      if (isView(n)) return viewCell(ctx, n, 'leaf');
       const st = leafStation(lay, n), project = n.pane !== undefined ? (n.project || lay.project) : null;
       // Saved without a station, and not yet given one: it is not guessed.
       if (!st) {
@@ -3528,7 +3576,7 @@ function dropDeadHidden(lay, ctx) {
   if (!S.loaded || lay.cache.dirty) return;
   const dead = leaves(lay.cache.tree).filter((n) => {
     const st = ctx.stationOf(n);
-    if (!n.hidden || !online(st) || S.busy.has(st) || !S.panes.has(st) || !S.projects.has(st) || ctx.resolve(n)) return false;
+    if (!n.hidden || isView(n) || !online(st) || S.busy.has(st) || !S.panes.has(st) || !S.projects.has(st) || ctx.resolve(n)) return false;
     if (n.id !== undefined) return true;
     const pr = S.projects.get(st).find(x => x.name === (n.project || lay.project));
     return !pr || !(pr.definition?.pane || []).some(x => x.name === n.pane);
@@ -3541,15 +3589,49 @@ const focusedLeaf = (ctx) => leaves(ctx.tree()).find(n => { const r = ctx.resolv
 
 // Put a pane in a layout: beside the pane that has the keyboard, else at the end.
 function addToLayout(lay, st, p, dir) {
-  const ctx = ctxFor(lay), leaf = paneLeaf(lay, st, p), all = leaves(lay.cache.tree);
-  if (ctx.has(st, p)) return toast(`${p.name} is already in ${lay.name}`);
+  if (ctxFor(lay).has(st, p)) return toast(`${p.name} is already in ${lay.name}`);
+  addLeaf(lay, paneLeaf(lay, st, p), dir);
+}
+// Put a leaf in a layout: a pane's, or a view's (Files, Watch).
+function addLeaf(lay, leaf, dir) {
+  const ctx = ctxFor(lay), all = leaves(lay.cache.tree);
   // Beside the pane with the keyboard, else the last one on screen, so the
   // new pane is seen even when others are hidden.
   const seen = all.filter(n => !n.hidden), focused = focusedLeaf(ctx);
   const beside = (focused && !focused.hidden ? focused : null) || seen[seen.length - 1] || all[all.length - 1];
   lay.cache.tree = beside ? treeInsert(lay.cache.tree, ctx.refOf(beside), dir === 'col' ? 'below' : 'right', leaf, ctx.refOf) : leaf;
+  // On a phone, where a layout is one pane at a time, it is the one shown.
+  if (isPhone()) phoneAt.set(lay.key, ctx.refOf(leaf));
   saveLayout(lay);
   render();
+}
+
+// From a Watch in a layout's cell to one of its agents: the pane in this
+// layout if it is there (shown, if it was hidden; on a phone, stepped to),
+// else the pane by itself.
+function toPaneFrom(lay, st, p) {
+  const ctx = ctxFor(lay), leaf = ctx.leafOf(st, p);
+  if (!leaf) return go(paneUrl(st, p.id));
+  if (isPhone()) { phoneAt.set(lay.key, ctx.refOf(leaf)); return render(); }
+  if (leaf.hidden) ctx.hide(leaf, false); else focusLeafSoon(ctx, leaf);
+  setTimeout(() => {
+    const el = [...document.querySelectorAll('.workspace .pane')].find(x => x.dataset.pane === p.id);
+    if (!el) return;
+    el.classList.add('view-flash');
+    setTimeout(() => el.classList.remove('view-flash'), 1200);
+  }, 100);
+}
+// A view of a layout, gone to from the list on the left.
+let viewWanted = null; // { key, id }
+function viewsShown() {
+  const w = viewWanted;
+  viewWanted = null;
+  if (!w || S.route.layout !== w.key) return;
+  const el = [...document.querySelectorAll('.workspace .view-cell')].find(x => x.dataset.view === w.id);
+  if (!el) return;
+  el.classList.add('view-flash');
+  setTimeout(() => el.classList.remove('view-flash'), 1200);
+  el.querySelector('.fx-tree, .watch-thread')?.focus({ preventScroll: true });
 }
 
 // Tree edits. `refOf` names a leaf; leaves are compared by that name.
@@ -3921,6 +4003,7 @@ function layoutView(key) {
     lay.project ? linkedChip(lay.station, (S.projects.get(lay.station) || []).find(pr => pr.name === lay.project)) : null,
     hiddenStrip(ctx),
     h('span', { class: 'grow' }),
+    h('button', { class: 'add-pane', title: 'Add a pane to this layout: an agent, a shell, Files or Watch', onclick: () => addPaneDialog(lay) }, '＋ Add pane'),
     h('button', { class: 'toggle' + (ctx.arrange ? ' on' : ''), 'aria-pressed': String(ctx.arrange), title: 'Move panes around by dragging them', onclick: () => { arranging = ctx.arrange ? null : lay.key; render(); } }, ctx.arrange ? 'Done arranging' : 'Arrange'),
     h('button', { class: 'toggle' + (c.lines ? ' on' : ''), 'aria-pressed': String(!!c.lines), title: 'Draw lines between panes whose agents are talking', onclick: () => { c.lines = !c.lines; saveLayout(lay); render(); } }, c.lines ? 'Lines: on' : 'Lines: off'),
     h('button', { class: 'icon-btn', title: 'Layout menu', 'aria-label': 'Layout menu', onclick: (e) => layMenu(e, lay) }, '⋮'));
@@ -3954,9 +4037,12 @@ function hiddenStrip(ctx) {
   if (!hid.length) return null;
   const chip = (n) => {
     const r = ctx.resolve(n), p = r?.p || null, name = ctx.label(n), guest = ctx.guest(n), ref = ctx.refOf(n);
-    const state = p ? stateOf(p) : 'missing';
-    const stateText = p ? (p.exited ? 'ended' : STATE_LABEL[state] || state) : (!ctx.stationOf(n) ? 'no station' : online(ctx.stationOf(n)) ? 'not running' : 'unreachable');
-    const says = (p ? paneSays(p) : `${name}, ${stateText}`) + (guest ? `, ${guest}` : '') + (p?.needs_reason && state === 'needs_you' ? `: ${p.needs_reason}` : '');
+    // A view has no state of its own: a Watch says its agents' (it stands
+    // out when one of them needs the owner), and Files says nothing.
+    const view = isView(n);
+    const state = p ? stateOf(p) : view ? viewState(ctx.lay, n) : 'missing';
+    const stateText = p ? (p.exited ? 'ended' : STATE_LABEL[state] || state) : view ? (STATE_LABEL[state] || state) : (!ctx.stationOf(n) ? 'no station' : online(ctx.stationOf(n)) ? 'not running' : 'unreachable');
+    const says = (p ? paneSays(p) : view && state === 'idle' ? name : `${name}, ${stateText}`) + (guest ? `, ${guest}` : '') + (p?.needs_reason && state === 'needs_you' ? `: ${p.needs_reason}` : '');
     const menu = (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -3970,7 +4056,7 @@ function hiddenStrip(ctx) {
     return h('span', { class: `hid-chip ${state}`, dataset: { ref }, oncontextmenu: menu },
       h('button', { type: 'button', class: 'hid-show', dataset: { keep: 'hid:' + ref }, 'aria-label': `Show ${says}. Hidden.`, title: `${says}. Hidden: click to show it where it was.`, onclick: () => ctx.hide(n, false) },
         h('span', { class: 'dot ' + state }), p ? paneMark(p) : null, h('span', { class: 'hid-name' }, name),
-        state === 'needs_you' || state === 'error' || !p ? h('span', { class: 'hid-state' }, stateText) : null),
+        state === 'needs_you' || state === 'error' || (!p && !view) ? h('span', { class: 'hid-state' }, stateText) : null),
       h('button', { type: 'button', class: 'icon-btn hid-menu', dataset: { keep: 'hidm:' + ref }, 'aria-label': `Menu for ${name}`, title: 'Pane menu', 'aria-haspopup': 'menu', onclick: menu }, '⋮'));
   };
   return h('div', { class: 'lay-hidden', role: 'group', 'aria-label': `Hidden panes of ${ctx.lay.name}` },
@@ -4314,9 +4400,10 @@ function phoneLayoutView(lay) {
   const ctx = ctxFor(lay);
   dropDeadHidden(lay, ctx);
   const cells = leaves(lay.cache.tree).map((n) => {
-    const p = ctx.resolve(n)?.p || null, guest = ctx.guest(n), name = ctx.label(n);
-    const state = p ? stateOf(p) : 'missing';
-    return { node: n, ref: ctx.refOf(n), st: ctx.stationOf(n), p, guest, name, state, hidden: !!n.hidden, label: `${name}${guest ? ' ' + guest : ''}, ${p ? STATE_LABEL[state] || state : 'not running'}${n.hidden ? ', hidden' : ''}` };
+    const p = ctx.resolve(n)?.p || null, guest = ctx.guest(n), name = ctx.label(n), view = isView(n);
+    // A view's name says its kind ("Files · out"); a Watch has its agents' state.
+    const state = p ? stateOf(p) : view ? viewState(lay, n) : 'missing';
+    return { node: n, ref: ctx.refOf(n), st: ctx.stationOf(n), p, guest, name, state, view, hidden: !!n.hidden, label: `${name}${guest ? ' ' + guest : ''}, ${p ? STATE_LABEL[state] || state : view ? (state === 'idle' ? 'a view' : STATE_LABEL[state] || state) : 'not running'}${n.hidden ? ', hidden' : ''}` };
   });
   // A hidden pane is left out of the order that Previous, Next and a swipe
   // step through. It stays in the map, marked, and a tap there looks at it
@@ -4349,7 +4436,9 @@ function phoneLayoutView(lay) {
     v.chev = h('span', { class: 'chev', 'aria-hidden': 'true' }, '▾');
     v.where = h('button', { type: 'button', class: 'lay-where', 'aria-expanded': 'false', onclick: (e) => { e.currentTarget.blur(); v.fold(!v.open); } }, v.showing, v.dots, v.chev);
     v.nav = h('div', { class: 'lay-nav' }, v.prev, v.where, v.next);
-    v.panel = h('div', { class: 'lay-panel', hidden: true }, v.title, v.map, h('div', { class: 'row lay-panel-row' }, h('span', { class: 'muted small grow' }, 'Tap a pane to show it here. A dashed one is hidden in the layout.'), v.hide));
+    // A pane is added by its kind here too (viewpanes.js).
+    v.add = h('button', { type: 'button', class: 'lay-add', onclick: (e) => { e.currentTarget.blur(); v.fold(false); addPaneDialog(v.lay); } }, 'Add a pane');
+    v.panel = h('div', { class: 'lay-panel', hidden: true }, v.title, v.map, h('div', { class: 'row lay-panel-row' }, h('span', { class: 'muted small grow' }, 'Tap a pane to show it here. A dashed one is hidden in the layout.'), v.add, v.hide));
     v.strip = h('div', { class: 'lay-strip' }, v.nav, v.panel);
     v.fold = (open) => {
       v.open = open;
@@ -4393,6 +4482,7 @@ function phoneLayoutView(lay) {
     phonePanes.clear();
     phonePanes.set(vkey, v);
   }
+  v.lay = lay;
   const show = (ref) => { v.fold(false); if (phoneAt.get(lay.key) !== ref) { phoneAt.set(lay.key, ref); render(); } };
   v.step = (d) => { const to = stepTo(d); if (to) show(to.ref); };
   v.toggle = () => { if (cur) { setHidden(cur.node, !cur.hidden); saveLayout(lay); render(); } };
@@ -4451,7 +4541,9 @@ function phoneLayoutView(lay) {
   for (const a of waiting) if (!v.rows.has(a.id)) { const el = approvalRow(a); v.rows.set(a.id, el); v.appr.append(el); }
 
   let body;
-  if (!p) {
+  // A view has the screen as a pane does: the file browser, or Watch.
+  if (cur && cur.view) body = viewCell(ctx, cur.node, 'phone');
+  else if (!p) {
     const what = cur ? cur.ref : '';
     if (v.gone?.what !== what) {
       const project = cur && cur.node.pane !== undefined ? (cur.node.project || lay.project) : null;
@@ -4464,6 +4556,7 @@ function phoneLayoutView(lay) {
   } else body = chat ? conv.body : v.term;
   v.main.classList.toggle('phone-chat', chat);
   v.main.classList.toggle('phone-pane', !!p && !chat);
+  v.main.classList.toggle('phone-viewleaf', !!(cur && cur.view));
   syncKids(v.main, [conv ? conv.bar : v.back, v.strip, v.appr, body]);
   return v.main;
 }
@@ -4504,9 +4597,11 @@ function phoneList() {
   const all = S.fleet.stations.flatMap(s => liveAgents(s.station).map(p => ({ st: s.station, p })));
   const blockers = all.filter(x => x.p.agent !== 'shell' && (x.p.state === 'needs_you' || x.p.state === 'error'));
   const whereOf = (st, p) => `${st}${p.project ? ' · ' + p.project : ''}`;
-  const line = (st, p, where) => h('a', { class: 'phone-row', href: paneUrl(st, p.id), 'aria-label': paneSays(p) }, dot(p), paneMark(p),
+  const line = (st, p, where) => h('a', { class: 'phone-row', href: paneUrl(st, p.id), 'aria-label': `${paneSays(p)}, ${KINDS[paneKind(st, p)][0]}` }, dot(p), paneMark(p),
     h('div', { class: 'grow' }, h('b', {}, p.name), where ? h('span', { class: 'muted' }, ' · ' + where) : null,
-      h('div', { class: 'muted small' }, p.needs_reason || (p.exited ? 'ended' : p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}` : `${STATE_LABEL[stateOf(p)]} · ${ago(p.state_since_ms)}`)), rapidLine(p)), '›');
+      h('div', { class: 'muted small' }, p.needs_reason || (p.exited ? 'ended' : p.tool ? `${p.tool} · ${ago(p.tool_since_ms)}` : `${STATE_LABEL[stateOf(p)]} · ${ago(p.state_since_ms)}`)), rapidLine(p)), kindTag(paneKind(st, p)), '›');
+  // A layout's views, under it, each with its kind.
+  const viewRows = (x) => leaves(x.cache.tree).filter(isView).map(n => sideView(x, n, 'phone-row phone-view-row'));
   // A layout is opened as a map you step through, one pane at a time.
   const layRow = (x, where) => { const n = leaves(x.cache.tree).length, hid = leaves(x.cache.tree).filter(y => y.hidden).length; return h('a', { class: 'phone-row lay-row', href: layUrl(x), 'aria-label': `${x.name}, layout` }, h('span', { class: 'ico-wrap' }, layoutIcon()),
     h('div', { class: 'grow' }, h('b', {}, x.name), where ? h('span', { class: 'muted' }, ' · ' + where) : null, h('div', { class: 'muted small' }, `${n} pane${n === 1 ? '' : 's'}, one at a time${hid ? ` · ${hid} hidden` : ''}`)), '›'); };
@@ -4530,7 +4625,7 @@ function phoneList() {
         const mine = panesOf(st).filter(p => p.project === pr.name && !p.exited).sort(byState);
         return h('div', { class: 'phone-project' },
           h('div', { class: 'row phone-project-head' }, h('b', {}, pr.name), pr.branch ? h('span', { class: 'muted' }, pr.branch) : null, linkedChip(st, pr)),
-          projectLayouts(st).filter(x => x.project === pr.name).map(x => layRow(x)),
+          projectLayouts(st).filter(x => x.project === pr.name).map(x => [layRow(x), viewRows(x)]),
           mine.length ? watchRow(st, pr) : null,
           mine.map(p => line(st, p)),
           !mine.length ? h('div', { class: 'row' }, h('span', { class: 'muted small grow' }, pr.open ? 'Nothing is running.' : 'Closed.'), pr.open ? null : h('button', { onclick: () => rpc(st, 'project.open', { name: pr.name }) }, 'Open')) : null);
@@ -4547,7 +4642,8 @@ function phoneList() {
     homeSwitch(),
     byStation ? null : h('section', { class: 'phone-recents' }, h('h2', {}, 'Recents'), recentRows()),
     byStation ? h('section', {}, h('h2', {}, 'Stations'), stationsByName().map(station), addRow(), twinsLine()) : null,
-    byStation && globals.length ? h('section', { class: 'phone-layouts' }, h('h2', {}, 'Layouts'), globals.map(x => layRow(x, 'every station'))) : null,
+    byStation && globals.length ? h('section', { class: 'phone-layouts' }, h('h2', {}, 'Layouts'), globals.map(x => [layRow(x, 'every station'), viewRows(x)])) : null,
+    byStation ? dotKeyLink() : null,
     stopRows(),
     byStation ? h('section', {}, h('button', { class: 'wide', onclick: fleetUsageDialog }, 'Usage: tokens and estimated cost'),
       h('a', { class: 'btn wide perf-btn', href: '#/perf' }, 'Performance', anyTrouble(S.perf) ? h('span', { class: 'perf-dot', 'aria-hidden': 'true' }) : null)) : null,
@@ -4731,6 +4827,7 @@ function render() {
   S.route = parseRoute();
   for (const t of S.terms.values()) t._used = false;
   chatBeforeRender();
+  viewsBeforeRender();
   const r = S.route;
   // The page is drawn again for every change, every few seconds at least:
   // whatever was scrolled stays where it was. (On a phone the list jumped
@@ -4770,6 +4867,8 @@ function render() {
   // is where it was scrolled to.
   chatAfterRender();
   watchAfterRender();
+  viewsAfterRender();
+  viewsShown();
   filesSync();
   // Each terminal has its look before it is first drawn.
   applyLook();
@@ -4792,6 +4891,8 @@ function update() {
   // Do not redraw under an open dialog's feet, while a menu is open, or in
   // the middle of dragging a pane or the line between two.
   if (document.querySelector('.menu') || document.body.classList.contains('dragging')) return false;
+  // Nor while a name is being typed in a layout's file browser, or a file dragged.
+  if (filesBusy()) return false;
   const active = document.activeElement;
   const typing = active && active.closest && active.closest('.dialog');
   const focusedTerm = [...S.terms.values()].find(t => t.el.contains(active));
@@ -4973,6 +5074,14 @@ initMic({
   api, hasCap, hopTo,
   stationsWith: (cap) => S.fleet.stations.filter(s => s.state === 'online' && (s.caps || []).includes(cap)).map(s => s.station),
   secureDeck: () => { const me = S.fleet.stations.find(s => s.self), t = me?.https; return t && t.on && t.name ? { origin: `https://${t.name}:${t.port}`, what: `${me.station}'s secure deck` } : null; },
+});
+initViews({
+  api, isPhone, hasCap, online, panesOf, go, paneUrl, watchUrl, render, watchView, addLeaf, addToLayout, newPaneDialog, refresh, findPane, paneMark, layUrl, layWhere,
+  stations: () => stationsByName(),
+  projects: (st) => S.projects.get(st) || [],
+  loaded: (st) => S.loaded && heard(st),
+  toPane: toPaneFrom,
+  has: (lay, st, p) => ctxFor(lay).has(st, p),
 });
 initFiles({
   api, isPhone, findPane,

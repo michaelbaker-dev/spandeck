@@ -1368,3 +1368,49 @@ button.gchip { cursor: pointer; } button.gchip:hover:not(:disabled) { border-col
 .glance-sheet .fact.g-warn b, .glance-sheet .fact.g-bad b { color: var(--chip-warn); } .glance-sheet .fact.g-bad b { color: var(--chip-bad); }
 .glance-sheet .g-act { flex: none; }
 @media (max-width: 760px) { .glance-sheet .g-act { min-height: 44px; padding: 4px 14px; } }
+
+/* ---- A layout holds more than programs: Files and Watch; the kind of a pane as a word; the key to the dots (20 Nov 2026) ---- */
+/* The kind is a word at the end of a row and in a pane's header. It has no colour of its own: colour is the dot's, and the dot is the state. */
+.kind-tag { flex: none; display: inline-block; font-size: calc(10px * var(--ui-scale)); line-height: 1.5; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; padding: 0 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel2); color: var(--muted); white-space: nowrap; }
+.side-row .kind-tag { margin-left: auto; } .side-row.current .kind-tag { color: var(--text); }
+.side-views { margin-left: 14px; } .side-view { color: var(--text); text-decoration: none; }
+.phone-row .kind-tag { align-self: center; } .phone-view-row { padding-left: 28px; }
+/* A view in a layout's cell: a head that says its kind, then the view. */
+.view-cell { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg); container-type: inline-size; }
+.view-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 3px 8px; height: 28px; background: var(--panel); border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; }
+.view-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.view-head .chip, .view-count, .view-back { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; } .view-back { padding: 0 7px; }
+.view-head .icon-btn { flex: none; }
+.view-cell > .fx-cell { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--panel); }
+.view-cell > .watch, .view-cell > .empty { flex: 1; min-height: 0; }
+.view-cell > .empty { margin: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
+/* Watch in a cell is one column whatever the window's width: the agents, then what they say. */
+.view-cell .watch { flex-direction: column; gap: 8px; padding: 8px; }
+.view-cell .watch-side { display: contents; }
+.view-cell .watch-strip { flex: none; max-height: 45%; min-height: 0; }
+.view-cell .watch-open { display: none; }
+.view-cell .watch-msg { min-width: min(60%, 200px); }
+/* A narrow cell lists names only, as a phone does. */
+@container (max-width: 430px) { .view-cell .fx-cols, .view-cell .fx-size, .view-cell .fx-when { display: none; } .view-count { display: none; } }
+.view-flash { outline: 2px solid var(--blue); outline-offset: -2px; }
+.phone-layout.phone-viewleaf > .view-cell { flex: 1 1 auto; }
+.phone-layout .view-head { height: auto; min-height: 44px; padding: 4px 10px; } .phone-layout .view-head .icon-btn { min-width: 44px; min-height: 44px; }
+/* Adding a pane: first its kind. */
+.lay-head .add-pane { flex: none; padding: 2px 9px; }
+.add-pane .kind-group { border: none; margin: 0 0 12px; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.add-pane legend { padding: 0; margin-bottom: 5px; color: var(--muted); font-size: calc(11px * var(--ui-scale)); text-transform: uppercase; letter-spacing: .04em; }
+.kind-card { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); cursor: pointer; }
+.kind-card:has(input:checked) { border-color: var(--blue); background: var(--sel-bg); }
+.kind-card:has(input:focus-visible) { outline: 2px solid var(--blue); outline-offset: 1px; }
+.kind-card.off { opacity: .65; cursor: default; }
+.kind-card input { flex: none; width: auto; margin: 0; }
+.kind-card-tags { flex: none; display: flex; flex-wrap: wrap; gap: 3px; width: 84px; }
+.kind-card-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.add-pane h3 { margin: 10px 0 6px; font-size: calc(13px * var(--ui-scale)); } .add-pane h3:first-child { margin-top: 0; }
+.add-new select { flex: 1 1 auto; width: auto; min-width: 0; }
+@media (max-width: 760px) { .kind-card-tags { width: 48px; } .add-pane .row.end button, .add-new button, .add-new select { min-height: 44px; } }
+/* The key to the dots: one quiet line at the foot of the list. */
+.dot-key-link { flex: none; justify-content: flex-start; gap: 7px; padding: 4px 6px; background: none; border: none; color: var(--muted); font-size: calc(12px * var(--ui-scale)); }
+.dot-key-link:hover { color: var(--text); } .phone .dot-key-link { min-height: 44px; }
+.dot-key-list { list-style: none; margin: 0 0 12px; padding: 0; display: grid; grid-template-columns: auto auto 1fr; gap: 8px 10px; align-items: center; }
+.dot-key-list li { display: contents; }

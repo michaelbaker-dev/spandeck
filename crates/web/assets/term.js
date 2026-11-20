@@ -15,7 +15,7 @@
 // font that stood in for it, so it measures again and then does as above.
 
 import { stripChips, fitStrip, watchGlance } from './chips.js';
-import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, heldWords, rapidLine, RELEASE_SAYS, trustAsksWords, trustAnsweredWords, hooksAsksWords, hooksAnsweredWords } from './ui.js';
+import { h, ago, dot, STATE_LABEL, stateOf, toast, copyText, heldWords, rapidLine, RELEASE_SAYS, trustAsksWords, trustAnsweredWords, hooksAsksWords, hooksAnsweredWords, kindTag } from './ui.js';
 import { paneIcon, iconName, hideIcon, fileIcon } from './icons.js';
 import { keyTyped, paneWrote, keysNotSent } from './perf.js';
 import { HOLD_MS, isTyping, isPaste, holdTake, heldTooLong, keysWords, wasWere, offWords, droppedWords, sendAct } from './typed.js';
@@ -1070,6 +1070,8 @@ export class PaneTerm {
       dot(p),
       h('span', { class: 'ico-wrap', title: iconName(p.icon) }, paneIcon(p.icon)),
       h('span', { class: 'strip-name', title: p.address }, p.name),
+      // What kind of pane this is, in a word: its terminal (its other face says Chat).
+      kindTag('term'),
       p.agent !== 'shell' ? h('span', { class: 'chip' }, p.agent_name) : null,
       p.role ? h('span', { class: 'chip' }, p.role) : null,
       this.guest ? h('span', { class: 'chip guest', title: `A guest in this layout: this pane is ${this.guest}` }, this.guest) : null,

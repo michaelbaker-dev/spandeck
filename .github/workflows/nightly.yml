@@ -203,6 +203,17 @@ jobs:
         run: |
           cargo test -p spandeck --test files -- --ignored
           cargo test -p spandeck --test filespanel -- --ignored
+      # A layout holds more than programs (the owner's request, 20 Nov
+      # 2026), in a real browser: Files and Watch added by kind to a
+      # project's layout and to a global one, the same after a reload and
+      # from another station's deck; the panel's work done in a Files pane,
+      # with the panel beside it; a Watch pane following a fake agent and a
+      # tap going to it; a view hidden, moved and taken out; the deck of
+      # 0.4.19's own reader given a layout with views; and a phone stepping
+      # through all four kinds. About five seconds.
+      - name: Files and Watch as panes of a layout, the kind as a word, the key to the dots
+        if: ${{ !cancelled() }}
+        run: cargo test -p spandeck --test viewpanes -- --ignored --skip screenshots_
       # A pane's header chips, in a real browser: the model, the context,
       # the branch and the cost in a conversation's bar and on a terminal's
       # strip, with the processor and memory of the pane's programs; an

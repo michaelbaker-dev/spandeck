@@ -31,7 +31,28 @@ export function openFiles(station, pane) {
 }
 // The page was drawn again: the pane the panel was opened for may have
 // another folder or name, and the fleet other stations.
-export function filesSync() { if (panel && panel.shown) panel.sync(); }
+export function filesSync() { if (panel && (panel.shown || panel.cells.size)) panel.sync(); }
+
+// A listing in a cell of a layout (viewpanes.js; DECISIONS.md, "A layout
+// holds more than programs"): the same listing the panel shows, with the
+// page's one clipboard, its uploads and its jobs, so a file copied in the
+// panel is pasted in a cell and the other way round. `key` names the cell;
+// asked for again, the same cell comes back as it was. `opts.onGo(path)`
+// hears of each folder shown. The cell is `{ el, view }`: `el` goes on the
+// page, `view.show(station, path)` says what it lists.
+export function filesCell(key, opts = {}) {
+  if (!panel) panel = new Panel();
+  return panel.cell(key, opts);
+}
+// The cells still on the page are `keep`; the others are let go.
+export function filesCellsKeep(keep) {
+  if (panel) for (const key of [...panel.cells.keys()]) if (!keep.has(key)) panel.dropCell(key);
+}
+// A name is being typed in a cell, or something is being dragged: the page
+// is not drawn again under it.
+export function filesBusy() {
+  return !!panel && (!!panel.drag || [...panel.cells.values()].some(c => c.el.isConnected && (c.view.draft || c.view.renaming || c.view.pathEdit)));
+}
 
 const KIB = 1024, MIB = 1024 * 1024;
 const PREVIEW_MAX = 256 * KIB;
@@ -168,9 +189,14 @@ function inUseNotice(verb, refused, sep, done) {
 
 // ------------------------------------------------------------- one listing
 
+let listings = 0;
 class Listing {
-  constructor(owner) {
+  // `opts.fixed`: its station is not chosen in its own bar (a cell of a
+  // layout says its station). `opts.onGo(path)`: told of each folder shown.
+  constructor(owner, opts = {}) {
     this.panel = owner;
+    this.opts = opts;
+    this.uid = ++listings;
     this.station = null;
     this.home = null;         // files.home of the station
     this.root = null;         // the folder shown
@@ -294,6 +320,7 @@ class Listing {
     this.tree.scrollTop = 0;
     this.draw();
     this.panel.sync();
+    if (this.opts.onGo) this.opts.onGo(got.path);
     return true;
   }
 
@@ -377,10 +404,10 @@ class Listing {
     const sig = JSON.stringify([all.map(s => [s.station, s.state, canFiles(s)]), this.station, !!parent, pane?.cwd, pane?.name, this.root, this.panel.showHidden, !!this.home]);
     if (sig === this.barSig) return;
     this.barSig = sig;
-    const pick = h('select', { class: 'fx-station', 'aria-label': 'Station', title: 'Whose files these are', onchange: (e) => this.show(e.target.value) },
+    const pick = this.opts.fixed ? h('span', { class: 'grow' }) : h('select', { class: 'fx-station', 'aria-label': 'Station', title: 'Whose files these are', onchange: (e) => this.show(e.target.value) },
       all.map(s => h('option', { value: s.station, selected: s.station === this.station, disabled: !canFiles(s) && s.station !== this.station },
         s.station + (s.state !== 'online' ? ' (not answering)' : canFiles(s) ? '' : ' (needs updating)'))));
-    if (this.station && !all.some(s => s.station === this.station)) pick.append(h('option', { value: this.station, selected: true }, this.station));
+    if (!this.opts.fixed && this.station && !all.some(s => s.station === this.station)) pick.append(h('option', { value: this.station, selected: true }, this.station));
     const btn = (name, label, run, off) => h('button', { type: 'button', class: 'fx-nav fx-nav-' + name, title: label, 'aria-label': label, disabled: !!off, onclick: run }, ico(name));
     fill(this.barEl, pick,
       btn('up', 'Up: the folder this one is in', () => this.go(parent), !parent),
@@ -486,7 +513,7 @@ class Listing {
     const box = this.tree.querySelector('.fx-name-box');
     if (box && document.activeElement !== box) { box.focus(); const dot = box.value.lastIndexOf('.'); box.setSelectionRange(0, dot > 0 ? dot : box.value.length); }
   }
-  idOf(path) { const i = this.flat.findIndex(r => r.path === path); return `fx-${this.panel.views.indexOf(this)}-${i}`; }
+  idOf(path) { const i = this.flat.findIndex(r => r.path === path); return `fx-${this.uid}-${i}`; }
 
   row(r, i, phone, cut) {
     const e = r.e, sel = this.sel.has(r.path), kind = fileKind(e, r.open);
@@ -497,7 +524,7 @@ class Listing {
     const says = r.odd ? 'This name is not UTF-8: it cannot be opened, renamed or deleted from here. It still goes with its folder.' : e.kind === 'link' ? `A link to ${e.target === 'missing' ? 'something that is not there' : e.target === 'dir' ? 'a folder' : 'a file'}` : '';
     return deep(h('div', {
       class: 'fx-row' + (sel ? ' sel' : '') + (this.cursor === r.path ? ' cursor' : '') + (r.odd ? ' odd' : '') + (cut && cut.has(r.path) ? ' cut' : '') + (e.hidden ? ' dot-file' : ''),
-      id: `fx-${this.panel.views.indexOf(this)}-${i}`, role: 'treeitem', 'aria-level': r.depth + 1, 'aria-selected': String(sel), 'aria-expanded': r.isDir && !r.odd ? String(r.open) : undefined,
+      id: `fx-${this.uid}-${i}`, role: 'treeitem', 'aria-level': r.depth + 1, 'aria-selected': String(sel), 'aria-expanded': r.isDir && !r.odd ? String(r.open) : undefined,
       'aria-disabled': r.odd ? 'true' : undefined, draggable: !r.odd && !phone ? 'true' : undefined, dataset: { i: String(i) }, title: says || undefined,
     },
     this.selecting ? h('input', { type: 'checkbox', class: 'fx-tick', checked: sel, disabled: r.odd, tabIndex: -1, 'aria-label': `Tick ${e.name}` }) : null,
@@ -525,7 +552,7 @@ class Listing {
     };
     const note = h('span', { class: 'fx-name-err', role: 'alert' }, state.error || '');
     box.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); end(true); } if (e.key === 'Escape') { e.preventDefault(); end(false); this.tree.focus({ preventScroll: true }); } });
-    box.addEventListener('blur', () => setTimeout(() => { if (!over && box.isConnected) end(true); }, 120));
+    box.addEventListener('blur', () => setTimeout(() => { if (!over && box.isConnected && document.activeElement !== box) end(true); }, 120));
     for (const type of ['click', 'dblclick', 'mousedown']) box.addEventListener(type, (e) => e.stopPropagation());
     return deep(h('div', { class: 'fx-row fx-naming' }, h('span', { class: 'fx-tri none' }), ico(kind, 'k-' + kind), h('span', { class: 'fx-main' }, box, note)), depth);
   }
@@ -837,6 +864,7 @@ class Panel {
     this.shown = false;
     this.pane = null;         // {station, id}: the pane it was opened for
     this.views = [];
+    this.cells = new Map();   // key -> {key, view, el, footEl}: listings in a layout's cells
     this.active = null;
     this.clip = null;         // {station, paths, op}: the page's own clipboard
     this.rows = [];           // uploads, zips and links, newest last
@@ -878,27 +906,66 @@ class Panel {
     });
     // What the device's clipboard holds: files are uploaded; anything
     // else, and the page's own clipboard is pasted.
-    this.el.addEventListener('paste', (e) => {
-      if (e.target.closest('input, textarea')) return;
-      const view = this.active || this.views[0];
-      if (!view || !view.root) return;
-      clearTimeout(this.pasteSoon);
-      const files = [...(e.clipboardData?.files || [])];
-      e.preventDefault();
-      if (files.length) this.upload(files.map(file => ({ file, parts: [] })), view.station, view.root, view);
-      else this.paste(view, view.root);
-    });
+    this.el.addEventListener('paste', (e) => this.onPaste(e, this.mine()));
     // A file dropped on the panel beside a listing goes to the listing
     // that has the keyboard, and never opens in place of the deck.
-    for (const type of ['dragenter', 'dragover']) this.el.addEventListener(type, (e) => { if ([...(e.dataTransfer?.types || [])].includes('Files')) { e.preventDefault(); try { e.dataTransfer.dropEffect = 'copy'; } catch (err) { /* nothing to say */ } } });
-    this.el.addEventListener('drop', (e) => {
-      const view = this.active || this.views[0];
+    this.besideDrop(this.el, () => this.mine());
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) this.relist(); });
+  }
+  onPaste(e, view) {
+    if (e.target.closest('input, textarea')) return;
+    if (!view || !view.root) return;
+    clearTimeout(this.pasteSoon);
+    const files = [...(e.clipboardData?.files || [])];
+    e.preventDefault();
+    if (files.length) this.upload(files.map(file => ({ file, parts: [] })), view.station, view.root, view);
+    else this.paste(view, view.root);
+  }
+  besideDrop(el, viewOf) {
+    for (const type of ['dragenter', 'dragover']) el.addEventListener(type, (e) => { if ([...(e.dataTransfer?.types || [])].includes('Files')) { e.preventDefault(); try { e.dataTransfer.dropEffect = 'copy'; } catch (err) { /* nothing to say */ } } });
+    el.addEventListener('drop', (e) => {
+      const view = viewOf();
       this.dragOver(null);
       if (!(e.dataTransfer?.files || []).length) return;
       e.preventDefault();
       if (view && view.root) this.uploadDropped(e.dataTransfer, view, view.root);
     });
-    document.addEventListener('visibilitychange', () => { if (!document.hidden && this.shown) this.relist(); });
+  }
+
+  // ---- listings in a layout's cells ----
+  cell(key, opts) {
+    let c = this.cells.get(key);
+    if (c) return c;
+    const view = new Listing(this, { fixed: true, onGo: opts.onGo });
+    const footEl = h('div', { class: 'fx-foot', hidden: true });
+    const el = h('div', { class: 'fx fx-cell' }, view.el, footEl);
+    el.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !e.defaultPrevented && view.selecting) { e.stopPropagation(); view.setSelecting(false); } });
+    el.addEventListener('paste', (e) => this.onPaste(e, view));
+    this.besideDrop(el, () => view);
+    c = { key, view, el, footEl };
+    this.cells.set(key, c);
+    this.ticking();
+    return c;
+  }
+  dropCell(key) {
+    const c = this.cells.get(key);
+    if (!c) return;
+    c.view.seq++;
+    c.el.remove();
+    this.cells.delete(key);
+    if (this.active === c.view) this.active = this.views[0] || null;
+    this.ticking();
+  }
+  // The panel's own listing that has the keyboard (a cell's listing is not the panel's).
+  mine() { return this.views.includes(this.active) ? this.active : this.views[0]; }
+  // Every listing there is, and those on the page now.
+  all() { return [...this.views, ...[...this.cells.values()].map(c => c.view)]; }
+  live() { return [...(this.shown ? this.views : []), ...[...this.cells.values()].filter(c => c.el.isConnected).map(c => c.view)]; }
+  // Listings are read again every few seconds while one is on the page.
+  ticking() {
+    const on = this.shown || this.cells.size > 0;
+    if (on && !this.timer) this.timer = setInterval(() => this.relist(), RELIST_MS);
+    if (!on && this.timer) { clearInterval(this.timer); this.timer = null; }
   }
 
   // A tap opens (and ticks choose) on a phone and on any touch screen.
@@ -906,7 +973,7 @@ class Panel {
   activate(view) { if (this.active === view) return; this.active = view; for (const v of this.views) v.el.classList.toggle('active', v === view && this.views.length > 1); this.sync(); }
   paneOf() { return this.pane ? env.findPane(this.pane.station, this.pane.id) : null; }
   // The pane the panel was opened for, where `view` shows its station.
-  paneFor(view) { const p = this.paneOf(); return p && this.pane.station === view.station ? p : null; }
+  paneFor(view) { const p = this.paneOf(); return p && this.pane.station === view.station && this.views.includes(view) ? p : null; }
 
   open(station, pane) {
     this.pane = pane ? { station, id: pane.id } : null;
@@ -915,11 +982,12 @@ class Panel {
     this.active = view;
     if (!this.shown) {
       this.shown = true;
+      this.el.append(this.input);
       document.body.append(this.el);
       document.getElementById('overlays').append(this.badge);
       document.body.classList.add('files-open');
       this.setWidth(this.width, false);
-      this.timer = setInterval(() => this.relist(), RELIST_MS);
+      this.ticking();
       for (const v of this.views.slice(1)) v.refresh();
     }
     view.show(station, null, pane ? pane.id : null).then(() => this.askJobs());
@@ -932,11 +1000,12 @@ class Panel {
   close() {
     if (!this.shown) return;
     this.shown = false;
-    clearInterval(this.timer);
+    this.ticking();
     closeMenu();
     this.el.remove();
     this.badge.remove();
     document.body.classList.remove('files-open');
+    this.drawFoot();
     this.refit();
   }
   // The panes beside the panel are as wide as what is left: say so.
@@ -956,7 +1025,7 @@ class Panel {
     addEventListener('pointerup', up);
   }
 
-  setHidden(on) { this.showHidden = on; store.set('hidden', on ? '1' : '0'); for (const v of this.views) v.draw(); }
+  setHidden(on) { this.showHidden = on; store.set('hidden', on ? '1' : '0'); for (const v of this.all()) v.draw(); }
 
   // A second listing under the first, with its own station and folder:
   // for dragging from one to the other.
@@ -980,8 +1049,13 @@ class Panel {
 
   // The head: what the panel is for, the pane's move, the second view, Close.
   sync() {
+    this.syncHead();
+    for (const c of this.cells.values()) c.el.classList.toggle('fx-touch', this.tapOpens());
+    for (const v of this.live()) { v.drawBar(); v.drawTools(); }
+  }
+  syncHead() {
     if (!this.shown) return;
-    const p = this.paneOf(), view = this.active || this.views[0];
+    const p = this.paneOf(), view = this.mine();
     const here = p && view && view.root && this.pane.station === view.station && !p.exited && view.root !== (p.cwd || '').replace(/(.)[\\/]$/, '$1') ? view.root : null;
     const shell = p && p.agent === 'shell';
     const sig = JSON.stringify([p?.name, p?.cwd, this.pane, here, this.views.length, env.isPhone()]);
@@ -996,7 +1070,6 @@ class Panel {
         h('button', { type: 'button', class: 'fx-close', 'aria-label': 'Close the file panel', title: 'Close (Esc)', onclick: () => this.close() }, env.isPhone() ? 'Close' : '✕'));
     }
     this.el.classList.toggle('fx-touch', this.tapOpens());
-    for (const v of this.views) { v.drawBar(); v.drawTools(); }
   }
 
   // Move agent here. The only thing in the panel that moves a pane.
@@ -1021,14 +1094,14 @@ class Panel {
   }
 
   // ---- staying current ----
-  relist() { if (this.shown && !document.hidden) for (const v of this.views) if (!v.draft && !v.renaming && !v.pathEdit && !this.drag) v.refresh(); }
+  relist() { if (!document.hidden) for (const v of this.live()) if (!v.draft && !v.renaming && !v.pathEdit && !this.drag) v.refresh(); }
   // Something of this page's own doing changed a station's files.
-  changed(station) { for (const v of this.views) if (v.station === station) v.refresh(); }
+  changed(station) { for (const v of this.all()) if (v.station === station) v.refresh(); }
 
   // ---- the clipboard, the page's own ----
   setClip(clip) {
     this.clip = clip;
-    for (const v of this.views) { v.drawTools(); v.drawTree(); }
+    for (const v of this.all()) { v.drawTools(); v.drawTree(); }
     this.drawFoot();
   }
   paste(view, dir) {
@@ -1083,7 +1156,7 @@ class Panel {
   }
   running() { return [...this.jobs.values()].some(j => j.job.state === 'running') || this.rows.some(r => r.kind === 'zip' && r.state === 'building'); }
   async askJobs() {
-    const asked = new Set(this.views.map(v => v.station).filter(s => s && canFiles(env.stations().find(x => x.station === s))));
+    const asked = new Set(this.live().map(v => v.station).filter(s => s && canFiles(env.stations().find(x => x.station === s))));
     await this.pollStations(asked);
     if (this.running()) this.watch();
   }
@@ -1105,7 +1178,7 @@ class Panel {
     const errs = (job.errors || []).length + (job.errors_more || 0);
     // What a pane is working in was not moved: its own notice, by name.
     const used = (job.errors || []).filter(e => e.code === 'in_use'), other = (job.errors || []).find(e => e.code !== 'in_use');
-    if (used.length && mine) inUseNotice('move', used, this.views.find(v => v.station === station)?.sep || '/', (job.created || []).length ? `${items(job.created.length)} moved. Not moved:` : null);
+    if (used.length && mine) inUseNotice('move', used, this.all().find(v => v.station === station)?.sep || '/', (job.created || []).length ? `${items(job.created.length)} moved. Not moved:` : null);
     if (job.state === 'failed') toast(job.message || 'The copy failed.', 'error');
     else if (job.state === 'done' && errs && (other || !used.length || !mine)) toast(`${job.op === 'move' ? 'Moved' : 'Copied'}, except ${errs}: ${(other || job.errors[0])?.message || ''}`, 'error');
   }
@@ -1170,7 +1243,12 @@ class Panel {
   }
 
   // ---- uploads ----
-  pickFiles(view, dir) { this.inputFor = { view, dir }; this.input.click(); }
+  pickFiles(view, dir) {
+    this.inputFor = { view, dir };
+    // (Laid out, as above: with the panel closed the box goes beside the listing that asked.)
+    if (!this.input.isConnected) (view.el.parentNode || document.body).append(this.input);
+    this.input.click();
+  }
 
   // What was dropped: files, and folders walked to their ends. The
   // entries are taken before anything is waited for (a browser empties a
@@ -1315,8 +1393,14 @@ class Panel {
 
   // ---- the foot: the clipboard, and what is on its way ----
   dismiss(row) { this.rows = this.rows.filter(r => r !== row); this.drawFoot(); }
+  // In the panel when it is open; with it closed, under each listing in a cell.
   drawFoot() {
-    if (!this.shown) return;
+    const cells = [...this.cells.values()].map(c => c.footEl);
+    if (!this.shown) { for (const foot of cells) this.drawFootIn(foot); return; }
+    for (const foot of cells) { foot.replaceChildren(); foot.hidden = true; }
+    this.drawFootIn(this.footEl);
+  }
+  drawFootIn(footEl) {
     const kids = [], c = this.clip;
     if (c) kids.push(h('div', { class: 'fx-clip', role: 'status' }, h('span', {}, `${items(c.paths.length)} ${c.op === 'cut' ? 'cut' : 'copied'} from ${c.station}`),
       h('button', { type: 'button', class: 'mini fx-clip-clear', 'aria-label': 'Forget what was copied', title: 'Forget what was copied', onclick: () => this.setClip(null) }, '✕')));
@@ -1361,16 +1445,17 @@ class Panel {
         errors: run ? null : (job.errors || []), more: job.errors_more || 0, except: `done, except ${errs}`, bad: !run && (job.state === 'failed' || errs > 0),
         cancel: run ? () => change(j.station, 'files.job.cancel', { id: j.id }).catch(e => toast(say(e), 'error')) : null, close: run ? null : () => { this.jobs.delete(key); this.drawFoot(); } }));
     }
-    const open = new Set([...this.footEl.querySelectorAll('details[open]')].map(d => d.closest('.fx-xfer')?.querySelector('.fx-xfer-what')?.textContent));
-    this.footEl.replaceChildren(...kids);
-    for (const d of this.footEl.querySelectorAll('details')) if (open.has(d.closest('.fx-xfer')?.querySelector('.fx-xfer-what')?.textContent)) d.open = true;
-    this.footEl.hidden = !kids.length;
+    const open = new Set([...footEl.querySelectorAll('details[open]')].map(d => d.closest('.fx-xfer')?.querySelector('.fx-xfer-what')?.textContent));
+    footEl.replaceChildren(...kids);
+    for (const d of footEl.querySelectorAll('details')) if (open.has(d.closest('.fx-xfer')?.querySelector('.fx-xfer-what')?.textContent)) d.open = true;
+    footEl.hidden = !kids.length;
   }
 
   // ---- where a drag is, and what a drop there would do ----
   dragOver(at) {
-    for (const el of this.el.querySelectorAll('.fx-drop')) el.classList.remove('fx-drop');
+    for (const el of document.querySelectorAll('.fx-drop')) el.classList.remove('fx-drop');
     if (!at) { this.badge.hidden = true; return; }
+    if (!this.badge.isConnected) document.getElementById('overlays').append(this.badge);
     (at.row || at.view.tree).classList.add('fx-drop');
     this.badge.textContent = at.says;
     this.badge.hidden = false;

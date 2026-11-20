@@ -48,7 +48,9 @@ const KV_OWED: &str = "station.rename_owed";
 /// A leaf's station, renamed. Says whether anything changed.
 pub(crate) fn node_renamed(node: &mut LayoutNode, now: &dyn Fn(&str) -> String) -> bool {
     match node {
-        LayoutNode::Pane { station, .. } | LayoutNode::PaneId { station, .. } => match station {
+        LayoutNode::Pane { station, .. }
+        | LayoutNode::PaneId { station, .. }
+        | LayoutNode::View { station, .. } => match station {
             Some(s) => {
                 let to = now(s);
                 let changed = to != *s;
@@ -868,5 +870,36 @@ mod tests {
                 "rtx6000-wsl/web/main"
             ]
         );
+    }
+
+    /// A view follows its station's new name, and keeps the rest (20 Nov 2026).
+    #[test]
+    fn a_view_follows_its_stations_new_name() {
+        let now = |s: &str| {
+            if s == "old" {
+                "new".to_string()
+            } else {
+                s.to_string()
+            }
+        };
+        let mut leaf = LayoutNode::View {
+            id: "view.files.a1".into(),
+            station: Some("old".into()),
+            folder: Some("/srv/out".into()),
+            watch: None,
+            hidden: true,
+        };
+        assert!(node_renamed(&mut leaf, &now));
+        assert_eq!(
+            leaf,
+            LayoutNode::View {
+                id: "view.files.a1".into(),
+                station: Some("new".into()),
+                folder: Some("/srv/out".into()),
+                watch: None,
+                hidden: true,
+            }
+        );
+        assert!(!node_renamed(&mut leaf, &now));
     }
 }
