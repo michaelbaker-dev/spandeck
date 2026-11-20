@@ -556,6 +556,8 @@ pub struct Inner {
     pub(crate) adding: crate::add::AddState,
     /// A release being supplied to, or taken from, another station.
     pub(crate) held: Arc<crate::supply_fleet::Held>,
+    /// Links: stations reached over the owner's own ssh (link/mod.rs).
+    pub(crate) link: crate::link::LinkState,
     /// Told when the owner asked for this station to be stopped (when it
     /// was removed from the fleet with "also stop spandeck there").
     pub quit: tokio::sync::Notify,
@@ -791,6 +793,7 @@ impl Daemon {
             newrelease: Default::default(),
             adding: Default::default(),
             held: Default::default(),
+            link: Default::default(),
             quit: tokio::sync::Notify::new(),
         }));
         daemon.prices_load();
@@ -830,6 +833,11 @@ impl Daemon {
         // What the tools document names for this station and is not here
         // yet is installed, off to one side: nothing waits for it.
         daemon.tools_start();
+        // A task and a port on 127.0.0.1 for each `[[link]]`. With none,
+        // nothing is started and nothing listens.
+        if !daemon.cfg.link.is_empty() {
+            daemon.link_start();
+        }
         Ok(daemon)
     }
 
@@ -3299,6 +3307,8 @@ impl Daemon {
         caps.push(crate::supply_fleet::CAP);
         // The owner's file explorer: the `files.` methods (files.rs).
         caps.push(crate::files::CAP);
+        // It can be either side of a link (link/mod.rs).
+        caps.push(crate::link::CAP);
         // Request ids are kept: a change may be tried again by its id.
         if self.flag_on(crate::rids::FLAG, true) {
             caps.push(crate::rids::CAP);

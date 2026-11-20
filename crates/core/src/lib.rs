@@ -11,6 +11,7 @@
 //!   tasks     task records, delegation, workspaces, checkpoints, sign-offs
 //!   recipes   the review loop, and the builder and critic pair
 //!   memory    shared project memory and the start digest
+//!   link      a station with no Tailscale, reached over the owner's own ssh (deck only)
 //!   links     project links: two projects whose agents message each other and share findings
 //!   orders    standing orders at five layers
 //!   fleet     discovery over Tailscale, trust, peer calls, stop-all
@@ -63,6 +64,7 @@ pub mod hookstrust;
 pub mod http;
 pub mod https;
 pub mod latest;
+pub mod link;
 pub mod links;
 pub mod look;
 pub mod loops;

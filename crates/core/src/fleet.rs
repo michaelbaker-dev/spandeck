@@ -800,9 +800,19 @@ fn says_a_version(out: &str) -> bool {
         })
 }
 
-fn tailscale_json(args: &[&str]) -> Option<Value> {
+/// The Tailscale program on this machine, looked for once.
+fn tailscale_found() -> Option<&'static String> {
     static BIN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let bin = BIN.get_or_init(tailscale_bin).as_ref()?;
+    BIN.get_or_init(tailscale_bin).as_ref()
+}
+
+/// Is there a Tailscale program on this machine at all?
+pub(crate) fn has_tailscale() -> bool {
+    tailscale_found().is_some()
+}
+
+fn tailscale_json(args: &[&str]) -> Option<Value> {
+    let bin = tailscale_found()?;
     let out = tailscale_cmd(bin).args(args).output().ok()?;
     if !out.status.success() {
         return None;

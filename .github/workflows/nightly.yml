@@ -202,6 +202,17 @@ jobs:
       - name: A pane's header chips (a computer and a phone, themes)
         if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test chips -- --ignored
+      # A station reached over the owner's own SSH (a link), with two
+      # stations and a carrier that is not SSH: a station with no link
+      # listens nowhere new; the far deck's page, a call and the socket
+      # through the link's port; the sign-in that carries no token, works
+      # once, is listed and signed out at the far station; a frozen far
+      # side said within the heartbeat's limit and the link back by itself;
+      # a far side with no station started, one with no spandeck said; and
+      # the far deck with a pane in a real browser. About ten seconds.
+      - name: A link to a station with no Tailscale (two stations, no SSH; a browser)
+        if: ${{ !cancelled() }}
+        run: cargo test -p spandeck --test link -- --ignored
   build:
     strategy:
       fail-fast: false

@@ -1030,6 +1030,24 @@ pub mod browser {
             page
         }
 
+        /// A browser at exactly this address, with whatever the address
+        /// carries, once the deck is on screen.
+        pub fn open_address(at: &str, width: u32, height: u32) -> Page {
+            let page = Page::bare(width, height, "");
+            page.tab.navigate_to(at).unwrap();
+            page.wait("the deck", "!!document.querySelector('.topbar')");
+            page
+        }
+
+        /// The same, for an address that signs nobody in: the page that
+        /// asks to be let in is on screen.
+        pub fn open_signed_out_at(at: &str, width: u32, height: u32) -> Page {
+            let page = Page::bare(width, height, "");
+            page.tab.navigate_to(at).unwrap();
+            page.wait("the sign-in page", "!!document.querySelector('main.login')");
+            page
+        }
+
         /// `spki`: the key of the certificates the test's stations serve.
         fn bare(width: u32, height: u32, spki: &str) -> Page {
             let trust =
@@ -1522,13 +1540,19 @@ pub mod wire {
 
         /// Signed in with what `auth` says besides the token: the client id,
         /// and what a page of today adds (`instance`, `caps`).
-        pub async fn open_as(s: &Station, port: u16, mut auth: Value) -> Deck {
+        pub async fn open_as(s: &Station, port: u16, auth: Value) -> Deck {
+            Deck::open_with(&s.token(), port, auth).await
+        }
+
+        /// Signed in with a token of the caller's choosing (a browser's
+        /// own, say), at any port of this machine.
+        pub async fn open_with(token: &str, port: u16, mut auth: Value) -> Deck {
             let url = format!("ws://127.0.0.1:{port}/api/ws");
             let (ws, _) = tokio_tungstenite::connect_async_with_config(url, None, true)
                 .await
                 .unwrap();
             let (mut sink, mut stream) = ws.split();
-            auth["token"] = json!(s.token());
+            auth["token"] = json!(token);
             let auth = json!({"auth": auth});
             sink.send(Message::Text(auth.to_string().into()))
                 .await

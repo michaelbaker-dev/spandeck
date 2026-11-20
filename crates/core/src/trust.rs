@@ -910,6 +910,81 @@ impl Daemon {
         )
     }
 
+    /// `link.signin`: a browser entry for the near side of a link, made at
+    /// the word of whoever runs the link's helper here, which is the owner
+    /// (rpc.rs, `LOCAL_METHODS`: the local socket and the station's own
+    /// token, nothing else). It is an ordinary entry: listed under Access,
+    /// signed out like any other, its token made with the fleet key.
+    ///
+    /// What is answered is not the token. It is what `trust_collect` takes
+    /// once, within two minutes, from this machine itself (the helper's
+    /// connection): the page at the near side exchanges it with this
+    /// station, so no token is ever in an address or crosses the near
+    /// station. `device`: the entry made for the same link before; while
+    /// it is still signed in it is used again and no second one is made.
+    pub(crate) fn link_signin(&self, params: &Value) -> Result<Value> {
+        let name = clean_name(
+            params["name"]
+                .as_str()
+                .unwrap_or("A computer (over a link)"),
+        );
+        let again = params["device"].as_str().filter(|id| {
+            self.known_devices()
+                .iter()
+                .any(|d| d["id"].as_str() == Some(id) && d["link"] == json!(true))
+        });
+        let id = match again {
+            Some(id) => id.to_string(),
+            None => crate::paths::new_id("q"),
+        };
+        if again.is_none() {
+            self.devices_keep(json!({"id": id, "name": name, "from": "a link",
+                "at": self.station, "approved_ms": now_ms(), "link": true}));
+            self.trust_sync_soon();
+            self.record(
+                "trust.approved",
+                None,
+                None,
+                None,
+                None,
+                json!({"kind": "device", "name": name, "from": "a link", "with": [], "by": "you (over a link)"}),
+            );
+            self.emit("trust.updated", None, None, json!({}));
+        }
+        // The helper reaches the web listener from this machine.
+        let from = self
+            .web_addrs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.parse::<std::net::SocketAddr>().ok())
+            .map(|a| a.ip())
+            .find(|ip| ip.is_loopback())
+            .ok_or_else(|| invalid("this station's web listener is not on 127.0.0.1"))?;
+        let now = now_ms();
+        let collect = random_token();
+        let req = Request {
+            id: id.clone(),
+            kind: "device",
+            name,
+            from: from.to_string(),
+            code: short_code(),
+            with: vec![],
+            collect_hash: Sha256::digest(collect.as_bytes()).into(),
+            decision: Decision::Approved,
+            expires_ms: now + 120_000,
+        };
+        let mut map = self.trust.requests.lock().unwrap();
+        map.retain(|_, r| r.expires_ms > now);
+        if map.len() >= MAX_PENDING {
+            return Err(Error::Denied(
+                "too many requests are waiting; try again later".into(),
+            ));
+        }
+        map.insert(id.clone(), req);
+        Ok(json!({"id": id, "collect": collect, "reused": again.is_some()}))
+    }
+
     /// The asker polls this. The key or token is handed over once.
     pub fn trust_collect(&self, id: &str, collect: &str, from: &str) -> Result<Value> {
         let mut map = self.trust.requests.lock().unwrap();

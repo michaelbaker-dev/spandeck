@@ -308,6 +308,52 @@ SSH host key is saved in spandeck's own `known_hosts`; your `~/.ssh/config` and
 cannot be started over SSH: spandeck is started directly and starts by itself from the
 next login.
 
+## Without Tailscale
+
+Where a machine cannot have Tailscale (a company laptop and a server you reach with
+`ssh`, say), a station can show another station's Control Deck over your own SSH. On the
+machine you sit at, add to `~/.config/spandeck/config.toml` and restart spandeck:
+
+```toml
+discovery = false              # this station does not look for stations through Tailscale
+
+[[link]]
+name = "devbox"                # how it is shown
+port = 17400                   # the port on this machine for devbox's deck (left out: one is chosen and kept)
+cmd  = ["ssh", "me@devbox"]    # your own ssh, with your own ~/.ssh/config, keys and bastion
+```
+
+Then:
+
+```
+spandeck link list             # each link: its port, how it stands, the far station, the round trip
+spandeck link open devbox      # sign this machine's browser in to devbox, and print the address to open
+spandeck link down devbox      # hold the link closed
+spandeck link up devbox        # open it again, or try now
+```
+
+`spandeck link open` prints an address like `http://localhost:17400/#signin=…`. Open it
+in a browser on the same machine within two minutes: it signs that browser in to devbox
+and is of no use afterwards. devbox lists the browser under Access, where you can sign it
+out.
+
+What to know:
+
+- spandeck must already be installed on the far machine, for your user (`~/.local/bin`
+  is enough; no root). If no station is running there, the link starts one. It never
+  installs or updates anything there.
+- Nothing listens on the far machine for this, and SSH forwarding is not used. spandeck
+  runs your `ssh` with forwarding off and with `BatchMode`, so it never asks for a
+  password behind your back. When `ssh` needs you (a password, a code, a new host key),
+  `spandeck link list` says the command to run in a terminal.
+- Any command that reaches a shell there works as `cmd`:
+  `["docker", "exec", "-i", "box"]`, `["kubectl", "exec", "-i", "pod", "--"]`.
+- The two stations are not one fleet. You see devbox's own deck, with everything it
+  does for devbox's panes; your machine's deck does not list devbox's panes, and agents
+  on the two cannot message each other.
+- Not built yet: installing spandeck on the far machine over SSH, joining a linked
+  station to a fleet, a phone, a far machine that runs Windows.
+
 ## Usage and cost
 
 Each agent pane shows the model in use and how full its context is, in the strip above
@@ -429,6 +475,9 @@ is working. To keep it awake whenever spandeckd runs, add `stay_awake = true` to
   there" has not been run against a real login service on any system (systemd, launchd
   or the Windows Scheduled Task), and ending a pane's whole session has not been tried
   on a Mac.
+- **Without Tailscale (a link)**: tested with two daemons on one machine and a carrier
+  that is not SSH. It has not been run over a real `ssh`, through a bastion, on a
+  company network, or with a Mac or a Windows PC as the machine you sit at.
 - **Phone**: tested in a phone-sized desktop browser, not on a real phone. Dictation
   with the 🎤 button has not been tried on any device.
 

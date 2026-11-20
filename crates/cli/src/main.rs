@@ -4,6 +4,7 @@
 //! the CLI covers the API and nothing else.
 
 mod agents_cmd;
+mod link_cmd;
 mod mcp;
 mod roles_cmd;
 mod tools_cmd;
@@ -255,6 +256,16 @@ enum Cmd {
     Roles {
         #[command(subcommand)]
         cmd: Option<roles_cmd::RolesCmd>,
+    },
+    /// Stations with no Tailscale, reached over your own ssh (`[[link]]`
+    /// in config.toml). With no subcommand: the list.
+    Link {
+        /// The far side of a link: speak it on standard input and output.
+        /// What a link's carrier runs on the far machine; not typed by hand.
+        #[arg(long)]
+        stdio: bool,
+        #[command(subcommand)]
+        cmd: Option<link_cmd::LinkCmd>,
     },
     /// Wake a sleeping station on this network (wake-on-LAN).
     Wake { station: String },
@@ -787,6 +798,9 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             );
             return Ok(0);
         }
+        // The far side of a link: it finds the station itself, and starts
+        // one if none is running.
+        Cmd::Link { stdio: true, .. } => return Ok(spandeck_core::link::helper::main(&paths)),
         Cmd::Service { stop: true, .. } => return service_stop(&paths),
         Cmd::Service { install, .. } => {
             let exe = std::env::current_exe()?;
@@ -1747,6 +1761,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             None => roles_cmd::list(&mut c, j)?,
             Some(cmd) => roles_cmd::run(&mut c, j, cmd)?,
         },
+        Cmd::Link { cmd, .. } => return link_cmd::run(&mut c, j, cmd),
         Cmd::Wake { station } => {
             let v = c.call("fleet.wake", json!({"station": station}))?;
             show(j, &v, |v| {

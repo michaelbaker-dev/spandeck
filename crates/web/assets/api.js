@@ -49,6 +49,23 @@ function takeToken() {
   return localStorage.getItem('spandeck.token') || undefined;
 }
 
+// A sign-in made over a link (`spandeck link open <name>`, on the machine
+// this browser is on). The address carries no token: it carries what this
+// page's own station exchanges for one, once and within two minutes, so
+// what a browser keeps of the address in its history opens nothing. Only
+// at `localhost`, where a link's port is. Resolves when it is settled
+// either way; a page that was not signed in then asks in the usual way.
+function takeSignIn() {
+  const m = location.hash.match(/^#signin=([a-z0-9-]{8,80})\.([0-9a-f]{32,128})$/);
+  if (!m) return null;
+  history.replaceState(null, '', location.pathname + '#/fleet');
+  if (location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') return null;
+  return fetch('/api/device/collect', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: m[1], collect: m[2] }) })
+    .then(r => r.json())
+    .then(j => { if (j && j.result && j.result.status === 'approved' && typeof j.result.token === 'string') localStorage.setItem('spandeck.token', j.result.token); })
+    .catch(() => { /* not signed in: the page asks as any browser does */ });
+}
+
 // ---- the heartbeat's rules ----
 //
 // The audit: with this page's link half-open, the deck showed nothing at
@@ -416,6 +433,8 @@ export class Api {
   }
 
   connect() {
+    const signIn = takeSignIn();
+    if (signIn) this.settling = Promise.all([this.settling, signIn]);
     if (!this.settling) return this._open();
     return this.settling.then(() => { this.settling = null; return this._open(); });
   }

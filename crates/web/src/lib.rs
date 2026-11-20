@@ -521,7 +521,11 @@ fn origin_ok(
     let decks =
         (decks && origin.is_some() && web.daemon.flag_on(spandeck_core::https::VIA_FLAG, true))
             .then(|| web.daemon.member_decks());
-    let hosts = web.hosts.read().unwrap().clone();
+    let mut hosts = web.hosts.read().unwrap().clone();
+    // While a link's helper is attached: `localhost` and `127.0.0.1` with
+    // the port the near side's browser uses (core: link/mod.rs). With no
+    // link there is none, and nothing is added.
+    hosts.extend(web.daemon.link_hosts());
     origin_rule(&hosts, host, origin, secure, decks.as_deref())
 }
 

@@ -365,6 +365,11 @@ pub struct Config {
     /// set one while the station runs (`station.flags`), which wins.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub flags: BTreeMap<String, toml::Value>,
+    /// `[[link]]`: stations with no Tailscale, each reached over a command
+    /// of the owner's own, usually their `ssh` (link/mod.rs). None: this
+    /// station starts nothing and listens on nothing for links.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub link: Vec<crate::link::LinkConfig>,
 }
 
 /// `[speech]`: a recording from the deck is turned into text by a program
@@ -487,6 +492,7 @@ impl Default for Config {
             update: UpdateConfig::default(),
             prices: Default::default(),
             flags: BTreeMap::new(),
+            link: vec![],
         }
     }
 }

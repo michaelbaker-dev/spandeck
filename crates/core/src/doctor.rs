@@ -105,9 +105,16 @@ impl Daemon {
         add("git", git_ok, true, git_detail);
 
         let me = self.fleet.tailnet_self();
+        // A machine with no Tailscale program at all, at a station that
+        // does not look for stations through it (`discovery = false`) or
+        // reaches them over links: nothing is wrong, and it is not said
+        // as if something were.
+        let not_used = me.is_none()
+            && (!self.cfg.discovery || !self.cfg.link.is_empty())
+            && !crate::fleet::has_tailscale();
         add(
             "tailscale",
-            me.is_some(),
+            me.is_some() || not_used,
             false,
             match &me {
                 Some(m) => format!(
@@ -115,6 +122,13 @@ impl Daemon {
                     m.login,
                     m.ips.first().cloned().unwrap_or_default()
                 ),
+                None if not_used && !self.cfg.link.is_empty() => {
+                    "not installed, and not needed: this station reaches others over links (`spandeck link list`)"
+                        .into()
+                }
+                None if not_used => {
+                    "not installed, and not needed: discovery is off".into()
+                }
                 None => {
                     "Tailscale is not running or not logged in: this station cannot see the fleet"
                         .into()

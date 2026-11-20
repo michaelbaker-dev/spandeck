@@ -315,8 +315,62 @@ days, not hours.
   says what was learned: the public version number, or that the host could not be
   reached and its name.
 
+- **A station reached over your own SSH** (a link, 20 Nov 2026). Where there is no
+  Tailscale, a station can show another station's Control Deck by running your own
+  `ssh` to it. Only a station whose `config.toml` has a `[[link]]` does any of this; a
+  station without one starts nothing and listens nowhere new. What is new, and how each
+  part is kept safe:
+  - *spandeck runs `ssh` by itself.* The host and the command are named only in that
+    station's `config.toml`. No call of the deck, of an agent or of another station can
+    add or change a link. `ssh` is run with options that come before yours and win:
+    nothing is forwarded (no ports, no agent, no X11), no command of your configuration
+    is run, no terminal is asked for, nothing can prompt (`BatchMode`), and a host whose
+    key is unknown or has changed is refused, never accepted for you. Your own
+    `~/.ssh/config` and `known_hosts` are used. spandeck stores no password, key or
+    ticket. The command that was run is in the ship's log.
+  - *A helper on the far side* (`spandeck link --stdio`). It adds no authority: it
+    reaches its station as any `spandeck` command there does, through the station's
+    private local socket with the token only that user can read. Whoever can run it
+    could already run every other command. It opens no port. If no station is running
+    there it starts one, and says so; it installs, updates and replaces nothing.
+  - *A parser that faces the far side.* The link's frames are a small fixed format with
+    a longest frame, a largest number of streams and a window for each stream; anything
+    outside them ends the link. The station you are at opens streams and refuses every
+    stream the far side tries to open. It runs nothing the far side sends.
+  - *One more listening port for each link*, on `127.0.0.1` only. What answers there is
+    the far station itself, with its own rules: every call needs a token, the Host and
+    the Origin are checked. The far station answers to `localhost` with that port only
+    while the helper is attached. While the link is down the port answers with a short
+    plain-text sentence and nothing from the far side.
+  - *A browser entry made over a link* (`spandeck link open`). Made at the far station
+    at the word of the helper, which is you, as that user, on that machine. It is an
+    ordinary entry: listed under Access, signed out like any other. The address you open
+    carries no token: it carries a code the far station exchanges for the token once,
+    within two minutes, with a caller on its own machine. The far station's own token
+    never leaves it, and no token passes through the station you are at.
+  - *Who may ask.* The calls of a link are taken only on a station's private local
+    socket and only with that station's own token. An agent, another station, a
+    signed-in browser and a request passed on between stations are all refused them.
+
+  **What a far side that has been taken over can do to the machine you are at:** serve
+  a hostile page at one `localhost` origin in your browser. That page can show false
+  information, read what you type into that page, and use the browser's token for that
+  far station, which whoever took it over controls already. It cannot open a stream to
+  your station, read your station's token or another link's (each link is an origin of
+  its own), reach your files, make `ssh` forward anything, or make spandeck run
+  anything. The two stations are not one fleet: neither holds the other's key.
+
 ## Known limits
 
+- With a link, a browser on your machine holds a token for the far station. Whoever can
+  use that browser profile can use that station, until you sign the entry out there.
+- A station reached over a link still has its web listener on `127.0.0.1` of its own
+  machine. On a host other people can log in to, they can connect to that port; every
+  call there needs a token, and the open calls (a station's name and version, a request
+  to sign in that only you can approve) are as on any station. A station with no TCP
+  listener at all is not built.
+- A link is as private as its carrier. Over `ssh` that is SSH's encryption. A carrier
+  you name yourself (`cmd`) is yours to judge.
 - Turning HTTPS on at a station publishes its name, `<machine>.<tailnet>.ts.net`, in
   the public certificate-transparency logs, for good: the machine's name and your
   tailnet's. The names resolve only inside your tailnet and nothing becomes reachable

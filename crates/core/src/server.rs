@@ -53,6 +53,8 @@ async fn connection(daemon: Daemon, stream: Stream) -> std::io::Result<()> {
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read).lines();
     let conn_id = crate::paths::new_id("c");
+    // What a link's helper asked on this connection, let go of with it.
+    let mut local = crate::rpc::LocalConn::new(&daemon);
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
@@ -73,6 +75,19 @@ async fn connection(daemon: Daemon, stream: Stream) -> std::io::Result<()> {
             .to_string();
         let params = req.get("params").cloned().unwrap_or(json!({}));
         let token = req.get("token").and_then(|t| t.as_str()).unwrap_or("");
+        // The calls that are only for whoever is at this machine: this
+        // socket is the one place they are taken (rpc.rs, `LOCAL_METHODS`).
+        if crate::rpc::local_only(&method) {
+            let out = match daemon
+                .dispatch_local(&mut local, token, &method, params)
+                .await
+            {
+                Ok(result) => json!({"id": id, "result": result}),
+                Err(e) => json!({"id": id, "error": error_json(&e)}),
+            };
+            write.write_all(format!("{out}\n").as_bytes()).await?;
+            continue;
+        }
         let Some(caller) = daemon.caller_for_token(token, &conn_id) else {
             let out =
                 json!({"id": id, "error": {"code": "denied", "message": "missing or wrong token"}});

@@ -313,6 +313,93 @@ pub const FILES_METHODS: &[&str] = &[
     "files.ticket",
 ];
 
+/// The calls of a link (link/mod.rs), the owner's decision of 20 Nov 2026.
+/// They are for whoever is at this machine as this user, and nobody else:
+/// taken only on the station's private local socket and only with the
+/// station's own token (`dispatch_local`). So they are on no other list,
+/// and `allowed` refuses them to every caller, the owner's browser and the
+/// owner's request passed on by another station included: a link's host
+/// is never named, and a browser is never signed in, through anything a
+/// browser, an agent or a station can reach.
+const LOCAL_METHODS: &[&str] = &[
+    // The far side: its helper says which port the near side's browser
+    // uses and learns where the web listener really is; and has a browser
+    // entry made for the near side.
+    "link.attach",
+    "link.signin",
+    // The near side: the `spandeck link` commands.
+    "link.list",
+    "link.up",
+    "link.down",
+    "link.open",
+];
+
+/// Is this one of the calls taken only from this machine's own command
+/// line (`LOCAL_METHODS`)?
+pub fn local_only(method: &str) -> bool {
+    LOCAL_METHODS.contains(&method)
+}
+
+/// What one connection on the local socket has asked that lasts only as
+/// long as the connection: the ports a link's helper named. Let go of when
+/// the connection closes, which is when the helper ends.
+pub struct LocalConn {
+    daemon: Daemon,
+    ports: Vec<u16>,
+}
+
+impl LocalConn {
+    pub fn new(daemon: &Daemon) -> LocalConn {
+        LocalConn {
+            daemon: daemon.clone(),
+            ports: vec![],
+        }
+    }
+}
+
+impl Drop for LocalConn {
+    fn drop(&mut self) {
+        for port in self.ports.drain(..) {
+            self.daemon.link_detach(port);
+        }
+    }
+}
+
+/// The owner's decision of 20 Nov 2026 (a station reached over the owner's
+/// own SSH) rests on these calls being nobody's but the local owner's:
+/// "the link's host/command is named only in the config file or at the
+/// local command line, never through the deck's API or any RPC a browser,
+/// agent or station can reach", and the call that signs a browser in is
+/// "on no agent's list and no station's list".
+#[cfg(test)]
+mod link_calls {
+    use super::*;
+
+    #[test]
+    fn the_calls_of_a_link_are_refused_to_every_caller_the_dispatcher_serves() {
+        for m in LOCAL_METHODS {
+            // The owner's too: a signed-in browser and a request another
+            // station passes on both arrive with the owner's authority.
+            for who in [
+                Authority::Owner,
+                Authority::Agent,
+                Authority::Peer,
+                Authority::ReadOnly,
+            ] {
+                assert!(!allowed(who, m), "{m}");
+            }
+            for list in [AGENT_METHODS, PEER_METHODS, READ_METHODS, OWNER_READS] {
+                assert!(!list.contains(m), "{m}");
+            }
+            // And never done a second time from a kept answer: what
+            // `link.signin` answers opens a sign-in.
+            assert!(!REPEATABLE.contains(m) && !DONE_ONCE.contains(m), "{m}");
+        }
+        assert!(local_only("link.signin") && local_only("link.attach"));
+        assert!(!local_only("station.info") && allowed(Authority::Agent, "station.info"));
+    }
+}
+
 /// Does this method only read? Such a call changes nothing, so a Control
 /// Deck's connection answers several at once and in any order; every other
 /// call to a station is made in the order it arrived (web: lanes).
@@ -324,6 +411,9 @@ pub fn reads(method: &str) -> bool {
 /// `dispatch` asks first; for whoever must act as a request is read
 /// (a stop's place in a pane's input) and so before it is dispatched.
 pub fn allowed(authority: Authority, method: &str) -> bool {
+    if local_only(method) {
+        return false;
+    }
     match authority {
         Authority::Owner => true,
         Authority::Agent => AGENT_METHODS.contains(&method),
@@ -972,6 +1062,40 @@ impl Daemon {
 
     pub async fn dispatch(&self, caller: &Caller, method: &str, params: Value) -> Result<Value> {
         self.dispatch_rid(caller, method, params, None).await
+    }
+
+    /// A call of `LOCAL_METHODS`, from a connection on the local socket.
+    /// `token` is what the request carried: only the station's own is
+    /// taken, never a pane's and never a signed-in browser's.
+    pub async fn dispatch_local(
+        &self,
+        conn: &mut LocalConn,
+        token: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value> {
+        if !constant_eq(token, &self.client_token) {
+            return Err(Error::Denied(format!(
+                "{method} is only for you, at this machine's own command line"
+            )));
+        }
+        match method {
+            "link.attach" => {
+                let port = params["port"].as_u64().and_then(|p| u16::try_from(p).ok());
+                let first = port.is_some_and(|p| !conn.ports.contains(&p));
+                let answer = self.link_attach(&params, first)?;
+                if let (true, Some(port)) = (first, port) {
+                    conn.ports.push(port);
+                }
+                Ok(answer)
+            }
+            "link.signin" => self.link_signin(&params),
+            "link.list" => Ok(self.link_list()),
+            "link.up" => self.link_hold(&params, false),
+            "link.down" => self.link_hold(&params, true),
+            "link.open" => self.link_open(&params).await,
+            _ => Err(Error::NotFound(format!("unknown method {method}"))),
+        }
     }
 
     /// `dispatch` for a request that may carry an id (rids.rs): a change
@@ -3212,6 +3336,7 @@ impl Daemon {
             // Let the reply reach the caller first.
             std::thread::sleep(Duration::from_millis(250));
             d.stop_keep_awake();
+            d.link_stop_all();
             let state = d.prepare_handoff();
             let file = d.paths.handoff_file();
             if let Err(e) = crate::daemon::write_private(
@@ -3221,6 +3346,7 @@ impl Daemon {
                 tracing::error!(error = %e, "could not write handoff state; staying on the current binary");
                 d.readopt(state);
                 d.resume_keep_awake();
+                d.link_resume();
                 return;
             }
             // Unix: this process becomes the new binary and keeps every
@@ -3245,6 +3371,7 @@ impl Daemon {
             // It returned: the old image is still running. Take the panes back.
             tracing::error!(error = %err, "starting the new binary failed; staying on the current binary");
             d.resume_keep_awake();
+            d.link_resume();
             let _ = std::fs::remove_file(&file);
             d.readopt(state);
         });

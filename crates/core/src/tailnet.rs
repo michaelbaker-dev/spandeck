@@ -828,8 +828,13 @@ impl Daemon {
             .map(|d| json!({"id": d.id, "name": d.name, "os": d.os, "expires_ms": d.expires_ms, "expired": d.expired, "online": d.online,
                 "deck": watched.iter().any(|w| w["id"] == json!(d.id))}))
             .collect();
+        // A station with links on a machine that has no Tailscale program
+        // at all: nothing was read, and nothing is wrong.
+        let none = !self.cfg.link.is_empty()
+            && t.as_ref().is_some_and(|t| t.state == "not_running")
+            && !crate::fleet::has_tailscale();
         json!({
-            "read": t.is_some(),
+            "read": t.is_some() && !none,
             "discovery": self.cfg.discovery,
             "state": t.as_ref().map(|t| t.state.clone()),
             "checked_ms": t.as_ref().map(|t| t.checked_ms),
