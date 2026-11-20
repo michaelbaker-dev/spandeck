@@ -5045,8 +5045,9 @@ fn pictures_of_the_conversation_view() {
     let stuck = s.fake(
         json!({"steps": [
             {"prompt": "Build it."}, {"sleep": 2500},
-            {"repeat": 3, "steps": [{"tool": {"name": "Bash", "command": "make", "ok": false}}]},
+            {"repeat": 2, "steps": [{"tool": {"name": "Bash", "command": "make", "ok": false}}]},
             {"say": "Do you want to keep trying?\n❯ 1. Yes\n  2. No, stop here"},
+            {"needs_input": "Claude needs your input"},
             {"sleep": 600000}
         ]}),
         json!({"name": "maker"}),
@@ -5342,7 +5343,7 @@ fn the_rest_of_the_conversation_view() {
     // An agent that needs the owner where no card can answer: the banner,
     // the terminal's last lines, and keys that reach the terminal.
     let stuck = s.fake(
-        json!({"steps": [{"prompt": "go"}, {"repeat": 3, "steps": [{"tool": {"name": "Bash", "command": "make", "ok": false}}]}]}),
+        json!({"steps": [{"prompt": "go"}, {"repeat": 2, "steps": [{"tool": {"name": "Bash", "command": "make", "ok": false}}]}, {"needs_input": "Claude needs your input"}]}),
         json!({"name": "stuck"}),
     );
     s.wait_state(&stuck, "needs_you");

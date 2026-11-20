@@ -28,6 +28,9 @@
 //!   {"work": ms}                         a long tool call; ESC interrupts it
 //!   {"subagent": {"type":"Explore","stop":false}}  the agent's own sub-agent starts (or stops)
 //!   {"turn_end": "last message"}         Stop (may be continued with mail)
+//!   {"needs_input": "message"}           the program waits at a prompt of its own
+//!                                        in its terminal and says so, as Claude
+//!                                        Code does (Notification, `agent_needs_input`)
 //!   {"rpc": {"method":"…","params":{}}}  call the daemon as this pane, print the reply
 //!   {"task_result": {"summary":"…","findings_by_round":[["a"],[]]}}
 //!   {"sh": "command"}                    run a shell command in the cwd
@@ -590,6 +593,11 @@ impl Agent {
             } else {
                 out("[fake] turn done");
             }
+        } else if let Some(msg) = step.get("needs_input").and_then(|s| s.as_str()) {
+            self.hook(
+                "Notification",
+                json!({"notification_type": "agent_needs_input", "message": msg}),
+            );
         } else if let Some(rpc) = step.get("rpc") {
             let method = rpc["method"].as_str().unwrap_or("");
             match self.rpc(method, rpc.get("params").cloned().unwrap_or(json!({}))) {

@@ -113,9 +113,20 @@ pub struct PaneWake {
     /// question, the review of hooks, a list to choose from), or one was
     /// answered (0: never).
     pub(crate) screen_ms: std::sync::atomic::AtomicU64,
+    /// What was typed into the pane last was the owner's own (typed,
+    /// pasted or sent as the owner), and no prompt has begun since: the
+    /// next prompt is the owner speaking (stuck.rs). A nudge for mail, and
+    /// text sent by an agent or by the station, take it back.
+    pub(crate) owner_spoke: std::sync::atomic::AtomicBool,
 }
 
 impl PaneWake {
+    /// Something was typed into the pane: by the owner, or not.
+    pub(crate) fn typed_by(&self, owner: bool) {
+        self.owner_spoke
+            .store(owner, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// The pane is at a screen that asks something, or one was just
     /// answered: what comes after it is given time to be drawn.
     pub(crate) fn at_screen(&self, now: u64) {

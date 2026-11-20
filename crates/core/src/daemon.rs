@@ -266,6 +266,10 @@ pub struct PaneMeta {
     /// The review is on the screen now and nothing was pressed.
     #[serde(default)]
     pub hooks_trust_asks: Option<crate::startscreen::Asks>,
+    /// What of stuck detection the owner said is fine for this pane
+    /// (stuck.rs): quiet until its session changes or a file is changed.
+    #[serde(default)]
+    pub stuck_fine: crate::stuck::Fine,
 }
 
 /// What came of stopping one pane.
@@ -370,7 +374,7 @@ impl PaneEntry {
     pub fn view(&self, station: &str) -> Value {
         let m = self.meta();
         let info = self.term.info();
-        json!({
+        let mut view = json!({
             "id": m.id, "station": station, "address": format!("{}@{}", m.id, station),
             "name": m.name, "project": m.project, "role": m.role,
             "agent": m.agent, "agent_name": m.agent.display(), "cwd": m.cwd,
@@ -388,7 +392,11 @@ impl PaneEntry {
             "last_output_ms": self.term.last_output_ms(), "pid": self.term.pid(),
             "program": m.spec.program,
             "icon": spandeck_agents::icon(m.agent, &m.spec.program),
-        })
+        });
+        // Said to be stuck, and by what: a deck shows a notice the owner
+        // can dismiss, not a prompt in the terminal (stuck.rs).
+        view["stuck"] = crate::stuck::view(&m);
+        view
     }
 }
 
@@ -1570,6 +1578,7 @@ impl Daemon {
             hooks_trust_choice: opts.hooks_trust_choice.clone(),
             hooks_trust_answered: None,
             hooks_trust_asks: None,
+            stuck_fine: Default::default(),
         };
         let entry = Arc::new(PaneEntry {
             id: id.clone(),
@@ -2053,6 +2062,7 @@ impl Daemon {
         from: Option<&str>,
     ) -> Result<()> {
         let p = self.pane(id)?;
+        p.wake.typed_by(false);
         p.term.send(Item {
             kind: InputKind::Text,
             bytes: text.as_bytes().to_vec(),
@@ -2379,6 +2389,7 @@ impl Daemon {
         } else {
             text.replace('\n', "\r").into_bytes()
         };
+        p.wake.typed_by(false);
         p.term.send(Item {
             kind: InputKind::Paste { bracketed },
             bytes,

@@ -365,6 +365,7 @@ fn owner_words(row: &LogRow) -> Option<String> {
         "pane.paused" => "paused the pane".to_string(),
         "pane.unpaused" => "ended the pane's pause".to_string(),
         "pane.released" => "released the pane".to_string(),
+        "pane.stuck_fine" => "said the pane is fine, not stuck".to_string(),
         "pane.killed" => "killed the pane's program".to_string(),
         "pane.closed" => "closed the pane".to_string(),
         "pane.model" => "chose the pane's model".to_string(),

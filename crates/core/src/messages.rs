@@ -777,7 +777,11 @@ impl Daemon {
                 },
                 wakeable,
             );
-            matches!(sent, Ok(Some(_)))
+            let sent = matches!(sent, Ok(Some(_)));
+            if sent {
+                p.wake.typed_by(false);
+            }
+            sent
         };
         // Its Enter was not taken (Codex, one time in five): once more,
         // two seconds on, while its mail is still unread.
@@ -838,6 +842,9 @@ impl Daemon {
                     wakeable,
                 );
                 typed_now = matches!(sent, Ok(Some(_)));
+                if typed_now {
+                    p.wake.typed_by(false);
+                }
                 typed_now
             },
             |ids| self.note_woken(ids, now),

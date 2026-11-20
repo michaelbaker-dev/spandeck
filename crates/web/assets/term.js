@@ -1083,6 +1083,9 @@ export class PaneTerm {
       ...glance.left,
       p.rapid ? h('span', { class: 'strip-note rapid-line', title: p.rapid.more }, p.rapid.says) : null,
       p.needs_reason && s === 'needs_you' ? h('span', { class: 'strip-reason', title: trustAsksWords(p) || hooksAsksWords(p) || p.needs_reason }, p.needs_reason) : null,
+      // Said to be stuck, which is the station's guess: the owner's one
+      // tap says it is not (as in Chat).
+      p.stuck && s === 'needs_you' && !p.exited ? h('button', { class: 'mini stuck-fine', title: 'It is not stuck: stop saying so for this pane until its conversation changes or it changes a file.', onclick: () => rpc('pane.stuck_fine') }, 'It is fine') : null,
       // The program asks whether to trust the folder, and spandeck can
       // read its choices: the owner's one tap answers it.
       p.trust?.asks?.button && !p.exited ? h('button', { class: 'mini trust-tap', title: trustAsksWords(p) + ' The pane\'s menu can also remember it for this folder.',

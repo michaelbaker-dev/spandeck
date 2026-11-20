@@ -352,6 +352,12 @@ impl Daemon {
         Ok(json!({"pane": p.id, "session": session, "cleared": ids}))
     }
 
+    /// What of it runs now, for stuck detection (stuck.rs): the same rows
+    /// a deck is shown as running, by the session the pane's hooks named.
+    pub(crate) fn conversation_running(&self, p: &PaneEntry, meta: &PaneMeta) -> Value {
+        self.conversation_tasks(p, meta, meta.session_id.as_deref())["running"].clone()
+    }
+
     /// What the pane's agent has running beside its turn, and what of it
     /// is over: its own sub-agents and the commands it left running (from
     /// its session file, where the program writes them: Claude Code), and
@@ -906,6 +912,7 @@ impl Daemon {
         json!({
             "state": meta.state, "state_since_ms": meta.state_since_ms,
             "needs_reason": meta.needs_reason,
+            "stuck": crate::stuck::view(meta),
             "tool": meta.tool, "tool_since_ms": meta.tool_since_ms,
             "subagents": meta.subagents, "paused": meta.paused,
             "held": self.held_view(meta),

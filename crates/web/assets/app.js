@@ -804,6 +804,7 @@ function paneMenu(e, st, p, where, term) {
     agent && alive && { label: 'Stop this turn', action: act('pane.stop'), disabled: !(s === 'working' || s === 'needs_you') },
     agent && alive && { label: p.paused ? 'Unpause (deliver work again)' : 'Pause (no new work)', action: act('pane.pause', { paused: !p.paused }) },
     agent && alive && p.held && { label: 'Release (take mail again)', hint: heldWords(p.held), action: act('pane.release') },
+    agent && alive && p.stuck && s === 'needs_you' && { label: 'It is fine (not stuck)', hint: 'stop saying so for this pane', action: act('pane.stuck_fine') },
     agent && alive && p.trust?.asks?.button && { label: 'Trust this folder', hint: 'answers its question, this once', action: act('pane.trust_folder') },
     agent && alive && p.trust?.asks?.button && { label: `Trust this folder and remember it for ${p.agent_name}`, action: act('pane.trust_folder', { remember: true }) },
     agent && alive && p.hooks_trust?.asks?.button && { label: 'Trust spandeck\'s hooks', hint: 'answers its review of hooks, this once', action: act('pane.trust_hooks') },

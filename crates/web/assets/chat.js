@@ -120,6 +120,8 @@ const moreTime = (ms) => {
   const s = Math.ceil(ms / 1000);
   return s >= 90 ? `${Math.round(s / 60)} more minutes` : `${plural(Math.max(s, 1), 'more second')}`;
 };
+// What "It is fine" does, for a pane the station says may be stuck.
+const STUCK_FINE_SAYS = 'It is not stuck: stop saying so for this pane until its conversation changes or it changes a file. It is in the ship\'s log.';
 const quiet = (text, cls) => h('div', { class: 'chat-quiet' + (cls ? ' ' + cls : '') }, text);
 const idOrder = (id) => { const [a, b] = String(id).split('.'); return [Number(a) || 0, Number(b) || 0]; };
 
@@ -935,11 +937,16 @@ class Conv {
     // nothing of it may ever be written to the conversation.
     const slash = this.sentSlash && !exited && !working && !switching && !L.prompt && performance.now() < this.sentSlash.until && !this.items.slice(this.sentSlash.n).some(x => x.kind !== 'user') ? this.sentSlash : (this.sentSlash = null);
     const blocked = !switching && !(L.prompt && (L.prompt.kind === 'picker' || L.prompt.kind === 'screen')) && !exited && this.available === true && !approvals.length && !asked.length && !held.length && (L.state === 'needs_you' || L.state === 'error');
+    // Said to be stuck (the station's guess: stuck.rs): nothing waits at
+    // a prompt, so it is a notice the owner can dismiss, with no rows of
+    // the terminal and no keys. (A station from before says no `stuck`.)
+    const stuck = blocked && L.state === 'needs_you' && L.stuck ? L.stuck : null;
+    const waits = blocked && !stuck;
     // A banner that waits in the terminal shows the terminal's last lines.
     // (Made from the screen, the conversation already ends with them.)
-    if (blocked && !this.wasBlocked && this.source !== 'screen') this.peekOpen = true;
-    if (!blocked && this.wasBlocked && !working) this.peekOpen = false;
-    this.wasBlocked = blocked;
+    if (waits && !this.wasBlocked && this.source !== 'screen') this.peekOpen = true;
+    if (!waits && this.wasBlocked && !working) this.peekOpen = false;
+    this.wasBlocked = waits;
     this.clocks = [];
     const status = [];
     if (working) {
@@ -958,7 +965,7 @@ class Conv {
     const tasks = this.tasksNow();
     if (tasks.running.length) status.push(this.node(cache, used, 'subs', tasks.running.length, () => h('button', { type: 'button', class: 'chat-tasks', 'aria-haspopup': 'dialog', onclick: () => this.tasksSheet() }, plural(tasks.running.length, 'running task'))));
     if (this.tasksBox) this.tasksBox();
-    if ((this.peekOpen && (working || blocked)) || slash) { status.push(this.peekEl); if (!this.peeked || slash) this.peek(); } else this.peeked = false;
+    if ((this.peekOpen && (working || waits)) || slash) { status.push(this.peekEl); if (!this.peeked || slash) this.peek(); } else this.peeked = false;
     sync(this.acts, status);
 
     const cards = [];
@@ -986,7 +993,12 @@ class Conv {
     if (trustAsks) cards.push(this.node(cache, used, 'trust', JSON.stringify(L.trust.asks), () => trustCard(trustP,
       (remember) => env.rpc(this.st, 'pane.trust_folder', { pane: p.id, remember }).catch(() => {}), () => setFace(this.st, p, 'terminal'))));
     if (trustAnsweredWords(trustP)) cards.push(this.node(cache, used, 'trusted', '', () => quiet(trustAnsweredWords(trustP) + '. It is in the ship\'s log.')));
-    if (blocked && !trustAsks) cards.push(this.node(cache, used, 'wait', `${L.state}|${L.needs_reason}`, () => h('div', { class: 'chat-card wait' + (L.state === 'error' ? ' err' : '') },
+    if (stuck && !trustAsks) cards.push(this.node(cache, used, 'stuck', `${stuck.kind}|${stuck.says}`, () => h('div', { class: 'chat-card stuck-note', role: 'status' },
+      h('span', { class: 'stuck-says' }, `${p.name || 'This agent'} may be stuck: ${String(stuck.says || 'it keeps doing the same thing')}. Nothing waits for an answer.`),
+      h('div', { class: 'row' },
+        h('button', { type: 'button', class: 'stuck-fine', title: STUCK_FINE_SAYS, onclick: () => env.rpc(this.st, 'pane.stuck_fine', { pane: p.id }).catch(() => {}) }, 'It is fine'),
+        h('button', { type: 'button', class: 'stuck-term', onclick: () => setFace(this.st, p, 'terminal') }, 'Open terminal')))));
+    if (waits && !trustAsks) cards.push(this.node(cache, used, 'wait', `${L.state}|${L.needs_reason}`, () => h('div', { class: 'chat-card wait' + (L.state === 'error' ? ' err' : '') },
       h('b', {}, (L.state === 'error' ? 'Stopped on an error: ' : 'Waiting in the terminal: ') + (L.needs_reason || 'it needs you')),
       h('div', { class: 'wait-keys', role: 'group', 'aria-label': 'Keys for the terminal' },
         WAIT_KEYS.map(([label, bytes]) => h('button', { type: 'button', class: 'key', 'aria-label': KEY_SAYS[label] || label, onclick: () => this.key1(bytes) }, label)),

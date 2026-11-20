@@ -1696,6 +1696,7 @@ impl Daemon {
                 self.screen_sent(&id, text, caller.is_owner(), &caller.who);
                 self.send_text_from(&id, text, enter, Some(&caller.client))?;
                 if caller.is_owner() {
+                    self.owner_spoke(&id);
                     self.note_input(&id, &caller.who, &caller.client);
                 }
                 json!({"ok": true})
@@ -1731,6 +1732,7 @@ impl Daemon {
                 self.start_screen_owner_typed(&id);
                 self.screen_sent(&id, text, true, &caller.who);
                 self.paste_from(&id, text, flag(&params, "enter"), Some(&caller.client))?;
+                self.owner_spoke(&id);
                 self.note_input(&id, &caller.who, &caller.client);
                 json!({"ok": true})
             }
@@ -1745,6 +1747,12 @@ impl Daemon {
                     self.start_screen_owner_typed(&pane.id);
                 }
                 self.type_keys(&pane.id, data, Some(&caller.client))?;
+                // The owner's keys, or somebody else's: the prompt typed
+                // next is theirs (stuck.rs). What a terminal says by
+                // itself is nobody's typing.
+                if crate::holds::is_typing(data) {
+                    pane.wake.typed_by(caller.is_owner());
+                }
                 self.note_input(&pane.id, &caller.who, &caller.client);
                 json!({"ok": true})
             }
@@ -1843,6 +1851,11 @@ impl Daemon {
                 .await
                 .map_err(|e| invalid(e.to_string()))??
             }
+            // "It is fine" for a pane said to be stuck (stuck.rs). The
+            // owner's alone: on no agent's list, no station's and not the
+            // read-only one; it reaches another station only as the
+            // owner's forwarded request.
+            "pane.stuck_fine" => self.stuck_fine(s(&params, "pane")?, by)?,
             "pane.kill" => {
                 self.kill(s(&params, "pane")?, by)?;
                 json!({"ok": true})
@@ -3601,6 +3614,15 @@ mod tests {
             assert!(allowed(Authority::Owner, m) && !not_forwarded(m), "{m}");
         }
         assert_eq!(class("pane.trust_folder", &none), Class::Never);
+        // "It is fine" for a pane said to be stuck (20 Nov 2026, rule 7):
+        // it changes what a station says of a pane, so it is the owner's
+        // alone, and reaches another station as the owner's forwarded
+        // request.
+        for who in [Authority::Agent, Authority::Peer, Authority::ReadOnly] {
+            assert!(!allowed(who, "pane.stuck_fine"), "{who:?}");
+        }
+        assert!(allowed(Authority::Owner, "pane.stuck_fine"));
+        assert!(!not_forwarded("pane.stuck_fine") && !reads("pane.stuck_fine"));
         // The chat's model chip and its cleared notes (17 Nov 2026):
         // choosing an agent's model types a command into its pane, and
         // clearing a note changes what the owner is shown. Both are the

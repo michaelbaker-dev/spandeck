@@ -136,6 +136,15 @@ jobs:
       - name: The Inbox is one size of text, and nothing runs off its card (phone and computer)
         if: ${{ !cancelled() }}
         run: cargo test -p spandeck --test inbox -- --ignored
+      # A pane said to be stuck (the owner's fault of 20 Nov 2026): the
+      # owner's prompt starts the count again and a nudge for mail does
+      # not, a turn that waits on a background command is not counted, "It
+      # is fine" from another station's deck holds until a file is changed,
+      # and Chat in a browser shows a notice with no terminal rows and no
+      # keys, and the old card for a real prompt. A few seconds.
+      - name: A pane that may be stuck (the owner speaks, background work, It is fine, the notice in Chat)
+        if: ${{ !cancelled() }}
+        run: cargo test -p spandeck --test stuck -- --ignored
       # HTTPS, the deck saved on the device, and carrying on through
       # another station, in a real browser at a phone's size. The rules of
       # the list and the choice as the plain functions they are; "Turn on

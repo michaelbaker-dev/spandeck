@@ -13,7 +13,7 @@ use spandeck_agents::{
 };
 
 use crate::approvals::{Answer, Asked};
-use crate::daemon::{invalid, ApprovalAnswer, Daemon, PaneEntry, PaneMeta, Result, TurnStats};
+use crate::daemon::{invalid, ApprovalAnswer, Daemon, PaneEntry, PaneMeta, Result};
 use crate::paths::now_ms;
 
 /// What answering an approval came to, for whoever answered.
@@ -134,6 +134,18 @@ impl Daemon {
                 was.transcript_path.as_deref().filter(|_| same),
             )
         });
+        // A turn that changed nothing may be waiting for what the agent has
+        // running beside it: looked at before the pane's state is held,
+        // and only for a turn the count is about (stuck.rs).
+        let background = ev.kind == EventKind::TurnEnd && {
+            let was = p.meta();
+            crate::stuck::idle_turn(&was.turn) && self.background_work(p, &was)
+        };
+        // The prompt follows the owner's own typing into the pane.
+        let owner_spoke = ev.kind == EventKind::PromptSubmit
+            && p.wake
+                .owner_spoke
+                .swap(false, std::sync::atomic::Ordering::Relaxed);
         let (meta, session_changed) = {
             let mut m = p.meta.lock().unwrap();
             m.hooks_seen = true;
@@ -159,18 +171,19 @@ impl Daemon {
                     session_changed = true;
                 }
             }
+            // Another conversation: its turns are counted from nothing,
+            // and what the owner said was fine is watched for again.
+            if session_changed {
+                m.turn.idle_turns = 0;
+                m.stuck_fine.forget();
+            }
             if ev.effort.is_some() {
                 m.effort = ev.effort.clone();
                 m.effort_at_ms = now;
             }
             match ev.kind {
                 EventKind::PromptSubmit => {
-                    let idle_turns = m.turn.idle_turns;
-                    m.turn = TurnStats {
-                        started_ms: now,
-                        idle_turns,
-                        ..Default::default()
-                    };
+                    m.turn = crate::stuck::turn_began(&m.turn, owner_spoke, now);
                     m.last_message = ev.message.clone();
                 }
                 EventKind::ToolStart => {
@@ -184,6 +197,7 @@ impl Daemon {
                         let ok = t.ok.unwrap_or(true);
                         if ok && t.writes {
                             m.turn.file_changes += 1;
+                            m.stuck_fine.forget();
                         }
                         match (&t.command, ok) {
                             (Some(cmd), false) => {
@@ -193,13 +207,11 @@ impl Daemon {
                                     m.turn.fail_cmd = Some(cmd.clone());
                                     m.turn.fail_streak = 1;
                                 }
-                                if m.turn.fail_streak >= self.cfg.stuck_same_failure {
-                                    stuck = Some(format!(
-                                        "stuck: the same command failed {} times in a row ({})",
-                                        m.turn.fail_streak,
-                                        truncate(cmd, 80)
-                                    ));
-                                }
+                                stuck = crate::stuck::command_failed(
+                                    &m.turn,
+                                    &m.stuck_fine,
+                                    self.cfg.stuck_same_failure,
+                                );
                             }
                             (Some(_), true) => {
                                 m.turn.fail_cmd = None;
@@ -233,17 +245,13 @@ impl Daemon {
                     m.subagents.clear();
                     m.last_message = ev.message.clone().or(m.last_message.take());
                     if ev.kind == EventKind::TurnEnd {
-                        if m.turn.tool_calls >= 5 && m.turn.file_changes == 0 {
-                            m.turn.idle_turns += 1;
-                        } else if m.turn.file_changes > 0 {
-                            m.turn.idle_turns = 0;
-                        }
-                        if m.turn.idle_turns >= self.cfg.stuck_idle_turns {
-                            stuck = Some(format!(
-                                "stuck: {} turns in a row used tools but changed no files",
-                                m.turn.idle_turns
-                            ));
-                        }
+                        let m = &mut *m;
+                        stuck = crate::stuck::turn_ended(
+                            &mut m.turn,
+                            &m.stuck_fine,
+                            background,
+                            self.cfg.stuck_idle_turns,
+                        );
                     }
                 }
                 EventKind::SessionStart => {
