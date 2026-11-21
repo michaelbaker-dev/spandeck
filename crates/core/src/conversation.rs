@@ -24,6 +24,12 @@ use spandeck_archive::stores;
 use crate::daemon::{invalid, Daemon, PaneEntry, PaneMeta, Result};
 use crate::paths::now_ms;
 
+/// Said in `caps`: a tool step that sent files to the owner (Claude Code's
+/// `SendUserFile`) carries them as `sent` (archive, conversation.rs; the
+/// owner's report of 21 Nov 2026). A station that does not say it sends
+/// the step as any other, and a deck shows it so.
+pub const SENT_CAP: &str = "sent_files";
+
 /// Something said of a pane's model at a moment of its conversation: what
 /// its program printed for a command (`name`), or the owner's choice for
 /// the pane alone (no name: the flags are on the pane's record).

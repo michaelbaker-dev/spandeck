@@ -772,3 +772,31 @@ fn a_zip_being_built_can_be_cancelled() {
         "cancelled"
     );
 }
+
+/// The owner's report of 21 Nov 2026: a film in the Files preview. A
+/// player asks for part after part over the length of the film, so a
+/// preview's ticket is kept good by being used: ten minutes more each
+/// time, and never beyond four hours from when it was given. A download's
+/// ticket is good for its minute and no longer, however often it is used.
+#[test]
+fn a_previews_ticket_is_kept_good_by_use_and_a_downloads_is_not() {
+    let (made, min) = (1_000_000u64, 60_000u64);
+    let first = made + TICKET_MS;
+    assert_eq!(first, made + min);
+    // A download's: as it was.
+    assert_eq!(ticket_until(first, made, made + 30_000, false), first);
+    // A preview's, used half a minute in: good ten minutes from then.
+    let used = ticket_until(first, made, made + 30_000, true);
+    assert_eq!(used, made + 30_000 + 10 * min);
+    // Used again: ten minutes from then, and never sooner than it was.
+    assert_eq!(
+        ticket_until(used, made, made + 5 * min, true),
+        made + 15 * min
+    );
+    assert_eq!(ticket_until(used, made, made + 30_001, true), used + 1);
+    // Near four hours: no further than four hours from when it was given.
+    let late = made + 4 * 60 * min - 2 * min;
+    let last = ticket_until(late + min, made, late, true);
+    assert_eq!(last, made + 4 * 60 * min);
+    assert_eq!(ticket_until(last, made, last - 1, true), last);
+}

@@ -15,8 +15,14 @@
 //! bytes of no type, with `nosniff` and a policy that lets it run nothing:
 //! a file an agent wrote must never be a page of the deck. The one
 //! exception is a preview (`inline=1`) of a file whose first bytes say PNG,
-//! JPEG, GIF or WebP, which goes out as that image. SVG and HTML are
-//! attachments, always.
+//! JPEG, GIF or WebP, which goes out as that image, or say a film or a
+//! sound (MP4, QuickTime, WebM, MP3, M4A, WAV, Ogg), which goes out as that
+//! (the owner's request of 21 Nov 2026: an `.mp4` could only be
+//! downloaded). SVG and HTML are attachments, always.
+//!
+//! A part of a file is served when a `Range` asks for one (206): a phone's
+//! browser plays no film without it. The type is still decided by the
+//! file's first bytes, whichever part is asked for.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -58,6 +64,94 @@ pub(crate) fn image_type(first: &[u8]) -> Option<&'static str> {
         Some("image/webp")
     } else {
         None
+    }
+}
+
+/// A film or a sound a browser's own player can be given, by the first
+/// bytes: MP4 and M4V, QuickTime, M4A, WebM (Matroska), MP3, WAV, Ogg.
+/// Never by the name. (A picture kept in the same box as an MP4, HEIC or
+/// AVIF, is not one of them.)
+pub(crate) fn media_type(first: &[u8]) -> Option<&'static str> {
+    if first.len() >= 12 && &first[4..8] == b"ftyp" {
+        return match &first[8..12] {
+            b"qt  " => Some("video/quicktime"),
+            b"M4A " | b"M4B " | b"M4P " => Some("audio/mp4"),
+            b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"mif1" | b"msf1"
+            | b"avif" | b"avis" | b"crx " => None,
+            _ => Some("video/mp4"),
+        };
+    }
+    if first.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
+        return Some("video/webm");
+    }
+    if first.starts_with(b"ID3") {
+        return Some("audio/mpeg");
+    }
+    if first.len() >= 12 && &first[..4] == b"RIFF" && &first[8..12] == b"WAVE" {
+        return Some("audio/wav");
+    }
+    if first.starts_with(b"OggS") {
+        return Some("audio/ogg");
+    }
+    // An MPEG audio frame: eleven bits set, then a version, a layer, a bit
+    // rate and a sample rate that exist (so not text that begins FF FE).
+    if first.len() >= 4 && first[0] == 0xff && first[1] & 0xe0 == 0xe0 {
+        let (version, layer) = ((first[1] >> 3) & 3, (first[1] >> 1) & 3);
+        let (rate, sample) = (first[2] >> 4, (first[2] >> 2) & 3);
+        if version != 1 && layer != 0 && rate != 0 && rate != 15 && sample != 3 {
+            return Some("audio/mpeg");
+        }
+    }
+    None
+}
+
+/// What a preview may go out as: one of the four pictures, or a film or a
+/// sound. Everything else is an attachment of no type.
+pub(crate) fn shown_type(first: &[u8]) -> Option<&'static str> {
+    image_type(first).or_else(|| media_type(first))
+}
+
+/// The part of a file of `size` bytes a `Range` header asks for: the first
+/// and the last byte. `Ok(None)`: no part is asked for in a way this
+/// serves (another unit, several parts, not understood), and the whole
+/// file is the answer, as RFC 9110 allows. `Err`: it asks for what the
+/// file does not have (416).
+pub(crate) fn range_of(header: &str, size: u64) -> Result<Option<(u64, u64)>, ()> {
+    let Some(spec) = header.trim().strip_prefix("bytes=") else {
+        return Ok(None);
+    };
+    let Some((from, to)) = spec.trim().split_once('-') else {
+        return Ok(None);
+    };
+    let (from, to) = (from.trim(), to.trim());
+    let number = |s: &str| -> Option<u64> {
+        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse().ok())
+            .flatten()
+    };
+    match (from.is_empty(), to.is_empty()) {
+        (true, true) => Ok(None),
+        // `-n`: the last n bytes.
+        (true, false) => match number(to) {
+            None => Ok(None),
+            Some(0) => Err(()),
+            Some(_) if size == 0 => Err(()),
+            Some(n) => Ok(Some((size.saturating_sub(n), size - 1))),
+        },
+        (false, open) => {
+            let Some(from) = number(from) else {
+                return Ok(None);
+            };
+            let to = match (open, number(to)) {
+                (true, _) => u64::MAX,
+                (false, Some(to)) if to >= from => to,
+                _ => return Ok(None),
+            };
+            if from >= size {
+                return Err(());
+            }
+            Ok(Some((from, to.min(size - 1))))
+        }
     }
 }
 
@@ -145,6 +239,21 @@ impl Feed {
             .map_err(|e| format!("a bad piece: {e}"))
     }
 
+    /// The file's first bytes, for a part that begins later: what it is
+    /// is said by these, never by where the part begins.
+    async fn head(&self) -> Result<Vec<u8>, String> {
+        let mut params = self.what.clone();
+        params["offset"] = json!(0);
+        params["len"] = json!(64);
+        let got = self
+            .ask("files.read", params)
+            .await
+            .map_err(|e| e.to_string())?;
+        base64::engine::general_purpose::STANDARD
+            .decode(got["data_b64"].as_str().unwrap_or(""))
+            .map_err(|e| format!("a bad piece: {e}"))
+    }
+
     /// A piece, asked up to three times, each time smaller.
     async fn next(&mut self) -> Result<Vec<u8>, String> {
         let mut tries = 0;
@@ -181,7 +290,8 @@ pub(crate) async fn get(
         return refuse(e);
     }
     // Who asks, and for what. A ticket says both: it was given to the
-    // owner a minute ago at the most, for one file, by this station.
+    // owner a minute ago at the most (a preview's, kept good by a player's
+    // use of it, four hours ago at the most), for one file, by this station.
     let (who, asked) = match q.get("ticket") {
         Some(ticket) => {
             match identify(&web, addr.ip()).await {
@@ -304,6 +414,46 @@ pub(crate) async fn get(
             )
         }
     };
+    // A part of it, when a part is asked for: a film is played from
+    // parts, and a phone's browser plays none without them.
+    let total = feed.size;
+    let part = match headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
+        None => None,
+        Some(asked) => match range_of(asked, total) {
+            Ok(part) => part,
+            Err(()) => {
+                let mut resp = failed(
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    "invalid",
+                    format!("{name} has {total} bytes: that part of it does not exist"),
+                );
+                let h = resp.headers_mut();
+                h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+                if let Ok(v) = HeaderValue::from_str(&format!("bytes */{total}")) {
+                    h.insert(header::CONTENT_RANGE, v);
+                }
+                return resp;
+            }
+        },
+    };
+    let (start, end) = part.unwrap_or((0, total.saturating_sub(1)));
+    let inline = asked["inline"] == json!(true) && zip.is_none();
+    // What it is, by the file's first bytes, also for a part that begins
+    // later or is only a few bytes long (a player's first question is
+    // often `bytes=0-1`): one small read more.
+    let whole_head = start == 0 && (end >= 63 || end + 1 >= total);
+    let mut head = match inline && !whole_head {
+        true => match feed.head().await {
+            Ok(bytes) => bytes,
+            Err(why) => return failed(StatusCode::BAD_GATEWAY, "internal", why),
+        },
+        false => vec![],
+    };
+    feed.at = start;
+    feed.size = match total {
+        0 => 0,
+        _ => end + 1,
+    };
     // The first piece before any header is sent: what cannot be read is an
     // error with a status, not a download that ends early; and a preview
     // is decided by these bytes.
@@ -314,10 +464,12 @@ pub(crate) async fn get(
             Err(why) => return failed(StatusCode::BAD_GATEWAY, "internal", why),
         },
     };
-    let inline = asked["inline"] == json!(true);
-    let image = image_type(&first).filter(|_| inline && zip.is_none());
+    if whole_head {
+        head = first[..first.len().min(64)].to_vec();
+    }
+    let image = shown_type(&head).filter(|_| inline);
     feed.first = Some(first);
-    let size = feed.size;
+    let size = feed.size - start;
     let body = futures_util::stream::unfold(feed, |mut feed| async move {
         let ended = |why: String| std::io::Error::other(why);
         if feed.at >= feed.size {
@@ -350,7 +502,16 @@ pub(crate) async fn get(
         }
     });
     let mut resp = Response::new(Body::from_stream(body));
+    if part.is_some() {
+        *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
+    }
     let h = resp.headers_mut();
+    h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if part.is_some() {
+        if let Ok(v) = HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")) {
+            h.insert(header::CONTENT_RANGE, v);
+        }
+    }
     h.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static(image.unwrap_or("application/octet-stream")),
@@ -403,6 +564,80 @@ mod tests {
             b"",
         ] {
             assert_eq!(image_type(not), None);
+        }
+    }
+
+    /// The owner's report of 21 Nov 2026: an `.mp4` in the Files panel could
+    /// only be downloaded. A film or a sound is known by its first bytes
+    /// alone; a page, a drawing and text that only look like one are not.
+    #[test]
+    fn a_film_or_a_sound_is_known_by_its_first_bytes_only() {
+        for (first, is) in [
+            (&b"\0\0\0\x18ftypisom\0\0\x02\0"[..], "video/mp4"),
+            (b"\0\0\0\x1cftypmp42\0\0\0\0", "video/mp4"),
+            (b"\0\0\0\x1cftypM4V \0\0\0\0", "video/mp4"),
+            (b"\0\0\0\x14ftypqt  \0\0\0\0", "video/quicktime"),
+            (b"\0\0\0\x1cftypM4A \0\0\0\0", "audio/mp4"),
+            (b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81", "video/webm"),
+            (b"ID3\x04\0\0\0\0\0\x0a", "audio/mpeg"),
+            (b"\xff\xfb\x90\x64\0\0", "audio/mpeg"),
+            (b"RIFF\x24\0\0\0WAVEfmt ", "audio/wav"),
+            (b"OggS\0\x02\0\0", "audio/ogg"),
+        ] {
+            assert_eq!(media_type(first), Some(is), "{first:?}");
+            assert_eq!(shown_type(first), Some(is));
+        }
+        for not in [
+            &b"<!doctype html><script>alert(1)</script>"[..],
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>",
+            // Text in UTF-16 begins FF FE.
+            b"\xff\xfe<\0h\0t\0m\0l\0>\0",
+            // A picture in an MP4's box is not a film.
+            b"\0\0\0\x18ftypheic\0\0\0\0",
+            b"\0\0\0\x18ftypavif\0\0\0\0",
+            b"RIFF\x10\0\0\0AVI LIST",
+            b"%PDF-1.7",
+            b"ftyp",
+            b"",
+        ] {
+            assert_eq!(media_type(not), None, "{not:?}");
+        }
+        assert_eq!(shown_type(b"<html>ftypisom"), None);
+        assert_eq!(shown_type(b"GIF89a..."), Some("image/gif"));
+    }
+
+    /// The same report: a phone's browser plays a film only from parts of
+    /// it. One part is served, as asked; what the file does not have is
+    /// refused; and what is not understood gets the whole file.
+    #[test]
+    fn one_part_of_a_file_is_what_a_range_asks_for() {
+        assert_eq!(range_of("bytes=0-1", 1000), Ok(Some((0, 1))));
+        assert_eq!(range_of("bytes=0-", 1000), Ok(Some((0, 999))));
+        assert_eq!(range_of("bytes=200-299", 1000), Ok(Some((200, 299))));
+        assert_eq!(range_of("bytes=999-", 1000), Ok(Some((999, 999))));
+        assert_eq!(range_of("bytes=900-5000", 1000), Ok(Some((900, 999))));
+        assert_eq!(range_of("bytes=-100", 1000), Ok(Some((900, 999))));
+        assert_eq!(range_of("bytes=-5000", 1000), Ok(Some((0, 999))));
+        assert_eq!(range_of(" bytes= 5 - 9 ", 1000), Ok(Some((5, 9))));
+        // Not there: 416.
+        assert_eq!(range_of("bytes=1000-", 1000), Err(()));
+        assert_eq!(range_of("bytes=5000-6000", 1000), Err(()));
+        assert_eq!(range_of("bytes=-0", 1000), Err(()));
+        assert_eq!(range_of("bytes=0-", 0), Err(()));
+        assert_eq!(range_of("bytes=-5", 0), Err(()));
+        // Not served as a part: the whole file.
+        for whole in [
+            "bytes=0-1,5-9",
+            "lines=0-5",
+            "bytes=9-5",
+            "bytes=-",
+            "bytes=a-b",
+            "bytes=+1-5",
+            "bytes=5",
+            "bytes=0-99999999999999999999",
+            "",
+        ] {
+            assert_eq!(range_of(whole, 1000), Ok(None), "{whole}");
         }
     }
 

@@ -1000,6 +1000,24 @@ pub mod browser {
             Page::open_as(s, width, height, true)
         }
 
+        /// A second of real video (WebM, 160 by 100), recorded by this
+        /// browser itself from a canvas it draws: in base64.
+        pub fn record_webm(&self) -> String {
+            self.js(r#"(() => { const v = document.createElement('canvas'); v.width = 160; v.height = 100; const d = v.getContext('2d'); let n = 0;
+                const tick = setInterval(() => { d.fillStyle = `hsl(${n * 40}, 70%, 50%)`; d.fillRect(0, 0, 160, 100); d.fillStyle = '#fff'; d.fillRect(10 + n * 8, 40, 30, 20); n += 1; }, 60);
+                const rec = new MediaRecorder(v.captureStream(15), { mimeType: 'video/webm' }); const parts = [];
+                rec.ondataavailable = (e) => parts.push(e.data);
+                rec.onstop = async () => { clearInterval(tick); const b = new Uint8Array(await new Blob(parts).arrayBuffer()); let bin = ''; for (const x of b) bin += String.fromCharCode(x); window.__webm = btoa(bin); };
+                window.__webm = null; rec.start(); setTimeout(() => rec.stop(), 900); return true; })()"#);
+            self.wait(
+                "a second of video",
+                "window.__webm && window.__webm.length > 200 && window.__webm",
+            )
+            .as_str()
+            .unwrap()
+            .to_string()
+        }
+
         /// A browser that has never been given a token for this station.
         pub fn open_signed_out(s: &Station, width: u32, height: u32) -> Page {
             Page::open_as(s, width, height, false)

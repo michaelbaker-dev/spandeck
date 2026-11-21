@@ -6,8 +6,9 @@
 //   - Browsing never moves a pane. Only "Move … here" does, after asking.
 //   - Between stations files are copied, never moved.
 //   - A file's name and what it holds are data: put on the page as text,
-//     never as HTML. A preview is text in a box, or an image the station
-//     itself says is a PNG, JPEG, GIF or WebP.
+//     never as HTML. A preview is text in a box, an image the station
+//     itself says is a PNG, JPEG, GIF or WebP, or a film or a sound the
+//     station itself says is one, in the browser's own player.
 //   - What a pane is working in is not deleted, renamed or moved: the
 //     station refuses it, and the page names the panes and offers no way
 //     round it.
@@ -54,11 +55,35 @@ export function filesBusy() {
   return !!panel && (!!panel.drag || [...panel.cells.values()].some(c => c.el.isConnected && (c.view.draft || c.view.renaming || c.view.pathEdit)));
 }
 
+// A file's preview, for the rest of the page (Chat shows the files an
+// agent sent with it): the same dialog the panel's listing opens. `known`
+// is what is known of the file already (`size`, `mtime_ms`, `kind`).
+export function previewFile(station, path, name, known = {}) {
+  if (!panel) panel = new Panel();
+  showPreview(panel, station || env.api.station, String(path), String(name || path), known || {});
+}
+// A link to one file of a station, as the panel asks for one: the page's
+// station gives it, for that station's file or another's.
+export function fileTicket(station, what) {
+  if (!panel) panel = new Panel();
+  return panel.ticket(station || env.api.station, what);
+}
+export function downloadFile(station, path, name) {
+  if (!panel) panel = new Panel();
+  return panel.downloadFile(station || env.api.station, String(path), String(name || path));
+}
+// What a preview shows a file as, by the end of its name. (What it is is
+// decided by the station, from its first bytes: a name is only a guess at
+// which element to ask with.)
+export const previewKind = (name) => (INLINE.test(name) ? 'image' : VIDEO.test(name) ? 'video' : AUDIO.test(name) ? 'audio' : 'other');
+
 const KIB = 1024, MIB = 1024 * 1024;
 const PREVIEW_MAX = 256 * KIB;
 const RELIST_MS = 4000, JOBS_MS = 1000, TICKET_MS = 45000;
 const ROWS_STEP = 300;
 const INLINE = /\.(png|jpe?g|gif|webp)$/i;
+const VIDEO = /\.(mp4|m4v|mov|webm)$/i, AUDIO = /\.(mp3|m4a|wav|ogg)$/i;
+const NOT_PLAYED = 'This cannot be played here. Download it to open it.';
 
 const store = {
   get(key, otherwise) { try { const v = localStorage.getItem('spandeck.files.' + key); return v === null ? otherwise : v; } catch (e) { return otherwise; } },
@@ -119,6 +144,77 @@ function fromB64(text) {
 // What only looks (a listing, a job's progress): at most two questions on
 // their way to one station at a time, each given ten seconds. A station that
 // does not answer so holds up nothing but its own listing.
+// A text file as text, an image as an image, a film or a sound in the
+// browser's own player, anything else as what is known of it. Nothing of
+// the file is ever put on the page as HTML: a picture, a film and a sound
+// are bytes the station sent as that type because their first bytes say
+// so, asked for by a link it gave a ticket for.
+function showPreview(P, station, path, name, e) {
+  let playing = null;
+  dialog(name, (close, body) => {
+    const facts = h('div', { class: 'fx-facts muted' }, [e.kind === 'link' ? 'link' : 'file', typeof e.size === 'number' ? fmtSize(e.size) : null, e.mtime_ms ? 'changed ' + fmtWhen(e.mtime_ms) : null, `on ${station}`].filter(Boolean).join(' · '));
+    const where = h('div', { class: 'fx-where mono muted' }, h('bdi', {}, path));
+    const box = h('div', { class: 'fx-preview' }, h('p', { class: 'muted' }, 'Reading…'));
+    const foot = h('div', { class: 'row end' },
+      h('button', { type: 'button', onclick: () => copyText(path, 'Copied the path') }, 'Copy path'),
+      h('button', { type: 'button', class: 'primary fx-preview-get', onclick: () => P.downloadFile(station, path, name) }, 'Download'));
+    const plain = (text) => { playing = null; box.replaceChildren(h('p', { class: 'muted fx-preview-note' }, text)); };
+    const ticket = () => P.ticket(station, { path, inline: true });
+    // A film or a sound. The player asks for part after part, and each
+    // use keeps its link good; one that ran out while it was paused for
+    // long is asked for again, once, and the film goes on from where it
+    // was. What still does not play is said plainly.
+    const play = async (video) => {
+      let t;
+      try { t = await ticket(); } catch (err) { return plain(say(err)); }
+      const el = video
+        ? h('video', { class: 'fx-media fx-video', controls: true, playsInline: true, preload: 'metadata', 'aria-label': `Video: ${name}` })
+        : h('audio', { class: 'fx-media fx-audio', controls: true, preload: 'metadata', 'aria-label': `Sound: ${name}` });
+      if (video) el.setAttribute('playsinline', '');
+      let at = 0, again = false;
+      el.addEventListener('timeupdate', () => { if (el.currentTime > 0) at = el.currentTime; });
+      el.addEventListener('loadedmetadata', () => { again = false; });
+      el.addEventListener('error', async () => {
+        if (again) return plain(NOT_PLAYED);
+        again = true;
+        const was = at;
+        let fresh;
+        try { fresh = await ticket(); } catch (err) { return plain(NOT_PLAYED); }
+        if (playing !== el) return;
+        el.addEventListener('loadedmetadata', () => { if (was > 0) { try { el.currentTime = was; } catch (err) { /* from the start */ } } }, { once: true });
+        el.src = fresh.url;
+        el.load();
+      });
+      el.src = t.url;
+      playing = el;
+      box.replaceChildren(el);
+    };
+    (async () => {
+      const kind = previewKind(name);
+      if (kind === 'image') {
+        let t;
+        try { t = await ticket(); } catch (err) { return plain(say(err)); }
+        const img = h('img', { class: 'fx-img', alt: `Picture: ${name}`, src: t.url });
+        img.addEventListener('error', () => plain('This picture cannot be shown here. Download it to see it.'));
+        return box.replaceChildren(img);
+      }
+      if (kind === 'video' || kind === 'audio') return play(kind === 'video');
+      let got;
+      try { got = await look(station, 'files.read', { path, offset: 0, len: PREVIEW_MAX }); } catch (err) { return plain(say(err)); }
+      const bytes = fromB64(got.data_b64);
+      const text = new TextDecoder('utf-8').decode(bytes);
+      const odd = (text.match(/�/g) || []).length;
+      if (bytes.includes(0) || odd > Math.max(2, text.length / 100)) return plain('This file is not text: there is nothing to show of it here. Download it to open it.');
+      if (!bytes.length) return plain('This file is empty.');
+      fill(box,
+        h('pre', { class: 'fx-text mono', tabIndex: 0, 'aria-label': `What ${name} holds` }, text),
+        got.eof ? null : h('p', { class: 'muted fx-preview-note' }, `Cut off: the first ${fmtSize(bytes.length)} of ${fmtSize(got.size)}. Download it for the rest.`));
+    })();
+    return h('div', { class: 'fx-preview-wrap' }, facts, where, box, foot);
+    // (A player taken off the page would play on: it is stopped.)
+  }, { wide: true, onClose: () => { if (playing) { try { playing.pause(); playing.removeAttribute('src'); playing.load(); } catch (err) { /* gone */ } playing = null; } } });
+}
+
 const lanes = new Map();
 function look(station, method, params = {}, within = 10000) {
   return new Promise((resolve, reject) => {
@@ -759,40 +855,7 @@ class Listing {
     this.panel.downloadZip(this.station, picked.map(p => p.path));
   }
 
-  // A text file as text, an image as an image, anything else as what is
-  // known of it. Nothing of the file is ever put on the page as HTML.
-  preview(r) {
-    const e = r.e, station = this.station;
-    dialog(e.name, (close, body) => {
-      const facts = h('div', { class: 'fx-facts muted' }, [e.kind === 'link' ? 'link' : 'file', fmtSize(e.size), e.mtime_ms ? 'changed ' + fmtWhen(e.mtime_ms) : null, `on ${station}`].filter(Boolean).join(' · '));
-      const where = h('div', { class: 'fx-where mono muted' }, h('bdi', {}, r.path));
-      const box = h('div', { class: 'fx-preview' }, h('p', { class: 'muted' }, 'Reading…'));
-      const foot = h('div', { class: 'row end' },
-        h('button', { type: 'button', onclick: () => copyText(r.path, 'Copied the path') }, 'Copy path'),
-        h('button', { type: 'button', class: 'primary fx-preview-get', onclick: () => this.panel.downloadFile(station, r.path, e.name) }, 'Download'));
-      const plain = (text) => box.replaceChildren(h('p', { class: 'muted fx-preview-note' }, text));
-      (async () => {
-        if (INLINE.test(e.name)) {
-          let t;
-          try { t = await this.panel.ticket(station, { path: r.path, inline: true }); } catch (err) { return plain(say(err)); }
-          const img = h('img', { class: 'fx-img', alt: `Picture: ${e.name}`, src: t.url });
-          img.addEventListener('error', () => plain('This picture cannot be shown here. Download it to see it.'));
-          return box.replaceChildren(img);
-        }
-        let got;
-        try { got = await look(station, 'files.read', { path: r.path, offset: 0, len: PREVIEW_MAX }); } catch (err) { return plain(say(err)); }
-        const bytes = fromB64(got.data_b64);
-        const text = new TextDecoder('utf-8').decode(bytes);
-        const odd = (text.match(/�/g) || []).length;
-        if (bytes.includes(0) || odd > Math.max(2, text.length / 100)) return plain('This file is not text: there is nothing to show of it here. Download it to open it.');
-        if (!bytes.length) return plain('This file is empty.');
-        fill(box,
-          h('pre', { class: 'fx-text mono', tabIndex: 0, 'aria-label': `What ${e.name} holds` }, text),
-          got.eof ? null : h('p', { class: 'muted fx-preview-note' }, `Cut off: the first ${fmtSize(bytes.length)} of ${fmtSize(got.size)}. Download it for the rest.`));
-      })();
-      return h('div', { class: 'fx-preview-wrap' }, facts, where, box, foot);
-    }, { wide: true });
-  }
+  preview(r) { showPreview(this.panel, this.station, r.path, r.e.name, r.e); }
 
   // ---- dragging ----
   onHover(e) {

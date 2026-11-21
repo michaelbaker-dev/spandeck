@@ -314,7 +314,7 @@ apply is absent, not null.
 | `user` | `text`, `images?`, `origin`, `from?`, `more?` | `origin`: `you` (typed), `queued` (typed while the agent worked, sent when it was free), `agent` (another agent's message; `from` is what that agent is called), `task` (a background task's report in a shape the station did not recognise; the ones it does are `notice` items), `schedule` (a scheduled wake-up), `system` (Claude Code's own). A slash command is `text: "/compact keep the tally"`. Codex: always `you`. |
 | `text` | `text`, `more?`, `phase?` | The agent's words, as markdown source. Codex adds `phase`: `commentary` (said while working) or `final_answer`. |
 | `thinking` | `duration_ms?` | Never the thinking. Codex gives no duration. |
-| `tool` | `name`, `summary`, `status`, `duration_ms?`, `added?`, `removed?`, `background?` | `summary` is one line, 200 characters at most: the command, the file, the pattern, the address. May be empty. `added` / `removed`: lines an edit changed. `background`: started and left running. |
+| `tool` | `name`, `summary`, `status`, `duration_ms?`, `added?`, `removed?`, `background?`, `sent?` | `summary` is one line, 200 characters at most: the command, the file, the pattern, the address. May be empty. `added` / `removed`: lines an edit changed. `background`: started and left running. `sent`: files the call sent to the owner (below). |
 | `question` | `questions`, `status`, `answers?` | Claude Code's AskUserQuestion. `questions[]`: `header`, `question`, `multi`, `options[] {label, description?}`. `answers`: `[question, answer]` pairs, once answered. While it waits it may be held for the owner: see `live.questions`. |
 | `plan` | `text`, `status`, `more?` | Claude Code's ExitPlanMode. `text` is the plan, markdown source: for a plan that was held, the text its hook was given (what the owner was shown); else the plan the result of an approved call carries; else what the call's record holds, which can be an earlier plan when Claude Code changed the plan in the same step, or empty. The detail's `text` follows the same order. `rejected`: the owner declined it in the terminal, or sent it back from the deck. |
 | `tasks` | `name`, `summary`, `status`, `background?` | A sub-agent the agent started: `name` is its kind ("Explore"), `summary` what it was asked. One item per sub-agent; fold neighbours into "3 tasks". Which are running now is `live.subagents`. |
@@ -768,6 +768,27 @@ item by its `summary`) that names a picture or a video file on the pane's statio
 - `pane.media.attach {pane, id}` → `{id, name, size, image}`: the file is made one of the
   owner's next message to this pane, at the station; use the `id` in `pane.paste`'s `files`.
 - Both are the owner's only. The item's own `text` is unchanged.
+
+## Files an agent sent: `sent`
+
+21 Nov 2026; `crates/archive/src/conversation.rs`. A `tool` item of Claude Code's
+`SendUserFile` (its input: `{"files": [path, ...], "caption"}`) has
+
+```json
+"sent": {"caption": "The film, and a contact sheet.",
+         "files": [{"path": "/home/ada/film/film_720p.mp4", "name": "film_720p.mp4"}],
+         "more": 3}
+```
+
+- `files`: twelve at the most; `more` is how many more the call named. `path` is as the
+  agent wrote it, or under the folder the record says it was in when it was not whole.
+  `caption` is cut at 2,000 characters and absent when empty. The item's `summary` is the names.
+- Every word of it is the agent's text: show it as text. The station has not looked at the
+  files: one may be gone, or not what its name says. A deck asks for each as the owner, with
+  the `files.` methods on the pane's station (`files.stat`, and `files.ticket` with `inline`
+  for a preview), which decide what it is by its first bytes.
+- A station that sends it says `sent_files` in `caps`. One that does not sends the same
+  step with no `sent`, and it is shown as any tool step.
 
 ## `pane.conversation.detail`
 

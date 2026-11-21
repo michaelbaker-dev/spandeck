@@ -56,6 +56,20 @@ const JOBS_MAX: usize = 8;
 const PATHS_MAX: usize = 1000;
 /// A download's ticket is taken this long after it was given.
 const TICKET_MS: u64 = 60_000;
+/// A preview's ticket (`inline`) is for a player that asks for part after
+/// part over the length of a film: each use keeps it good this much
+/// longer, and never beyond this long after it was given.
+const TICKET_SLIDE_MS: u64 = 10 * 60_000;
+const TICKET_LIFE_MS: u64 = 4 * 60 * 60_000;
+
+/// Until when a ticket is good once it has been used at `now`. One that is
+/// not `inline` is good as long as it was, whatever uses it.
+fn ticket_until(until: u64, made: u64, now: u64, inline: bool) -> u64 {
+    if !inline {
+        return until;
+    }
+    until.max((now + TICKET_SLIDE_MS).min(made + TICKET_LIFE_MS))
+}
 /// One piece sent to another station, and how long it may take there.
 const SEND_START: usize = 256 * 1024;
 const SEND_MIN: usize = 32 * 1024;
@@ -2098,7 +2112,8 @@ pub struct FilesState {
     /// One piece of an upload at a time.
     putting: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Downloads a signed-in browser may start by a link.
-    tickets: Mutex<HashMap<String, (u64, Value)>>,
+    /// ticket -> (good until, when it was given, what it is for).
+    tickets: Mutex<HashMap<String, (u64, u64, Value)>>,
 }
 
 impl FilesState {
@@ -2348,9 +2363,10 @@ impl Daemon {
                     return Err(invalid("a ticket is for one path or one zip"));
                 }
                 let ticket = random_token();
-                let expires = now_ms() + TICKET_MS;
+                let made = now_ms();
+                let expires = made + TICKET_MS;
                 let mut tickets = self.files.tickets.lock().unwrap();
-                tickets.retain(|_, (until, _)| *until > now_ms());
+                tickets.retain(|_, (until, _, _)| *until > made);
                 if tickets.len() >= 1000 {
                     return Err(invalid("too many downloads were asked for at once"));
                 }
@@ -2358,6 +2374,7 @@ impl Daemon {
                     ticket.clone(),
                     (
                         expires,
+                        made,
                         json!({"station": station, "path": path, "zip": zip,
                                "inline": params["inline"] == json!(true)}),
                     ),
@@ -2372,13 +2389,14 @@ impl Daemon {
         }
     }
 
-    /// What a download's ticket is for, while it is good.
+    /// What a download's ticket is for, while it is good. A preview's
+    /// ticket is kept good by being used (`ticket_until`).
     pub fn files_ticket(&self, ticket: &str) -> Option<Value> {
-        let tickets = self.files.tickets.lock().unwrap();
-        tickets
-            .get(ticket)
-            .filter(|(until, _)| *until > now_ms())
-            .map(|(_, what)| what.clone())
+        let now = now_ms();
+        let mut tickets = self.files.tickets.lock().unwrap();
+        let (until, made, what) = tickets.get_mut(ticket).filter(|t| t.0 > now)?;
+        *until = ticket_until(*until, *made, now, what["inline"] == json!(true));
+        Some(what.clone())
     }
 
     fn files_zip(&self, id: &str) -> Result<Arc<Zip>> {
