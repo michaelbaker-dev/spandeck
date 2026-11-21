@@ -436,7 +436,7 @@ impl Daemon {
         // cannot reach it says so to whoever asked (another station waits
         // five seconds for this call) instead of going quiet.
         let probe = ReleaseHost::new(url, Duration::from_secs(3)).map_err(invalid)?;
-        let host = ReleaseHost::new(url, Duration::from_secs(300)).map_err(invalid)?;
+        let host = ReleaseHost::for_download(url).map_err(invalid)?;
         let tag = match probe.latest().await {
             Ok(latest) => {
                 let tag = version.map(String::from).unwrap_or(latest);

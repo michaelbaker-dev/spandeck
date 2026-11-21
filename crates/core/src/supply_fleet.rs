@@ -280,8 +280,7 @@ impl Daemon {
             self.prune_leftovers();
             return Ok(answer);
         }
-        let host = ReleaseHost::new(self.cfg.update.url.as_deref(), Duration::from_secs(300))
-            .map_err(invalid)?;
+        let host = ReleaseHost::for_download(self.cfg.update.url.as_deref()).map_err(invalid)?;
         // Checked against the SHA-256 published now; when the release host
         // does not answer, a kept copy that matches the one it was checked
         // against when it was downloaded. Nothing else is ever handed on.

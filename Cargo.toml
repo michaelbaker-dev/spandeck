@@ -62,7 +62,13 @@ tempfile = "3"
 
 [profile.release]
 opt-level = 3
-debug = 1
+# What is published is the production build: no debug information in it.
+# With it the two programs were 237 MB each and a release 110 MB, which a
+# station on a slow line could not download in the time it was given
+# (21 Nov 2026). Function names are kept, so a backtrace still names where
+# it was; a panic says its file and line as before.
+debug = 0
+strip = "debuginfo"
 
 [profile.dev]
 opt-level = 1

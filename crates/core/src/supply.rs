@@ -178,6 +178,24 @@ impl ReleaseHost {
         })
     }
 
+    /// For the archive itself: given as long as it takes while it keeps
+    /// coming. A release is tens of megabytes and some stations are on a
+    /// slow line; only one that sends nothing for a minute is given up.
+    pub fn for_download(configured: Option<&str>) -> Result<ReleaseHost, String> {
+        let http = crate::http::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|e| e.to_string())?;
+        Ok(ReleaseHost {
+            base: configured
+                .unwrap_or(RELEASES)
+                .trim_end_matches('/')
+                .to_string(),
+            http,
+        })
+    }
+
     /// "GitHub", or the host of the address the owner configured.
     pub fn words(&self) -> String {
         if self.base == RELEASES {
@@ -402,12 +420,13 @@ impl Daemon {
         let Some(target) = TARGETS.iter().copied().find(|t| *t == target) else {
             return Err(NoSupply::NoSuchPlatform);
         };
-        let host = ReleaseHost::new(self.cfg.update.url.as_deref(), Duration::from_secs(300))
-            .map_err(|e| NoSupply::NoSource {
+        let host = ReleaseHost::for_download(self.cfg.update.url.as_deref()).map_err(|e| {
+            NoSupply::NoSource {
                 reached: false,
                 why: e,
                 fleet: String::new(),
-            })?;
+            }
+        })?;
         let mut reached = false;
         let mut why = String::new();
         let newest = match force {
