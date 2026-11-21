@@ -200,6 +200,18 @@ pub fn fleet_update(stations: &mut [Value], base: &str) -> Value {
         }
         s["update"] = update.unwrap_or(Value::Null);
     }
+    // A release a station runs is published, whatever the last check said:
+    // straight after an update no station has asked the host again, and
+    // the fleet would offer the release before the one it runs.
+    if let Some(known) = best.clone() {
+        for s in stations.iter().filter(|s| s["state"] != json!("not_linked")) {
+            if let Some(runs) = s["version"].as_str().and_then(plain_version) {
+                if older(&known, &runs) && best.as_deref().is_none_or(|b| older(b, &runs)) {
+                    best = Some(runs);
+                }
+            }
+        }
+    }
     let (mut behind, mut states, mut why) = (vec![], vec![], Value::Null);
     for s in stations.iter_mut().filter(members) {
         let runs = s["version"].as_str().and_then(plain_version);
@@ -425,6 +437,24 @@ mod tests {
 
     fn row(station: &str, version: &str, update: Value) -> Value {
         json!({"station": station, "version": version, "state": "online", "update": update})
+    }
+
+    /// A bug that happened (21 Nov 2026): the fleet was updated to 0.4.20
+    /// minutes after it was published, no station had asked the host
+    /// since, and the deck offered "0.4.19" to a fleet that ran 0.4.20,
+    /// because one station that was off still ran 0.4.18.
+    #[test]
+    fn a_release_a_station_runs_is_never_older_news_than_the_last_check() {
+        let knew = json!({"state": "latest", "version": "0.4.19"});
+        let mut rows = vec![
+            row("alpha", "0.4.20", knew.clone()),
+            row("beta", "0.4.20", knew.clone()),
+            row("gamma", "0.4.18", Value::Null),
+        ];
+        let fleet = fleet_update(&mut rows, "https://example.test/releases");
+        assert_eq!(fleet["version"], json!("0.4.20"), "{fleet}");
+        assert_eq!(fleet["behind"], json!(["gamma"]), "{fleet}");
+        assert_eq!(fleet["says"], json!("spandeck 0.4.20 is available"));
     }
 
     /// The same request: the fleet's view is the newest release any

@@ -2039,11 +2039,14 @@ function versionBar() {
   const phone = isPhone();
   if (!out || releaseLaterIs(out.version) || (phone && S.route && S.route.view === 'pane')) { versionBox = null; versionKey = ''; return null; }
   const can = all.filter(s => s.state === 'online' && out.behind.includes(s.station));
-  const key = `release${outKey}:${can.map(s => s.station).join(',')}:${phone}`;
+  // Who is behind and cannot be updated from here is named: a line that
+  // offers a release and no button otherwise reads as a fault (21 Nov 2026).
+  const away = out.behind.filter(n => !can.some(s => s.station === n)).slice(0, 4);
+  const key = `release${outKey}:${can.map(s => s.station).join(',')}:${away.join(',')}:${phone}`;
   if (key === versionKey) return versionBox;
   versionKey = key;
   versionBox = h('div', { class: 'vault-prompt version-bar update-line', role: 'region', 'aria-label': 'A newer spandeck is available' },
-    h('div', { class: 'grow', title: can.length < out.behind.length ? 'A station that is off or cannot be controlled from here is updated at that machine.' : null }, releaseLink(out), ' is available.'),
+    h('div', { class: 'grow', title: can.length < out.behind.length ? 'A station that is off or cannot be controlled from here is updated at that machine.' : null }, releaseLink(out), ' is available.', away.length ? ` ${away.join(", ")} ${away.length === 1 ? 'is' : 'are'} not on it and cannot be reached now: update ${away.length === 1 ? 'it' : 'them'} when ${away.length === 1 ? 'it is' : 'they are'} back.` : ''),
     can.length ? h('button', { class: 'primary update-all', onclick: () => askUpdate(can) }, phone ? 'Update' : can.length === 1 ? `Update ${can[0].station}` : 'Update all stations') : null,
     h('button', { class: 'update-later', onclick: () => { releaseLater = out.version; try { localStorage.setItem(RELEASE_LATER, out.version); } catch (e) { /* held in this page, then */ } render(); } }, 'Not now'));
   return versionBox;
