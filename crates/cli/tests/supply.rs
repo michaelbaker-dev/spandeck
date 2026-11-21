@@ -224,6 +224,66 @@ fn hello(port: u16) -> Value {
     serde_json::from_str::<Value>(json).unwrap()["result"].clone()
 }
 
+/// A bug that happened (21 Nov 2026, twice): `spandeck update --station
+/// rtx6000-wsl` said "did not answer within 5 s" and the station was never
+/// updated. Its line is slow, the answer waited for the whole download,
+/// and the download ended with the call that stopped waiting. The download
+/// is the station's own work: a slow one is answered at once as begun, and
+/// the station updates when it has it.
+#[test]
+#[cfg_attr(windows, ignore = "the release is a tar.gz made with sh")]
+fn a_station_whose_download_is_slow_answers_at_once_and_still_updates() {
+    let releases = Releases::start(true);
+    releases.slow(7000);
+    let (pa, pb) = (free_port(), free_port());
+    let a = Station::in_fleet("alpha", pa, &[pb], &host_at(&releases));
+    let b = Station::in_fleet("bravo", pb, &[pa], NO_HOST);
+    online(&a, &["bravo"]);
+    online(&b, &["alpha"]);
+    let pane = a.fake(
+        json!({"steps": [{"say": "before-update marker"}]}),
+        json!({}),
+    );
+    a.wait_text(&pane, "before-update marker");
+    let before = a.call("station.info", json!({}));
+    let began = std::time::Instant::now();
+    let said = b.call(
+        "peer.call",
+        json!({"station": "alpha", "method": "station.update", "params": {}}),
+    );
+    assert!(
+        began.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        began.elapsed()
+    );
+    assert_eq!(
+        (&said["begun"], &said["release"], &said["note"]),
+        (
+            &json!(true),
+            &json!(TAG),
+            &json!(format!(
+                "alpha is downloading {TAG}. It updates by itself when the download is checked."
+            ))
+        ),
+        "{said}"
+    );
+    // Asked again while it downloads: said, and nothing is begun twice.
+    let again = a.try_call("station.update", json!({})).unwrap_err();
+    assert!(
+        again.message.contains("already getting a release"),
+        "{}",
+        again.message
+    );
+    wait_for("the updated image to answer", 60, || {
+        let i = a.try_call("station.info", json!({})).ok()?;
+        (i["started_ms"] != before["started_ms"]).then_some(i)
+    });
+    assert!(a.text(&pane).contains("before-update marker"));
+    assert!(a.log("station.rolled_back").is_empty());
+    let name = format!("spandeck-{TAG}-{}.tar.gz", target());
+    assert_eq!(releases.asked(&name), 1);
+}
+
 /// Done when: a station whose release host does not answer is updated
 /// through a station of its fleet that can reach it. The bytes are the
 /// published release (the SHA-256 that station checked is the published

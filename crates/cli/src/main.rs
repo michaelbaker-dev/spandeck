@@ -1738,6 +1738,12 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                         "already on the latest release ({})",
                         v["version"].as_str().unwrap_or("")
                     )
+                } else if v["begun"] == json!(true) {
+                    // The download takes longer than a call waits: it goes on there.
+                    format!(
+                        "{} A notice in the Control Deck says how it went.",
+                        v["note"].as_str().unwrap_or("")
+                    )
                 } else if v["fleet"] == json!(true) {
                     // It cannot download: it asks the fleet, and goes on by itself.
                     format!(

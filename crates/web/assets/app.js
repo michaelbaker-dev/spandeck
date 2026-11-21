@@ -1997,7 +1997,7 @@ function releaseOut() {
 }
 const releaseLink = (out) => out.url ? h('a', { class: 'out', href: out.url, target: '_blank', rel: 'noopener' }, `spandeck ${out.version}`) : `spandeck ${out.version}`;
 const releaseLaterIs = (version) => { if (releaseLater === version) return true; try { return localStorage.getItem(RELEASE_LATER) === version; } catch (e) { return false; } };
-const updateStations = (can) => Promise.all(can.map(s => api.on(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : r.fleet ? r.note : `${s.station} is updating to ${r.release}`)).catch(e => toast(`${s.station}: ${e.message}`, 'error')))).then(() => refreshSoon(1500));
+const updateStations = (can) => Promise.all(can.map(s => api.on(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : r.fleet || r.begun ? r.note : `${s.station} is updating to ${r.release}`)).catch(e => toast(`${s.station}: ${e.message}`, 'error')))).then(() => refreshSoon(1500));
 const askUpdate = (can) => confirmBox(`Update ${can.map(s => s.station).join(', ')}?`, `The latest release is downloaded on ${can.length === 1 ? 'that station' : 'each of them'} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => updateStations(can), false);
 // "Check for a newer spandeck now": every station that answers asks its
 // own release host, and the fleet's list is read again when they have.
@@ -2422,7 +2422,7 @@ function stationMenu(e, s) {
     up && (s.caps || []).includes('rename') && { label: 'Rename…', action: () => renameStationDialog(s) },
     up && { label: 'Restart spandeck here (keeps terminals)', action: () => confirmBox(`Restart spandeck on ${s.station}?`, 'Every terminal and agent keeps running. If it does not come back healthy, the restart is undone.', 'Restart', () => rpc(s.station, 'station.restart', {}).then(() => toast(`${s.station} is restarting`))) },
     up && { label: 'Check for a newer spandeck now', action: checkReleaseNow },
-    up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : r.fleet ? r.note : `${s.station} is updating to ${r.release}`))) },
+    up && { label: 'Update to the latest release…', action: () => confirmBox(`Update spandeck on ${s.station}?`, `It runs ${s.version}. The latest release is downloaded on ${s.station} and checked against its published checksum. Terminals keep running, and a version that does not start properly is undone.`, 'Update', () => rpc(s.station, 'station.update', {}).then((r) => toast(r.current ? `${s.station} already runs the latest release` : r.fleet || r.begun ? r.note : `${s.station} is updating to ${r.release}`))) },
     // A station that is on, and refused for its clock or its Tailscale key,
     // is not helped by waking or starting it.
     awayWhy(s) && { note: awayWhy(s) },

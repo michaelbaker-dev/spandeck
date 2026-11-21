@@ -2248,6 +2248,8 @@ pub mod fake_releases {
         down: bool,
         /// Publishes checksums that match no file.
         wrong_sums: bool,
+        /// How long an archive takes to come, in ms.
+        slow_ms: u64,
     }
 
     pub struct Releases {
@@ -2274,6 +2276,12 @@ pub mod fake_releases {
         /// Stop answering (every request gets "unavailable"), or answer again.
         pub fn down(&self, down: bool) {
             self.served.lock().unwrap().down = down;
+        }
+
+        /// An archive takes this long to come (a release is 100 MB, and
+        /// not every station has a fast line).
+        pub fn slow(&self, ms: u64) {
+            self.served.lock().unwrap().slow_ms = ms;
         }
 
         /// Publish checksums that match no file, or the true ones again.
@@ -2336,6 +2344,13 @@ pub mod fake_releases {
                     get(
                         |State(served): State<Arc<Mutex<Served>>>,
                          Path((tag, file)): Path<(String, String)>| async move {
+                            let wait = match file.ends_with(".sha256") {
+                                true => 0,
+                                false => served.lock().unwrap().slow_ms,
+                            };
+                            if wait > 0 {
+                                tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                            }
                             let mut served = served.lock().unwrap();
                             served.asked.push(file.clone());
                             if served.down {

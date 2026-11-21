@@ -437,41 +437,133 @@ impl Daemon {
         // five seconds for this call) instead of going quiet.
         let probe = ReleaseHost::new(url, Duration::from_secs(3)).map_err(invalid)?;
         let host = ReleaseHost::new(url, Duration::from_secs(300)).map_err(invalid)?;
-        let direct = match probe.latest().await {
+        let tag = match probe.latest().await {
             Ok(latest) => {
                 let tag = version.map(String::from).unwrap_or(latest);
                 if tag.trim_start_matches('v') == VERSION && version.is_none() {
                     return Ok(json!({"ok": true, "current": true, "version": VERSION,
                         "note": "This station already runs the latest release."}));
                 }
-                match host.verified(&tag, &target).await {
-                    Ok((archive, _sum)) => Ok((tag, archive)),
-                    Err(e) => Err(e),
-                }
+                Ok(tag)
             }
             Err(e) => Err(e),
         };
-        match direct {
-            Ok((tag, archive)) => {
-                let dir = self.release_dir(&tag)?;
-                let file = dir.join(format!("release.{}", crate::supply::archive_ext(&target)));
-                std::fs::write(&file, &archive)?;
-                self.install_release(&tag, &target, &file, by).await
+        let tag = match tag {
+            Ok(tag) => tag,
+            Err(e) => return self.update_failed(e, version, target, probe.words(), by),
+        };
+        // The download is this station's own work, not the request's: a
+        // release is 100 MB, another station waits five seconds for this
+        // call, and a caller that stopped waiting used to end the download
+        // with it (rtx6000-wsl, 21 Nov 2026: never updated from another
+        // station). It is waited for a moment, so that a quick one is
+        // answered as done; a slow one is answered as begun and goes on.
+        use std::sync::atomic::Ordering;
+        if self.held.updating.swap(true, Ordering::SeqCst) {
+            return Err(invalid(format!(
+                "{} is already getting a release: its notice says how far it is",
+                self.station
+            )));
+        }
+        let (me, by_task, tag_task, target_task) =
+            (self.clone(), by.to_string(), tag.clone(), target.clone());
+        let mut work = tokio::spawn(async move {
+            let got = match host.verified(&tag_task, &target_task).await {
+                Ok((archive, _sum)) => {
+                    let installed = async {
+                        let dir = me.release_dir(&tag_task)?;
+                        let file = dir.join(format!(
+                            "release.{}",
+                            crate::supply::archive_ext(&target_task)
+                        ));
+                        std::fs::write(&file, &archive)?;
+                        me.install_release(&tag_task, &target_task, &file, &by_task)
+                            .await
+                    };
+                    Ok(installed.await)
+                }
+                Err(e) => Err(e),
+            };
+            me.held.updating.store(false, Ordering::SeqCst);
+            got
+        });
+        let quick = tokio::time::timeout(Duration::from_millis(1500), &mut work).await;
+        let ended = |got: std::result::Result<
+            std::result::Result<Result<Value>, Fetch>,
+            tokio::task::JoinError,
+        >| match got {
+            Ok(got) => got,
+            Err(e) => Ok(Err(invalid(format!("the update stopped: {e}")))),
+        };
+        match quick {
+            Ok(got) => match ended(got) {
+                Ok(installed) => installed,
+                Err(e) => self.update_failed(e, version, target, probe.words(), by),
+            },
+            Err(_) => {
+                let station = self.station.clone();
+                let begun = format!(
+                    "{station} is downloading {tag}. It updates by itself when the download is checked."
+                );
+                let notice = self.notify_quiet("station.update", &begun, "");
+                let (me, by, version, words) = (
+                    self.clone(),
+                    by.to_string(),
+                    version.map(String::from),
+                    probe.words(),
+                );
+                let tag_then = tag.clone();
+                tokio::spawn(async move {
+                    let line = match ended(work.await) {
+                        // The station is going over to it now.
+                        Ok(Ok(_)) => format!(
+                            "{station} downloaded {tag_then} and is updating to it. Terminals stay open, and a version that does not start properly is undone."
+                        ),
+                        Ok(Err(e)) => format!("{station} was not updated to {tag_then}: {e}"),
+                        Err(e) => {
+                            match me.update_failed(e, version.as_deref(), target, words, &by) {
+                                Ok(v) => v["note"].as_str().unwrap_or("").to_string(),
+                                Err(e) => format!("{station} was not updated to {tag_then}: {e}"),
+                            }
+                        }
+                    };
+                    me.notify_rewrite(&notice, "station.update", &line, "");
+                    me.emit("station.update.progress", None, None, json!({"text": line}));
+                });
+                Ok(
+                    json!({"ok": true, "begun": true, "from": VERSION, "release": tag,
+                    "note": begun}),
+                )
             }
-            Err(Fetch::Checksum) => Err(invalid(
+        }
+    }
+
+    /// The release could not be had from the release host: said, or the
+    /// fleet is asked.
+    fn update_failed(
+        &self,
+        e: crate::supply::Fetch,
+        version: Option<&str>,
+        target: String,
+        host: String,
+        by: &str,
+    ) -> Result<Value> {
+        use crate::supply::Fetch;
+        match e {
+            Fetch::Checksum => Err(invalid(
                 "the download does not match its published checksum; nothing was changed",
             )),
             // The release host answers and has no such file: no station
             // of the fleet would find it there either.
-            Err(Fetch::Http(url, 404)) => Err(invalid(format!("{url}: HTTP 404"))),
-            Err(e) => {
+            Fetch::Http(url, 404) => Err(invalid(format!("{url}: HTTP 404"))),
+            e => {
                 let why = match e {
                     Fetch::Unreachable(why) => why,
                     Fetch::Http(url, code) => format!("{url}: HTTP {code}"),
                     Fetch::Checksum => String::new(),
                 };
                 tracing::info!(%why, "the release could not be had from the release host; asking the fleet");
-                self.update_through_fleet(version.map(String::from), target, probe.words(), by)
+                self.update_through_fleet(version.map(String::from), target, host, by)
             }
         }
     }
