@@ -43,6 +43,7 @@ import { micFor } from './mic.js';
 import { rolePick } from './roles.js';
 import { retryIn } from './api.js';
 import { applyPaneFrame, applyChatFrame } from './look.js';
+import { previewFile, fileTicket, downloadFile, previewKind } from './files.js';
 
 let env = null;
 const convs = new Map();   // "station/pane id" -> Conv
@@ -67,6 +68,8 @@ let titlesAt = 0, titlesFor = '';
 
 const keyOf = (st, p) => `${st}/${p.id}`;
 const RUN = new Set(['tool', 'thinking', 'tasks']);
+// Files of one send that are shown (the station sends as many at the most).
+const SENT_MAX = 12;
 const STATUS = ['running', 'ok', 'done', 'error', 'denied', 'interrupted'];
 // The keys under "Keys" in the message box, for a program that is at a
 // prompt nothing here knows of. As on the terminal's face.
@@ -638,9 +641,76 @@ class Conv {
     const said = new Set();
     for (const x of this.items) if (x.kind !== 'tool' && Array.isArray(x.media)) for (const m of x.media) said.add(m && m.id);
     const media = [];
-    for (const x of run) if (x.kind === 'tool' && Array.isArray(x.media)) for (const m of x.media) if (m && !said.has(m.id) && !media.some(k => k.id === m.id)) media.push(m);
-    if (!media.length) return el;
-    return h('div', { class: 'chat-run-made' }, el, this.madeEl({ media }));
+    // (Files the agent sent have their own card: not shown twice.)
+    const sent = run.filter(x => this.sentOf(x));
+    for (const x of run) if (x.kind === 'tool' && Array.isArray(x.media) && !sent.includes(x)) for (const m of x.media) if (m && !said.has(m.id) && !media.some(k => k.id === m.id)) media.push(m);
+    if (!media.length && !sent.length) return el;
+    return h('div', { class: 'chat-run-made' }, el, sent.map(x => this.sentEl(x)), media.length ? this.madeEl({ media }) : null);
+  }
+
+  // ---- files an agent sent ----
+
+  // The owner's report of 21 Nov 2026: Claude Code "sent" files twelve
+  // times with its own tool and nothing appeared here. A tool step that
+  // sent files (`sent`, from a station that says `sent_files`) has a card
+  // under it. A step that failed, or one from a station from before, is
+  // the tool step it always was.
+  sentOf(it) {
+    const s = it && it.kind === 'tool' && it.sent;
+    if (!s || typeof s !== 'object' || !Array.isArray(s.files) || ['error', 'denied', 'interrupted'].includes(it.status)) return null;
+    const files = s.files.filter(f => f && typeof f.path === 'string' && f.path).slice(0, SENT_MAX);
+    return files.length ? { files, caption: typeof s.caption === 'string' ? s.caption : '', more: Math.max(0, Number(s.more) || 0) + Math.max(0, s.files.length - files.length) } : null;
+  }
+
+  // The card: what the agent wrote under them, and each file by its name.
+  // Every word of it is the agent's text and goes on the page as text. A
+  // file is asked of the pane's station as the owner, by the calls the
+  // Files panel makes; what it is, the station says from its first bytes.
+  // (A run is drawn again with each step it gains: the card is kept.)
+  sentEl(it) {
+    const s = this.sentOf(it), sig = JSON.stringify(s);
+    const had = (this.sentCards ||= new Map()).get(it.id);
+    if (had && had.sig === sig) return had.el;
+    const n = s.files.length + s.more, can = env.hasCap(this.st, 'files');
+    const el = h('div', { class: 'chat-sent', role: 'group', 'aria-label': `The agent sent you ${plural(n, 'file')}`, dataset: { sent: it.id } },
+      h('div', { class: 'sent-head muted small' }, `The agent sent you ${plural(n, 'file')}`),
+      s.caption ? h('div', { class: 'sent-caption' }, s.caption) : null,
+      h('div', { class: 'sent-files' }, s.files.map(f => this.sentFile(f, can))),
+      s.more ? h('div', { class: 'muted small sent-more' }, `and ${s.more} more`) : null);
+    this.sentCards.set(it.id, { sig, el });
+    return el;
+  }
+
+  sentFile(f, can) {
+    const st = this.st, path = f.path, name = String(f.name || '') || path, kind = previewKind(name);
+    const says = h('span', { class: 'muted sent-says' }, can ? 'Looking for it…' : `${st} needs updating before its files can be opened here.`);
+    const acts = h('span', { class: 'sent-acts' });
+    const row = h('div', { class: 'sent-file', dataset: { name } }, h('span', { class: 'att-what' }, h('b', { title: path }, h('bdi', {}, name)), says), acts);
+    if (!can) return row;
+    env.api.on(st, 'files.stat', { path }).then((e) => {
+      const isFile = e && (e.kind === 'file' || (e.kind === 'link' && e.target === 'file'));
+      if (!isFile) { says.textContent = `This is not a file on ${st}.`; row.classList.add('gone'); return; }
+      const open = () => previewFile(st, path, name, e);
+      says.textContent = `${fileSize(Number(e.size) || 0)} · on ${st}`;
+      const word = kind === 'video' || kind === 'audio' ? 'Play' : 'Open';
+      acts.append(
+        h('button', { type: 'button', class: 'primary sent-open', 'aria-label': `${word} ${name}`, onclick: open }, word),
+        h('button', { type: 'button', class: 'sent-get', 'aria-label': `Download ${name}`, onclick: () => downloadFile(st, path, name) }, 'Download'));
+      if (kind !== 'image') return;
+      // A picture, small: drawn only if the station says it is one.
+      fileTicket(st, { path, inline: true }).then((t) => {
+        const img = h('img', { class: 'sent-thumb', alt: `Picture: ${name}`, loading: 'lazy' });
+        const pic = h('button', { type: 'button', class: 'sent-pic', 'aria-label': `Picture ${name}: show it large`, onclick: open }, img);
+        img.addEventListener('error', () => { pic.remove(); row.dataset.pic = 'no'; });
+        img.src = t.url;
+        row.prepend(pic);
+      }, () => {});
+    }, (err) => {
+      // (Another station's answer comes with the code or with its words.)
+      says.textContent = err && (err.code === 'not_found' || /\bnot found\b/i.test(err.message || '')) ? `It is not on ${st} any more.` : `It could not be looked at on ${st}: ${(err && err.message) || 'no answer'}`;
+      row.classList.add('gone');
+    });
+    return row;
   }
 
   runRows(run) {

@@ -4027,6 +4027,334 @@ mod in_a_browser {
         );
         shoot(&wide, "desktop-layout");
     }
+
+    /// Words of a sent-files card that are hard to read: each `[what,
+    /// contrast]` under what it needs (names, the caption and buttons
+    /// 4.5:1; the quiet words 3:1), and what was looked at.
+    const SENT_LOW: &str = r#"(() => {
+        const root = document.querySelector('.chat-sent');
+        if (!root) return null;
+        const ctx = (window.__ctx ||= document.createElement('canvas').getContext('2d', { willReadFrequently: true }));
+        const rgba = (css) => { ctx.clearRect(0, 0, 1, 1); ctx.fillStyle = '#000'; ctx.fillStyle = css; ctx.fillRect(0, 0, 1, 1); return [...ctx.getImageData(0, 0, 1, 1).data]; };
+        const behind = (e) => { for (; e; e = e.parentElement) { const c = rgba(getComputedStyle(e).backgroundColor); if (c[3] > 250) return c; } return rgba(getComputedStyle(document.body).backgroundColor); };
+        const lum = (c) => { const [r, g, b] = c.slice(0, 3).map(v => { const s = v / 255; return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+        const contrast = (a, b) => { const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x); return (hi + 0.05) / (lo + 0.05); };
+        const low = [], seen = [];
+        for (const [sels, least] of [[['.sent-file b', '.sent-caption', '.sent-open', '.sent-get'], 4.5], [['.sent-head', '.sent-says', '.sent-more'], 3]]) for (const sel of sels) {
+            for (const e of document.querySelectorAll('.chat-sent ' + sel)) {
+                if (!e.getClientRects().length || !(e.innerText || '').trim()) continue;
+                const c = contrast(rgba(getComputedStyle(e).color), behind(e));
+                seen.push(sel);
+                if (c < least) { low.push([sel, Number(c.toFixed(2))]); break; }
+            }
+        }
+        return { low, seen: [...new Set(seen)], card: getComputedStyle(root).backgroundColor };
+    })()"#;
+
+    /// A bug that happened (the owner's report of 21 Nov 2026): Claude Code
+    /// in a pane "sent" files to the owner twelve times with its own tool
+    /// (`SendUserFile`, "N files delivered to user."), and nothing appeared
+    /// in Chat, which the owner read from an iPhone.
+    ///
+    /// With two real stations, the page from one and the pane on the other,
+    /// at a phone's size: the step that sent files has a card with the
+    /// caption and each file by its name; a picture is drawn small (only
+    /// one the station says is a picture) and a tap shows it; a video has
+    /// Play, which opens the preview's player, given the film in parts
+    /// through the first station; a document has Open and Download; a
+    /// file that is not there says so; a send of fourteen shows twelve
+    /// "and 2 more"; a send that failed is the tool step it always was.
+    /// The caption and a name full of markup are text and run nothing
+    /// (rule 6). The same after a reload, with a file since deleted said
+    /// to be gone; on a computer; and readable in the four themes.
+    #[test]
+    #[ignore = "merge tier: a browser, two stations"]
+    fn files_an_agent_sent_are_shown_where_it_sent_them() {
+        use base64::Engine;
+        let (a, b) = Station::pair();
+        let dir = folder(&b, "mere");
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        let markup = "<img src=x onerror=\"window.__ran = 1\"><script>window.__ran = 2</script>";
+        let caption = "The film & the stills. <img src=x onerror=window.__cap=1>";
+        let named = "<img src=x onerror=window.__named=1>.txt";
+        let decode = |b64: &str| {
+            base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .unwrap()
+        };
+        std::fs::write(dir.join("out/heron.png"), decode(DOT_PNG)).unwrap();
+        std::fs::write(dir.join("notes.txt"), "nine herons, three egrets").unwrap();
+        std::fs::write(dir.join(named), "named").unwrap();
+        std::fs::write(dir.join("out/liar.png"), markup).unwrap();
+        let at = |name: &str| dir.join(name).display().to_string();
+        let send = |id: &str, files: Value, caption: &str| {
+            json!({"transcript": {"type": "assistant", "message": {"role": "assistant",
+                "content": [{"type": "tool_use", "id": id, "name": "SendUserFile", "input": {"files": files, "caption": caption}}]}}})
+        };
+        let result = |id: &str, said: &str, failed: bool| {
+            json!({"transcript": {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": id, "content": said, "is_error": failed}]}}})
+        };
+        let many: Vec<String> = (0..14).map(|n| at(&format!("nope/f{n}.bin"))).collect();
+        let lead = pane(
+            &b,
+            "fake",
+            "lead",
+            &dir,
+            json!({"steps": [{"prompt": "x"}, {"turn_end": "ok"}], "on_input": [
+                send("toolu_f1", json!([at("out/heron.png"), at("out/tide.webm"), at("notes.txt"), at(named), at("out/liar.png"), at("out/gone.pdf")]), caption),
+                result("toolu_f1", "6 files delivered to user.", false),
+                send("toolu_f2", json!(many), ""),
+                result("toolu_f2", "14 files delivered to user.", false),
+                send("toolu_f3", json!([at("notes.txt")]), "this one did not go"),
+                result("toolu_f3", "The files could not be sent.", true),
+                says("Sent you the film and the stills."),
+                {"turn_end": "ok"}]}),
+        );
+        b.wait_state(&lead, "done");
+        // (The station says it sends them.)
+        assert!(b.call("station.info", json!({}))["caps"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("sent_files")));
+        let page = Page::open(&a, 390, 844);
+        page.phone_screen();
+        page.goto(&format!("#/s/bravo/p/{lead}"));
+        page.wait(
+            "the chat",
+            "!!document.querySelector('.phone-chat .chat-box')",
+        );
+        std::fs::write(dir.join("out/tide.webm"), decode(&page.record_webm())).unwrap();
+        page.js(&say(".phone-chat", "send me the film and the stills"));
+
+        // ---- the card
+        let card = "document.querySelector('.chat-sent')";
+        let rows = format!("[...{card}.querySelectorAll('.sent-file')].map(r => [r.dataset.name, r.querySelector('.sent-says').innerText.replace(/^[0-9.]+ (B|KB|MB)/, 'SIZE'), [...r.querySelectorAll('.sent-acts button')].map(x => x.innerText), !!r.querySelector('.sent-pic'), r.classList.contains('gone')])");
+        let shown = page.wait(
+            "the files the agent sent",
+            &format!("(c => c && c.querySelectorAll('.sent-file').length === 6 && ![...c.querySelectorAll('.sent-says')].some(s => /Looking/.test(s.innerText)) && c.querySelector('.sent-pic img')?.naturalWidth === 1 && c.querySelector('.sent-file[data-pic=no]') && [c.querySelector('.sent-head').innerText, c.querySelector('.sent-caption').textContent, {rows}, c.getAttribute('aria-label')])({card})"),
+        );
+        assert_eq!(shown[0], json!("The agent sent you 6 files"), "{shown}");
+        assert_eq!(shown[1], json!(caption), "the caption, as text: {shown}");
+        assert_eq!(
+            shown[2],
+            json!([
+                [
+                    "heron.png",
+                    "SIZE · on bravo",
+                    ["Open", "Download"],
+                    true,
+                    false
+                ],
+                [
+                    "tide.webm",
+                    "SIZE · on bravo",
+                    ["Play", "Download"],
+                    false,
+                    false
+                ],
+                [
+                    "notes.txt",
+                    "SIZE · on bravo",
+                    ["Open", "Download"],
+                    false,
+                    false
+                ],
+                [named, "SIZE · on bravo", ["Open", "Download"], false, false],
+                // A page named as a picture: no picture of it is drawn.
+                [
+                    "liar.png",
+                    "SIZE · on bravo",
+                    ["Open", "Download"],
+                    false,
+                    false
+                ],
+                ["gone.pdf", "It is not on bravo any more.", [], false, true]
+            ]),
+            "{shown}"
+        );
+        assert_eq!(shown[3], json!("The agent sent you 6 files"));
+        // Nothing of the agent's words became an element, and nothing ran.
+        assert_eq!(
+            page.js(&format!("[{card}.querySelectorAll('img').length, {card}.querySelectorAll('script, iframe, img[src=x]').length, window.__cap === undefined, window.__named === undefined, window.__ran === undefined, {card}.querySelector('.sent-pic img').src.includes('/api/files/get?ticket=')]")),
+            json!([1, 0, true, true, true, true])
+        );
+        // On the phone's screen: nothing off its side, buttons a finger hits.
+        assert_eq!(
+            page.js(&format!("[document.documentElement.scrollWidth <= innerWidth, [...{card}.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > innerWidth).length, [...{card}.querySelectorAll('.sent-acts button')].filter(x => x.getBoundingClientRect().height < 44).length, [...{card}.querySelectorAll('.sent-acts button')].map(x => x.getAttribute('aria-label')).slice(2, 4)]")),
+            json!([true, 0, 0, ["Play tide.webm", "Download tide.webm"]])
+        );
+        if std::env::var_os("SPANDECK_SHOTS").is_some() {
+            page.js(&format!("({card}.scrollIntoView(), true)"));
+        }
+        shoot(&page, "sent-files-phone");
+        // Fourteen sent: twelve, and the rest counted. A send that failed
+        // has no card: it is the tool step, in the run of three.
+        let others = page.wait(
+            "the second send",
+            "(c => c.length === 2 && c[1].querySelectorAll('.sent-file.gone').length === 12 && [c[1].querySelector('.sent-head').innerText, c[1].querySelector('.sent-more').innerText, !!c[1].querySelector('.sent-caption'), document.querySelector('.chat-run .chat-fold')?.innerText.replace(/\\s+/g, ' ')])([...document.querySelectorAll('.chat-sent')])",
+        );
+        assert_eq!(
+            (&others[0], &others[1], &others[2]),
+            (
+                &json!("The agent sent you 14 files"),
+                &json!("and 2 more"),
+                &json!(false)
+            ),
+            "{others}"
+        );
+        let fold = others[3].as_str().unwrap();
+        assert!(
+            fold.starts_with("Ran 3 tools") && fold.contains("1 failed"),
+            "{fold}"
+        );
+
+        // ---- Play: the preview's player, from the pane's station
+        let close = || {
+            page.js("[...document.querySelectorAll('.dialog-head .icon-btn')].pop().click()");
+            page.wait("no dialog", "!document.querySelector('.dialog')");
+        };
+        page.js(&format!(
+            "{card}.querySelector('.sent-file[data-name=\"tide.webm\"] .sent-open').click()"
+        ));
+        let film = page.wait(
+            "the film, ready to play",
+            "(v => v && v.readyState >= 2 && v.videoWidth === 160 && [v.getAttribute('aria-label'), document.querySelector('.dialog .fx-facts').innerText.endsWith('on bravo'), (r => r.right <= innerWidth && r.bottom <= innerHeight)(v.getBoundingClientRect()), performance.getEntriesByType('resource').filter(e => e.name === v.currentSrc).map(e => e.responseStatus)])(document.querySelector('.dialog .fx-video'))",
+        );
+        assert_eq!(
+            (&film[0], &film[1], &film[2]),
+            (&json!("Video: tide.webm"), &json!(true), &json!(true)),
+            "{film}"
+        );
+        assert!(
+            !film[3].as_array().unwrap().is_empty()
+                && film[3].as_array().unwrap().iter().all(|s| s == &json!(206)),
+            "in parts, through the first station: {film}"
+        );
+        shoot(&page, "sent-files-play-phone");
+        close();
+        // A tap on the picture shows it; Open shows a document as text.
+        page.js(&format!("{card}.querySelector('.sent-pic').click()"));
+        page.wait(
+            "the picture",
+            "(i => i && i.complete && i.naturalWidth === 1)(document.querySelector('.dialog .fx-img'))",
+        );
+        close();
+        page.js(&format!(
+            "{card}.querySelector('.sent-file[data-name=\"notes.txt\"] .sent-open').click()"
+        ));
+        page.wait(
+            "the notes",
+            "document.querySelector('.dialog .fx-text')?.textContent === 'nine herons, three egrets'",
+        );
+        close();
+        page.js(&format!(
+            "{card}.querySelector('.sent-file[data-name=\"liar.png\"] .sent-open').click()"
+        ));
+        page.wait(
+            "no picture of a page",
+            "!document.querySelector('.dialog .fx-img') && document.querySelector('.dialog .fx-preview-note')?.innerText.includes('cannot be shown')",
+        );
+        assert_eq!(page.js("window.__ran === undefined"), json!(true));
+        close();
+        // Download: the link a ticket gave, for the pane's station's file.
+        // (The link the page hands the browser to save is caught here,
+        // in place of the browser's own saving of it.)
+        page.js("(() => { window.__saved = []; HTMLAnchorElement.prototype.click = function () { if (this.hasAttribute('download')) window.__saved.push([this.getAttribute('href'), this.getAttribute('download')]); }; return true; })()");
+        page.js(&format!(
+            "{card}.querySelector('.sent-file[data-name=\"notes.txt\"] .sent-get').click()"
+        ));
+        let saved = page.wait(
+            "the download's link",
+            "window.__saved.length === 1 && window.__saved[0]",
+        );
+        assert_eq!(saved[1], json!("notes.txt"));
+        let link = &saved[0];
+        assert!(link.as_str().unwrap().starts_with("/api/files/get?ticket="));
+        let got = page.js(&format!(
+            "fetch({link}).then(async r => [r.status, r.headers.get('content-type'), r.headers.get('content-disposition').startsWith('attachment'), await r.text()])"
+        ));
+        assert_eq!(
+            got,
+            json!([
+                200,
+                "application/octet-stream",
+                true,
+                "nine herons, three egrets"
+            ])
+        );
+
+        // ---- after a reload, with a file since deleted
+        std::fs::remove_file(dir.join("out/heron.png")).unwrap();
+        page.reload();
+        let later = page.wait(
+            "the card again",
+            &format!("(c => c && c.querySelectorAll('.sent-file').length === 6 && ![...c.querySelectorAll('.sent-says')].some(s => /Looking/.test(s.innerText)) && document.querySelectorAll('.chat-sent').length === 2 && {rows}.map(r => [r[0], r[1], r[4]]).slice(0, 2))({card})"),
+        );
+        assert_eq!(
+            later,
+            json!([
+                ["heron.png", "It is not on bravo any more.", true],
+                ["tide.webm", "SIZE · on bravo", false]
+            ])
+        );
+        // The conversation under the card is whole.
+        page.wait(
+            "the reply after the sends",
+            "[...document.querySelectorAll('.chat-text')].some(t => t.innerText.includes('Sent you the film and the stills.'))",
+        );
+
+        // ---- on a computer, in the four themes
+        let wide = Page::open(&a, 1300, 900);
+        wide.goto(&format!("#/s/bravo/p/{lead}"));
+        let ready = format!("(c => c && c.querySelectorAll('.sent-file').length === 6 && ![...c.querySelectorAll('.sent-says')].some(s => /Looking/.test(s.innerText)) && c.querySelectorAll('.sent-open').length === 4)({card})");
+        wide.wait("the card on a computer", &ready);
+        assert_eq!(
+            wide.js(&format!(
+                "(r => r.width <= 562 && r.width > 300)({card}.getBoundingClientRect())"
+            )),
+            json!(true)
+        );
+        let mut cards = vec![];
+        for theme in [
+            None,
+            Some("spandeck-light"),
+            Some("solarized-dark"),
+            Some("solarized-light"),
+        ] {
+            if let Some(theme) = theme {
+                let was = cards.last().cloned().unwrap();
+                a.call(
+                    "look.set",
+                    json!({"level": "deck", "choice": {"theme": theme}}),
+                );
+                wide.wait(
+                    "the theme on the card",
+                    &format!(
+                        "getComputedStyle({card}).backgroundColor !== {}",
+                        json!(was)
+                    ),
+                );
+            }
+            let seen = wide.js(SENT_LOW);
+            assert_eq!(seen["low"], json!([]), "{theme:?}: {seen}");
+            assert_eq!(
+                seen["seen"],
+                json!([
+                    ".sent-file b",
+                    ".sent-caption",
+                    ".sent-open",
+                    ".sent-get",
+                    ".sent-head",
+                    ".sent-says",
+                    ".sent-more"
+                ]),
+                "{theme:?}"
+            );
+            cards.push(seen["card"].as_str().unwrap().to_string());
+            shoot(&wide, &format!("sent-files-{}", theme.unwrap_or("default")));
+        }
+    }
 }
 
 /// A pane's look in both of its faces (`look/mod.rs`).

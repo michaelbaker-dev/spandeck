@@ -88,6 +88,85 @@ pub struct Choice {
     pub description: String,
 }
 
+/// Files an agent's own tool sent to the owner (Claude Code's
+/// `SendUserFile`): where each is on the pane's station, and what the
+/// agent wrote under them. An agent's text, all of it: a deck shows it as
+/// text and asks the station for the files as the owner (the owner's
+/// report of 21 Nov 2026: twelve sends, and nothing in Chat).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Sent {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub caption: String,
+    pub files: Vec<SentFile>,
+    /// Files of the call beyond `SENT_MAX`, counted only.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub more: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct SentFile {
+    pub path: String,
+    pub name: String,
+}
+
+/// Files of one send that are shown; the rest are counted.
+pub const SENT_MAX: usize = 12;
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// What a `SendUserFile` call sent: `{"files": [path, ...], "caption"}`.
+/// A path that is not whole is taken from the folder the record says the
+/// agent was in. None when the call names no file.
+fn sent_of(input: &Value, cwd: Option<&str>) -> Option<Sent> {
+    let all: Vec<&str> = input
+        .get("files")?
+        .as_array()?
+        .iter()
+        .filter_map(|f| f.as_str())
+        .filter(|f| !f.trim().is_empty() && f.len() <= 4096 && !f.contains('\0'))
+        .collect();
+    if all.is_empty() {
+        return None;
+    }
+    let whole = |f: &str| {
+        let b = f.as_bytes();
+        f.starts_with('/') || f.starts_with('\\') || (b.len() > 2 && b[1] == b':')
+    };
+    let files = all
+        .iter()
+        .take(SENT_MAX)
+        .map(|f| {
+            let path = match cwd.filter(|c| !c.is_empty() && !whole(f)) {
+                Some(cwd) => {
+                    let sep = if cwd.contains('\\') && !cwd.contains('/') {
+                        '\\'
+                    } else {
+                        '/'
+                    };
+                    format!("{}{sep}{f}", cwd.trim_end_matches(sep))
+                }
+                None => f.to_string(),
+            };
+            let name = f
+                .trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(f);
+            SentFile {
+                name: one_line(name, 255),
+                path,
+            }
+        })
+        .collect();
+    Some(Sent {
+        caption: cap(&clean(input["caption"].as_str().unwrap_or("")), 2000).0,
+        files,
+        more: all.len().saturating_sub(SENT_MAX) as u32,
+    })
+}
+
 /// One thing in the conversation. `kind` says which fields mean something:
 /// user, text, thinking, tool, question, plan, tasks, notice.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -153,6 +232,9 @@ pub struct Item {
     pub pre_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_tokens: Option<u64>,
+    /// tool: the files the call sent to the owner, when it is such a call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sent: Option<Box<Sent>>,
     /// The vendor's id of a tool call, which its result names. Not served.
     #[serde(skip)]
     pub tool_id: Option<String>,
@@ -840,6 +922,17 @@ fn claude_assistant(line: u64, v: &Value, out: &mut Parsed) {
                         let mut i = Item::new(line, n, "tool", ts);
                         i.name = Some(one_line(name, 120));
                         i.summary = Some(summary_of(input));
+                        // Files sent to the owner: the call stays a tool
+                        // step, as a deck from before shows it, with the
+                        // names as its one line and the files beside it.
+                        if name == "SendUserFile" {
+                            if let Some(sent) = sent_of(input, v["cwd"].as_str()) {
+                                let names: Vec<&str> =
+                                    sent.files.iter().map(|f| f.name.as_str()).collect();
+                                i.summary = Some(one_line(&names.join(", "), SUMMARY_CAP));
+                                i.sent = Some(Box::new(sent));
+                            }
+                        }
                         i.status = Some("running");
                         i
                     }
@@ -3416,5 +3509,73 @@ mod tests {
             c.unknown,
             c.unknown_kinds,
         );
+    }
+
+    /// The owner's report of 21 Nov 2026: Claude Code "sent" files twelve
+    /// times with its tool `SendUserFile` and nothing appeared in Chat. The
+    /// call is read as a tool step that carries the files and the caption:
+    /// a path as it was written, one that is not whole taken from the
+    /// folder the record names, at most twelve with the rest counted, and
+    /// a call that names no file left a plain tool step.
+    #[test]
+    fn files_an_agent_sent_are_read_from_the_call() {
+        let call = |input: Value| {
+            let raw = json!({"type": "assistant", "isSidechain": false, "cwd": "/home/ada/film",
+                "timestamp": "2026-11-21T10:00:00.000Z", "message": {"role": "assistant",
+                "content": [{"type": "tool_use", "id": "toolu_send", "name": "SendUserFile", "input": input}]}})
+            .to_string();
+            parse_line(Dialect::Claude, 7, &raw).items.remove(0)
+        };
+        let item = call(
+            json!({"files": ["/abs/path/film_720p.mp4", "out/contact sheet.jpg"],
+            "caption": "The film, and a <b>contact</b> sheet."}),
+        );
+        assert_eq!(
+            (item.kind, item.name.as_deref()),
+            ("tool", Some("SendUserFile"))
+        );
+        assert_eq!(
+            item.summary.as_deref(),
+            Some("film_720p.mp4, contact sheet.jpg")
+        );
+        let sent = item.sent.as_deref().unwrap();
+        assert_eq!(sent.caption, "The film, and a <b>contact</b> sheet.");
+        assert_eq!(
+            sent.files,
+            vec![
+                SentFile {
+                    path: "/abs/path/film_720p.mp4".into(),
+                    name: "film_720p.mp4".into()
+                },
+                SentFile {
+                    path: "/home/ada/film/out/contact sheet.jpg".into(),
+                    name: "contact sheet.jpg".into()
+                },
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&item).unwrap()["sent"],
+            json!({"caption": "The film, and a <b>contact</b> sheet.", "files": [
+                {"path": "/abs/path/film_720p.mp4", "name": "film_720p.mp4"},
+                {"path": "/home/ada/film/out/contact sheet.jpg", "name": "contact sheet.jpg"}]})
+        );
+        // Twenty files: twelve, and eight counted.
+        let many: Vec<String> = (0..20).map(|n| format!("/tmp/f{n}.png")).collect();
+        let sent = call(json!({"files": many})).sent.unwrap();
+        assert_eq!(
+            (sent.files.len(), sent.more, sent.caption.as_str()),
+            (12, 8, "")
+        );
+        // Nothing that is a file's name: a tool step as any other.
+        for none in [
+            json!({"files": [], "caption": "x"}),
+            json!({"files": "one.png"}),
+            json!({"files": [7, null, ""]}),
+            json!({}),
+        ] {
+            let item = call(none);
+            assert!(item.sent.is_none() && item.kind == "tool", "{item:?}");
+            assert!(serde_json::to_value(&item).unwrap().get("sent").is_none());
+        }
     }
 }

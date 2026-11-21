@@ -822,3 +822,365 @@ fn a_folder_is_copied_from_one_station_to_another_and_downloaded_through_the_fir
     assert_eq!(zipped.status, 200);
     assert!(zipped.body.starts_with(b"PK\x03\x04") && zipped.body.len() > big.len());
 }
+
+fn get_part(
+    rt: &tokio::runtime::Runtime,
+    s: &Station,
+    query: &str,
+    token: Option<&str>,
+    range: &str,
+) -> Got {
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let mut req = client
+            .get(s.url(&format!("/api/files/get?{query}")))
+            .header("range", range);
+        if let Some(token) = token {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await.unwrap();
+        Got {
+            status: resp.status().as_u16(),
+            headers: resp.headers().clone(),
+            body: resp.bytes().await.unwrap().to_vec(),
+        }
+    })
+}
+
+/// A file that begins as `head` and goes on, `len` bytes in all, each byte
+/// told by where it is.
+fn begun_with(head: &[u8], len: usize) -> Vec<u8> {
+    let mut bytes: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+    bytes[..head.len()].copy_from_slice(head);
+    bytes
+}
+
+const MP4: &[u8] = b"\0\0\0\x18ftypisom\0\0\x02\0isomiso2";
+
+/// The owner's report of 21 Nov 2026: an `.mp4` in the Files panel could
+/// only be downloaded, and an iPhone's browser plays no film that is not
+/// served in parts. With two real stations: a part of a file is what a
+/// `Range` asks for (206, `Content-Range`), on the station asked and on
+/// the other one through it, a piece at a time; what the file does not
+/// have is refused (416); a preview of a film or a sound goes out as that,
+/// by the file's FIRST bytes also when the part asked for begins later;
+/// a page named `.mp4`, or one with a film's header further in, stays an
+/// attachment of no type; and every other header is as it was.
+#[test]
+#[ignore = "merge tier: two stations"]
+fn a_film_is_served_in_parts_and_shown_only_by_its_first_bytes() {
+    let (a, b) = Station::pair();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let token = a.token();
+    let here = a.root.join("home/film");
+    let there = b.root.join("home/film");
+    std::fs::create_dir_all(&here).unwrap();
+    std::fs::create_dir_all(&there).unwrap();
+    let film = begun_with(MP4, 300_000);
+    std::fs::write(here.join("film_720p.mp4"), &film).unwrap();
+    // Several pieces from the other station (the first is 256 KB).
+    let far = begun_with(MP4, 700_000);
+    std::fs::write(there.join("far.mp4"), &far).unwrap();
+    // A page named as a film; and a page with a film's header further in.
+    std::fs::write(here.join("liar.mp4"), PAGE).unwrap();
+    let mut later = begun_with(PAGE, 2000);
+    later[1000..1000 + MP4.len()].copy_from_slice(MP4);
+    std::fs::write(here.join("later.mp4"), &later).unwrap();
+    for (name, head) in [
+        ("a.mov", &b"\0\0\0\x14ftypqt  \0\0\0\0"[..]),
+        ("a.m4a", b"\0\0\0\x1cftypM4A \0\0\0\0"),
+        ("a.webm", b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81"),
+        ("a.mp3", b"ID3\x04\0\0\0\0\0\x0a"),
+        ("b.mp3", b"\xff\xfb\x90\x64\0\0"),
+        ("a.wav", b"RIFF\x24\0\0\0WAVEfmt "),
+        ("a.ogg", b"OggS\0\x02\0\0"),
+    ] {
+        std::fs::write(here.join(name), begun_with(head, 500)).unwrap();
+    }
+    let at = |name: &str| format!("path={}", enc(&here.join(name)));
+    let guarded = |got: &Got, what: &str| {
+        assert_eq!(got.header("x-content-type-options"), "nosniff", "{what}");
+        assert_eq!(
+            got.header("content-security-policy"),
+            "default-src 'none'; sandbox",
+            "{what}"
+        );
+        assert_eq!(
+            got.header("cross-origin-resource-policy"),
+            "same-origin",
+            "{what}"
+        );
+        assert_eq!(got.header("cache-control"), "private, no-store", "{what}");
+        assert_eq!(got.header("accept-ranges"), "bytes", "{what}");
+    };
+
+    // ---- the whole film, as a preview and as a download
+    let whole = get(
+        &rt,
+        &a,
+        &format!("{}&inline=1", at("film_720p.mp4")),
+        Some(&token),
+    );
+    assert_eq!(
+        (whole.status, whole.header("content-type")),
+        (200, "video/mp4")
+    );
+    assert!(whole
+        .header("content-disposition")
+        .starts_with("inline; filename=\"film_720p.mp4\""));
+    assert_eq!(whole.header("content-length"), "300000");
+    assert_eq!(whole.header("content-range"), "");
+    assert!(whole.body == film);
+    guarded(&whole, "the whole film");
+    let saved = get(&rt, &a, &at("film_720p.mp4"), Some(&token));
+    assert_eq!(
+        (saved.status, saved.header("content-type")),
+        (200, "application/octet-stream"),
+        "not asked for as a preview, it is a download as before"
+    );
+    assert!(saved
+        .header("content-disposition")
+        .starts_with("attachment"));
+
+    // ---- parts of it
+    for (range, from, to) in [
+        ("bytes=0-1", 0usize, 1usize),
+        ("bytes=0-", 0, 299_999),
+        ("bytes=100000-199999", 100_000, 199_999),
+        ("bytes=299990-", 299_990, 299_999),
+        ("bytes=250000-999999", 250_000, 299_999),
+        ("bytes=-10", 299_990, 299_999),
+    ] {
+        let part = get_part(
+            &rt,
+            &a,
+            &format!("{}&inline=1", at("film_720p.mp4")),
+            Some(&token),
+            range,
+        );
+        assert_eq!(part.status, 206, "{range}");
+        assert_eq!(
+            part.header("content-range"),
+            format!("bytes {from}-{to}/300000"),
+            "{range}"
+        );
+        assert_eq!(
+            part.header("content-length"),
+            (to - from + 1).to_string(),
+            "{range}"
+        );
+        assert!(part.body == film[from..=to], "{range}: the bytes asked for");
+        // By the file's first bytes, wherever the part begins.
+        assert_eq!(part.header("content-type"), "video/mp4", "{range}");
+        assert!(
+            part.header("content-disposition").starts_with("inline"),
+            "{range}"
+        );
+        guarded(&part, range);
+    }
+    // What the file does not have.
+    for range in ["bytes=300000-", "bytes=999999-1000000", "bytes=-0"] {
+        let none = get_part(
+            &rt,
+            &a,
+            &format!("{}&inline=1", at("film_720p.mp4")),
+            Some(&token),
+            range,
+        );
+        assert_eq!(
+            (none.status, none.header("content-range")),
+            (416, "bytes */300000"),
+            "{range}"
+        );
+    }
+    // Several parts at once are not served as parts: the whole file.
+    let both = get_part(&rt, &a, &at("film_720p.mp4"), Some(&token), "bytes=0-1,5-9");
+    assert_eq!((both.status, both.body.len()), (200, 300_000));
+    // A download is served in parts too, still as a download.
+    let part = get_part(&rt, &a, &at("film_720p.mp4"), Some(&token), "bytes=5-9");
+    assert_eq!(
+        (
+            part.status,
+            part.header("content-type"),
+            part.body.as_slice()
+        ),
+        (206, "application/octet-stream", &film[5..=9])
+    );
+    assert!(part.header("content-disposition").starts_with("attachment"));
+
+    // ---- each kind, by its first bytes
+    for (name, is) in [
+        ("a.mov", "video/quicktime"),
+        ("a.m4a", "audio/mp4"),
+        ("a.webm", "video/webm"),
+        ("a.mp3", "audio/mpeg"),
+        ("b.mp3", "audio/mpeg"),
+        ("a.wav", "audio/wav"),
+        ("a.ogg", "audio/ogg"),
+    ] {
+        let got = get_part(
+            &rt,
+            &a,
+            &format!("{}&inline=1", at(name)),
+            Some(&token),
+            "bytes=100-199",
+        );
+        assert_eq!(
+            (got.status, got.header("content-type")),
+            (206, is),
+            "{name}"
+        );
+        assert!(
+            got.header("content-disposition").starts_with("inline"),
+            "{name}"
+        );
+        guarded(&got, name);
+    }
+
+    // ---- a page is never a film, whatever its name and whatever is asked
+    for (name, bytes) in [("liar.mp4", PAGE), ("later.mp4", later.as_slice())] {
+        for range in [
+            None,
+            Some("bytes=0-"),
+            Some("bytes=10-20"),
+            Some("bytes=1000-"),
+        ] {
+            let query = format!("{}&inline=1", at(name));
+            let got = match range {
+                Some(range) if range == "bytes=1000-" && bytes.len() <= 1000 => continue,
+                Some(range) => get_part(&rt, &a, &query, Some(&token), range),
+                None => get(&rt, &a, &query, Some(&token)),
+            };
+            assert!(got.status == 200 || got.status == 206, "{name} {range:?}");
+            assert_eq!(
+                got.header("content-type"),
+                "application/octet-stream",
+                "{name} {range:?}"
+            );
+            assert!(
+                got.header("content-disposition").starts_with("attachment"),
+                "{name} {range:?}"
+            );
+            guarded(&got, name);
+        }
+    }
+
+    // ---- the other station's film, through this one, a piece at a time
+    let query = format!(
+        "station=bravo&path={}&inline=1",
+        enc(&there.join("far.mp4"))
+    );
+    let whole = get(&rt, &a, &query, Some(&token));
+    assert_eq!(
+        (whole.status, whole.header("content-type")),
+        (200, "video/mp4")
+    );
+    assert!(whole.body == far);
+    let part = get_part(&rt, &a, &query, Some(&token), "bytes=123456-654321");
+    assert_eq!(
+        (
+            part.status,
+            part.header("content-type"),
+            part.header("content-range")
+        ),
+        (206, "video/mp4", "bytes 123456-654321/700000")
+    );
+    assert!(part.body == far[123_456..=654_321]);
+    let end = get_part(&rt, &a, &query, Some(&token), "bytes=-5");
+    assert_eq!((end.status, end.body.as_slice()), (206, &far[699_995..]));
+    assert_eq!(
+        get_part(&rt, &a, &query, Some(&token), "bytes=700000-").status,
+        416
+    );
+
+    // ---- by a ticket, as a player asks: no header of ours, part after part
+    let ticket = a.call(
+        "files.ticket",
+        json!({"station": "bravo", "path": there.join("far.mp4"), "inline": true}),
+    );
+    let by = format!("ticket={}", ticket["ticket"].as_str().unwrap());
+    for range in ["bytes=0-", "bytes=500000-", "bytes=0-1"] {
+        let part = get_part(&rt, &a, &by, None, range);
+        assert_eq!(
+            (part.status, part.header("content-type")),
+            (206, "video/mp4"),
+            "{range}"
+        );
+    }
+    // And a ticket is still the owner's to ask for, and nobody else's.
+    let pane = a.fake(json!({"steps": []}), json!({}));
+    assert_eq!(
+        a.call_as_pane(
+            &pane,
+            "files.ticket",
+            json!({"path": here.join("film_720p.mp4"), "inline": true})
+        )
+        .unwrap_err()
+        .code,
+        "denied"
+    );
+}
+
+/// The same report: a player asks for part after part over the length of
+/// a film, and a ticket was good for a minute. A preview's ticket
+/// (`inline`) is kept good by being used; a download's is not, used or
+/// not; and a preview's that nothing used is over after its minute too.
+/// (The minute is waited for: nothing here can turn a station's clock.)
+#[test]
+#[ignore = "merge tier: waits out a ticket's minute"]
+fn a_previews_ticket_stays_good_while_it_is_used_and_a_downloads_does_not() {
+    let s = Station::keyed_on("alpha", free_port(), "");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dir = s.root.join("home/film");
+    std::fs::create_dir_all(&dir).unwrap();
+    let film = begun_with(MP4, 5000);
+    std::fs::write(dir.join("film.mp4"), &film).unwrap();
+    let ticket = |inline: bool| {
+        let t = s.call(
+            "files.ticket",
+            json!({"path": dir.join("film.mp4"), "inline": inline}),
+        );
+        format!("ticket={}", t["ticket"].as_str().unwrap())
+    };
+    let (played, idle, saved) = (ticket(true), ticket(true), ticket(false));
+    let began = std::time::Instant::now();
+    // The player's first parts; and the download, taken once.
+    let first = get_part(&rt, &s, &played, None, "bytes=0-99");
+    assert_eq!(
+        (
+            first.status,
+            first.header("content-type"),
+            first.body.as_slice()
+        ),
+        (206, "video/mp4", &film[..100])
+    );
+    let download = get(&rt, &s, &saved, None);
+    assert_eq!(
+        (download.status, download.header("content-type")),
+        (200, "application/octet-stream")
+    );
+    std::thread::sleep(Duration::from_secs(30));
+    assert_eq!(
+        get_part(&rt, &s, &played, None, "bytes=100-199").status,
+        206
+    );
+    while began.elapsed() < Duration::from_secs(63) {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // Past the minute: the one that was used goes on, the others are over.
+    let later = get_part(&rt, &s, &played, None, "bytes=4000-");
+    assert_eq!(
+        (later.status, later.body.as_slice()),
+        (206, &film[4000..]),
+        "a ticket a player uses is kept good"
+    );
+    assert_eq!(get(&rt, &s, &saved, None).status, 401, "a download's");
+    assert_eq!(
+        get_part(&rt, &s, &idle, None, "bytes=0-").status,
+        401,
+        "a preview's that nothing used"
+    );
+}

@@ -3314,6 +3314,8 @@ impl Daemon {
         let mut caps = vec!["task_continue", "station_flags"];
         // A layout's Files and Watch leaves are kept whole (project.rs).
         caps.push(crate::project::VIEW_CAP);
+        // A tool step that sent files to the owner carries them (`sent`).
+        caps.push(crate::conversation::SENT_CAP);
         // One answer for everything a deck shows of this station.
         if self.flag_on(crate::snapshot::CAP, true) {
             caps.push(crate::snapshot::CAP);

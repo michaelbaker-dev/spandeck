@@ -1727,3 +1727,205 @@ fn the_panel_stands_beside_a_layout_and_follows_every_theme() {
     let note = page.js(&format!("{}.listing.flat[5000].note", v(0)));
     assert_eq!(note, json!("… 200 more not shown: this folder has 5200"));
 }
+
+/// A second of real video, recorded by the browser itself (WebM), and a
+/// second of real sound (a WAV written here): the test's own films.
+fn recorded_webm(page: &Page) -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(page.record_webm())
+        .unwrap()
+}
+
+fn one_second_wav() -> Vec<u8> {
+    let samples: Vec<u8> = (0..8000u32)
+        .map(|i| if (i / 20) % 2 == 0 { 96 } else { 160 })
+        .collect();
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // one channel
+    wav.extend_from_slice(&8000u32.to_le_bytes());
+    wav.extend_from_slice(&8000u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&8u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&samples);
+    wav
+}
+
+/// How the browser's own player was answered for the link it now has: the
+/// statuses of its requests (Chrome says them for what a page loaded).
+const PLAYER_GOT: &str = "(m => m && performance.getEntriesByType('resource').filter(e => e.name === m.currentSrc).map(e => e.responseStatus))(document.querySelector('.dialog .fx-media'))";
+
+/// The owner's report of 21 Nov 2026: "when the owner browses to an `.mp4`
+/// in the Files panel, the preview says it is not text and offers only
+/// Download". At a phone's size, with a real video and a real sound: the
+/// preview is the browser's own player, with a name a screen reader says,
+/// inside the dialog and the screen; it is given the film in parts (206)
+/// by a ticket's link; a link that has run out is asked for again, once,
+/// and the film is where it was; a file that only begins as a film, and a
+/// page named `.mp4`, are said not to play, with Download, and nothing of
+/// them runs or is put on the page (rule 6).
+#[test]
+#[ignore = "merge tier: a browser"]
+fn a_film_and_a_sound_are_played_in_the_preview_and_a_page_named_as_one_is_not() {
+    let s = Station::start("alpha");
+    let work = home(&s).join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let markup = "<img src=x onerror=\"window.__ran = 1\"><script>window.__ran = 2</script>";
+    std::fs::write(work.join("liar.mp4"), markup).unwrap();
+    let mut stub = b"\0\0\0\x18ftypisom\0\0\x02\0isomiso2".to_vec();
+    stub.resize(4000, 0);
+    std::fs::write(work.join("stub.mp4"), &stub).unwrap();
+    std::fs::write(work.join("tone.wav"), one_second_wav()).unwrap();
+    let sh = shell(&s, "scratch", &work);
+    let page = Page::open(&s, 390, 844);
+    page.phone_screen();
+    page.goto(&format!("#/s/alpha/p/{sh}"));
+    page.wait(
+        "the pane's bar",
+        "!!document.querySelector('.chat-bar .chat-cwd.opens')",
+    );
+    std::fs::write(work.join("tide.webm"), recorded_webm(&page)).unwrap();
+    click(
+        &page,
+        "the folder line",
+        "document.querySelector('.chat-bar .chat-cwd.opens')",
+    );
+    at(&page, 0, &work);
+    let preview = |name: &str| {
+        no_dialog(&page);
+        shows(&page, 0, name);
+        // (On a phone a tap opens.)
+        click(&page, name, &row(0, name));
+        page.wait(
+            "the preview",
+            "!!document.querySelector('.dialog .fx-preview')",
+        );
+    };
+    let close = || {
+        click(
+            &page,
+            "the dialog's ✕",
+            "[...document.querySelectorAll('.dialog-head .icon-btn')].pop()",
+        );
+        no_dialog(&page);
+    };
+
+    // ---- a film
+    preview("tide.webm");
+    let film = page.wait(
+        "the film, ready to play",
+        "(v => v && v.readyState >= 2 && v.videoWidth === 160 && [v.tagName, v.controls, v.hasAttribute('playsinline'), v.preload, v.getAttribute('aria-label'), new URL(v.currentSrc).pathname + new URL(v.currentSrc).search.replace(/=.*/, '='), document.querySelector('.dialog h2').textContent])(document.querySelector('.dialog .fx-video'))",
+    );
+    assert_eq!(
+        film,
+        json!([
+            "VIDEO",
+            true,
+            true,
+            "metadata",
+            "Video: tide.webm",
+            "/api/files/get?ticket=",
+            "tide.webm"
+        ])
+    );
+    // In parts, as a phone's browser asks.
+    let got = page.wait(
+        "what the player was answered",
+        &format!("(g => g && g.length && g)({PLAYER_GOT})"),
+    );
+    assert!(
+        got.as_array().unwrap().iter().all(|s| s == &json!(206)),
+        "the player is given parts of the film: {got}"
+    );
+    // Inside the dialog and the screen, with Download beside it.
+    let fits = page.js("(v => { const r = v.getBoundingClientRect(), d = v.closest('.dialog').getBoundingClientRect(); return [r.left >= d.left, r.right <= d.right + 1, r.right <= innerWidth, r.bottom <= innerHeight, r.width > 200, [...document.querySelectorAll('.dialog .row.end button')].map(b => b.innerText), (b => b.top >= 0 && b.bottom <= innerHeight)(document.querySelector('.dialog .fx-preview-get').getBoundingClientRect())]; })(document.querySelector('.dialog .fx-video'))");
+    assert_eq!(
+        fits,
+        json!([
+            true,
+            true,
+            true,
+            true,
+            true,
+            ["Copy path", "Download"],
+            true
+        ])
+    );
+    shot(&page, "preview-of-a-film-phone");
+    // It plays.
+    page.js("(v => { v.muted = true; v.play(); return true; })(document.querySelector('.dialog .fx-video'))");
+    page.wait(
+        "the film moving",
+        "document.querySelector('.dialog .fx-video')?.currentTime > 0.2",
+    );
+    // Its link ran out (stood in for by a link that never was one: a
+    // ticket's minute is not waited for here): asked for again, once, and
+    // the film is where it was.
+    page.js("(v => { v.pause(); v.currentTime = 0.5; window.__first = v.currentSrc; return true; })(document.querySelector('.dialog .fx-video'))");
+    page.wait(
+        "the film at half a second",
+        "(v => !v.seeking && Math.abs(v.currentTime - 0.5) < 0.05)(document.querySelector('.dialog .fx-video'))",
+    );
+    page.js("(v => { v.src = '/api/files/get?ticket=one-that-ran-out'; v.load(); return true; })(document.querySelector('.dialog .fx-video'))");
+    let again = page.wait(
+        "the film back, with a new link",
+        "(v => v && v.readyState >= 2 && v.currentSrc.includes('/api/files/get?ticket=') && !v.currentSrc.includes('ran-out') && v.currentSrc !== window.__first && !v.seeking && [Math.abs(v.currentTime - 0.5) < 0.1, !!document.querySelector('.dialog .fx-preview-note')])(document.querySelector('.dialog .fx-video'))",
+    );
+    assert_eq!(
+        again,
+        json!([true, false]),
+        "where it was, and nothing said"
+    );
+    // Closed, the player is stopped and gone.
+    page.js("(v => { window.__film = v; v.play(); return true; })(document.querySelector('.dialog .fx-video'))");
+    close();
+    assert_eq!(
+        page.js("[window.__film.paused, window.__film.isConnected]"),
+        json!([true, false])
+    );
+
+    // ---- a sound
+    preview("tone.wav");
+    let sound = page.wait(
+        "the sound, ready to play",
+        "(a => a && a.readyState >= 1 && Math.abs(a.duration - 1) < 0.01 && [a.tagName, a.controls, a.getAttribute('aria-label'), (r => r.width > 200 && r.right <= innerWidth && r.height >= 40)(a.getBoundingClientRect())])(document.querySelector('.dialog .fx-audio'))",
+    );
+    assert_eq!(sound, json!(["AUDIO", true, "Sound: tone.wav", true]));
+    let got = page.wait(
+        "what the player was answered",
+        &format!("(g => g && g.length && g)({PLAYER_GOT})"),
+    );
+    assert!(
+        got.as_array().unwrap().iter().all(|s| s == &json!(206)),
+        "{got}"
+    );
+    shot(&page, "preview-of-a-sound-phone");
+    close();
+
+    // ---- what only says it is a film
+    for name in ["stub.mp4", "liar.mp4"] {
+        preview(name);
+        let said = page.wait(
+            "that it cannot be played",
+            "(n => n && !document.querySelector('.dialog .fx-media') && [n.innerText, [...document.querySelectorAll('.dialog .row.end button')].map(b => b.innerText), document.querySelectorAll('.dialog img, .dialog script, .dialog iframe').length, window.__ran === undefined])(document.querySelector('.dialog .fx-preview-note'))",
+        );
+        assert_eq!(
+            said,
+            json!([
+                "This cannot be played here. Download it to open it.",
+                ["Copy path", "Download"],
+                0,
+                true
+            ]),
+            "{name}"
+        );
+        close();
+    }
+}
