@@ -1458,3 +1458,14 @@ button.sub-row { cursor: pointer; } button.sub-row:hover, .sub-row.sel { backgro
 .sub-view > .chat-log.side-log { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 14px max(14px, calc((100% - 820px) / 2)) 12px; }
 .sub-foot { flex: none; margin: 0; padding: 9px 12px calc(9px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: var(--panel); color: var(--muted); font-size: calc(12px * var(--ui-scale)); }
 @media (max-width: 760px) { .sub-head .sub-back { min-height: 44px; min-width: 44px; padding: 4px 12px; } }
+
+/* A picture enlarged where it is (files.js, zoomBox). The page is not
+   zoomed by a pinch on a picture: on a phone that left the whole deck
+   enlarged and half off the screen (21 Nov 2026). */
+.fx-zoom { display: flex; flex-direction: column; gap: 6px; }
+.fx-zoom-area { overflow: hidden; touch-action: none; border-radius: 8px; display: flex; justify-content: center; align-items: center; cursor: zoom-in; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.fx-zoom-area.zoomed { cursor: grab; }
+.fx-zoom-area .fx-img { transform-origin: center center; will-change: transform; -webkit-user-drag: none; }
+.fx-zoom-bar { align-items: center; gap: 6px; }
+.fx-zoom-bar .mini { min-width: 44px; min-height: 36px; }
+.sent-pic, .sent-thumb { touch-action: pan-y; -webkit-touch-callout: none; }

@@ -1127,6 +1127,41 @@ fn names_and_previews_are_text_and_a_download_is_a_tickets_link() {
         "the picture",
         "(i => i && i.complete && i.naturalWidth === 1 && i.src.includes('/api/files/get?ticket='))(document.querySelector('.dialog .fx-img'))",
     );
+    // A bug that happened (21 Nov 2026): a pinch on a picture enlarged the
+    // whole deck on the owner's phone and left it half off the screen. A
+    // picture is enlarged where it is, by two fingers, a double tap or
+    // its buttons, and the page takes no pinch from it.
+    const ZOOM: &str = "document.querySelector('.dialog .fx-zoom-area')";
+    let finger = |kind: &str, id: u32, x: f64, y: f64| {
+        page.js(&format!("(a => {{ const r = a.getBoundingClientRect(); a.dispatchEvent(new PointerEvent('{kind}', {{ pointerId: {id}, pointerType: 'touch', bubbles: true, clientX: r.left + r.width / 2 + {x}, clientY: r.top + r.height / 2 + {y} }})); return true; }})({ZOOM})"));
+    };
+    assert_eq!(
+        page.js(&format!(
+            "[getComputedStyle({ZOOM}).touchAction, {ZOOM}.dataset.zoom || '1']"
+        )),
+        json!(["none", "1"])
+    );
+    // Two fingers moved apart to three times their distance.
+    finger("pointerdown", 11, -10.0, 0.0);
+    finger("pointerdown", 12, 10.0, 0.0);
+    finger("pointermove", 11, -30.0, 0.0);
+    finger("pointermove", 12, 30.0, 0.0);
+    finger("pointerup", 11, -30.0, 0.0);
+    finger("pointerup", 12, 30.0, 0.0);
+    assert_eq!(
+        page.js(&format!("[{ZOOM}.dataset.zoom, {ZOOM}.classList.contains('zoomed'), /scale\\(3\\)/.test({ZOOM}.querySelector('.fx-img').style.transform), window.visualViewport.scale]")),
+        json!(["3", true, true, 1])
+    );
+    page.js("document.querySelector('.dialog .fx-zoom-fit').click()");
+    assert_eq!(page.js(&format!("{ZOOM}.dataset.zoom")), json!("1"));
+    // A double tap, and a double tap back.
+    for want in ["2.5", "1"] {
+        for _ in 0..2 {
+            finger("pointerdown", 13, 0.0, 0.0);
+            finger("pointerup", 13, 0.0, 0.0);
+        }
+        assert_eq!(page.js(&format!("{ZOOM}.dataset.zoom")), json!(want));
+    }
     close();
     preview("liar.png");
     page.wait(

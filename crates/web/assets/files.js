@@ -81,6 +81,70 @@ const KIB = 1024, MIB = 1024 * 1024;
 const PREVIEW_MAX = 256 * KIB;
 const RELIST_MS = 4000, JOBS_MS = 1000, TICKET_MS = 45000;
 const ROWS_STEP = 300;
+// A picture that is made larger where it is: two fingers, a double tap,
+// a pinch on a trackpad, or the two buttons. The page itself is not
+// zoomed by a pinch on it (on a phone that left the whole deck enlarged
+// and half off the screen: the owner, 21 Nov 2026).
+const ZOOM_MAX = 8;
+export function zoomBox(img) {
+  let s = 1, x = 0, y = 0, from = null, tapAt = 0;
+  const pts = new Map();
+  const area = h('div', { class: 'fx-zoom-area' }, img);
+  const out = h('button', { type: 'button', class: 'mini fx-zoom-out', 'aria-label': 'Smaller', disabled: true }, '−');
+  const fit = h('button', { type: 'button', class: 'mini fx-zoom-fit', disabled: true }, 'Fit');
+  const inn = h('button', { type: 'button', class: 'mini fx-zoom-in', 'aria-label': 'Larger' }, '+');
+  const says = h('span', { class: 'muted small fx-zoom-says', role: 'status' }, 'Pinch or double tap to enlarge');
+  const draw = () => {
+    s = Math.min(ZOOM_MAX, Math.max(1, s));
+    const mx = Math.max(0, (img.offsetWidth * s - area.clientWidth) / 2), my = Math.max(0, (img.offsetHeight * s - area.clientHeight) / 2);
+    x = Math.min(mx, Math.max(-mx, x)); y = Math.min(my, Math.max(-my, y));
+    img.style.transform = s === 1 ? '' : `translate(${x}px, ${y}px) scale(${s})`;
+    area.classList.toggle('zoomed', s > 1);
+    area.dataset.zoom = String(Math.round(s * 100) / 100);
+    out.disabled = fit.disabled = s === 1; inn.disabled = s >= ZOOM_MAX;
+    says.textContent = s === 1 ? 'Pinch or double tap to enlarge' : `${Math.round(s * 100)}%`;
+  };
+  // Enlarged about a point of the area (from its middle), so what is
+  // under the fingers stays under them.
+  const about = (to, cx, cy) => { const was = s; s = Math.min(ZOOM_MAX, Math.max(1, to)); x = cx - (cx - x) * (s / was); y = cy - (cy - y) * (s / was); if (s === 1) { x = 0; y = 0; } draw(); };
+  const middle = (px, py) => { const r = area.getBoundingClientRect(); return [px - r.left - r.width / 2, py - r.top - r.height / 2]; };
+  const two = () => { const [a, b] = [...pts.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, c: middle((a.x + b.x) / 2, (a.y + b.y) / 2) }; };
+  area.addEventListener('pointerdown', (e) => {
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try { area.setPointerCapture(e.pointerId); } catch (err) { /* a pointer that is gone */ }
+    from = pts.size === 2 ? { ...two(), s, x, y } : { px: e.clientX, py: e.clientY, x, y, at: performance.now(), still: true };
+  });
+  area.addEventListener('pointermove', (e) => {
+    if (!pts.has(e.pointerId) || !from) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 2 && from.d) {
+      const now = two();
+      s = Math.min(ZOOM_MAX, Math.max(1, from.s * now.d / from.d));
+      x = now.c[0] - (from.c[0] - from.x) * (s / from.s); y = now.c[1] - (from.c[1] - from.y) * (s / from.s);
+      draw();
+    } else if (pts.size === 1 && from.px !== undefined) {
+      if (Math.hypot(e.clientX - from.px, e.clientY - from.py) > 8) from.still = false;
+      if (s > 1) { x = from.x + e.clientX - from.px; y = from.y + e.clientY - from.py; draw(); }
+    }
+  });
+  const up = (e) => {
+    if (!pts.delete(e.pointerId)) return;
+    const was = from; from = null;
+    if (pts.size === 1) { const [p] = [...pts.values()]; from = { px: p.x, py: p.y, x, y, at: 0, still: false }; return; }
+    if (e.type !== 'pointerup' || !was || !was.still || performance.now() - was.at > 350) return;
+    // A second tap soon after the first: larger about that point, or back.
+    if (performance.now() - tapAt < 400) { tapAt = 0; const [cx, cy] = middle(e.clientX, e.clientY); if (s > 1) about(1, 0, 0); else about(2.5, cx, cy); } else tapAt = performance.now();
+  };
+  area.addEventListener('pointerup', up);
+  area.addEventListener('pointercancel', up);
+  area.addEventListener('wheel', (e) => { if (!e.ctrlKey && !e.metaKey) return; e.preventDefault(); const [cx, cy] = middle(e.clientX, e.clientY); about(s * Math.exp(-e.deltaY / 200), cx, cy); }, { passive: false });
+  // Safari's own pinch on a page (its gesture events) is not let through.
+  for (const g of ['gesturestart', 'gesturechange', 'gestureend']) area.addEventListener(g, (e) => e.preventDefault());
+  out.onclick = () => about(s / 1.6, 0, 0); inn.onclick = () => about(s * 1.6, 0, 0); fit.onclick = () => about(1, 0, 0);
+  img.draggable = false;
+  return h('div', { class: 'fx-zoom' }, area, h('div', { class: 'row fx-zoom-bar' }, says, h('span', { class: 'grow' }), out, fit, inn));
+}
+
 const INLINE = /\.(png|jpe?g|gif|webp)$/i;
 const VIDEO = /\.(mp4|m4v|mov|webm)$/i, AUDIO = /\.(mp3|m4a|wav|ogg)$/i;
 const NOT_PLAYED = 'This cannot be played here. Download it to open it.';
@@ -196,7 +260,7 @@ function showPreview(P, station, path, name, e) {
         try { t = await ticket(); } catch (err) { return plain(say(err)); }
         const img = h('img', { class: 'fx-img', alt: `Picture: ${name}`, src: t.url });
         img.addEventListener('error', () => plain('This picture cannot be shown here. Download it to see it.'));
-        return box.replaceChildren(img);
+        return box.replaceChildren(zoomBox(img));
       }
       if (kind === 'video' || kind === 'audio') return play(kind === 'video');
       let got;
