@@ -204,7 +204,10 @@ pub fn fleet_update(stations: &mut [Value], base: &str) -> Value {
     // straight after an update no station has asked the host again, and
     // the fleet would offer the release before the one it runs.
     if let Some(known) = best.clone() {
-        for s in stations.iter().filter(|s| s["state"] != json!("not_linked")) {
+        for s in stations
+            .iter()
+            .filter(|s| s["state"] != json!("not_linked"))
+        {
             if let Some(runs) = s["version"].as_str().and_then(plain_version) {
                 if older(&known, &runs) && best.as_deref().is_none_or(|b| older(b, &runs)) {
                     best = Some(runs);

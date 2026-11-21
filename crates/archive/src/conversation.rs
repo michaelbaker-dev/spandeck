@@ -520,6 +520,11 @@ const CLAUDE_QUIET: &[&str] = &[
     "frame-link",
     "summary",
     "progress",
+    // Seen in 2.1.326 (21 Nov 2026): where a resumed session came from,
+    // and the program's own book-keeping of what it sent where.
+    "derived-from",
+    "data-flow-records",
+    "data-flow-incomplete",
 ];
 
 const CLAUDE_QUIET_SYSTEM: &[&str] = &["stop_hook_summary", "bridge_status", "scheduled_task_fire"];
@@ -878,6 +883,21 @@ fn claude_system(line: u64, v: &Value, out: &mut Parsed) {
             let mut item = Item::notice(line, 0, what, ts).with_text(said);
             item.level = Some(one_line(level, 40));
             out.items.push(item);
+        }
+        // What a command of the program's own printed ("/voice": "Voice
+        // mode enabled"): a line of the conversation, with its wrapping
+        // taken off. One that printed nothing is nothing.
+        "local_command" => {
+            let printed = said
+                .replace("<local-command-stdout>", "")
+                .replace("</local-command-stdout>", "")
+                .replace("<local-command-stderr>", "")
+                .replace("</local-command-stderr>", "");
+            if !printed.trim().is_empty() {
+                let mut item = Item::notice(line, 0, "info", ts).with_text(printed.trim());
+                item.level = Some("info".into());
+                out.items.push(item);
+            }
         }
         quiet if CLAUDE_QUIET_SYSTEM.contains(&quiet) => {}
         other => out.unknown = Some(kind_name("system:", other)),
@@ -2370,6 +2390,37 @@ mod tests {
         for l in fixture.lines().skip(from).take(to - from) {
             writeln!(f, "{l}").unwrap();
         }
+    }
+
+    /// A bug that happened (21 Nov 2026): a resumed Claude Code session
+    /// said "13 records not shown: open the terminal to see everything"
+    /// under its last reply. The thirteen were the program's book-keeping
+    /// and what its own commands had printed; nothing of the conversation
+    /// was missing.
+    #[test]
+    fn claudes_book_keeping_is_not_counted_as_something_not_shown() {
+        const LINES: &str = r#"{"type":"user","timestamp":"2026-11-10T02:27:50.000Z","message":{"role":"user","content":"hello"}}
+{"type":"system","subtype":"local_command","content":"<local-command-stdout>Voice mode enabled (hold). Hold space to record.</local-command-stdout>","level":"info","timestamp":"2026-11-10T02:28:00.178Z"}
+{"type":"system","subtype":"local_command","content":"<local-command-stdout></local-command-stdout>","level":"info","timestamp":"2026-11-10T02:28:01.000Z"}
+{"type":"derived-from","v":1,"sessions":[{"type":"claude_code_session","id":"x","via":"resume"}]}
+{"type":"data-flow-incomplete","v":1,"codes":[9,6]}
+{"type":"data-flow-records","v":1,"records":[{"tool_name":"RemoteControlLinked","event_id":"event_1"}]}"#;
+        let (a, _dir) = following("claude", LINES, usize::MAX);
+        let page = a.conversation("s1", Range::Tail, 200).unwrap();
+        assert_eq!(
+            kinds(&page.items),
+            vec!["user", "info"],
+            "{:#?}",
+            page.items
+        );
+        assert_eq!(
+            page.items[1].text.as_deref(),
+            Some("Voice mode enabled (hold). Hold space to record.")
+        );
+        assert_eq!(
+            (page.not_understood, page.not_understood_kinds.len()),
+            (0, 0)
+        );
     }
 
     fn kinds(items: &[Item]) -> Vec<&str> {
