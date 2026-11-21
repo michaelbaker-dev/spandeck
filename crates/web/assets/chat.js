@@ -1003,8 +1003,8 @@ class Conv {
     const switching = !exited && L.prompt && L.prompt.kind === 'model_switch' ? L.prompt : null;
     // A list the program draws to choose from, read from its screen by
     // the station: its rows, to tap. (One that grants something, or with
-    // nothing marked, is `screen`: the terminal's own rows and the keys,
-    // under "Waiting in the terminal", as for any pane that waits there.)
+    // nothing marked, is `screen`: the terminal's own rows and the keys;
+    // one that grants and is read whole also has its choices: `grantEl`.)
     // A command of the program's own was sent from here a moment ago:
     // what it opened in the terminal, if anything, is shown, since
     // nothing of it may ever be written to the conversation.
@@ -1085,8 +1085,19 @@ class Conv {
     // itself and goes when the program's own goes; and a line here, for
     // the record and to open it again.
     const showing = !exited && L.prompt && (L.prompt.kind === 'picker' || L.prompt.kind === 'screen') && L.prompt.picker ? L.prompt : null;
+    // A question that grants something, read whole (21 Nov 2026, the
+    // owner's report from a phone: "this multi choice is not showing up
+    // in chat and it should"): a card here, with the program's own rows
+    // and each of its choices to tap. It is shown once: its window (the
+    // screen and the keys) does not open by itself over the card, and
+    // "Its keys" on the card opens it.
+    const grant = this.grantable(showing) ? showing : null;
+    const gsig = grant ? `${grant.kind}|${grant.since_ms}` : '';
+    if (grant && this.grantSig !== gsig) { this.grantSig = gsig; this.listShut = gsig; this.grantRows = ''; }
+    if (!grant && this.grantSig) { if (this.listShut === this.grantSig) this.listShut = null; this.grantSig = null; this.grantRows = ''; }
     this.promptWindow(showing);
-    if (showing) cards.push(this.node(cache, used, 'list', `${showing.kind}|${showing.name}`, () => h('div', { class: 'chat-card wait list-line' },
+    if (grant) cards.push(this.node(cache, used, 'grant', JSON.stringify([grant.picker, this.picking, this.pickSaid, p.agent_name]), () => this.grantEl(grant)));
+    else if (showing) cards.push(this.node(cache, used, 'list', `${showing.kind}|${showing.name}`, () => h('div', { class: 'chat-card wait list-line' },
       h('b', {}, `${p.agent_name || 'The program'} shows ${showing.kind === 'picker' ? 'a list to choose from' : 'something in its terminal'}: ${String(showing.name || '')}`),
       h('div', { class: 'row' }, h('button', { type: 'button', class: 'primary list-open', onclick: () => { this.listShut = null; this.drawDock(); } }, 'Show it'),
         h('button', { type: 'button', onclick: () => this.key1('\x1b') }, 'Cancel (Esc)'), h('button', { type: 'button', onclick: () => setFace(this.st, p, 'terminal') }, 'Open terminal')))));
@@ -1330,6 +1341,7 @@ class Conv {
     read();
     const timer = setInterval(() => (rows.isConnected ? read() : clearInterval(timer)), 1000);
     const why = this.pickSaid ? this.pickSaid + ' Its screen is below: finish there with the keys.'
+      : this.grantable(P) ? `${name} asks for something only you should grant. This is its screen as it is, with its own keys; its choices are also on the card in Chat, and nothing is chosen for you.`
       : k.class === 'grants' ? `${name} asks for something only you should grant. It is shown as it is, and answered with its own keys: nothing here chooses for you.`
         : `${name} is showing this in its terminal, and it is not its ordinary wait for a message. Nothing on it can be read as rows to tap, so it is shown as it is, with its keys.`;
     return h('div', { class: 'list-window screen' },
@@ -1342,10 +1354,85 @@ class Conv {
         f.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); e.stopPropagation(); const v = f.value.replace(/[\x00-\x1f\x7f]/g, ''); f.value = ''; if (v) this.key1(v); } });
         return f; })(),
       h('div', { class: 'row sheet-foot' },
-        this.pickSaid ? h('button', { type: 'button', class: 'list-again', onclick: () => { this.pickSaid = ''; this.drawDock(); } }, 'Show the list again') : null,
+        this.pickSaid && !this.grantable(P) ? h('button', { type: 'button', class: 'list-again', onclick: () => { this.pickSaid = ''; this.drawDock(); } }, 'Show the list again') : null,
         // A wrong guess is one tap: this exact screen is not said again.
         this.pickSaid || k.class === 'grants' ? null : h('button', { type: 'button', class: 'list-hide', title: 'This screen is not asking anything: do not show it again while it is exactly this.', onclick: () => env.rpc(this.st, 'pane.pick', { pane: this.p.id, hide: true }).catch(() => {}) }, 'Not a prompt: hide'),
         h('button', { type: 'button', class: 'primary', onclick: () => setFace(this.st, this.p, 'terminal') }, 'Open terminal')));
+  }
+
+  // A screen that grants something whose structure the station read
+  // whole (one column of choices, exactly one of them marked), on a
+  // station that says its `pane.pick` chooses from one (`grant_pick`): on
+  // a station from before the tap would be refused, so no button is
+  // drawn and the screen is shown with its keys, as before. Anything
+  // else that grants (nothing marked, as `/permissions`; a structure not
+  // read whole) has no choices to tap.
+  grantable(P) {
+    const k = P && P.kind === 'screen' ? P.picker : null;
+    return !!k && k.class === 'grants' && k.exact === true && !k.multi && Array.isArray(k.choices) && k.choices.length > 0
+      && k.choices.every(c => c && typeof c.text === 'string' && c.text) && k.choices.filter(c => c.marked).length === 1
+      && env.hasCap(this.st, 'grant_pick');
+  }
+
+  // The card for it. The question in full; the program's own rows as
+  // they are, so that what is asked for is in sight and never only the
+  // choices; each choice a button with its number and its whole words.
+  // A tap is `pane.pick` for that row and no other: the station moves
+  // the program's marker there and confirms only on the same words of
+  // the same question. Nothing is chosen by default, and nothing here
+  // remembers an answer. All of it is text from a screen.
+  grantEl(P) {
+    const k = P.picker, name = this.p.agent_name || 'The program', busy = !!this.picking;
+    const join = (...parts) => parts.map(x => String(x || '').trim()).filter(Boolean).join(' ');
+    const question = join(k.title, k.about) || 'It asks for something';
+    const rows = h('pre', { class: 'chat-peek grant-rows', tabIndex: 0, 'aria-label': `${name}'s terminal now` }, this.grantRows || 'Reading its terminal…');
+    let placed = false;
+    // The rows over its choices are what it asks leave for: they are
+    // brought into view, and the rest is there to scroll to.
+    const place = (lines) => {
+      const at = lines.map(l => l.trim()).lastIndexOf(String(k.title || '').trim());
+      const one = rows.scrollHeight / Math.max(1, lines.length);
+      rows.scrollTop = at < 0 ? rows.scrollHeight : Math.max(0, Math.round((at + (k.about ? 2 : 1)) * one - rows.clientHeight + 4));
+    };
+    const read = () => env.api.on(this.st, 'pane.text', { pane: this.p.id }).then((r) => {
+      const lines = r.lines.map(l => String(l).replace(/\s+$/, ''));
+      while (lines.length && !lines[lines.length - 1]) lines.pop();
+      const last = lines.slice(-24), text = last.join('\n');
+      this.grantRows = text;
+      if (rows.textContent !== text) rows.textContent = text;
+      if (!placed && rows.isConnected) { placed = true; place(last); }
+    }).catch((e) => { rows.textContent = 'Its terminal could not be read: ' + e.message; });
+    read();
+    const timer = setInterval(() => (rows.isConnected ? read() : clearInterval(timer)), 1000);
+    const pick = (c) => {
+      if (this.picking) return;
+      this.picking = c.text; this.pickSaid = '';
+      this.drawDock();
+      // The question as it was shown goes with the tap: the station
+      // chooses nothing when its screen is another question by then.
+      env.api.on(this.st, 'pane.pick', { pane: this.p.id, text: c.text, detail: String(c.detail || ''), title: String(k.title || ''), about: String(k.about || '') }).then((r) => {
+        this.picking = null;
+        if (r && r.picked) toast(`Chose: ${join(c.text, c.detail)}`);
+        else this.pickSaid = `Not chosen: ${r?.why || 'its screen changed'}.`;
+        this.drawDock();
+      }).catch((e) => { this.picking = null; this.pickSaid = `Not chosen: ${e.message}.`; this.drawDock(); });
+    };
+    return h('div', { class: 'chat-card ask grant-card' },
+      h('div', { class: 'ask-head' }, h('span', { class: 'muted small' }, `${name} asks, in its terminal. It grants something: read what it shows, then tap your answer.`)),
+      h('b', { class: 'ask-q grant-q' }, question),
+      rows,
+      this.pickSaid ? h('div', { class: 'warn-text grant-said', role: 'alert' }, `${this.pickSaid} Nothing was confirmed. Its screen is above: tap again, or answer with its keys.`) : null,
+      h('div', { class: 'ask-opts grant-opts', role: 'group', 'aria-label': question },
+        k.choices.map(c => h('button', { type: 'button', class: 'ask-opt grant-opt' + (c.marked ? ' on' : '') + (this.picking === c.text ? ' busy' : ''), disabled: busy, dataset: { text: String(c.text), marked: String(!!c.marked) }, onclick: () => pick(c) },
+          h('span', { class: 'ask-mark grant-mark', 'aria-hidden': 'true' }, c.marked ? '❯' : ''),
+          h('span', { class: 'ask-label' }, h('b', {}, (typeof c.number === 'number' ? c.number + '. ' : '') + join(c.text, c.detail)),
+            this.picking === c.text ? h('span', { class: 'muted' }, 'choosing…') : c.marked ? h('span', { class: 'muted' }, `${name}'s marker is here. Chosen only if you tap it.`) : null)))),
+      (Array.isArray(k.footer) ? k.footer : []).map(f => h('div', { class: 'muted small' }, String(f))),
+      h('div', { class: 'row grant-foot' },
+        h('button', { type: 'button', class: 'grant-cancel', disabled: busy, onclick: () => this.key1('\x1b') }, 'Cancel (Esc)'),
+        h('button', { type: 'button', class: 'grant-keys', title: 'Its screen as it is, with its own keys', onclick: () => { this.listShut = null; this.drawDock(); } }, 'Its keys'),
+        h('button', { type: 'button', class: 'grant-term', onclick: () => setFace(this.st, this.p, 'terminal') }, 'Open terminal')),
+      h('div', { class: 'muted small grant-hint' }, `${name}'s own keys: ${String(k.hint || '')}`));
   }
 
   // A list the pane's program draws to choose from. A tap is `pane.pick`:

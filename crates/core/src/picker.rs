@@ -11,7 +11,11 @@
 //!   draws its rows, and a tap is `pane.pick`.
 //! - `screen`: it grants something (trust, a permission, a sign-in), or
 //!   nothing on it is marked. The deck shows the screen itself with keys,
-//!   and the owner decides in full view. Never a friendly row.
+//!   and the owner decides in full view. One that grants and is read
+//!   whole (`exact`, one row marked) is shown with the program's own rows
+//!   AND its choices (21 Nov 2026, the owner's request), and a choice is
+//!   `pane.pick` too: only the row the owner tapped, only while the
+//!   question is word for word the one the owner was shown.
 //!
 //! **A choice is made as the folder-trust answer is** (`pane.pick`, the
 //! owner's only): the screen is read again and must still show that row
@@ -65,6 +69,35 @@ fn ours(reason: Option<&str>) -> bool {
         r.starts_with("shows a list to choose from")
             || r.starts_with("shows something in its terminal")
     })
+}
+
+/// Said in `caps`: `pane.pick` chooses a row of a screen that grants
+/// something, when it is read whole and the owner's deck says which
+/// question it showed (the owner's report of 21 Nov 2026). A deck offers
+/// the choices of such a screen only on a station that says so: one from
+/// before refuses, and its deck shows the screen and the keys. It is also
+/// a switch of the station's (`station.flags`, on unless set to false).
+pub const GRANT_CAP: &str = "grant_pick";
+
+/// A screen that grants something and is read whole: its choices in one
+/// column, exactly one of them marked.
+fn grants_whole(p: &Picker) -> bool {
+    p.exact
+        && p.class == Class::Grants
+        && p.choices.iter().filter(|c| c.marked).count() == 1
+        && !p.multi
+}
+
+/// The same question: its words, and every choice with its words, its
+/// number and the words under it, in the same order.
+fn same_question(a: &Picker, b: &Picker) -> bool {
+    let rows = |p: &Picker| {
+        p.choices
+            .iter()
+            .map(|c| (c.text.clone(), c.detail.clone(), c.number))
+            .collect::<Vec<_>>()
+    };
+    a.title == b.title && a.about == b.about && rows(a) == rows(b)
 }
 
 /// The deck's rows are offered only for a list whose structure is whole
@@ -291,27 +324,45 @@ impl Daemon {
     /// Take the program's marker to the row with these words and press
     /// `key` there, or stop. `Ok(None)`: done. `Ok(Some(why))`: stopped,
     /// and nothing was confirmed.
+    ///
+    /// `granting`: `None` for a plain list, and a screen that grants is
+    /// then no list at all. `Some(shown)` only from `pane.pick`, for the
+    /// owner's own tap on a screen that grants: the screen must be, word
+    /// for word, the question `shown` (what the station said the pane
+    /// shows, and the deck said it showed the owner), before the marker
+    /// is moved and again before the key is pressed.
     pub(crate) async fn picker_choose(
         &self,
         p: &PaneEntry,
         text: &str,
+        detail: Option<&str>,
         key: &[u8],
+        granting: Option<&Picker>,
     ) -> Result<Option<String>> {
-        let look = || read(&p.term.lines()).filter(|x| x.exact && x.class == Class::Plain);
+        let look = || {
+            read(&p.term.lines()).filter(|x| match granting {
+                None => x.exact && x.class == Class::Plain,
+                Some(shown) => grants_whole(x) && same_question(x, shown),
+            })
+        };
         let Some(now) = look() else {
-            return Ok(Some("no list to choose from is on its screen now".into()));
+            return Ok(Some(match granting {
+                None => "no list to choose from is on its screen now".into(),
+                Some(_) => "its screen is not the question you were shown any more: nothing was chosen. Look again".into(),
+            }));
         };
         let at = |x: &Picker| x.choices.iter().position(|c| c.marked);
         let rows: Vec<usize> = now
             .choices
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.text == text)
+            .filter(|(_, c)| c.text == text && detail.is_none_or(|d| c.detail == d))
             .map(|(i, _)| i)
             .collect();
         let (Some(from), [to]) = (at(&now), rows.as_slice()) else {
             return Ok(Some("the list changed: look again".into()));
         };
+        let under = now.choices[*to].detail.clone();
         let arrow: &[u8] = if *to > from { b"\x1b[B" } else { b"\x1b[A" };
         for _ in 0..to.abs_diff(from) {
             p.term.send(Item::keys(arrow))?;
@@ -323,8 +374,15 @@ impl Daemon {
         for _ in 0..15 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             if let Some(x) = look() {
+                // (A screen that grants is already held to the whole
+                // question by `look`; its row is the same to the words
+                // under it.)
                 let same = x.title == now.title && x.choices.len() == now.choices.len();
-                there = same && at(&x).is_some_and(|i| x.choices[i].text == text);
+                there = same
+                    && at(&x).is_some_and(|i| {
+                        x.choices[i].text == text
+                            && (granting.is_none() || x.choices[i].detail == under)
+                    });
                 if there {
                     break;
                 }
@@ -341,6 +399,14 @@ impl Daemon {
     /// on a pane's screen. `key`: `enter` (the default), `space` (tick it,
     /// where several may be ticked), or `session` (Claude Code's `/model`:
     /// "s to use this session only", only when its list says so).
+    ///
+    /// A screen that grants something (21 Nov 2026): only when the station
+    /// has said the pane shows it (`prompt`: `screen`, read whole, one row
+    /// marked: never the folder-trust question, the review of hooks or
+    /// "Switch model?", which have their own cards), only with `title` and
+    /// `about` as the deck showed them, and only Enter on the row tapped.
+    /// This is the one place a granting row is chosen from: the owner's
+    /// call (`rpc.rs`), and nothing else passes `granting`.
     pub async fn pane_pick(&self, pane: &str, params: &Value, by: &str) -> Result<Value> {
         let p = self.pane(pane)?;
         // "Not a prompt: hide": what is shown now is not said again while
@@ -362,6 +428,39 @@ impl Daemon {
             .filter(|t| !t.is_empty() && t.len() <= 400)
             .ok_or_else(|| invalid("missing parameter: text"))?;
         let shown = read(&p.term.lines());
+        let detail = params.get("detail").and_then(|t| t.as_str());
+        let said = p
+            .meta()
+            .prompt
+            .filter(|x| x.kind == "screen")
+            .and_then(|x| x.picker)
+            .filter(grants_whole)
+            // (The owner's switch at this station, `grant_pick`: off, a
+            // screen that grants is answered with its own keys only.)
+            .filter(|_| self.flag_on(GRANT_CAP, true));
+        let granting = match (&shown, said) {
+            (Some(now), Some(said)) if now.class == Class::Grants => {
+                let word = |k: &str| params.get(k).and_then(|t| t.as_str());
+                if word("title") != Some(said.title.as_str())
+                    || word("about").unwrap_or("") != said.about
+                {
+                    return Ok(json!({"ok": false, "picked": false,
+                        "why": "its screen is not the question you were shown: nothing was chosen. Look again"}));
+                }
+                if params
+                    .get("key")
+                    .and_then(|k| k.as_str())
+                    .unwrap_or("enter")
+                    != "enter"
+                {
+                    return Err(invalid(
+                        "a choice that grants something is made with Enter on its row only",
+                    ));
+                }
+                Some(said)
+            }
+            _ => None,
+        };
         let key: &[u8] = match params
             .get("key")
             .and_then(|k| k.as_str())
@@ -379,7 +478,9 @@ impl Daemon {
             other => return Err(invalid(format!("this list has no key \"{other}\""))),
         };
         self.start_screen_owner_typed(&p.id);
-        let stopped = self.picker_choose(&p, text, key).await?;
+        let stopped = self
+            .picker_choose(&p, text, detail, key, granting.as_ref())
+            .await?;
         let m = p.meta();
         self.record(
             "pane.pick",
@@ -387,7 +488,9 @@ impl Daemon {
             m.project.as_deref(),
             None,
             Some(by),
-            json!({"list": shown.map(|x| short(&x.title)), "confirmed": stopped.is_none()}),
+            json!({"list": shown.map(|x| short(&x.title)), "confirmed": stopped.is_none(),
+                "grants": granting.is_some(),
+                "row": granting.is_some().then(|| short(text))}),
         );
         Ok(match stopped {
             None => json!({"ok": true, "picked": true}),
@@ -448,7 +551,7 @@ impl Daemon {
                 "why": format!("\"{model}\" is not one row of its list (it may be under More models): the list was closed and nothing was changed")}),
             );
         };
-        match self.picker_choose(p, row, b"s").await? {
+        match self.picker_choose(p, row, None, b"s", None).await? {
             None => Ok(
                 json!({"ok": true, "sent": true, "session_only": true, "picked": row, "command": command}),
             ),

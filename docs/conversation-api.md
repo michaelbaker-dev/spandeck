@@ -539,7 +539,7 @@ command the station answers it and no `prompt` is ever set.
 
 | Field | Meaning |
 |---|---|
-| `kind` | `picker`: a list read whole from the screen that grants nothing: draw its rows; a row is chosen with `pane.pick`. `screen`: the program shows something with key names under it that is a grant (trust, a permission, a sign-in: `picker.class == "grants"`) or has nothing marked (`choices` empty): show the screen itself (`pane.text`) with keys (`pane.input`), never a row. |
+| `kind` | `picker`: a list read whole from the screen that grants nothing: draw its rows; a row is chosen with `pane.pick`. `screen`: the program shows something with key names under it that is a grant (trust, a permission, a sign-in: `picker.class == "grants"`) or has nothing marked (`choices` empty): show the screen itself (`pane.text`) with keys (`pane.input`). Since 21 Nov 2026, one that grants and is read whole (`picker.class == "grants"`, `picker.exact`, exactly one of `choices` marked, not `multi`) on a station that says `grant_pick` in `caps` may also be shown with its choices, **beside the screen's own rows and never in their place**, and a choice made with `pane.pick` (below). Any other `screen` has no row to choose. |
 | `name` | Its title. The pane is `needs_you`, with `needs_reason` `shows a list to choose from: <title>` or `shows something in its terminal: <title>`. |
 | `picker.title`, `about`, `tabs` | The first row of words above the list, the rows under it, and the title row's parts when it is a row of tabs. |
 | `picker.choices[]` | `{text, detail?, marked, checked?, number?, current?, submenu?}`: the row's words; its second column or the words under it; the program's marker is on it; ticked (where `multi`); the program's own number; the program marks it as in use (`✔`); it opens another list (`▸`). Exactly one is `marked`. Only what the screen shows now: 40 at most. |
@@ -579,7 +579,18 @@ the screen now. The station sends the arrow keys that take the program's marker 
 reads the screen again, and presses the key **only when the marker is on the row with the
 same words and the list is the same list**; else nothing is confirmed. `key`: `enter` (the
 default), `space` (tick it; only where `multi`), `session` (`s`; only where `session_key`).
-Never for a `screen`. Keys only, never pasted text.
+Keys only, never pasted text.
+
+**A `screen` that grants** (21 Nov 2026; a station that says `grant_pick` in `caps`, which
+is also its switch in `station.flags`): `{pane, text, detail, title, about}`, where `text`
+and `detail` are the choice's and `title` and `about` are `prompt.picker`'s **as they were
+shown to the owner**. The station chooses only when the pane's `prompt` is such a screen
+read whole (`exact`, one row marked, not `multi`), `title` and `about` are its own, and the
+screen is word for word that question with those choices in that order, before the marker
+is moved and again before Enter. `key` may only be `enter`. Otherwise `picked: false` with
+`why`, and nothing is confirmed. Call it for the row the owner tapped and for nothing else:
+never for a default, never again by itself. Any other `screen` (nothing marked, not read
+whole, a station without `grant_pick`): never.
 
 `pane.model {pane, model, session_only: true}` (Claude Code): types `/model`, waits for its
 list, takes the marker to the model's row ("opus" is the row that begins "Opus") and

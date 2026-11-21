@@ -778,6 +778,21 @@ impl Agent {
                 .filter_map(|l| l.as_str().map(String::from))
                 .collect()
         });
+        // A question drawn as Claude Code draws one that asks leave for
+        // something (`asked`: its rows; `above`, `under`; `then_asked`:
+        // the question it becomes after `change_after` moves).
+        let rows = |k: &str| -> Option<Vec<String>> {
+            spec[k].as_array().map(|a| {
+                a.iter()
+                    .filter_map(|l| l.as_str().map(String::from))
+                    .collect()
+            })
+        };
+        let mut asked = rows("asked");
+        let (above, under) = (
+            rows("above").unwrap_or_default(),
+            rows("under").unwrap_or_default(),
+        );
         let mut marked = spec["marked"].as_u64().unwrap_or(0) as usize;
         let (mut top, mut moves, mut swallowed) = (0usize, 0u64, String::new());
         loop {
@@ -786,9 +801,16 @@ impl Agent {
             } else if marked >= top + window {
                 top = marked + 1 - window;
             }
-            let lines = match &raw {
-                Some(rows) => rows.clone(),
-                None => {
+            let lines = match (&raw, &asked) {
+                (Some(rows), _) => rows.clone(),
+                (None, Some(question)) => {
+                    let choices: Vec<(String, String)> =
+                        choices.iter().map(|c| (c.0.clone(), c.1.clone())).collect();
+                    spandeck_agents::picker::asked(
+                        &above, question, &choices, marked, &under, &hint,
+                    )
+                }
+                (None, None) => {
                     spandeck_agents::picker::drawn(&title, &choices, marked, top, window, &hint)
                 }
             };
@@ -859,7 +881,10 @@ impl Agent {
                                     (marked + 1).min(choices.len().saturating_sub(1))
                                 };
                                 if change_after == Some(moves) {
-                                    choices.rotate_left(1);
+                                    match rows("then_asked") {
+                                        Some(other) => asked = Some(other),
+                                        None => choices.rotate_left(1),
+                                    }
                                 }
                             }
                         }

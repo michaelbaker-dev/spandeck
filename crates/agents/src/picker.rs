@@ -73,8 +73,10 @@ pub enum Class {
     /// A choice among things: a model, a setting, a session.
     Plain,
     /// It grants something: trust in a folder or in hooks, a permission,
-    /// a sign-in, a way round the permissions. Never answered from a
-    /// friendly row: the owner decides with the whole screen in view.
+    /// a sign-in, a way round the permissions. The owner decides with
+    /// the program's own rows in view; its choices are offered beside
+    /// them only when it is read whole, and only the owner's tap chooses
+    /// (DECISIONS.md, 21 Nov 2026).
     Grants,
 }
 
@@ -764,6 +766,37 @@ pub fn drawn(
     out
 }
 
+/// A question as Claude Code draws one that asks leave for something, for
+/// the stand-in agent and the tests: in the layout of `real::READ_OUTSIDE`
+/// (the unit test holds the two to each other). `above`: what it is about
+/// to do, over the question; `question`: its rows, as the program wrapped
+/// them; a choice: its words, and the words wrapped under them; `under`:
+/// rows between the choices and the key names.
+pub fn asked(
+    above: &[String],
+    question: &[String],
+    choices: &[(String, String)],
+    marked: usize,
+    under: &[String],
+    hint: &str,
+) -> Vec<String> {
+    let mut out: Vec<String> = above.iter().map(|r| format!(" {r}")).collect();
+    if !above.is_empty() {
+        out.push(String::new());
+    }
+    out.extend(question.iter().map(|r| format!(" {r}")));
+    for (i, (text, detail)) in choices.iter().enumerate() {
+        let mark = if i == marked { "❯" } else { " " };
+        out.push(format!(" {mark} {}. {text}", i + 1));
+        if !detail.is_empty() {
+            out.push(format!("      {detail}"));
+        }
+    }
+    out.extend(under.iter().map(|r| format!(" {r}")));
+    out.push(format!(" {hint}"));
+    out
+}
+
 /// Claude Code 2.1.326's own screens, as captured on 17 Nov 2026 in a
 /// pane of 120 columns: the rows from its rule down. (Of `/resume`, the
 /// sessions' titles are made up; everything else is as it was.)
@@ -944,6 +977,20 @@ Keyboard: ↑/↓ Navigate  ←/→ Effort  enter Select  esc Go Back
      mcp__spandeck
 
    ←/→ to switch · ↓ to select · Esc to cancel";
+    /// Claude Code asking leave to read outside its folders, as the owner
+    /// pasted it from a pane 42 columns wide (a phone) on 21 Nov 2026:
+    /// the question and everything under it. The rows over the question
+    /// (what it wanted to read) were not in the report and are not here.
+    pub const READ_OUTSIDE: &str = " Allow this read outside the working
+ directories?
+ ❯ 1. Yes, and keep allowing any reads
+      outside the working directories
+   2. No, and block reads outside the
+      working directories from now on
+   3. No, and ask again next time
+   4. Yes, but ask again next time
+ ↑ 16 more lines
+ Esc to cancel · Tab to amend";
 }
 
 #[cfg(test)]
@@ -1240,6 +1287,102 @@ mod tests {
             (p.class, p.choices[0].number, p.choices[0].marked),
             (Class::Plain, Some(1), true)
         );
+    }
+
+    /// The owner's report of 21 Nov 2026, from a phone: Claude Code asked
+    /// "Allow this read outside the working directories?" with four
+    /// choices, and "this multi choice is not showing up in chat and it
+    /// should". The screen as it stood, wrapped at 42 columns, is read
+    /// whole: the question over two rows, each choice with its number
+    /// and the words wrapped under it, the one the program marks, and
+    /// that it grants. (The deck offers its choices only when all of
+    /// this is so.) What the stand-in program draws is this layout.
+    #[test]
+    fn a_question_that_grants_wrapped_on_a_phone_is_read_whole() {
+        let p = read(&lines(real::READ_OUTSIDE)).expect("the question");
+        assert_eq!(
+            (
+                p.title.as_str(),
+                p.about.as_str(),
+                p.class,
+                p.exact,
+                p.multi
+            ),
+            (
+                "Allow this read outside the working",
+                "directories?",
+                Class::Grants,
+                true,
+                false
+            )
+        );
+        let rows: Vec<(Option<u32>, &str, &str, bool)> = p
+            .choices
+            .iter()
+            .map(|c| (c.number, c.text.as_str(), c.detail.as_str(), c.marked))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    Some(1),
+                    "Yes, and keep allowing any reads",
+                    "outside the working directories",
+                    true
+                ),
+                (
+                    Some(2),
+                    "No, and block reads outside the",
+                    "working directories from now on",
+                    false
+                ),
+                (Some(3), "No, and ask again next time", "", false),
+                (Some(4), "Yes, but ask again next time", "", false),
+            ]
+        );
+        assert_eq!(
+            (p.footer.clone(), p.hint.as_str()),
+            (
+                vec!["↑ 16 more lines".to_string()],
+                "Esc to cancel · Tab to amend"
+            )
+        );
+        // The stand-in's drawing is the real layout, row for row; and
+        // with what it is about to do over the question, the question
+        // is still read as it was.
+        let own = |a: &str, b: &str| (a.to_string(), b.to_string());
+        let choices = [
+            own(
+                "Yes, and keep allowing any reads",
+                "outside the working directories",
+            ),
+            own(
+                "No, and block reads outside the",
+                "working directories from now on",
+            ),
+            own("No, and ask again next time", ""),
+            own("Yes, but ask again next time", ""),
+        ];
+        let question = [
+            "Allow this read outside the working".to_string(),
+            "directories?".to_string(),
+        ];
+        let under = ["↑ 16 more lines".to_string()];
+        let hint = "Esc to cancel · Tab to amend";
+        assert_eq!(
+            asked(&[], &question, &choices, 0, &under, hint),
+            lines(real::READ_OUTSIDE)
+        );
+        let above = [
+            "Read file".to_string(),
+            "/srv/elsewhere/tides.txt".to_string(),
+        ];
+        let with = read(&asked(&above, &question, &choices, 2, &under, hint)).expect("with rows");
+        assert_eq!(
+            (with.title.as_str(), with.about.as_str(), with.exact),
+            (p.title.as_str(), p.about.as_str(), true)
+        );
+        assert_eq!(with.choices.iter().position(|c| c.marked), Some(2));
     }
 
     /// The owner, 17 Nov 2026: "Confirm the picker works on any agent at

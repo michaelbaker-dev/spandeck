@@ -3316,6 +3316,11 @@ impl Daemon {
         caps.push(crate::project::VIEW_CAP);
         // A tool step that sent files to the owner carries them (`sent`).
         caps.push(crate::conversation::SENT_CAP);
+        // `pane.pick` chooses a row of a screen that grants (picker.rs),
+        // unless the owner switched that off at this station.
+        if self.flag_on(crate::picker::GRANT_CAP, true) {
+            caps.push(crate::picker::GRANT_CAP);
+        }
         // One answer for everything a deck shows of this station.
         if self.flag_on(crate::snapshot::CAP, true) {
             caps.push(crate::snapshot::CAP);
