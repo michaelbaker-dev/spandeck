@@ -1140,6 +1140,14 @@ button.list-opt:last-child { border-bottom: none; } button.list-opt.on { backgro
 .list-foot { gap: 8px; flex-wrap: wrap; } .list-foot button { min-height: 46px; flex: 1 1 auto; justify-content: center; }
 .list-screen { max-height: 46dvh; white-space: pre; overflow: auto; } .list-window.screen .wait-keys .key { flex: 1 1 0; }
 .list-line .row { gap: 8px; flex-wrap: wrap; } .list-line button { min-height: 40px; }
+/* A question of the program's own that grants something: its rows as they
+   are, and its choices to tap (chat.js, grantEl). */
+.chat-card.grant-card { border-color: var(--amber); gap: 10px; } .grant-card > * { flex: none; }
+.grant-card .grant-rows { flex: none; max-height: 9.5em; overflow: auto; overscroll-behavior: contain; }
+.grant-card button.ask-opt { min-height: 52px; align-items: center; } .grant-card button.ask-opt.busy { opacity: .7; }
+.grant-card button.ask-opt.on { color: var(--on-accent); } .grant-card .ask-opt.on .muted { color: inherit; opacity: .85; }
+.grant-card .grant-mark { border: none; color: inherit; font-weight: 700; }
+.grant-foot { gap: 8px; flex-wrap: wrap; } .grant-foot button { min-height: 44px; flex: 1 1 auto; justify-content: center; }
 @media (max-width: 760px) {
   /* A phone: a sheet from the bottom, as tall as it needs, with a grabber. */
   .backdrop:has(> .dialog.list-sheet) { place-items: end stretch; padding: 0; }

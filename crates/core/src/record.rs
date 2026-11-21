@@ -369,6 +369,17 @@ fn owner_words(row: &LogRow) -> Option<String> {
         "pane.killed" => "killed the pane's program".to_string(),
         "pane.closed" => "closed the pane".to_string(),
         "pane.model" => "chose the pane's model".to_string(),
+        // (A row of a screen that grants something is named: the owner's
+        // own tap, 21 Nov 2026.)
+        "pane.pick" if row.data["grants"] == json!(true) => format!(
+            "chose {} where the pane's program asked for something to be granted ({})",
+            code(d("row")),
+            if row.data["confirmed"] == json!(true) {
+                "confirmed"
+            } else {
+                "nothing was confirmed"
+            }
+        ),
         "pane.pick" => "chose a row of a list in the pane".to_string(),
         "project.added" => "added the project".to_string(),
         "project.opened" => "opened the project".to_string(),

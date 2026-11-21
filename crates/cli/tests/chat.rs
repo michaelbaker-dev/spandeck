@@ -927,6 +927,18 @@ fn model_list() -> Value {
         "hint": "Enter to set as default · s to use this session only · Esc to cancel"})
 }
 
+/// Claude Code asking leave to read outside its folders, in the layout
+/// the owner reported on 21 Nov 2026 (agents/picker.rs, `READ_OUTSIDE`),
+/// with what it wants to read over the question.
+fn read_outside() -> Value {
+    json!({"above": ["Read file", "/srv/elsewhere/tides.txt"],
+        "asked": ["Allow this read outside the working", "directories?"],
+        "choices": [["Yes, and keep allowing any reads", "outside the working directories"],
+            ["No, and block reads outside the", "working directories from now on"],
+            ["No, and ask again next time", ""], ["Yes, but ask again next time", ""]],
+        "under": ["↑ 16 more lines"], "hint": "Esc to cancel · Tab to amend"})
+}
+
 fn shown(s: &Station, pane: &str, kind: &str) -> Value {
     wait_for_or(
         "the pane to say what its program shows",
@@ -950,9 +962,17 @@ fn shown(s: &Station, pane: &str, kind: &str) -> Value {
 /// the pane needs the owner and says what it shows. A row is chosen with
 /// one call: the station moves the program's marker there, reads the
 /// screen again, and confirms once. A list that changes under the choice
-/// is not confirmed. Where several may be ticked, each is ticked. One
-/// that grants something has no rows to choose. A message sent meanwhile
-/// is not typed into it, and no agent chooses.
+/// is not confirmed. Where several may be ticked, each is ticked. A
+/// message sent meanwhile is not typed into it, and no agent chooses.
+///
+/// One that grants something (the owner's report of 21 Nov 2026: Claude
+/// Code asked "Allow this read outside the working directories?" and "this
+/// multi choice is not showing up in chat and it should"): the station
+/// says it can choose from one, and the row the owner tapped is chosen
+/// with one call and confirmed once, only with the question as the deck
+/// showed it, only with Enter, never by an agent. A question that became
+/// another under the tap is not confirmed. `/permissions`, with nothing
+/// marked, has no row to choose.
 #[test]
 #[ignore = "merge tier: seven panes, each drawing a list"]
 fn a_list_a_program_draws_is_chosen_from_and_never_typed_into() {
@@ -1178,27 +1198,138 @@ fn a_list_a_program_draws_is_chosen_from_and_never_typed_into() {
         .then_some(())
     });
 
-    // One that grants something, and Claude Code's own `/permissions`
-    // (nothing marked): shown as the screen, with no row to choose.
-    let grant = lister(
-        &s,
-        "grant",
-        &dir,
-        json!({"title": "Allow calling this tool?", "choices": ["Yes", "Yes, and don't ask again", "No"]}),
-    );
+    // One that grants something: still `screen` (a deck from before
+    // shows its rows and the keys), read whole, and the station says
+    // its `pane.pick` chooses from one.
+    assert!(s.call("station.info", json!({}))["caps"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("grant_pick")));
+    let grant = lister(&s, "grant", &dir, read_outside());
     ask(&grant, "go");
     let p = shown(&s, &grant, "screen");
+    let k = &p["prompt"]["picker"];
     assert_eq!(
-        (&p["needs_reason"], &p["prompt"]["picker"]["class"]),
         (
-            &json!("shows something in its terminal: Allow calling this tool?"),
-            &json!("grants")
+            &p["needs_reason"],
+            &k["class"],
+            &k["exact"],
+            &k["about"],
+            &k["choices"][0]["marked"],
+            &k["choices"][2]["text"]
+        ),
+        (
+            &json!("shows something in its terminal: Allow this read outside the working"),
+            &json!("grants"),
+            &json!(true),
+            &json!("directories?"),
+            &json!(true),
+            &json!("No, and ask again next time")
         ),
         "{p}"
     );
-    let no = s.call("pane.pick", json!({"pane": grant, "text": "Yes"}));
+    let asked = json!({"title": "Allow this read outside the working", "about": "directories?"});
+    let tap = |pane: &str, text: &str, more: Value| {
+        let mut params = json!({"pane": pane, "text": text});
+        for (k, v) in more.as_object().unwrap() {
+            params[k] = v.clone();
+        }
+        params
+    };
+    // Without the question the owner was shown (a deck from before, or
+    // any other caller), and with another question: nothing is chosen.
+    for said in [
+        json!({}),
+        json!({"title": "Allow this read outside the working", "about": "tree?"}),
+        json!({"title": "Allow calling this tool?"}),
+    ] {
+        let no = s.call(
+            "pane.pick",
+            tap(&grant, "Yes, and keep allowing any reads", said.clone()),
+        );
+        assert!(no["picked"] == json!(false), "{said}: {no}");
+    }
+    // No key but Enter on the row; no agent.
+    for key in ["session", "space"] {
+        let mut with = asked.clone();
+        with["key"] = json!(key);
+        let no = s
+            .try_call(
+                "pane.pick",
+                tap(&grant, "Yes, and keep allowing any reads", with),
+            )
+            .unwrap_err();
+        assert_eq!(no.code, "invalid", "{key}");
+    }
+    let refused = s
+        .call_as_pane(
+            &grant,
+            "pane.pick",
+            tap(&grant, "Yes, but ask again next time", asked.clone()),
+        )
+        .unwrap_err();
+    assert_eq!(refused.code, "denied");
+    // A row whose words under it are not the ones shown: nothing.
+    let mut wrong = asked.clone();
+    wrong["detail"] = json!("inside the working directories");
+    let no = s.call(
+        "pane.pick",
+        tap(&grant, "Yes, and keep allowing any reads", wrong),
+    );
     assert!(no["picked"] == json!(false), "{no}");
-    assert!(!s.text(&grant).contains("[fake] picked"));
+    assert!(
+        !s.text(&grant).contains("[fake] picked") && !s.text(&grant).contains("swallowed"),
+        "{}",
+        s.text(&grant)
+    );
+    assert_eq!(
+        s.pane(&grant)["prompt"]["picker"]["choices"][0]["marked"],
+        json!(true),
+        "a refusal leaves its marker where it was"
+    );
+    // The owner's tap on the third row: two arrows, read again, Enter
+    // once, on that row and no other.
+    let mut third = asked.clone();
+    third["detail"] = json!("");
+    let yes = s.call(
+        "pane.pick",
+        tap(&grant, "No, and ask again next time", third.clone()),
+    );
+    assert_eq!(yes["picked"], json!(true), "{yes}");
+    s.wait_text(&grant, "[fake] picked: No, and ask again next time");
+    let text = s.text(&grant);
+    assert_eq!(text.matches("[fake] picked").count(), 1, "{text}");
+    assert!(!text.contains("swallowed"), "{text}");
+    wait_for("the pane as it was", 10, || {
+        s.pane(&grant)["prompt"].is_null().then_some(())
+    });
+    // The same rows under another question after the first move (what
+    // it asks leave for is not what the owner was shown): not confirmed.
+    let mut other = read_outside();
+    other["change_after"] = json!(1);
+    other["then_asked"] = json!(["Allow this write outside the working", "directories?"]);
+    let turned = lister(&s, "turned", &dir, other);
+    ask(&turned, "go");
+    shown(&s, &turned, "screen");
+    let stopped = s.call(
+        "pane.pick",
+        tap(&turned, "No, and ask again next time", third),
+    );
+    assert!(
+        stopped["picked"] == json!(false)
+            && stopped["why"]
+                .as_str()
+                .unwrap()
+                .contains("nothing was confirmed"),
+        "{stopped}"
+    );
+    assert!(
+        !s.text(&turned).contains("[fake] picked"),
+        "{}",
+        s.text(&turned)
+    );
+    // Claude Code's own `/permissions` (nothing marked): shown as the
+    // screen, with no row to choose.
     let perms = lister(
         &s,
         "perms",
@@ -1208,6 +1339,11 @@ fn a_list_a_program_draws_is_chosen_from_and_never_typed_into() {
     ask(&perms, "/permissions");
     let p = shown(&s, &perms, "screen");
     assert_eq!(p["prompt"]["picker"]["choices"], json!([]), "{p}");
+    let no = s.call(
+        "pane.pick",
+        json!({"pane": perms, "text": "mcp__spandeck", "title": p["prompt"]["picker"]["title"], "about": p["prompt"]["picker"]["about"]}),
+    );
+    assert!(no["picked"] == json!(false), "{no}");
     assert!(s
         .try_call(
             "pane.paste",
@@ -3423,9 +3559,18 @@ mod in_a_browser {
     /// (for `/model`, for the session alone) and the sheet goes when the
     /// program's list goes. Claude Code's own `/config` and `/resume`, as
     /// captured, are sheets with their tabs, their search field, their
-    /// values and their two-row entries. A list that grants something is
-    /// shown as its screen with keys. On a computer the same window, and
-    /// the arrow keys in it go to the program.
+    /// values and their two-row entries. On a computer the same window,
+    /// and the arrow keys in it go to the program.
+    ///
+    /// One that grants something (the owner's report of 21 Nov 2026, from
+    /// an iPhone: Claude Code asked "Allow this read outside the working
+    /// directories?" and "this multi choice is not showing up in chat and
+    /// it should"): a card in Chat with the question in full, the
+    /// program's own rows (what it asks leave for) and each choice a
+    /// button a finger can hit, inside the screen, in the four themes;
+    /// its window does not open over it by itself. A tap chooses that
+    /// row, once. On a station that does not say it can, and for
+    /// `/permissions` (nothing marked), there are no such buttons.
     #[test]
     #[ignore = "merge tier: a browser"]
     fn a_programs_list_is_a_window_in_chat_and_a_tap_chooses() {
@@ -3442,12 +3587,9 @@ mod in_a_browser {
             &dir,
             json!({"title": "Which rivers", "multi": true, "choices": [["Avon", "slow, wide"], ["Exe", "fast"], ["Tamar", "tidal"]], "hint": "Space to toggle · Enter to confirm · Esc to cancel"}),
         );
-        let grant = lister(
-            &s,
-            "grant",
-            &dir,
-            json!({"title": "Allow calling this tool?", "choices": ["Yes", "Yes, and don't ask again", "No"]}),
-        );
+        let grant = lister(&s, "grant", &dir, read_outside());
+        let perms = lister(&s, "perms", &dir, raw(real::PERMISSIONS));
+        let before = lister(&s, "before", &dir, read_outside());
         let page = Page::open(&s, 390, 844);
         page.phone_screen();
         let open = |id: &str| {
@@ -3546,10 +3688,99 @@ mod in_a_browser {
         page.js(&format!("{win}.querySelector('.list-done').click()"));
         s.wait_text(&many, "[fake] picked: Exe, Tamar");
 
-        // One that grants: its screen and the keys, no row that says Yes.
+        // One that grants, read whole: a card in Chat with the question,
+        // the program's rows and its four choices; no window over it.
         open(&grant);
         s.call("pane.input", json!({"pane": grant, "data": "go\r"}));
-        let scr = page.wait("the screen in the window", &format!("(w => w && w.querySelector('.list-screen') && w.querySelector('.list-screen').innerText.includes('Allow calling this tool?') && [w.querySelectorAll('.list-opt').length, w.querySelector('.list-window p').innerText, [...w.querySelectorAll('.wait-keys .key')].map(k => k.innerText).join(' ')])({win})"));
+        let card = "document.querySelector('.phone-chat .grant-card')";
+        let seen = page.wait("the card with its rows and its choices", &format!("(c => c && c.querySelector('.grant-rows').innerText.includes('/srv/elsewhere/tides.txt') && [c.querySelector('.grant-q').innerText, [...c.querySelectorAll('.grant-opt')].map(o => [o.querySelector('b').innerText, o.dataset.marked, Math.round(o.getBoundingClientRect().height) >= 48, o.getBoundingClientRect().left >= 0 && o.getBoundingClientRect().right <= innerWidth]), [...c.querySelectorAll('.grant-foot button')].map(b => [b.innerText, Math.round(b.getBoundingClientRect().height) >= 44]), !!{win}, !!document.querySelector('.phone-chat .list-line'), document.documentElement.scrollWidth <= innerWidth, c.querySelector('.grant-rows').children.length + c.querySelector('.grant-q').children.length])({card})"));
+        assert_eq!(
+            seen[0],
+            json!("Allow this read outside the working directories?")
+        );
+        assert_eq!(
+            seen[1],
+            json!([
+                [
+                    "1. Yes, and keep allowing any reads outside the working directories",
+                    "true",
+                    true,
+                    true
+                ],
+                [
+                    "2. No, and block reads outside the working directories from now on",
+                    "false",
+                    true,
+                    true
+                ],
+                ["3. No, and ask again next time", "false", true, true],
+                ["4. Yes, but ask again next time", "false", true, true]
+            ]),
+            "{seen}"
+        );
+        assert_eq!(
+            seen[2],
+            json!([
+                ["Cancel (Esc)", true],
+                ["Its keys", true],
+                ["Open terminal", true]
+            ])
+        );
+        assert_eq!(
+            (&seen[3], &seen[4], &seen[5], &seen[6]),
+            (&json!(false), &json!(false), &json!(true), &json!(0)),
+            "shown once, inside the screen, as text: {seen}"
+        );
+        // What it asks leave for is in sight in its rows without a
+        // scroll, and every choice can be brought into sight in the dock.
+        let sight = page.wait("where things are", &format!("(c => {{ const r = c.querySelector('.grant-rows'), box = r.getBoundingClientRect(), one = r.scrollHeight / r.innerText.split('\\n').length, at = r.innerText.split('\\n').findIndex(l => l.includes('tides.txt')) * one - r.scrollTop; return r.scrollHeight > 0 && [at >= 0 && at + one <= box.height + 1, box.top >= 0 && box.bottom <= innerHeight, [...c.querySelectorAll('.grant-opt')].every(o => {{ o.scrollIntoView({{block: 'nearest'}}); const b = o.getBoundingClientRect(); return b.top >= 0 && b.bottom <= innerHeight; }})]; }})({card})"));
+        assert_eq!(sight, json!([true, true, true]), "{sight}");
+        shoot(&page, "grant-card");
+        // In the four themes its words can be read, on the card and on
+        // its buttons (the marked one too).
+        let mut cards = vec![];
+        for theme in [
+            None,
+            Some("spandeck-light"),
+            Some("solarized-dark"),
+            Some("solarized-light"),
+        ] {
+            if let Some(theme) = theme {
+                let was = cards.last().cloned().unwrap();
+                s.call(
+                    "look.set",
+                    json!({"level": "deck", "choice": {"theme": theme}}),
+                );
+                page.wait(
+                    "the theme on the card",
+                    &format!(
+                        "getComputedStyle({card}).backgroundColor !== {}",
+                        json!(was)
+                    ),
+                );
+            }
+            let seen = page.js(GRANT_LOW);
+            assert_eq!(seen["low"], json!([]), "{theme:?}: {seen}");
+            assert_eq!(
+                seen["seen"],
+                json!([
+                    ".grant-q",
+                    ".grant-opt.on b",
+                    ".grant-opt:not(.on) b",
+                    ".grant-rows",
+                    ".grant-foot button",
+                    ".grant-opt.on .muted",
+                    ".ask-head .muted",
+                    ".grant-hint"
+                ]),
+                "{theme:?}"
+            );
+            cards.push(seen["card"].as_str().unwrap().to_string());
+            shoot(&page, &format!("grant-card-{}", theme.unwrap_or("default")));
+        }
+        // "Its keys": the program's screen as it is, in the window.
+        page.js(&format!("{card}.querySelector('.grant-keys').click()"));
+        let scr = page.wait("the screen in the window", &format!("(w => w && w.querySelector('.list-screen') && w.querySelector('.list-screen').innerText.includes('Allow this read outside') && [w.querySelectorAll('.list-opt').length, w.querySelector('.list-window p').innerText, [...w.querySelectorAll('.wait-keys .key')].map(k => k.innerText).join(' ')])({win})"));
         assert_eq!(scr[0], json!(0));
         assert!(
             scr[1].as_str().unwrap().contains("only you should grant"),
@@ -3560,15 +3791,74 @@ mod in_a_browser {
             "{scr}"
         );
         shoot(&page, "window-grants-screen");
-        // A message written meanwhile stays in the box.
         page.js(&format!("{win}.querySelector('.icon-btn').click()"));
         page.wait(
-            "the line that opens it again",
-            "!!document.querySelector('.phone-chat .list-line .list-open')",
+            "the window closed, the card there",
+            &format!("!{win} && !!{card}"),
         );
+        // A message written meanwhile stays in the box.
         page.js(&say(".phone-chat", "count the egrets too"));
         page.wait("the message kept", "(p => p && !p.hidden && p.innerText.includes('choose from what it shows'))(document.querySelector('.phone-chat .send-said'))");
-        s.call("pane.input", json!({"pane": grant, "data": "\u{1b}"}));
+        // One tap on the third choice: that row, confirmed once.
+        page.js(&format!("[...{card}.querySelectorAll('.grant-opt')].find(o => o.dataset.text === 'No, and ask again next time').click()"));
+        s.wait_text(&grant, "[fake] picked: No, and ask again next time");
+        page.wait(
+            "the card gone with the program's question",
+            &format!("!{card} && !{win}"),
+        );
+        let text = s.text(&grant);
+        assert_eq!(text.matches("[fake] picked").count(), 1, "{text}");
+        assert!(!text.contains("egrets"), "{text}");
+
+        // `/permissions` (nothing marked): its screen in the window, as
+        // before, and no choice to tap anywhere.
+        open(&perms);
+        s.call(
+            "pane.input",
+            json!({"pane": perms, "data": "/permissions\r"}),
+        );
+        let none = page.wait("its screen, by itself", &format!("(w => w && w.querySelector('.list-screen') && [w.querySelectorAll('.list-opt, .grant-opt').length, !!document.querySelector('.phone-chat .grant-card'), !!document.querySelector('.phone-chat .list-line')])({win})"));
+        assert_eq!(none, json!([0, false, true]), "{none}");
+        page.js(&format!("{win}.querySelector('.icon-btn').click()"));
+        s.call("pane.input", json!({"pane": perms, "data": "\u{1b}"}));
+
+        // A station that does not say it can choose from one (a station
+        // from before; here, its switch off): the screen in its window
+        // with the keys, as before, and no button that would be refused.
+        s.call("station.flags", json!({"set": {"grant_pick": false}}));
+        assert!(!s.call("station.info", json!({}))["caps"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("grant_pick")));
+        let old = Page::open(&s, 390, 844);
+        old.phone_screen();
+        old.goto(&format!("#/s/alpha/p/{before}"));
+        old.wait(
+            "the pane's chat",
+            "!!document.querySelector('.phone-chat .chat-box')",
+        );
+        s.call("pane.input", json!({"pane": before, "data": "go\r"}));
+        let as_was = old.wait("its screen, by itself", &format!("(w => w && w.querySelector('.list-screen') && w.querySelector('.list-screen').innerText.includes('Allow this read outside') && [w.querySelectorAll('.list-opt, .grant-opt').length, !!document.querySelector('.phone-chat .grant-card'), !!document.querySelector('.phone-chat .list-line'), w.querySelector('.list-window p').innerText])({win})"));
+        assert_eq!(
+            (&as_was[0], &as_was[1], &as_was[2]),
+            (&json!(0), &json!(false), &json!(true)),
+            "{as_was}"
+        );
+        assert!(
+            as_was[3]
+                .as_str()
+                .unwrap()
+                .contains("nothing here chooses for you"),
+            "{as_was}"
+        );
+        let no = s.call(
+            "pane.pick",
+            json!({"pane": before, "text": "Yes, but ask again next time", "detail": "",
+                "title": "Allow this read outside the working", "about": "directories?"}),
+        );
+        assert!(no["picked"] == json!(false), "{no}");
+        assert!(!s.text(&before).contains("[fake] picked"));
+        s.call("station.flags", json!({"set": {"grant_pick": null}}));
 
         // A computer: the same window, and its keys go to the program.
         let wide = Page::open(&s, 1300, 900);
@@ -4031,6 +4321,29 @@ mod in_a_browser {
     /// Words of a sent-files card that are hard to read: each `[what,
     /// contrast]` under what it needs (names, the caption and buttons
     /// 4.5:1; the quiet words 3:1), and what was looked at.
+    /// The card for a question that grants: every kind of words on it
+    /// against what is behind them (4.5 for what is read to decide, 3 for
+    /// the quiet lines), and the card's own colour.
+    const GRANT_LOW: &str = r#"(() => {
+        const root = document.querySelector('.phone-chat .grant-card');
+        if (!root) return null;
+        const ctx = (window.__ctx ||= document.createElement('canvas').getContext('2d', { willReadFrequently: true }));
+        const rgba = (css) => { ctx.clearRect(0, 0, 1, 1); ctx.fillStyle = '#000'; ctx.fillStyle = css; ctx.fillRect(0, 0, 1, 1); return [...ctx.getImageData(0, 0, 1, 1).data]; };
+        const behind = (e) => { for (; e; e = e.parentElement) { const c = rgba(getComputedStyle(e).backgroundColor); if (c[3] > 250) return c; } return rgba(getComputedStyle(document.body).backgroundColor); };
+        const lum = (c) => { const [r, g, b] = c.slice(0, 3).map(v => { const s = v / 255; return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+        const contrast = (a, b) => { const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x); return (hi + 0.05) / (lo + 0.05); };
+        const low = [], seen = [];
+        for (const [sels, least] of [[['.grant-q', '.grant-opt.on b', '.grant-opt:not(.on) b', '.grant-rows', '.grant-foot button'], 4.5], [['.grant-opt.on .muted', '.ask-head .muted', '.grant-hint'], 3]]) for (const sel of sels) {
+            for (const e of root.querySelectorAll(sel)) {
+                if (!e.getClientRects().length || !(e.innerText || '').trim()) continue;
+                const c = contrast(rgba(getComputedStyle(e).color), behind(e));
+                seen.push(sel);
+                if (c < least) { low.push([sel, Number(c.toFixed(2))]); break; }
+            }
+        }
+        return { low, seen: [...new Set(seen)], card: getComputedStyle(root).backgroundColor };
+    })()"#;
+
     const SENT_LOW: &str = r#"(() => {
         const root = document.querySelector('.chat-sent');
         if (!root) return null;
