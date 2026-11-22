@@ -51,6 +51,10 @@ const drafts = new Map();  // what was being written, when its view is not on th
 const draftFiles = new Map(); // and the files waiting to go with it (gone on a reload)
 // A photo or a document goes with a message (DECISIONS.md, 17 Nov 2026).
 const FILE_MAX = 64 * 1024 * 1024, FILES_MAX = 10, PIECE = 180 * 1024;
+// A piece of an upload begins this small, and a failed one is tried this many times more (about 50 s).
+const PIECE_MIN = 45 * 1024, PIECE_TRIES = 8;
+// Uploads to one pane go one after another: "station/pane" -> the last one's promise.
+const upTurns = new Map();
 const fileSize = (n) => (n < 1024 ? n + ' B' : n < 1048576 ? Math.round(n / 1024) + ' KB' : (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB');
 const isImage = (name, type) => /^image\//.test(type || '') || /\.(png|jpe?g|gif|webp|heic|heif|bmp)$/i.test(name || '');
 const b64 = (bytes) => { let bin = ''; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(bin); };
@@ -1669,10 +1673,10 @@ class Conv {
     const row = this.filesEl;
     row.hidden = !this.files.length;
     sync(row, this.files.map((a) => {
-      const sig = `${a.state}|${Math.round((a.sent / Math.max(a.size, 1)) * 20)}|${a.why || ''}`;
+      const sig = `${a.state}|${Math.round((a.sent / Math.max(a.size, 1)) * 20)}|${a.why || ''}|${a.again ? 1 : 0}`;
       if (a.el && a.sig === sig) return a.el;
       a.sig = sig;
-      const says = a.state === 'up' ? `Sending to ${this.st}… ${Math.round((a.sent / Math.max(a.size, 1)) * 100)}%` : a.state === 'failed' ? `Not sent to ${this.st}: ${a.why || 'it failed'}` : `${a.name} · ${fileSize(a.size)}`;
+      const says = a.state === 'up' ? `${a.again ? `${this.st} did not answer: trying again` : `Sending to ${this.st}`}… ${Math.round((a.sent / Math.max(a.size, 1)) * 100)}%` : a.state === 'failed' ? `Not sent to ${this.st}: ${a.why || 'it failed'}` : `${a.name} · ${fileSize(a.size)}`;
       a.el = h('div', { class: `att-chip ${a.state}` + (a.image ? ' pic' : ''), title: says, dataset: { name: a.name } },
         a.image && a.url ? h('img', { class: 'att-thumb', src: a.url, alt: a.name }) : h('span', { class: 'att-kind', 'aria-hidden': 'true' }, fileKind(a.name)),
         a.image ? null : h('span', { class: 'att-what' }, h('b', {}, a.name), h('span', { class: 'muted' }, a.state === 'failed' ? 'not sent' : a.state === 'up' ? `${Math.round((a.sent / Math.max(a.size, 1)) * 100)}%` : fileSize(a.size))),
@@ -1703,28 +1707,80 @@ class Conv {
 
   // One file to the station, a piece at a time: no single call is large,
   // so a key typed or an answer given meanwhile is not kept waiting.
-  async sendFile(a) {
+  //
+  // The owner's three pictures from a phone, 22 Nov 2026: "they were slow
+  // and finally errored", twice. All three went up at once, in pieces of
+  // 180 KB, and the first piece that failed ended its file, which then
+  // began again from nothing. So:
+  // - Files go one after another: three at once made every piece three
+  //   times as slow on the phone's line, and held up everything else said
+  //   on the connection.
+  // - A piece starts small and grows only while the line carries it
+  //   quickly.
+  // - A piece that fails is tried again, for most of a minute, from where
+  //   the station has the file (it is asked, with an empty piece): a
+  //   connection that dropped and came back costs one piece.
+  // "Retry" carries on from there too.
+  sendFile(a) {
     const run = (a.run = (a.run || 0) + 1);
-    a.state = 'up'; a.sent = 0; a.id = null; a.why = '';
+    a.state = 'up'; a.why = ''; a.again = false;
+    if (!a.id) a.sent = 0;
     this.drawFiles();
-    try {
-      let offset = 0;
-      do {
-        const piece = new Uint8Array(await a.file.slice(offset, offset + PIECE).arrayBuffer());
+    const turn = (upTurns.get(this.key) || Promise.resolve()).then(() => this.sendPieces(a, run));
+    upTurns.set(this.key, turn);
+    return turn;
+  }
+
+  async sendPieces(a, run) {
+    const stale = () => a.run !== run || !this.files.includes(a);
+    const put = (data, last) => env.api.on(this.st, 'pane.attach.put', { pane: this.p.id, name: a.name, id: a.id || undefined, data_b64: data, last });
+    let offset = a.id ? a.sent : 0, size = PIECE_MIN, fails = 0, ask = !!a.id;
+    for (;;) {
+      if (stale()) return;
+      try {
+        if (ask && a.id) {
+          // Where the station has it: an empty piece adds nothing and is
+          // answered with the size.
+          const has = await put('', false);
+          if (stale()) return;
+          offset = Math.min(Number(has.size) || 0, a.size);
+          ask = false;
+        }
+        const piece = new Uint8Array(await a.file.slice(offset, offset + size).arrayBuffer());
         const last = offset + piece.length >= a.size;
-        const r = await env.api.on(this.st, 'pane.attach.put', { pane: this.p.id, name: a.name, id: a.id || undefined, data_b64: b64(piece), last });
-        if (a.run !== run || !this.files.includes(a)) { env.api.on(this.st, 'pane.attach.remove', { pane: this.p.id, id: r.id }).catch(() => {}); return; }
+        const began = performance.now();
+        const r = await put(b64(piece), last);
+        if (stale()) { env.api.on(this.st, 'pane.attach.remove', { pane: this.p.id, id: r.id }).catch(() => {}); return; }
         a.id = r.id;
         offset += piece.length;
-        a.sent = offset;
+        a.sent = offset; a.again = false; fails = 0;
+        const took = performance.now() - began;
+        size = took < 400 ? Math.min(PIECE, size * 2) : took > 2000 ? Math.max(PIECE_MIN, size / 2) : size;
         this.drawFiles();
-      } while (offset < a.size);
-      a.state = 'done';
-    } catch (e) {
-      if (a.run !== run) return;
-      a.state = 'failed';
-      a.why = /method/i.test(e.message || '') && e.code === 'not_found' ? `${this.st} runs a spandeck from before files could go with a message` : e.message;
+        if (last) break;
+      } catch (e) {
+        if (stale()) return;
+        const gone = !!a.id && e.code === 'not_found' && /upload/i.test(e.message || '');
+        const never = !gone && ['invalid', 'not_found', 'denied', 'forbidden'].includes(e.code);
+        if (never || ++fails > PIECE_TRIES) {
+          a.state = 'failed'; a.again = false;
+          a.why = /method/i.test(e.message || '') && e.code === 'not_found' ? `${this.st} runs a spandeck from before files could go with a message` : e.message;
+          this.drawFiles();
+          return;
+        }
+        if (gone) {
+          // The station no longer takes pieces for it (it restarted the
+          // upload's record, or the last piece did arrive and only its
+          // answer was lost): what is there goes, and it begins again.
+          env.api.on(this.st, 'pane.attach.remove', { pane: this.p.id, id: a.id }).catch(() => {});
+          a.id = null; offset = 0; a.sent = 0;
+        }
+        ask = true; size = PIECE_MIN; a.again = true;
+        this.drawFiles();
+        await new Promise((go) => setTimeout(go, Math.min(8000, 500 * 2 ** fails)));
+      }
     }
+    a.state = 'done';
     this.drawFiles();
   }
 

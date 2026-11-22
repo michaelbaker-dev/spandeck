@@ -4165,6 +4165,73 @@ mod in_a_browser {
         shoot(&wide, "attach-desktop");
     }
 
+    /// The owner, 22 Nov 2026, of three pictures from a phone: "I tried to
+    /// upload 3 pics and they were slow and finally errored". All three
+    /// went up at once, and the first piece that failed ended its file.
+    ///
+    /// Three files given together go up one after another; the connection
+    /// is closed under one piece (the page's own socket, by the browser);
+    /// the file carries on from what the station has when the page is
+    /// connected again; and all three are on the station whole, byte for
+    /// byte.
+    #[test]
+    #[ignore = "merge tier: a browser"]
+    fn files_go_up_one_after_another_and_a_piece_that_fails_is_tried_again() {
+        let s = Station::start("alpha");
+        let dir = folder(&s, "mere");
+        let lead = pane(
+            &s,
+            "fake",
+            "lead",
+            &dir,
+            json!({"steps": [{"prompt": "x"}, {"turn_end": "ok"}]}),
+        );
+        s.wait_state(&lead, "done");
+        let page = Page::open(&s, 390, 844);
+        page.phone_screen();
+        page.goto(&format!("#/s/alpha/p/{lead}"));
+        page.wait(
+            "the chat",
+            "!!document.querySelector('.phone-chat .chat-box')",
+        );
+        // The browser's socket: what is sent for each piece is noted, and
+        // the connection is closed in place of the fourth piece.
+        page.js("(() => { const send = WebSocket.prototype.send; window.__puts = []; window.__cut = 0; WebSocket.prototype.send = function (d) { if (typeof d === 'string' && d.includes('pane.attach.put')) { const m = JSON.parse(d).params; const q = m.params || m; window.__puts.push([q.name, (q.data_b64 || '').length]); if (window.__puts.length === 4) { window.__cut += 1; this.close(); return; } } return send.call(this, d); }; return true; })()");
+        page.js("(() => { const dt = new DataTransfer(); for (const [name, k] of [['one.bin', 3], ['two.bin', 5], ['three.bin', 7]]) { const bytes = new Uint8Array(400000); for (let i = 0; i < bytes.length; i++) bytes[i] = (i * k + (i >> 9)) % 251; dt.items.add(new File([bytes], name, { type: 'application/octet-stream' })); } const b = document.querySelector('.phone-chat .chat-body'); b.dispatchEvent(new DragEvent('dragover', { dataTransfer: dt, bubbles: true, cancelable: true })); b.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true })); return true; })()");
+        let chips = page.wait(
+            "three files there",
+            "(c => c.length === 3 && c.every(x => x.classList.contains('done')) && [window.__cut, window.__puts.map(p => p[0])])([...document.querySelectorAll('.phone-chat .att-chip')])",
+        );
+        assert_eq!(chips[0], json!(1), "the connection was closed once");
+        // One after another: a file's pieces are never among another's.
+        let names: Vec<String> = chips[1]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap().to_string())
+            .collect();
+        let mut order = names.clone();
+        order.dedup();
+        assert_eq!(order, ["one.bin", "two.bin", "three.bin"], "{names:?}");
+        // Whole on the station, and what was given.
+        let kept = s.root.join("state/drops").join(&lead).join("attached");
+        for (name, k) in [("one.bin", 3usize), ("two.bin", 5), ("three.bin", 7)] {
+            let want: Vec<u8> = (0..400000usize)
+                .map(|i| ((i * k + (i >> 9)) % 251) as u8)
+                .collect();
+            let files: Vec<_> = std::fs::read_dir(&kept)
+                .unwrap()
+                .flatten()
+                .filter(|f| f.file_name().to_string_lossy().ends_with(name))
+                .collect();
+            assert_eq!(files.len(), 1, "one file for {name}, none left half sent");
+            assert!(
+                std::fs::read(files[0].path()).unwrap() == want,
+                "{name} is on the station as it was given"
+            );
+        }
+    }
+
     /// The owner, 17 Nov 2026: "Can I paste or add an image in ChatGPT or
     /// Gemini and have it make a image or video for me, would that work in
     /// out chat?"

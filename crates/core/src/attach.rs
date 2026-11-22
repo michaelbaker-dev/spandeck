@@ -101,6 +101,17 @@ struct Index {
     sent: Vec<Sent>,
 }
 
+/// One change to a pane's record of files at a time. Pieces of several
+/// files arrive together, each on a thread of its own: without this, two
+/// that read the record and wrote it back lost one another's piece (found
+/// reading the code, 22 Nov 2026, after the owner's three pictures stopped
+/// part of the way).
+static RECORD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn record() -> std::sync::MutexGuard<'static, ()> {
+    RECORD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn key(pane: &str) -> String {
     format!("attach.{pane}")
 }
@@ -191,6 +202,7 @@ impl Daemon {
     /// answered with its `id`; the others carry the id; `last` closes it.
     pub fn attach_put(&self, pane: &str, params: &Value) -> Result<Value> {
         let p = self.pane(pane)?;
+        let _one = record();
         let data = base64::engine::general_purpose::STANDARD
             .decode(
                 params
@@ -271,6 +283,7 @@ impl Daemon {
     /// taken away.
     pub fn attach_remove(&self, pane: &str, id: &str) -> Result<Value> {
         let p = self.pane(pane)?;
+        let _one = record();
         let mut index = self.attach_index(&p.id);
         if let Some(at) = index.files.iter().position(|f| f.id == id && !f.sent) {
             let gone = index.files.remove(at);
@@ -316,6 +329,7 @@ impl Daemon {
     /// was removed or did not arrive.
     pub fn attach_message(&self, pane: &str, text: &str, ids: &[String]) -> Result<String> {
         let p = self.pane(pane)?;
+        let _one = record();
         if ids.len() > WITH_MESSAGE_MAX {
             return Err(invalid("at most 10 files go with one message"));
         }
@@ -438,6 +452,7 @@ impl Daemon {
         }
         let mut to = open.open(dir.join(&on_disk))?;
         std::io::copy(&mut std::fs::File::open(from)?, &mut to)?;
+        let _one = record();
         let mut index = self.attach_index(pane);
         let f = File {
             id,
