@@ -16,7 +16,7 @@ Read `DECISIONS.md` before changing anything. It wins over every other document.
 
 ## Status
 
-Version 0.4.22. It is built on one Linux arm64 machine and tested there and in CI on
+Version 0.4.23. It is built on one Linux arm64 machine and tested there and in CI on
 macOS, Linux and Windows, and runs on real Macs and one real Windows 11 PC. Windows is
 new since 0.3.0 and its programs are not code-signed yet: where Smart App Control is
 on, Windows blocks them. It is young: see "Not verified" below before you rely on it.
@@ -145,7 +145,7 @@ arranged. They are saved in the project file, so they are the same on every devi
   layout. Both are saved with the layout, are hidden, moved and taken out like any
   pane, and taking one out deletes and stops nothing. On a phone each is a step of the
   layout, full screen.
-- A station on spandeck 0.4.22 or earlier shows a Files or Watch pane as "This pane was
+- A station on spandeck 0.4.19 or earlier shows a Files or Watch pane as "This pane was
   closed" and keeps it; if a layout is saved there, the pane goes back to its default
   folder or project. Update the station to see it.
 
@@ -567,7 +567,7 @@ is working. To keep it awake whenever spandeckd runs, add `stay_awake = true` to
 - **Renaming a station**: tested with three and four daemons on one machine, where
   every station is at one address and a different port. It has not been run across two
   machines, on a Mac or on Windows (there the daemon is started again by the pane host
-  instead of replaced in place), or with a real station on 0.4.22 in the fleet: a
+  instead of replaced in place), or with a real station on 0.4.19 in the fleet: a
   station with `rename = false` stands in for one. Tailscale SSH's "additional check"
   is a stand-in that prints what Tailscale prints; the real one has not been met.
 - **Removing a station**: tested with three daemons on one machine. "Also stop spandeck
