@@ -1994,6 +1994,7 @@ fn service_stop(paths: &Paths) -> anyhow::Result<i32> {
 
 fn daemon_main(paths: Paths, handoff: Option<PathBuf>, no_web: bool) -> anyhow::Result<i32> {
     use spandeck_terminal::sys;
+    sys::raise_open_files();
     if handoff.is_none() {
         // Descriptors inherited from a previous image whose handoff is not
         // being adopted: closed, so orphaned terminals do not stay half-open.

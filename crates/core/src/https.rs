@@ -300,7 +300,7 @@ fn tlv(der: &[u8]) -> Option<(u8, &[u8], &[u8])> {
 /// Run a program to its end, or for `limit`: what it printed, and how it
 /// ended (`None`: it was ended here). `input` is written to it and its
 /// input closed.
-fn run_bounded(
+pub(crate) fn run_bounded(
     cmd: &mut Command,
     input: Option<&[u8]>,
     limit: Duration,

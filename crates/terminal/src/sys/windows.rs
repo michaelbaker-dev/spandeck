@@ -1306,6 +1306,11 @@ pub fn process_started(pid: u32) -> Option<std::time::SystemTime> {
     Some(std::time::UNIX_EPOCH + Duration::from_nanos(since_1970.checked_mul(100)?))
 }
 
+/// Windows has no such limit for a process's handles: nothing to raise.
+pub fn raise_open_files() -> Option<u64> {
+    None
+}
+
 /// Start `cmd` without opening a console window.
 pub fn no_window(cmd: &mut Command) {
     cmd.creation_flags(CREATE_NO_WINDOW);

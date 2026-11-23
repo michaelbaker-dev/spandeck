@@ -2667,3 +2667,11 @@ not been tried on a real machine is said where it applies.
   script Add a machine sends. The pane host and the local socket are tested on every
   system. CI has a `windows` job with the same tests; the scenario step reports without
   failing the job until the browser tests have been seen to pass there.
+
+### A station does not run out of open files, and Tailscale is asked for a limited time (23 Nov 2026)
+
+The owner's MacBook (0.4.18) was listed as unreachable for days while the machine was online. Its log, once a second: "accept error: Too many open files". It answered nobody, its own `spandeck update` and `spandeck doctor` included, and told other stations "Tailscale is not answering here" (it could not start the Tailscale program to ask who was calling). A hard restart and the update put it right.
+
+- **The limit is raised at start**: to 4096 open files, or what the system allows when less (`sys::raise_open_files`). macOS gives a service started at login 256. The programs a pane runs inherit the limit.
+- **The Tailscale program is given 8 s** for a question (`whois`, `status`), and is ended after that. It was run with no limit, once for each connection from an address not known yet.
+- **Not established:** what used up the 256. Nothing of that station from before the restart was looked at but its last log lines; an M4 on 0.4.23 held 72 after eight days. So this is room and a bound, not a leak found. Not tested (no test fills a process's files): the limit is read back by nothing.

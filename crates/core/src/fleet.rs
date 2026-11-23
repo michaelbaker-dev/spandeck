@@ -845,6 +845,11 @@ pub(crate) fn tailscale_bin() -> Option<String> {
 /// which it is to be. (Found on the owner's Mac "monitoring", 17 Nov 2026:
 /// its station saw no machine of the fleet, and said Tailscale was not
 /// running, which it was.)
+/// How long the Tailscale program is given to answer a question. It was
+/// run with no limit: one that never ended kept its pipes and the thread
+/// that asked, for every connection that came in meanwhile.
+const TAILSCALE_ASKED_FOR: std::time::Duration = std::time::Duration::from_secs(8);
+
 pub(crate) fn tailscale_cmd(bin: &str) -> std::process::Command {
     let mut cmd = std::process::Command::new(bin);
     cmd.env("TAILSCALE_BE_CLI", "1");
@@ -877,11 +882,16 @@ pub(crate) fn has_tailscale() -> bool {
 
 fn tailscale_json(args: &[&str]) -> Option<Value> {
     let bin = tailscale_found()?;
-    let out = tailscale_cmd(bin).args(args).output().ok()?;
-    if !out.status.success() {
+    let (code, out, _) = crate::https::run_bounded(
+        tailscale_cmd(bin).args(args),
+        None,
+        TAILSCALE_ASKED_FOR,
+    )
+    .ok()?;
+    if code != Some(0) {
         return None;
     }
-    serde_json::from_slice(&out.stdout).ok()
+    serde_json::from_slice(&out).ok()
 }
 
 pub fn tailscale_status() -> Option<Value> {
@@ -919,15 +929,19 @@ fn tailscale_whois(ip: IpAddr) -> Whois {
         // another address is the owner.
         return Whois::Unknown;
     };
-    let out = tailscale_cmd(bin)
-        .args(["whois", "--json", &ip.to_string()])
-        .output();
+    let out = crate::https::run_bounded(
+        tailscale_cmd(bin).args(["whois", "--json", &ip.to_string()]),
+        None,
+        TAILSCALE_ASKED_FOR,
+    );
     match out {
-        Ok(out) if out.status.success() => match serde_json::from_slice(&out.stdout) {
+        Ok((Some(0), out, _)) => match serde_json::from_slice(&out) {
             Ok(who) => Whois::Is(who),
             Err(_) => Whois::Failed,
         },
-        Ok(out) if !tailscale_is_down(&String::from_utf8_lossy(&out.stderr)) => Whois::Unknown,
+        // Ended here for taking too long: it did not answer.
+        Ok((None, ..)) => Whois::Failed,
+        Ok((_, _, err)) if !tailscale_is_down(&String::from_utf8_lossy(&err)) => Whois::Unknown,
         _ => Whois::Failed,
     }
 }

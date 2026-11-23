@@ -756,6 +756,35 @@ pub fn process_started(_pid: u32) -> Option<std::time::SystemTime> {
 /// Start `cmd` without opening a console window. Only Windows opens one.
 pub fn no_window(_cmd: &mut Command) {}
 
+/// Let this process hold more open files than a login service is given.
+/// macOS gives a service started at login 256; a station's connections,
+/// terminals and the programs it runs to ask Tailscale share them. The
+/// owner's MacBook, 23 Nov 2026: its log was "accept error: Too many open
+/// files" once a second, and it answered nobody. Raised to 4096, or to what
+/// the system allows when that is less. What it is afterwards.
+pub fn raise_open_files() -> Option<u64> {
+    let mut now = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `now` is a valid rlimit for the call to fill in.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut now) } != 0 {
+        return None;
+    }
+    let want = (4096 as libc::rlim_t).min(now.rlim_max);
+    if now.rlim_cur < want {
+        let more = libc::rlimit {
+            rlim_cur: want,
+            rlim_max: now.rlim_max,
+        };
+        // SAFETY: a valid rlimit, no higher than the hard limit.
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &more) } == 0 {
+            return Some(want as u64);
+        }
+    }
+    Some(now.rlim_cur as u64)
+}
+
 /// Let Ctrl-C reach the programs this one starts without ending this one.
 /// On Unix the shell script that needs this uses `trap`; nothing calls it.
 pub fn ignore_interrupt() {}
