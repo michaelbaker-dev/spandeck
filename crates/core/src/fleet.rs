@@ -882,12 +882,8 @@ pub(crate) fn has_tailscale() -> bool {
 
 fn tailscale_json(args: &[&str]) -> Option<Value> {
     let bin = tailscale_found()?;
-    let (code, out, _) = crate::https::run_bounded(
-        tailscale_cmd(bin).args(args),
-        None,
-        TAILSCALE_ASKED_FOR,
-    )
-    .ok()?;
+    let (code, out, _) =
+        crate::https::run_bounded(tailscale_cmd(bin).args(args), None, TAILSCALE_ASKED_FOR).ok()?;
     if code != Some(0) {
         return None;
     }
