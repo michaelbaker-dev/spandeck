@@ -454,6 +454,39 @@ pub fn antigravity_whole(named: &Path) -> PathBuf {
     named.to_path_buf()
 }
 
+/// Whether Antigravity began the conversation `id` under `ancestor`, as a
+/// sub-agent of it or of one of its sub-agents (three deep at most). Read
+/// from the file the program keeps beside the parent for each one it
+/// begins, `brain/<parent>/.system_generated/subagents/<child>.json`,
+/// which is there before the child's first hook (seen on `agy` 1.5.10:
+/// the file 64 ms before the child's transcript folder).
+pub fn antigravity_begun_under(dir: &Path, ancestor: &str, id: &str) -> bool {
+    fn under(dir: &Path, parent: &str, id: &str, deeper: u8) -> bool {
+        if !plain_id(parent) {
+            return false;
+        }
+        let kept = dir
+            .join("brain")
+            .join(parent)
+            .join(".system_generated/subagents");
+        if kept.join(format!("{id}.json")).is_file() {
+            return true;
+        }
+        if deeper == 0 {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(&kept) else {
+            return false;
+        };
+        entries
+            .filter_map(Result::ok)
+            .take(CHILDREN_MAX)
+            .filter_map(|e| Some(e.file_name().to_str()?.strip_suffix(".json")?.to_string()))
+            .any(|child| under(dir, &child, id, deeper - 1))
+    }
+    plain_id(id) && ancestor != id && under(dir, ancestor, id, 2)
+}
+
 /// The transcript of a conversation, by its id, if it has one.
 pub fn antigravity_transcript(dir: &Path, id: &str) -> Option<PathBuf> {
     if !plain_id(id) {

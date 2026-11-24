@@ -119,6 +119,19 @@ impl Daemon {
         ev: &AgentEvent,
         hook_id: Option<&str>,
     ) -> HookDecision {
+        // Antigravity runs the same hooks for a sub-agent as for the
+        // conversation that began it, under the sub-agent's own id. Such
+        // an event says nothing of the pane: its conversation is still the
+        // parent's, and a sub-agent's turn ending is not the pane's.
+        if ev.agent == AgentKind::Antigravity {
+            let ours = p.meta().session_id;
+            if let (Some(ours), Some(theirs)) = (ours.as_deref(), ev.session_id.as_deref()) {
+                let dir = spandeck_archive::stores::antigravity_dir(&self.home);
+                if spandeck_archive::stores::antigravity_begun_under(&dir, ours, theirs) {
+                    return HookDecision::default();
+                }
+            }
+        }
         let now = now_ms();
         let mut stuck: Option<String> = None;
         // The file to follow for the transcript the hook named (for

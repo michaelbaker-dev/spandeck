@@ -2187,6 +2187,45 @@ fn opencode_and_antigravity_panes_get_their_own_conversations() {
         "{b}"
     );
     assert!(!b.to_string().contains("grebes"));
+    // A sub-agent of that conversation sends the same hooks under an id of
+    // its own (the owner's Antigravity pane, 24 Nov 2026: five sub-agents
+    // at work, and the pane showed one of them as its conversation and no
+    // sub-agent). The pane's conversation and state stay the parent's.
+    let child = "0aaaaaaa-0000-4000-8000-000000000004";
+    let kept = s
+        .root
+        .join("home/.gemini/antigravity-cli/brain")
+        .join(named)
+        .join(".system_generated/subagents");
+    std::fs::create_dir_all(&kept).unwrap();
+    std::fs::write(
+        kept.join(format!("{child}.json")),
+        json!({"conversationId": child, "subagentDescriptor": {"typeName": "self", "role": "Reed counter"}}).to_string(),
+    )
+    .unwrap();
+    let asked = [agy_asked(
+        0,
+        "2020-01-01T00:00:01Z",
+        "What the sub-agent was asked",
+    )];
+    antigravity_conversation(&s, child, &other, &asked, &asked);
+    for event in ["PreInvocation", "Stop"] {
+        s.call_as_pane(
+            &agy,
+            "hook.ingest",
+            json!({"agent": "antigravity", "payload": {"hookEventName": event, "conversationId": child,
+                "transcriptPath": mere.join(".gemini/antigravity-cli/transcript.jsonl"), "cwd": mere,
+                "lastUserInput": "y", "terminationReason": "DONE"}}),
+        )
+        .unwrap();
+    }
+    let c = conversation(&s, &agy, true);
+    assert_eq!(
+        (&c["session"], &c["live"]["state"]),
+        (&json!(named), &json!("working")),
+        "{c}"
+    );
+    assert!(c.to_string().contains("the hook's conversation"), "{c}");
 }
 
 /// A program that draws its screen itself, 120 columns wide, as the
