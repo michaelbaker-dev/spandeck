@@ -215,10 +215,13 @@ impl Daemon {
     /// At start, before anything is served: the renames kept, and whether
     /// this station's own name is the one it last ran under. If it is not
     /// (the owner renamed it, from the deck, the command line or by hand
-    /// in the config file; or the machine's own name changed and the
-    /// config names none) that is a rename, and what is stored here under
-    /// the old name is moved now.
+    /// in the config file) that is a rename, and what is stored here under
+    /// the old name is moved now. The machine's own name changing is none:
+    /// a station whose config names none keeps the name it wrote down.
     pub(crate) fn rename_started(&self) {
+        // The name is written down, for a config file that names none: the
+        // next start takes it from there, not from the machine.
+        self.paths.keep_name(&self.station);
         if !self.rename_on() {
             return;
         }

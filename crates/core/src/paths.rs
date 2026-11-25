@@ -507,12 +507,47 @@ impl Default for Config {
 impl Config {
     pub fn load(paths: &Paths) -> anyhow::Result<Config> {
         let file = paths.config_file();
-        match std::fs::read_to_string(&file) {
-            Ok(text) => Ok(
-                toml::from_str(&text).map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?
-            ),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-            Err(e) => Err(e.into()),
+        let (mut cfg, named) = match std::fs::read_to_string(&file) {
+            Ok(text) => {
+                let cfg: Config = toml::from_str(&text)
+                    .map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?;
+                let named =
+                    toml::from_str::<toml::Table>(&text).is_ok_and(|t| t.contains_key("station"));
+                (cfg, named)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Config::default(), false),
+            Err(e) => return Err(e.into()),
+        };
+        // A station whose config names none keeps the name it first ran
+        // under: the machine's own name is not asked again (a Mac's changes
+        // with the network it is on).
+        if !named {
+            if let Some(kept) = paths.kept_name() {
+                cfg.station = kept;
+            }
+        }
+        Ok(cfg)
+    }
+}
+
+impl Paths {
+    fn name_file(&self) -> PathBuf {
+        self.state_dir.join("station.name")
+    }
+
+    /// The name this station last ran under, as it wrote it down.
+    pub fn kept_name(&self) -> Option<String> {
+        let name = std::fs::read_to_string(self.name_file()).ok()?;
+        let name = name.trim();
+        crate::project::valid_name(name).then(|| name.to_string())
+    }
+
+    /// Write down the name this station runs under.
+    pub fn keep_name(&self, name: &str) {
+        if self.kept_name().as_deref() != Some(name) {
+            if let Err(e) = std::fs::write(self.name_file(), format!("{name}\n")) {
+                tracing::warn!("this station's name could not be written down: {e}");
+            }
         }
     }
 }
@@ -615,5 +650,37 @@ mod tests {
         let image = other.state_dir.join("releases/v9/spandeck");
         assert_eq!(other.started_from_in(home, &image), image);
         assert!(!other.is_the_station(home));
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    /// The owner's portable came back from an update called "Mac": its
+    /// config named no station, and macOS gave another name for the machine
+    /// than at the start before (25 Nov 2026; Mac-mini became valpomac the
+    /// same way). The name a station wrote down is the one it keeps, and a
+    /// name in the config file still decides.
+    #[test]
+    fn a_station_keeps_its_name_when_the_machines_name_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path());
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        // First start: the machine's name, which is then written down.
+        assert_eq!(Config::load(&paths).unwrap().station, hostname());
+        paths.keep_name("MacBookM5");
+        assert_eq!(Config::load(&paths).unwrap().station, "MacBookM5");
+        // A config file that names none changes nothing of that.
+        std::fs::write(paths.config_file(), "web_port = 7391\n").unwrap();
+        assert_eq!(Config::load(&paths).unwrap().station, "MacBookM5");
+        // One that names the station decides.
+        std::fs::write(paths.config_file(), "station = \"laptop\"\n").unwrap();
+        assert_eq!(Config::load(&paths).unwrap().station, "laptop");
+        // What is written down and could be no station's name is not taken.
+        std::fs::remove_file(paths.config_file()).unwrap();
+        std::fs::write(paths.state_dir.join("station.name"), "a b/c\n").unwrap();
+        assert_eq!(Config::load(&paths).unwrap().station, hostname());
     }
 }
