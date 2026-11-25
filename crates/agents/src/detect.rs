@@ -242,27 +242,50 @@ pub fn detect_why(rules: &[Rule], lines: &[String]) -> Option<(AgentState, Optio
 /// OSC 7501 (Program Status Protocol): read when present, never required.
 /// Returns the reported state from `ESC ] 7501 ; key=value:... ST` sequences.
 pub fn parse_osc7501(bytes: &[u8]) -> Option<AgentState> {
+    parse_osc7501_why(bytes).map(|(state, _)| state)
+}
+
+/// The state, and what the program said with it: every pair but its id and
+/// the state itself, as it sent them (seen live: `kind=auth:…`). It is the
+/// program's text, so it is cut to a length and its control characters go.
+pub fn parse_osc7501_why(bytes: &[u8]) -> Option<(AgentState, Option<String>)> {
     let marker = b"\x1b]7501;";
     let start = bytes.windows(marker.len()).rposition(|w| w == marker)? + marker.len();
     let rest = &bytes[start..];
     let end = rest.iter().position(|b| *b == 0x07 || *b == 0x1b)?;
     let body = std::str::from_utf8(&rest[..end]).ok()?;
+    let mut state = None;
+    let mut said: Vec<&str> = Vec::new();
     for pair in body.split(':') {
         if let Some(v) = pair
             .strip_prefix("status=")
             .or_else(|| pair.strip_prefix("state="))
         {
-            return Some(match v {
-                "idle" => AgentState::Idle,
-                "working" => AgentState::Working,
-                "blocked" => AgentState::NeedsYou,
-                "done" => AgentState::Done,
-                "error" => AgentState::Error,
-                _ => return None,
-            });
+            if state.is_none() {
+                state = Some(match v {
+                    "idle" => AgentState::Idle,
+                    "working" => AgentState::Working,
+                    "blocked" => AgentState::NeedsYou,
+                    "done" => AgentState::Done,
+                    "error" => AgentState::Error,
+                    _ => return None,
+                });
+                continue;
+            }
         }
+        if state.is_none() && pair.starts_with("id=") {
+            continue;
+        }
+        said.push(pair);
     }
-    None
+    let said: String = said
+        .join(":")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(160)
+        .collect();
+    let said = said.trim().to_string();
+    Some((state?, (!said.is_empty()).then_some(said)))
 }
 
 #[cfg(test)]
@@ -388,5 +411,19 @@ mod tests {
             Some(AgentState::Working)
         );
         assert_eq!(parse_osc7501(b"plain output"), None);
+        // What it said with the state is kept: a pane that needs the owner
+        // says why (LLM-Server, 25 Nov 2026: "waiting for you" and no more,
+        // sixteen seconds after a turn ended, and nothing to tell why from).
+        assert_eq!(
+            parse_osc7501_why(b"\x1b]7501;state=blocked:kind=auth:sign in at http://x\x07"),
+            Some((
+                AgentState::NeedsYou,
+                Some("kind=auth:sign in at http://x".to_string())
+            ))
+        );
+        assert_eq!(
+            parse_osc7501_why(b"\x1b]7501;id=a:status=done\x07"),
+            Some((AgentState::Done, None))
+        );
     }
 }

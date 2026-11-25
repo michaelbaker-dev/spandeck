@@ -499,7 +499,7 @@ pub struct ApprovalAnswer {
 
 pub(crate) enum PaneMsg {
     Term(String, PaneEvent),
-    Osc7501(String, AgentState),
+    Osc7501(String, AgentState, Option<String>),
 }
 
 pub struct Inner {
@@ -865,7 +865,7 @@ impl Daemon {
             while let Some(msg) = msg_rx.recv().await {
                 match msg {
                     PaneMsg::Term(id, ev) => d.on_pane_event(&id, ev),
-                    PaneMsg::Osc7501(id, state) => {
+                    PaneMsg::Osc7501(id, state, said) => {
                         // Read when present; hooks stay the primary signal.
                         // Antigravity's hooks cover the turn but not its
                         // prompts, so there both are listened to.
@@ -875,8 +875,22 @@ impl Daemon {
                                 (m.hooks_seen, m.agent)
                             };
                             if !hooked || agent == AgentKind::Antigravity {
-                                let reason = (state == AgentState::NeedsYou)
-                                    .then(|| "waiting for you".to_string());
+                                // What the program said with it is the
+                                // reason, and is written down: without it
+                                // nobody can tell why a pane waits.
+                                let reason = (state == AgentState::NeedsYou).then(|| match &said {
+                                    Some(said) => format!("waiting for you: {said}"),
+                                    None => "waiting for you".to_string(),
+                                });
+                                let news = reason.is_some()
+                                    && p.meta.lock().unwrap().needs_reason != reason;
+                                if news {
+                                    tracing::info!(
+                                        pane = %id,
+                                        said = said.as_deref().unwrap_or(""),
+                                        "the program reports it waits for the owner (OSC 7501)"
+                                    );
+                                }
                                 d.set_state(&p, state, reason);
                             }
                         }
@@ -1258,8 +1272,9 @@ impl Daemon {
         Box::new(move |ev| match ev {
             PaneEvent::Output(bytes) => {
                 if bytes.windows(7).any(|w| w == b"\x1b]7501;") {
-                    if let Some(state) = spandeck_agents::detect::parse_osc7501(&bytes) {
-                        let _ = msg_tx.send(PaneMsg::Osc7501(id.clone(), state));
+                    if let Some((state, said)) = spandeck_agents::detect::parse_osc7501_why(&bytes)
+                    {
+                        let _ = msg_tx.send(PaneMsg::Osc7501(id.clone(), state, said));
                     }
                 }
                 // Never blocks: a subscriber that falls behind is told it lagged
