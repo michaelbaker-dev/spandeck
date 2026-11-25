@@ -548,19 +548,32 @@ pub fn showing(agent: crate::AgentKind, lines: &[String]) -> bool {
                     }
             };
             match boxed {
-                Some(i) => lines[i + 2..=end].iter().enumerate().any(|(n, l)| {
-                    // (Found with the real 1.5.10: after its turn, with a
-                    // sub-agent still listed, a row `● Agent(…)` and a rule
-                    // stand between its box and its status row. Its own.)
-                    !clean(l).is_empty()
-                        && !own_row(l)
-                        && !status_row(l)
-                        && !l.trim_start().starts_with("● Agent(")
-                        && {
-                            let _ = n;
-                            true
+                Some(i) => {
+                    // Where its hint is, and so its status row: in a
+                    // narrow terminal the status runs on to the next row
+                    // or two, cut wherever the width cuts it (the real
+                    // 1.5.10 at 60 columns: `…auto · Gemin` / `i 4 Neon ·
+                    // high`). Those rows are the status still.
+                    let under = &lines[i + 2..=end];
+                    let hint = under.iter().position(|l| {
+                        let t = l.trim();
+                        t.starts_with("? for shortcuts") || t.starts_with("esc to cancel")
+                    });
+                    under.iter().enumerate().any(|(n, l)| {
+                        let run_on = hint
+                            .is_some_and(|h| n > h && n <= h + 2 && l.trim().chars().count() <= 60);
+                        if run_on {
+                            return false;
                         }
-                }),
+                        // (Found with the real 1.5.10: after its turn, with a
+                        // sub-agent still listed, a row `● Agent(…)` and a rule
+                        // stand between its box and its status row. Its own.)
+                        !clean(l).is_empty()
+                            && !own_row(l)
+                            && !status_row(l)
+                            && !l.trim_start().starts_with("● Agent(")
+                    })
+                }
                 None => false,
             }
         }
@@ -1188,6 +1201,21 @@ mod tests {
             .collect();
             assert!(!showing(crate::AgentKind::Antigravity, &narrow), "{alone}");
         }
+        // Wherever the width cuts its status (the real 1.5.10 at 60
+        // columns, twice, cut at two places): every cut of the row.
+        let whole = "? for shortcuts\t\t                     \t         auto \u{b7} Gemini 4 Neon \u{b7} high";
+        for cut in 16..whole.chars().count() {
+            let mut cut_up = screen(&whole.chars().take(cut).collect::<String>());
+            cut_up.push(whole.chars().skip(cut).collect());
+            assert!(
+                !showing(crate::AgentKind::Antigravity, &cut_up),
+                "cut at {cut}"
+            );
+        }
+        // A question under the hint's place is still something it shows.
+        let mut asks = screen("  Allow calling this tool?");
+        asks.extend(["  > Yes", "    No", "? for shortcuts"].map(String::from));
+        assert!(showing(crate::AgentKind::Antigravity, &asks));
         // At 60 columns its status is cut in two (the real 1.5.10).
         let mut wrapped =
             screen("? for shortcuts\t\t              \t        auto \u{b7} Gemini 4 Neon");
