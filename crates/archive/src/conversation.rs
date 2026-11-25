@@ -1489,6 +1489,15 @@ fn antigravity_line(line: u64, raw: &str) -> Parsed {
                 });
             }
         }
+        // What Antigravity itself tells its model (a reminder to work
+        // efficiently, a sub-agent's word that it is done): no part of the
+        // conversation, and nothing the owner misses. (Each was counted as
+        // "not shown": 35 of the owner's "36 records not shown".)
+        "SYSTEM_MESSAGE" if v["source"] == json!("SYSTEM") => {}
+        // It summed up what came before and went on from the summary.
+        "CHECKPOINT" if v["source"] == json!("SYSTEM") => {
+            out.items.push(Item::notice(line, 0, "compacted", ts))
+        }
         other => out.unknown = Some(kind_name("", other)),
     }
     out
@@ -3144,13 +3153,23 @@ mod tests {
             .open(dir.path().join("session.jsonl"))
             .unwrap();
         writeln!(f, "{}", json!({"step_index": 7, "source": "SYSTEM", "type": "TIDE_TABLE", "status": "DONE", "created_at": "2026-11-16T12:01:03Z"})).unwrap();
+        // What Antigravity tells its own model is neither shown nor counted
+        // as missing, and its summing-up is the same notice as any agent's.
+        writeln!(f, "{}", json!({"step_index": 8, "source": "SYSTEM", "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-16T12:01:04Z", "content": "The following is a <SYSTEM_MESSAGE> not actually sent by the user. Reminder: count quickly."})).unwrap();
+        writeln!(f, "{}", json!({"step_index": 9, "source": "SYSTEM", "type": "CHECKPOINT", "status": "DONE", "created_at": "2026-11-16T12:01:05Z", "content": "# Resuming from a compaction"})).unwrap();
         let more = a
             .conversation("s1", Range::After(page.cursor), 200)
             .unwrap();
         assert_eq!(
-            (more.items.len(), more.not_understood_kinds),
-            (0, vec![("TIDE_TABLE".to_string(), 1)])
+            (
+                more.items.iter().map(|i| i.what).collect::<Vec<_>>(),
+                more.not_understood_kinds.clone()
+            ),
+            (vec![Some("compacted")], vec![("TIDE_TABLE".to_string(), 1)])
         );
+        assert!(!serde_json::to_string(&more)
+            .unwrap()
+            .contains("count quickly"));
     }
 
     /// The same report, for OpenCode ("Shouldn't chat be the same code base
