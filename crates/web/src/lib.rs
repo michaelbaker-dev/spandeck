@@ -294,6 +294,26 @@ fn no_delay(daemon: &Daemon, tcp: &tokio::net::TcpStream) {
             tracing::debug!(error = %e, "could not set TCP_NODELAY on a connection");
         }
     }
+    still_there(tcp);
+}
+
+/// Have the system ask the other end of an accepted connection whether it
+/// is still there, once the connection has been quiet for 30 seconds and
+/// every 10 after (`SO_KEEPALIVE`). A caller that gave up while this
+/// machine was asleep or off the network closed its end, and nothing of
+/// that arrived here: the connection stayed open on this side for good.
+/// The owner's portable, 25 Nov 2026, an hour after it started: 44
+/// connections from the other seven stations, ten of them from one station
+/// that itself held two; at 256 open files (five and ten hours after a
+/// start, twice) it answered nobody. Asked, the other end says it knows no
+/// such connection, and this side closes.
+fn still_there(tcp: &tokio::net::TcpStream) {
+    let ask = socket2::TcpKeepalive::new()
+        .with_time(std::time::Duration::from_secs(30))
+        .with_interval(std::time::Duration::from_secs(10));
+    if let Err(e) = socket2::SockRef::from(tcp).set_tcp_keepalive(&ask) {
+        tracing::debug!(error = %e, "could not set SO_KEEPALIVE on a connection");
+    }
 }
 
 /// Bind the listeners and start serving. Returns the bound addresses.
@@ -3508,6 +3528,24 @@ fn assets_build() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reason: the owner's portable, 25 Nov 2026 (DECISIONS.md, "A
+    /// connection whose other end is gone is closed"): connections other
+    /// stations had given up while it slept stayed open on it until it had
+    /// no files left. A connection the station accepts is one the system
+    /// asks after, after 30 seconds of quiet.
+    #[tokio::test]
+    async fn an_accepted_connection_is_asked_after_when_it_goes_quiet() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _caller = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (tcp, _) = listener.accept().await.unwrap();
+        let sock = socket2::SockRef::from(&tcp);
+        assert!(!sock.keepalive().unwrap());
+        still_there(&tcp);
+        assert!(sock.keepalive().unwrap());
+    }
 
     /// Reason: DECISIONS.md, "What 'working through another station' is"
     /// and "What was reviewed" (Host, Origin): the one other origin a

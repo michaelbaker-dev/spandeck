@@ -21,7 +21,10 @@ use spandeck_terminal::sys;
 /// A client builder with spandeck's trust settings. Use this, never
 /// `reqwest::Client::builder()` directly.
 pub fn builder() -> reqwest::ClientBuilder {
-    let builder = reqwest::Client::builder();
+    // A connection to another station that went quiet is asked after: one
+    // whose other end is gone (this machine slept, or changed networks)
+    // is closed, and not kept and waited on.
+    let builder = reqwest::Client::builder().tcp_keepalive(std::time::Duration::from_secs(30));
     if !sys::WINDOWS {
         return builder;
     }

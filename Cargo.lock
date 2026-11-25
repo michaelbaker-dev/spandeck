@@ -2591,6 +2591,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "socket2",
  "spandeck-core",
  "spandeck-terminal",
  "tokio",
