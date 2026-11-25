@@ -1477,3 +1477,50 @@ button.sub-row { cursor: pointer; } button.sub-row:hover, .sub-row.sel { backgro
 .fx-zoom-bar { align-items: center; gap: 6px; }
 .fx-zoom-bar .mini { min-width: 44px; min-height: 36px; }
 .sent-pic, .sent-thumb { touch-action: pan-y; -webkit-touch-callout: none; }
+
+/* ---- finding a station in the list (25 Nov 2026) ----
+   A station's colour is --st, set by the page's code on what is that
+   station's. Every shade here is mixed from it and the theme's own colours,
+   so a light theme stays light and a pane with a look of its own (its bar on
+   a phone) mixes from its own. */
+.side-station-group, .phone-station, .st-tile, .chat-bar.st-bar {
+  --st-band: color-mix(in srgb, var(--st, var(--line)) 20%, var(--panel)); --st-line: color-mix(in srgb, var(--st, var(--line)) 52%, var(--panel));
+  --st-ink: color-mix(in srgb, var(--st, var(--line)) 38%, var(--text)); --st-edge: color-mix(in srgb, var(--st, var(--line)) 80%, var(--text));
+}
+/* The computer's list: the name on a band of the colour, its panes on a line of it. */
+.side-row.side-station { background: var(--st-band); box-shadow: inset 3px 0 0 var(--st-edge); }
+.side-row.side-station .side-name { color: var(--st-ink); }
+a.side-row.side-station:hover { background: color-mix(in srgb, var(--st) 30%, var(--panel)); }
+/* Selected: the selection's own ground under the tint, and its blue all round. */
+.side-row.side-station.current { background: color-mix(in srgb, var(--st) 22%, var(--sel-bg)); box-shadow: inset 3px 0 0 var(--st-edge), inset 0 0 0 1.5px var(--blue); }
+/* Away: the colour is a hint only, and the words at the end say why. */
+.side-row.side-station.away { background: color-mix(in srgb, var(--st) 8%, var(--panel)); box-shadow: inset 3px 0 0 var(--st-line); }
+.side-row.side-station.away .side-name { color: var(--muted); }
+.side-station-group > .side-kids { border-left-color: var(--st-line); }
+.st-pin .ico { width: 12px; height: 12px; }
+.fold-opt { flex: none; display: inline-flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; color: var(--muted); font-size: calc(11px * var(--ui-scale)); }
+.fold-opt input { margin: 0; padding: 0; width: 13px; height: 13px; accent-color: var(--blue); }
+button.st-quiet .caret { display: inline-flex; align-items: center; justify-content: center; }
+button.side-row.st-quiet { width: 100%; margin-top: 2px; background: none; border: 1px dashed var(--line); color: var(--muted); text-align: left; font-size: inherit; }
+.st-dots { display: flex; gap: 3px; flex: none; } .st-dots i { width: 7px; height: 7px; border-radius: 2px; background: var(--st); }
+/* The colours to choose from. */
+.st-swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; margin: 12px 0 4px; }
+.st-swatch { min-height: 44px; justify-content: flex-start; gap: 8px; text-transform: capitalize; background: color-mix(in srgb, var(--st) 18%, var(--panel)); border-color: color-mix(in srgb, var(--st) 50%, var(--panel)); }
+.st-swatch i { flex: none; width: 16px; height: 16px; border-radius: 4px; background: var(--st); }
+.st-swatch.on { border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue); }
+/* The phone: a tile for each station, two to a row, then each station's block under a band of its colour. */
+.st-head { min-height: 44px; } .st-head h2 { margin: 0; }
+.phone .fold-opt { min-height: 44px; padding: 0 2px; gap: 8px; font-size: calc(13px * var(--ui-scale)); } .phone .fold-opt input { width: 20px; height: 20px; }
+.st-tiles { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.st-tile { flex-direction: column; align-items: stretch; justify-content: center; gap: 4px; min-width: 0; min-height: 56px; padding: 8px 10px; border-radius: 10px; text-align: left; white-space: normal; background: var(--st-band); border-color: var(--st-line); }
+.st-tile > b { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--st-ink); } .st-tile > b > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st-tile-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 8px; min-height: 17px; color: var(--muted); font-size: calc(12px * var(--ui-scale)); }
+.st-says { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.st-tile.away { background: color-mix(in srgb, var(--st) 8%, var(--panel)); } .st-tile.away > b { color: var(--muted); }
+.st-tile.wide { grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 8px; min-height: 44px; background: var(--panel); border: 1px dashed var(--line); color: var(--muted); }
+.phone-station { border-color: var(--st-line); scroll-margin-top: 8px; }
+.phone-station-head { padding: 6px 8px; border-radius: 8px; background: var(--st-band); box-shadow: inset 3px 0 0 var(--st-edge); } .phone-station-head > b { color: var(--st-ink); }
+.add-row.phone-station { border-color: var(--line); }
+/* A pane on a phone: its bar is on its station's colour and names the station first. */
+.chat-bar.st-bar { background: var(--st-band); box-shadow: inset 4px 0 0 var(--st-edge); }
+.chat-title .st-name { color: var(--st-ink); font-weight: 600; }

@@ -23,11 +23,50 @@ use serde_json::{json, Value};
 
 use crate::daemon::{invalid, write_private, Daemon, Result};
 
-pub const FORMAT: u32 = 1;
+/// The newest format this station reads. 2 (25 Nov 2026): a document that
+/// holds one of the `stations.` preferences. A station that reads only 1
+/// would drop them from its copy and hand that copy on, so it is never
+/// offered such a document; one that holds none of them stays at 1 and goes
+/// to every station as before.
+pub const FORMAT: u32 = 2;
+
+/// The format a document with these values is in at the least.
+fn format_of(values: &BTreeMap<String, Value>) -> u32 {
+    if values.keys().any(|k| k.starts_with("stations.")) {
+        2
+    } else {
+        1
+    }
+}
+
+/// A station's name as a preference holds it: data, bounded, one line.
+fn name_ok(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 200 && !name.chars().any(char::is_control)
+}
 
 /// Every preference there is, and whether a value is one it can take.
 fn value_ok(key: &str, v: &Value) -> Option<bool> {
     Some(match key {
+        // The colour the owner chose for a station, by the station's name:
+        // one of the deck's palette, by its name there ("teal"). A station
+        // not named here has the colour its name gives it.
+        "stations.colour" => v.as_object().is_some_and(|chosen| {
+            chosen.len() <= 64
+                && chosen.iter().all(|(station, colour)| {
+                    name_ok(station)
+                        && colour.as_str().is_some_and(|c| {
+                            (1..=16).contains(&c.len())
+                                && c.chars().all(|ch| ch.is_ascii_lowercase())
+                        })
+                })
+        }),
+        // The stations the owner pinned to the top of the list, in the
+        // owner's order.
+        "stations.pinned" => v.as_array().is_some_and(|list| {
+            list.len() <= 64 && list.iter().all(|k| k.as_str().is_some_and(name_ok))
+        }),
+        // "Fold quiet stations": those with nothing running are one row.
+        "stations.foldQuiet" => v.is_boolean(),
         // "Continue the last conversation" in the New pane dialog.
         "newPane.resumeLast" => v.is_boolean(),
         // The parts of the list on the left that are folded shut.
@@ -122,7 +161,9 @@ impl Daemon {
             if prefs.values == before {
                 return Ok(json!(prefs));
             }
-            prefs.format = FORMAT;
+            // Never lower than it was: a station refuses a copy in an older
+            // format than its own.
+            prefs.format = prefs.format.max(format_of(&prefs.values));
             let base = prefs.updated_ms;
             prefs.updated_ms = self.sync_stamp("prefs", base);
             self.sync_mark(&mut prefs.changes, base, prefs.updated_ms);

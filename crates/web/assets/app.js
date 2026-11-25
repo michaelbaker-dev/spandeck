@@ -978,7 +978,8 @@ function newPaneDialog(st, project, then, preset = {}) {
 // page opens with before the station has answered, and what is used on a
 // station from before preferences. What is the device's own is not here:
 // which pane a phone shows, drafts, fit-to-screen, the sign-in token.
-const PREF_LOCAL = { 'side.folded': 'spandeck.side.folded', 'newPane.resumeLast': 'spandeck.newPane.resumeLast' };
+const PREF_LOCAL = { 'side.folded': 'spandeck.side.folded', 'newPane.resumeLast': 'spandeck.newPane.resumeLast',
+  'stations.colour': 'spandeck.stations.colour', 'stations.pinned': 'spandeck.stations.pinned', 'stations.foldQuiet': 'spandeck.stations.foldQuiet' };
 function prefLocal(key) {
   try {
     const v = localStorage.getItem(PREF_LOCAL[key]);
@@ -2408,6 +2409,13 @@ function stationMenu(e, s) {
   const up = s.state === 'online';
   showMenu(e.clientX, e.clientY, [
     { label: 'Open ' + s.station, action: () => go(stationUrl(s.station)) },
+    // Where it stands in the list, and its colour (the owner's preferences).
+    ...(() => { const pins = pinnedStations().filter(x => S.fleet.stations.some(y => y.station === x)), at = pins.indexOf(s.station); return [
+      at < 0 ? { label: 'Pin to top', action: () => pinStation(s.station, true) } : { label: 'Unpin from top', action: () => pinStation(s.station, false) },
+      at > 0 && { label: 'Move up', action: () => movePin(s.station, -1) },
+      at >= 0 && at < pins.length - 1 && { label: 'Move down', action: () => movePin(s.station, 1) }]; })(),
+    { label: 'Colour…', action: () => stationColourDialog(s.station) },
+    '-',
     up && { label: 'New pane here…', action: () => newPaneDialog(s.station) },
     up && { label: 'New project here…', action: () => newProjectDialog(s.station) },
     up && { label: 'Check this station', action: () => doctorPanel(s.station) },
@@ -2892,6 +2900,108 @@ function fold(key) {
 const caret = (key, what) => h('button', { class: 'caret', type: 'button', 'aria-expanded': String(!folded.has(key)), 'aria-label': `${folded.has(key) ? 'Show' : 'Hide'} ${what}`,
   onclick: (e) => { e.preventDefault(); e.stopPropagation(); fold(key); } }, folded.has(key) ? '▸' : '▾');
 
+// ---- finding a station in the list (25 Nov 2026, the owner's request) ----
+// "I find it hard to find the machine I am looking for in the list on the
+// left of spandeck." So: every station has a colour, the stations the owner
+// pinned come first in the owner's order, and with "Fold quiet stations"
+// ticked the ones with nothing running are one row. All three are the
+// owner's preferences, by the station's name (a name is data: only ever
+// compared, and put in as text).
+//
+// The colours keep clear of the four that say a state (blue working, amber
+// needs you, green done, red error) and of the violet of an approval's dot.
+const STATION_COLOURS = [['teal', '#3fc8c0'], ['pink', '#ff8fb8'], ['orange', '#ff9d5c'], ['lime', '#b6d94c'], ['slate', '#9fb0c0'], ['indigo', '#8f9bff'], ['orchid', '#d98fd0'], ['tan', '#cdaa7d']];
+// With none chosen, a station's name gives it one: the same in every
+// browser with nothing kept anywhere (FNV-1a over the name, then stirred so
+// that names alike in their endings do not land on one colour). Eight
+// colours for more stations than that: two can share one, and the owner
+// then chooses.
+const autoColour = (st) => {
+  let x = 2166136261;
+  for (let i = 0; i < st.length; i++) x = Math.imul(x ^ st.charCodeAt(i), 16777619);
+  x ^= x >>> 16; x = Math.imul(x, 0x85ebca6b); x ^= x >>> 13; x = Math.imul(x, 0xc2b2ae35); x ^= x >>> 16;
+  return STATION_COLOURS[(x >>> 0) % STATION_COLOURS.length];
+};
+// What the owner chose, by the name each station has now (`stationNow`).
+function chosenColours() {
+  const v = pref('stations.colour', null), out = new Map();
+  if (v && typeof v === 'object' && !Array.isArray(v)) for (const [st, c] of Object.entries(v)) if (typeof c === 'string') out.set(stationNow(st), c);
+  return out;
+}
+const stationColourKey = (st) => { const c = chosenColours().get(st); return STATION_COLOURS.some(x => x[0] === c) ? c : null; };
+const stationColour = (st) => (STATION_COLOURS.find(x => x[0] === stationColourKey(st)) || autoColour(st))[1];
+// An element in a station's colour: the style sheet mixes its tints from
+// `--st` and the theme's own colours, so they are right in a light theme too.
+const tinted = (el, st) => { el.style.setProperty('--st', stationColour(st)); return el; };
+function setStationColour(st, key) {
+  const next = Object.fromEntries([...chosenColours()].filter(([name]) => name !== st).slice(0, 63));
+  if (key) next[st] = key;
+  setPref('stations.colour', next);
+  render();
+}
+function stationColourDialog(st) {
+  dialog(`Colour of ${st}`, (close) => {
+    const now = stationColourKey(st);
+    const pick = (key, label, hex) => { const b = h('button', { type: 'button', class: 'st-swatch' + (now === key ? ' on' : ''), 'aria-pressed': String(now === key), dataset: { colour: key || 'auto' },
+      onclick: () => { close(); setStationColour(st, key); } }, h('i', {}), label); b.style.setProperty('--st', hex); return b; };
+    return h('div', {}, h('p', { class: 'muted' }, 'Its name in the list, its tile and the bar of its panes on a phone take this colour, on every station and in every browser.'),
+      h('div', { class: 'st-swatches' }, pick(null, 'Automatic', autoColour(st)[1]), STATION_COLOURS.map(([key, hex]) => pick(key, key, hex))),
+      h('div', { class: 'row end' }, h('button', { type: 'button', onclick: close }, 'Cancel')));
+  });
+}
+
+// The stations pinned to the top, in the owner's order. (Not the "Pinned"
+// section: that one is panes and layouts, `pinnedItems`.)
+const pinnedStations = () => { const v = pref('stations.pinned', []); return [...new Set((Array.isArray(v) ? v : []).filter(x => typeof x === 'string').map(stationNow))]; };
+const stationPinned = (st) => pinnedStations().includes(st);
+function pinStation(st, on) {
+  setPref('stations.pinned', [...pinnedStations().filter(x => x !== st), ...(on ? [st] : [])].slice(-64));
+  render();
+}
+// Up or down among the pinned stations that are on the list now.
+function movePin(st, by) {
+  const list = pinnedStations(), here = list.filter(x => S.fleet.stations.some(s => s.station === x));
+  const other = here[here.indexOf(st) + by];
+  if (!other || !here.includes(st)) return;
+  const i = list.indexOf(st), j = list.indexOf(other);
+  [list[i], list[j]] = [list[j], list[i]];
+  setPref('stations.pinned', list);
+  render();
+}
+
+const foldQuiet = () => pref('stations.foldQuiet', false) === true;
+// Whether the folded row is open is this page's, until it is loaded again.
+let quietOpen = false;
+// How many panes run on a station, as far as this page knows: its own list
+// of them once it has answered this page, before that the count the station
+// serving the page last heard from it. null: not known.
+const liveCount = (s) => (s.state !== 'online' ? 0 : S.panes.has(s.station) ? liveAgents(s.station).length : Number.isInteger(s.panes) ? s.panes : null);
+// Something on it waits for the owner: an approval, or an agent that asks or failed.
+const stationNeeds = (s) => s.needs_you > 0 || S.approvals.some(a => a.station === s.station) || liveAgents(s.station).some(p => p.agent !== 'shell' && (p.state === 'needs_you' || p.state === 'error'));
+// The most urgent thing a station's panes say, as a dot's name.
+const stationSays = (s) => (s.state !== 'online' ? 'unreachable' : stationNeeds(s) ? 'needs_you' : s.working > 0 ? 'working' : liveAgents(s.station).some(p => p.state === 'done') ? 'done' : 'idle');
+// Quiet: away, or on with no pane running. Never the station the page is
+// on, never one that waits for the owner, and never one of which it is not
+// known (a station is not put out of sight on a guess).
+const stationQuiet = (s) => s.station !== S.route.station && !stationNeeds(s) && liveCount(s) === 0;
+// The list in its order: the pinned, then the rest by name; with the fold
+// on, the quiet ones of the rest apart, to be shown as one row.
+function stationList() {
+  const all = stationsByName();
+  const pinned = pinnedStations().map(n => all.find(s => s.station === n)).filter(Boolean);
+  const rest = all.filter(s => !pinned.includes(s));
+  const quiet = foldQuiet() ? rest.filter(stationQuiet) : [];
+  return { pinned, rest: rest.filter(s => !quiet.includes(s)), quiet };
+}
+// The tick at the top of the Stations section, on a computer and a phone.
+const foldOption = () => (S.fleet.stations.length > 1 ? h('label', { class: 'fold-opt', title: 'Stations with nothing running (and those that are away) become one row at the end. Never a pinned one, the one you are on, or one that needs you.' },
+  h('input', { type: 'checkbox', checked: foldQuiet(), dataset: { keep: 'fold-quiet' }, onchange: (e) => { setPref('stations.foldQuiet', e.target.checked); render(); } }), 'Fold quiet stations') : null);
+// The quiet stations as one row, a small square for each in its colour.
+const quietRow = (quiet, cls) => (quiet.length ? h('button', { type: 'button', class: cls + ' st-quiet', 'aria-expanded': String(quietOpen), dataset: { keep: 'quiet-row' }, title: quiet.map(s => s.station).join(', '),
+  onclick: () => { quietOpen = !quietOpen; render(); } }, h('span', { class: 'caret', 'aria-hidden': 'true' }, quietOpen ? '▾' : '▸'), h('span', { class: 'side-name' }, plural(quiet.length, 'quiet station')),
+  h('span', { class: 'st-dots', 'aria-hidden': 'true' }, quiet.slice(0, 12).map(s => tinted(h('i', {}), s.station))), isPhone() ? h('span', { class: 'muted' }, quietOpen ? 'hide' : 'show') : null) : null);
+const pinMark = () => h('span', { class: 'ico-wrap st-pin', title: 'Pinned to top', role: 'img', 'aria-label': 'pinned to top' }, pinIcon());
+
 function projMenu(e, st, pr) {
   e.preventDefault();
   e.stopPropagation();
@@ -2965,26 +3075,27 @@ function sidebar() {
         pr.open ? mine.map(p => paneRow(st, p)) : h('button', { class: 'mini side-open', onclick: () => rpc(st, 'project.open', { name: pr.name }) }, 'Open'),
         pr.problem ? h('div', { class: 'warn-text small' }, pr.problem) : null));
   };
-  const station = (s) => {
+  const station = (s, pinned) => {
     const st = s.station, up = s.state === 'online', key = 's:' + st;
     const cur = current(r.view === 'station' && r.station === st);
     const loose = up ? panesOf(st).filter(p => !p.project).sort(byState) : [];
     const projects = up ? (S.projects.get(st) || []) : [];
-    return h('div', { class: 'side-group side-station-group', dataset: { station: st } },
+    // Its name on its colour, and its panes hang from a line of the same.
+    return tinted(h('div', { class: 'side-group side-station-group', dataset: { station: st } },
       h('a', { class: 'side-row side-station' + cur.class + (up ? '' : ' away'), href: stationUrl(st), 'aria-current': cur['aria-current'],
         title: up ? `Every pane running on ${st}` : `${st} is ${STATION_STATE[s.state] || s.state}`, oncontextmenu: (e) => stationMenu(e, s) },
       up ? caret(key, st) : h('span', { class: 'caret' }),
       h('span', { class: 'dot ' + (up ? (s.needs_you ? 'needs_you' : s.working ? 'working' : 'idle') : 'unreachable') }), h('span', { class: 'ico-wrap' }, stationIcon()),
-      h('b', { class: 'side-name' }, st),
+      h('b', { class: 'side-name' }, st), pinned ? pinMark() : null,
       up ? (s.self && S.fleet.stations.length > 1 ? h('span', { class: 'muted side-where' }, 'this one') : null) : h('span', { class: 'warn-text side-where' }, STATION_STATE[s.state] || s.state)),
       !up || folded.has(key) ? null : h('div', { class: 'side-kids' },
         projects.map(pr => project(st, pr)),
         loose.length ? h('div', { class: 'side-group side-proj' }, projects.length ? h('div', { class: 'side-row side-project side-other' }, h('span', { class: 'caret' }), h('b', { class: 'side-name' }, 'Other panes')) : null,
           h('div', { class: projects.length ? 'side-kids' : '' }, loose.map(p => paneRow(st, p)))) : null,
-        !projects.length && !loose.length ? h('div', { class: 'muted small side-hint' }, 'Nothing is running here.') : null));
+        !projects.length && !loose.length ? h('div', { class: 'muted small side-hint' }, 'Nothing is running here.') : null)), st);
   };
 
-  const pins = pinnedItems(), globals = globalLayouts();
+  const pins = pinnedItems(), globals = globalLayouts(), sl = stationList();
   const here = (e) => e.target.closest?.('.side-station-group')?.dataset.station || r.station || api.station;
   return h('aside', { class: 'sidebar', 'aria-label': 'Stations, projects, layouts and panes',
     oncontextmenu: (e) => { e.preventDefault(); const st = online(here(e)) ? here(e) : api.station; showMenu(e.clientX, e.clientY, [
@@ -2993,7 +3104,8 @@ function sidebar() {
   pins.length ? h('div', { class: 'side-group side-pinned' }, h('div', { class: 'side-section' }, h('span', { class: 'ico-wrap' }, pinIcon()), h('b', {}, 'Pinned')),
     pins.map(x => x.p ? paneRow(x.st, x.p, `${x.st}${x.p.project ? ' · ' + x.p.project : ''}`) : x.lay ? layRow(x.lay, layShort(x.lay))
       : h('div', { class: 'side-row side-gone muted', title: 'Pinned, but not here now' }, h('span', { class: 'side-name' }, x.gone), h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Unpin', title: 'Unpin', onclick: () => togglePin(x.pin) }, '✕')))) : null,
-  h('div', { class: 'side-group side-stations' }, h('div', { class: 'side-section' }, h('b', {}, 'Stations')), stationsByName().map(station)),
+  h('div', { class: 'side-group side-stations' }, h('div', { class: 'side-section' }, h('b', {}, 'Stations'), h('span', { class: 'grow' }), foldOption()),
+    sl.pinned.map(s => station(s, true)), sl.rest.map(s => station(s)), quietRow(sl.quiet, 'side-row'), quietOpen ? sl.quiet.map(s => station(s)) : null),
   h('div', { class: 'side-group side-globals' }, h('div', { class: 'side-section' }, h('b', {}, 'Layouts'), h('span', { class: 'grow' }),
     h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'New global layout', title: 'New global layout: the same on every station', onclick: () => newLayoutDialog(null, null) }, '＋')),
   globals.length ? globals.map(x => [layRow(x), viewRows(x)]) : h('div', { class: 'muted small side-hint' }, 'No global layouts yet. A global layout can hold any pane from any station.')),
@@ -4613,12 +4725,25 @@ function phoneList() {
     h('div', { class: 'grow' }, h('b', {}, 'Watch'), h('div', { class: 'muted small' }, 'Every agent here, and who is talking')), '›');
   const pins = pinnedItems();
   const globals = globalLayouts();
+  const sl = stationList(), shown = [...sl.pinned, ...sl.rest, ...(quietOpen ? sl.quiet : [])];
+  // A tile for each station, in its colour: its name, how many panes run
+  // there and the most urgent thing they say. A tap goes to its block below
+  // (a phone has no page of one station).
+  const toStation = (st) => [...document.querySelectorAll('.phone-station')].find(x => x.dataset.station === st)
+    ?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  const tile = (s) => {
+    const st = s.station, up = s.state === 'online', n = liveCount(s), says = stationSays(s);
+    return tinted(h('button', { type: 'button', class: 'st-tile' + (up ? '' : ' away'), dataset: { station: st, keep: 'tile:' + st }, onclick: () => toStation(st) },
+      h('b', {}, sl.pinned.includes(s) ? pinMark() : null, h('span', {}, st)),
+      h('span', { class: 'st-tile-sub' }, up && n !== null ? plural(n, 'pane') : null,
+        says !== 'idle' ? h('span', { class: 'st-says' }, h('span', { class: 'dot ' + says }), up ? STATE_LABEL[says] : STATION_STATE[s.state] || s.state.replace('_', ' ')) : null)), st);
+  };
   const station = (s) => {
     const st = s.station, up = s.state === 'online';
     const projects = up ? (S.projects.get(st) || []) : [];
     const loose = up ? panesOf(st).filter(p => !p.project && !p.exited).sort(byState) : [];
-    return h('div', { class: 'phone-station' },
-      h('div', { class: 'row' }, h('span', { class: 'dot ' + (up ? 'idle' : 'unreachable') }), h('b', {}, st), h('span', { class: 'muted' }, up ? `${s.working ?? 0} working · ${s.needs_you ?? 0} need you` : s.why === 'clock' ? `clock differs by ${clockWords(s.clock_diff_ms || 0)}` : STATION_STATE[s.state] || s.state.replace('_', ' ')), keyChip(st), h('span', { class: 'grow' }),
+    return tinted(h('div', { class: 'phone-station', dataset: { station: st } },
+      h('div', { class: 'row phone-station-head' }, h('span', { class: 'dot ' + (up ? 'idle' : 'unreachable') }), h('b', {}, st), h('span', { class: 'muted' }, up ? `${s.working ?? 0} working · ${s.needs_you ?? 0} need you` : s.why === 'clock' ? `clock differs by ${clockWords(s.clock_diff_ms || 0)}` : STATION_STATE[s.state] || s.state.replace('_', ' ')), keyChip(st), h('span', { class: 'grow' }),
         up ? h('button', { onclick: () => newPaneDialog(st) }, 'New') : null,
         s.state === 'unreachable' && !awayWhy(s) ? h('button', { onclick: () => rpc(api.station, 'fleet.wake', { station: st }).then((r) => toast(`Sent ${r.sent} wake packets. Give it a minute.`)) }, 'Wake') : null,
         s.state === 'unreachable' && !awayWhy(s) ? h('button', { onclick: () => rpc(api.station, 'fleet.start', { station: st }).then((r) => toast(`${st} is ${r.state}`)) }, 'Start') : null,
@@ -4634,7 +4759,7 @@ function phoneList() {
           mine.map(p => line(st, p)),
           !mine.length ? h('div', { class: 'row' }, h('span', { class: 'muted small grow' }, pr.open ? 'Nothing is running.' : 'Closed.'), pr.open ? null : h('button', { onclick: () => rpc(st, 'project.open', { name: pr.name }) }, 'Open')) : null);
       }),
-      loose.length ? h('div', { class: 'phone-project' }, projects.length ? h('div', { class: 'row phone-project-head' }, h('b', {}, 'Other panes')) : null, loose.map(p => line(st, p))) : null);
+      loose.length ? h('div', { class: 'phone-project' }, projects.length ? h('div', { class: 'row phone-project-head' }, h('b', {}, 'Other panes')) : null, loose.map(p => line(st, p))) : null), st);
   };
   // An agent's row is its session: its title, and a dot when it is unread.
   const row = (st, p) => (p.agent === 'shell' ? line(st, p, whereOf(st, p)) : sessionRow(st, p));
@@ -4645,7 +4770,9 @@ function phoneList() {
     pins.length ? h('section', { class: 'phone-pinned' }, h('h2', {}, 'Pinned'), pins.map(x => x.p ? row(x.st, x.p) : x.lay ? layRow(x.lay, layShort(x.lay)) : h('div', { class: 'phone-row muted' }, x.gone))) : null,
     homeSwitch(),
     byStation ? null : h('section', { class: 'phone-recents' }, h('h2', {}, 'Recents'), recentRows()),
-    byStation ? h('section', {}, h('h2', {}, 'Stations'), stationsByName().map(station), addRow(), twinsLine()) : null,
+    byStation ? h('section', { class: 'phone-stations' }, h('div', { class: 'row st-head' }, h('h2', {}, 'Stations'), h('span', { class: 'grow' }), foldOption()),
+      S.fleet.stations.length > 1 ? h('div', { class: 'st-tiles' }, [...sl.pinned, ...sl.rest].map(tile), quietRow(sl.quiet, 'st-tile wide'), quietOpen ? sl.quiet.map(tile) : null) : null,
+      shown.map(station), addRow(), twinsLine()) : null,
     byStation && globals.length ? h('section', { class: 'phone-layouts' }, h('h2', {}, 'Layouts'), globals.map(x => [layRow(x, 'every station'), viewRows(x)])) : null,
     byStation ? dotKeyLink() : null,
     stopRows(),
@@ -5098,7 +5225,7 @@ initFiles({
 initChips({ api, hasCap, isPhone, vault: (st) => S.fleet.stations.find(s => s.station === st)?.vault || null, openVault: vaultPanel, openAgents: agentsPanel, openInbox: inboxPanel });
 initChat({
   files: (st, p) => (hasCap(st, 'files') ? () => filesFor(st, p) : null),
-  api, hasCap, isPhone, update, go, paneUrl, rpc, findPane, paneMenu, usage: usageDialog, online, onlineStations, panesOf, freeName, lastSessionNote, pref, setPref,
+  api, hasCap, isPhone, update, go, paneUrl, rpc, findPane, paneMenu, stationColour, usage: usageDialog, online, onlineStations, panesOf, freeName, lastSessionNote, pref, setPref,
   AGENTS: AGENT_CHOICES,
   approvals: () => S.approvals,
   stations: () => stationsByName(),

@@ -497,10 +497,13 @@ class Conv {
     const next = this.where === 'leaf' ? [] : queue(this.key);
     const title = this.title || titles.get(this.key) || p.name;
     const sub = [p.agent === 'shell' ? 'shell' : p.agent_name, p.role ? 'role: ' + p.role : null, this.st, p.project].filter(Boolean).join(' · ');
+    // On a phone the bar is on its station's colour and says the station
+    // first: with one pane on screen, nothing else says whose it is.
+    const tint = phone ? env.stationColour(this.st) : '';
     const state = stateOf(p);
     const pct = [p.usage ? 1 : 0, p.usage?.context_pct ?? null, p.usage?.context_tokens ?? null];
     const files = env.files ? env.files(this.st, p) : null;
-    const sig = JSON.stringify([phone, !!files, title, sub, p.cwd || '', state, p.needs_reason, face, this.available, this.available === false ? this.reason : '', next.length, next[0] && keyOf(next[0].st, next[0].p), this.where, p.name, pct, p.rapid?.says, chipsSig(this.st, p), this.subsSig()]);
+    const sig = JSON.stringify([phone, tint, !!files, title, sub, p.cwd || '', state, p.needs_reason, face, this.available, this.available === false ? this.reason : '', next.length, next[0] && keyOf(next[0].st, next[0].p), this.where, p.name, pct, p.rapid?.says, chipsSig(this.st, p), this.subsSig()]);
     if (sig === this.barSig) return;
     this.barSig = sig;
     const pick = (to) => h('button', { type: 'button', class: face === to ? 'on' : '', 'aria-pressed': String(face === to), onclick: (e) => { e.currentTarget.blur(); if (face !== to) setFace(this.st, p, to); } }, to === 'chat' ? 'Chat' : 'Terminal');
@@ -509,10 +512,14 @@ class Conv {
       env.paneMenu({ clientX: e.clientX || b.left, clientY: e.clientY || b.bottom + 2, preventDefault() {}, stopPropagation() {} }, this.st, this.p, this.where === 'phone' ? 'zoom' : this.where);
     };
     this.bar.classList.toggle('has-next', next.length > 0);
+    this.bar.classList.toggle('st-bar', !!tint);
+    if (tint) this.bar.style.setProperty('--st', tint); else this.bar.style.removeProperty('--st');
     sync(this.bar, [
       phone ? h('a', { class: 'btn chat-back', href: '#/fleet', 'aria-label': 'Back to the list' }, '‹') : null,
       h('span', { class: 'dot ' + state, title: p.needs_reason || STATE_LABEL[state] || state }),
-      h('div', { class: 'chat-title', title: `${p.name} · ${p.address}` }, h('b', {}, title), h('span', { class: 'muted' }, sub),
+      h('div', { class: 'chat-title', title: `${p.name} · ${p.address}` }, h('b', {}, title),
+        tint ? h('span', { class: 'chat-sub' }, h('b', { class: 'st-name' }, this.st), h('span', { class: 'muted' }, sub.split(' · ').filter(x => x !== this.st).map(x => ' · ' + x).join('')))
+          : h('span', { class: 'muted' }, sub),
         // The folder its program was started in. A long path loses its
         // beginning, not its end (the mark keeps the first "/" in place).
         // With the file explorer (files.js) a tap on it shows that folder's files.
