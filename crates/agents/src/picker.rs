@@ -526,18 +526,26 @@ pub fn showing(agent: crate::AgentKind, lines: &[String]) -> bool {
             // wide the hint stands alone, with no status beside it, and an
             // idle pane asked for the owner without end.)
             let own_row = |l: &String| {
-                status_row(l) || matches!(l.trim(), "? for shortcuts" | "esc to cancel") || {
-                    let t = l.trim_end();
-                    let gap = t.find("          ");
-                    gap.is_some_and(|g| {
-                        let (left, right) = (t[..g].trim(), t[g..].trim());
-                        !left.is_empty()
-                            && left.chars().count() <= 32
-                            && !right.is_empty()
-                            && right.chars().count() <= 72
-                            && !right.contains("     ")
-                    })
-                }
+                // (And at 60 columns, the same day: the hint, tabs, as much
+                // of the status as fits, and the rest of the status on a
+                // row of its own, begun with its `·`.)
+                let t = l.trim();
+                status_row(l)
+                    || t.starts_with("? for shortcuts")
+                    || t.starts_with("esc to cancel")
+                    || (t.starts_with('\u{b7}') && t.chars().count() <= 60)
+                    || {
+                        let t = l.trim_end();
+                        let gap = t.find("          ");
+                        gap.is_some_and(|g| {
+                            let (left, right) = (t[..g].trim(), t[g..].trim());
+                            !left.is_empty()
+                                && left.chars().count() <= 32
+                                && !right.is_empty()
+                                && right.chars().count() <= 72
+                                && !right.contains("     ")
+                        })
+                    }
             };
             match boxed {
                 Some(i) => lines[i + 2..=end].iter().enumerate().any(|(n, l)| {
@@ -1180,6 +1188,11 @@ mod tests {
             .collect();
             assert!(!showing(crate::AgentKind::Antigravity, &narrow), "{alone}");
         }
+        // At 60 columns its status is cut in two (the real 1.5.10).
+        let mut wrapped =
+            screen("? for shortcuts\t\t              \t        auto \u{b7} Gemini 4 Neon");
+        wrapped.push(" \u{b7} high".to_string());
+        assert!(!showing(crate::AgentKind::Antigravity, &wrapped));
         // Something else under the box is still something it shows.
         let mut menu = screen("  Allow calling this tool?");
         menu.push("  > Yes".to_string());
