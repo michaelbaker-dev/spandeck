@@ -161,6 +161,8 @@ a.side-row:hover { background: var(--panel2); }
 .side-row .chip.linked { max-width: 40%; }
 .side-row .icon-btn { visibility: hidden; padding: 0 2px; }
 .side-row:hover .icon-btn, .side-row .icon-btn:focus-visible, .side-gone .icon-btn, .side-section .icon-btn { visibility: visible; }
+/* Where nothing hovers (a finger), a station's menu button is always there. */
+@media (hover: none) { .side-row .side-more { visibility: visible; min-width: 32px; min-height: 26px; color: var(--st-ink, var(--muted)); } }
 .side-station { font-size: calc(13px * var(--ui-scale)); } .side-station.away { opacity: .8; }
 .side-project { color: var(--muted); } .side-project b { color: var(--text); font-weight: 600; }
 .side-gone { font-size: calc(12px * var(--ui-scale)); }

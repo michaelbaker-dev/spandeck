@@ -110,7 +110,12 @@ fn the_list_has_a_colour_for_each_station_the_pinned_first_and_the_quiet_folded(
     shot(&page, "computer-fold-off");
 
     // The owner chooses one: it is the fleet's, and Automatic puts it back.
-    page.right_click(&side_row("bravo"));
+    // (By the row's own button: a finger has no right click, and on the
+    // owner's iPad nothing else led to a station's menu.)
+    page.js(&format!(
+        "{}.querySelector('button[aria-label=\"More for bravo\"]').click()",
+        side_row("bravo")
+    ));
     page.choose("Colour");
     page.wait(
         "the colours to choose from",

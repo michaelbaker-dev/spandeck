@@ -3087,7 +3087,10 @@ function sidebar() {
       up ? caret(key, st) : h('span', { class: 'caret' }),
       h('span', { class: 'dot ' + (up ? (s.needs_you ? 'needs_you' : s.working ? 'working' : 'idle') : 'unreachable') }), h('span', { class: 'ico-wrap' }, stationIcon()),
       h('b', { class: 'side-name' }, st), pinned ? pinMark() : null,
-      up ? (s.self && S.fleet.stations.length > 1 ? h('span', { class: 'muted side-where' }, 'this one') : null) : h('span', { class: 'warn-text side-where' }, STATION_STATE[s.state] || s.state)),
+      up ? (s.self && S.fleet.stations.length > 1 ? h('span', { class: 'muted side-where' }, 'this one') : null) : h('span', { class: 'warn-text side-where' }, STATION_STATE[s.state] || s.state),
+      // A finger has no right click (the owner's iPad: no way to a new pane
+      // on a station, its colour or its pin), so the menu has a button too.
+      h('button', { class: 'icon-btn side-more', 'aria-label': `More for ${st}`, title: `More for ${st}`, onclick: (e) => stationMenu(e, s) }, '⋯')),
       !up || folded.has(key) ? null : h('div', { class: 'side-kids' },
         projects.map(pr => project(st, pr)),
         loose.length ? h('div', { class: 'side-group side-proj' }, projects.length ? h('div', { class: 'side-row side-project side-other' }, h('span', { class: 'caret' }), h('b', { class: 'side-name' }, 'Other panes')) : null,
