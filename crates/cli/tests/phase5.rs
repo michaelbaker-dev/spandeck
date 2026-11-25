@@ -2324,6 +2324,241 @@ fn a_terminals_history_on_a_phone_is_scrolled_by_the_phone() {
     );
 }
 
+/// A terminal does not jump to the top of its history. The owner, 25 Nov
+/// 2026, of an Antigravity pane whose size had changed several times that
+/// evening: "antigravity terminal window is jumping to the top all the time,
+/// I dont know if its this terminal or all of them".
+///
+/// Which device that was on is not known, and no real Antigravity was run.
+/// Two ways a terminal came to show the top of its history were found with
+/// a stand-in, both on a computer, and are held here:
+///
+/// - The page is drawn again for every change on it, and the terminal put
+///   back into it: the browser then starts the terminal's scrolling element
+///   at 0 again. One notch of the wheel towards the end was read as a
+///   scroll from line 0, and the view went from the end to the top; turned
+///   the other way it moved nothing. Every terminal with a history.
+/// - A program that wipes its history and prints it all again (`ESC[2J
+///   ESC[3J ESC[H`, which Antigravity's program holds; when it sends it was
+///   not seen) left the terminal on the first line of what was printed
+///   again: always with earlier output in sight, and one time in five or so
+///   with the end in sight (which is why it is drawn again ten times here).
+///   The stand-in does so when a line is typed to it and when its terminal
+///   changes size, which is when such a program draws again by itself.
+///
+/// On a phone neither was seen (the phone scrolls the history itself, and
+/// the page puts that back when it is drawn again); that is held too.
+#[test]
+#[cfg_attr(windows, ignore = "runs a Unix shell script (/bin/sh)")]
+fn a_terminal_does_not_jump_to_the_top_of_its_history() {
+    use common::browser::{Page, T};
+    const D: &str = "document.querySelector('.pane')?.paneTerm";
+    let s = Station::start("alpha");
+    // It says, on its last row, what made it draw: a word typed to it (after
+    // a pause of that many seconds between the wipe and the lines, when the
+    // word is a number), or its size.
+    let program = s.root.join("again.sh");
+    std::fs::write(
+        &program,
+        "draw() { printf '\\033[2J\\033[3J\\033[H'; case \"$1\" in 0.*) sleep \"$1\";; esac; seq -f 'line %g' 1 300; printf 'drawn %s> ' \"$1\"; }\n\
+         trap 'draw \"$(stty size)\"' WINCH\n\
+         draw first\n\
+         while :; do if read -r word; then draw \"$word\"; fi; done\n",
+    )
+    .unwrap();
+    let spawn = |name: &str| {
+        s.call(
+            "pane.spawn",
+            json!({"program": "/bin/sh", "args": [program], "name": name, "cwd": s.root.join("home")}),
+        )["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let type_word = |pane: &str, word: &str| {
+        s.call(
+            "pane.input",
+            json!({"pane": pane, "data": format!("{word}\n")}),
+        );
+    };
+    let size_of = |pane: &str| {
+        let p = s.pane(pane);
+        format!("{} {}", p["rows"], p["cols"])
+    };
+    // Waits until the terminal `t` of `page` says `word` on its last row
+    // (or, with no word, the size of `pane`) and `also` holds, of the
+    // terminal `t` and its lines `b`.
+    let until = |page: &Page, t: &str, what: &str, pane: &str, word: &str, also: &str| {
+        let seen = || {
+            page.js(&format!("(t => (b => JSON.stringify({{ last: b.getLine(b.baseY + b.cursorY).translateToString(true), baseY: b.baseY, viewportY: b.viewportY, rows: t.term.rows, cols: t.term.cols, following: t.following, top: t.body.scrollTop }}))(t.term.buffer.active))({t})")).to_string()
+        };
+        wait_for_or(what, 10, seen, || {
+            let word = if word.is_empty() {
+                size_of(pane)
+            } else {
+                word.to_string()
+            };
+            (page.js(&format!("(t => (b => b.getLine(b.baseY + b.cursorY).translateToString(true).trimEnd() === 'drawn {word}>' && b.baseY > 200 && {also})(t.term.buffer.active))({t})")) == json!(true)).then_some(())
+        });
+    };
+
+    // On a computer: the end of the terminal's lines is what is shown.
+    const END: &str = "b.viewportY === b.baseY";
+    let wide = spawn("wide");
+    let desk = Page::open(&s, 1300, 800);
+    desk.goto(&format!("#/s/alpha/p/{wide}"));
+    desk.wait(
+        "the pane on a computer",
+        &format!("(t => !!t && !t.flow && t.control && t.chan !== null && t.term.cols > 100)({D})"),
+    );
+    // (It has drawn for the size the page gave it: nothing it was told
+    // before a word is typed is still on its way.)
+    until(&desk, D, "drawn at the computer's size", &wide, "", END);
+    for i in 0..10 {
+        let word = format!("d{i}");
+        type_word(&wide, &word);
+        until(
+            &desk,
+            D,
+            "drawn again on a computer, its end in sight",
+            &wide,
+            &word,
+            END,
+        );
+    }
+
+    // The page is drawn again (another pane is started: the one the phone
+    // opens below), and the terminal is put back into it.
+    let draws = "Number(document.getElementById('app').dataset.draws || 0)";
+    let before = desk.js(draws).as_u64().unwrap();
+    let narrow = spawn("narrow");
+    desk.wait(
+        "the page drawn again, the terminal's scrolling element where its lines are",
+        &format!("{draws} > {before} && (t => (v => v.scrollTop > 1000 && v.scrollTop >= v.scrollHeight - v.clientHeight - 1)(t.term.element.querySelector('.xterm-viewport')))({D})"),
+    );
+    // The wheel, as a hand turns it: a notch towards the end, where the
+    // view already is, and then sixty lines back. The view is those lines
+    // back, not at the top; and it is the hand's from then.
+    let wheel = |by: i32| {
+        let at = desk.js(&format!(
+            "(r => [r.left + r.width / 2, r.top + r.height / 2])({D}.body.getBoundingClientRect())"
+        ));
+        desk.protocol(
+            "Input.dispatchMouseEvent",
+            json!({"type": "mouseWheel", "x": at[0], "y": at[1], "deltaX": 0, "deltaY": by}),
+        );
+    };
+    let read_earlier = || {
+        desk.js(&format!("{D}.term.scrollToBottom()"));
+        wheel(100);
+        wheel(-900);
+        // (What the scrolling element and the lines say, if it does not come.)
+        let seen = || {
+            desk.js(&format!("(t => (v => JSON.stringify({{ scrollTop: v.scrollTop, scrollHeight: v.scrollHeight, viewportY: t.term.buffer.active.viewportY, baseY: t.term.buffer.active.baseY, draws: {draws} }}))(t.term.element.querySelector('.xterm-viewport')))({D})")).to_string()
+        };
+        let back = wait_for_or("earlier output in sight", 10, seen, || {
+            let back = desk.js(&format!(
+                "(b => b.baseY - b.viewportY)({D}.term.buffer.active)"
+            ));
+            (back.as_u64().unwrap() > 20).then_some(back)
+        });
+        assert!(
+            back.as_u64().unwrap() < 120,
+            "a notch towards the end and sixty lines back left the view {back} lines from the end"
+        );
+        format!("b.viewportY >= b.baseY - {back}")
+    };
+    // Earlier output is read, and the program draws again: afterwards the
+    // view is no further from the end than it was (the lines that were read
+    // are gone).
+    let near = read_earlier();
+    type_word(&wide, "two");
+    until(&desk, D, "drawn again under a reader", &wide, "two", &near);
+    let near = read_earlier();
+    desk.protocol(
+        "Emulation.setDeviceMetricsOverride",
+        json!({"width": 1000, "height": 800, "deviceScaleFactor": 1, "mobile": false}),
+    );
+    wait_for("the pane narrower", 10, || {
+        (s.pane(&wide)["cols"].as_u64().unwrap() < 100).then_some(())
+    });
+    until(
+        &desk,
+        D,
+        "drawn again at another size under a reader",
+        &wide,
+        "",
+        &near,
+    );
+
+    // On a phone: the live screen is in sight, and it is the end of the
+    // terminal's lines that it shows.
+    const LIVE: &str = "b.viewportY === b.baseY && t.hist.lines > 200 && !t.hist.pending() && t.following && t.pill.hidden && Math.abs(t.body.scrollTop - t._metrics().liveTop) < 1";
+    let phone = Page::open(&s, 390, 844);
+    phone.phone_screen();
+    phone.touches();
+    phone.goto(&format!("#/s/alpha/p/{narrow}"));
+    phone.wait(
+        "the pane on a phone",
+        &format!("(t => !!t && t.flow && t.control && t.chan !== null && t.term.cols < 60)({T})"),
+    );
+    until(&phone, T, "drawn at the phone's size", &narrow, "", LIVE);
+    // (Also with the lines a while after the wipe: the history is empty
+    // meanwhile.)
+    for i in 0..10 {
+        let word = if i == 9 {
+            "0.3".to_string()
+        } else {
+            format!("p{i}")
+        };
+        type_word(&narrow, &word);
+        until(
+            &phone,
+            T,
+            "drawn again on a phone, the live screen in sight",
+            &narrow,
+            &word,
+            LIVE,
+        );
+    }
+    // Earlier output is read: afterwards the view is no further from the end
+    // than it was, whether the wipe and the lines come together or apart.
+    for word in ["three", "0.2"] {
+        phone.touch_drag(&format!("{T}.body"), 0.0, 300.0, 16);
+        let back = phone.wait(
+            "earlier output on the phone",
+            &format!("(t => !t.following && !!t._read && t._metrics().liveTop - t.body.scrollTop > 200 && t._metrics().liveTop - t.body.scrollTop)({T})"),
+        );
+        type_word(&narrow, word);
+        let near = format!("b.viewportY === b.baseY && t.hist.lines > 200 && t._metrics().liveTop - t.body.scrollTop <= {back} + 1");
+        until(
+            &phone,
+            T,
+            "drawn again under a reader on the phone",
+            &narrow,
+            word,
+            &near,
+        );
+        phone.js(&format!("{T}.toEnd()"));
+    }
+    // The phone is turned narrower: the program draws again by itself.
+    phone.protocol(
+        "Emulation.setDeviceMetricsOverride",
+        json!({"width": 320, "height": 844, "deviceScaleFactor": 1, "mobile": false}),
+    );
+    wait_for("the pane narrower on the phone", 10, || {
+        (s.pane(&narrow)["cols"].as_u64().unwrap() < 44).then_some(())
+    });
+    until(
+        &phone,
+        T,
+        "drawn again at the phone's new size",
+        &narrow,
+        "",
+        LIVE,
+    );
+}
+
 /// The phone's layout map (agreed prototype, screen 4): a project layout is
 /// stepped through one pane at a time, from a small map of it.
 #[test]

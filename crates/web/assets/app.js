@@ -4829,7 +4829,7 @@ function render() {
   pendingLinks = null;
   layCtx = null;
   S.route = parseRoute();
-  for (const t of S.terms.values()) t._used = false;
+  for (const t of S.terms.values()) { t._used = false; t.leaving(); }
   chatBeforeRender();
   viewsBeforeRender();
   const r = S.route;

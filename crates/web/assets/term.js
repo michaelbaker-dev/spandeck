@@ -119,6 +119,25 @@ export class PaneTerm {
       else if (ev.kind === 'page.woke') this._refuseHeld('asleep');
     });
     this.term.onResize(() => {});
+    // A program wipes its history (ESC[3J) and prints it all again, as some
+    // do when their terminal changes size. The terminal library was then
+    // left showing the first line of what was printed again, and stayed
+    // there, as if someone were reading that line. Always, with earlier
+    // output in sight (it moves the view to line 0 and goes on taking it for
+    // a reader's). And one time in five or so with the end in sight: its
+    // scrolling element, emptied, is put at 0 by the browser, which says so
+    // a moment later, when the lines are back; the library takes that for a
+    // scroll to line 0 by hand. So from a wipe on the view is the end of the
+    // lines, whatever moves it (`_keepEnd`), until someone moves it by hand:
+    // a wheel, a finger, the scrollbar, a key. The lines that were read are
+    // gone. The library's own handling of the sequence comes after this.
+    this.term.parser.registerCsiHandler({ final: 'J' }, (params) => {
+      if (params[0] === 3) { this._wiped = true; this._keepEnd(); }
+      return false;
+    });
+    this.term.onScroll(() => this._keepEnd());
+    const byHand = () => { this._wiped = false; this._viewSet = false; this._hand = performance.now(); };
+    for (const kind of ['wheel', 'touchstart', 'pointerdown', 'keydown']) this.el.addEventListener(kind, byHand, { capture: true, passive: true });
     // Ctrl+Shift+C copies what is selected, and Ctrl+Shift+V is left to the
     // browser, which pastes. (Cmd-C and Cmd-V on a Mac need nothing here.)
     this.term.attachCustomKeyEventHandler((e) => {
@@ -246,6 +265,16 @@ export class PaneTerm {
 
   mount() {
     this.term.open(this.body);
+    // The library's scrolling element, after the library's own listener:
+    // what it made of a scroll is looked at. A scroll that only put the
+    // element back (`_viewBack`) moves nothing: the end stays the end,
+    // though lines came in the meantime.
+    this.term.element.querySelector('.xterm-viewport')?.addEventListener('scroll', () => {
+      const b = this.term.buffer.active;
+      if (this._viewSet && this._viewEnd && b.type === 'normal' && b.viewportY !== b.baseY) this.term.scrollToBottom();
+      this._viewSet = false;
+      this._keepEnd();
+    }, { passive: true });
     if (this.flow) { this.body.prepend(this.hist.el); this.el.append(this.pill); }
     // Whoever is typed into last is who gets the keyboard back after a
     // reconnect, however it got it (a click, Tab, the layout's own keys).
@@ -558,6 +587,46 @@ export class PaneTerm {
   // sent when they can be, and are nothing when they cannot.
   _send(data) {
     if (this._canSend()) this._put({ data, t: performance.now() }, false);
+  }
+
+  // The end of the terminal's own lines is what it shows: after a program
+  // wiped its history, until a hand moves the view (see the constructor).
+  _keepEnd() {
+    const b = this.term.buffer.active;
+    if (this._wiped && b.type === 'normal' && b.viewportY !== b.baseY) this.term.scrollToBottom();
+  }
+
+  // The page was drawn again and this terminal put back into it (it is, for
+  // every change on the page): the browser starts the library's scrolling
+  // element at 0 again, and tells nobody. The library went on showing the
+  // lines it showed; but the scrollbar was at the top, a wheel turned
+  // towards earlier output moved nothing, and one notch the other way was
+  // read as a scroll from line 0: the view jumped to the top of the
+  // history. Every terminal with a history did, on a computer. So the
+  // element is put back where the lines shown are. Unless a hand had moved
+  // the element a moment before and the library had not been told yet:
+  // then it is put back where the hand left it (`leaving`). (On a phone
+  // the terminal is never scrolled.)
+  leaving() {
+    const v = this.flow ? null : this.term.element?.querySelector('.xterm-viewport');
+    this._viewTop = v ? v.scrollTop : null;
+  }
+  _viewBack() {
+    const x = this.term.element, b = this.term.buffer.active, left = this._viewTop;
+    this._viewTop = null;
+    if (this.flow || !x || b.type !== 'normal') return;
+    const v = x.querySelector('.xterm-viewport'), row = x.querySelector('.xterm-rows > div');
+    const line = row ? parseFloat(getComputedStyle(row).height) || 0 : 0;
+    if (!v || !line || v.scrollTop !== 0) return;
+    const shown = b.viewportY * line;
+    const hand = typeof left === 'number' && Math.abs(left - shown) >= 1 && performance.now() - (this._hand || 0) < 300;
+    v.scrollTop = hand ? left : shown;
+    if (hand || v.scrollTop === 0) return;
+    // (The browser says so before the next frame, or not at all; and a
+    // hand's scroll is never taken for this one.)
+    this._viewSet = true;
+    this._viewEnd = b.viewportY === b.baseY;
+    requestAnimationFrame(() => { this._viewSet = false; });
   }
 
   // Scroll by a finger drag. A full-screen program (Claude Code, an editor, a
@@ -910,6 +979,7 @@ export class PaneTerm {
   layout() {
     if (this.disposed || !this.term.element) return;
     if (this.flow) this._caughtUp();
+    this._viewBack();
     const xterm = this.term.element;
     this.body.classList.toggle('natural', !this.control && !!this.opts.natural && !this.whole);
     if (this.control) {
