@@ -522,8 +522,11 @@ pub fn showing(agent: crate::AgentKind, lines: &[String]) -> bool {
             // the same row ("? for shortcuts", "esc to cancel"). Found with
             // the real 1.5.10, 17 Nov 2026: an idle pane was taken for one
             // showing something, and messages to it were held.
+            // (The owner's phone, 24 Nov 2026: in a terminal 43 columns
+            // wide the hint stands alone, with no status beside it, and an
+            // idle pane asked for the owner without end.)
             let own_row = |l: &String| {
-                status_row(l) || {
+                status_row(l) || matches!(l.trim(), "? for shortcuts" | "esc to cancel") || {
                     let t = l.trim_end();
                     let gap = t.find("          ");
                     gap.is_some_and(|g| {
@@ -1161,6 +1164,22 @@ mod tests {
             " ".repeat(83)
         );
         assert!(!showing(crate::AgentKind::Antigravity, &screen(&working)));
+        // In a narrow terminal the hint stands alone under the box (the
+        // real 1.5.10 at 43 columns, a phone's width).
+        for alone in ["? for shortcuts", "esc to cancel"] {
+            let narrow: Vec<String> = [
+                "  \u{2192} AddOns \u{2192} qfont",
+                "",
+                &"\u{2500}".repeat(43),
+                ">",
+                &"\u{2500}".repeat(43),
+                alone,
+            ]
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+            assert!(!showing(crate::AgentKind::Antigravity, &narrow), "{alone}");
+        }
         // Something else under the box is still something it shows.
         let mut menu = screen("  Allow calling this tool?");
         menu.push("  > Yes".to_string());
