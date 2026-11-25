@@ -2678,6 +2678,15 @@ The owner's MacBook (0.4.18) was listed as unreachable for days while the machin
 - **The Tailscale program is given 8 s** for a question (`whois`, `status`), and is ended after that. It was run with no limit, once for each connection from an address not known yet.
 - **Not established:** what used up the 256. Nothing of that station from before the restart was looked at but its last log lines; an M4 on 0.4.23 held 72 after eight days. So this is room and a bound, not a leak found. Not tested (no test fills a process's files): the limit is read back by nothing.
 
+## A terminal does not jump to the top of its history (25 Nov 2026)
+
+"antigravity terminal window is jumping to the top all the time, I dont know if its this terminal or all of them". Which device, and whether the program was at work, was not said. Two causes were reproduced in a browser, both in the terminal as a computer shows it, and both are fixed there (`term.js`; test `a_terminal_does_not_jump_to_the_top_of_its_history`, which fails without the change).
+
+- **The page drawn again.** Every change on the page puts each pane's element back into it, and the browser then starts the terminal library's scrolling element at 0 without saying so. The lines shown stayed right, but the next wheel notch towards the end was read as a scroll from line 0: a shell pane after 300 lines went from its end to line 7, five times of five. The element is put back where the shown lines are after each redraw (or where a hand left it in the last 300 ms). Every terminal with a history of its own did this; Claude Code keeps its own history and has none.
+- **A program that wipes its history and prints it again** (`ESC[2J ESC[3J ESC[H`; Antigravity's program contains the sequence, and when it sends it was not observed). The library was left at line 0: always with earlier output in sight, about one time in five with the end in sight. From a wipe on, the view is the end of the lines until a wheel, a finger, the pointer or a key moves it.
+- **On a phone** neither was reproduced as a lasting jump in some eighty tries: while the lines are printed again the view shows their start for a few frames and returns to the end. That, and a watched pane following the cursor's row, are unchanged.
+- **Not established:** that either is what the owner saw; anything on a real iPhone; when the real Antigravity wipes.
+
 ## A connection whose other end is gone is closed (25 Nov 2026)
 
 "On spandeck, macbookm5 seems to have this problem multiple times, is it because it goes to sleep, is off, gets out of sync and seems to loose connection to spandeck and can't reconnect, research it". And: "The m5 is my portable I carry around".
