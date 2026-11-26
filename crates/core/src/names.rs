@@ -95,6 +95,12 @@ impl Names {
         true
     }
 
+    /// The same renames, those that `void` says no longer hold left out.
+    pub fn without(mut self, void: impl Fn(&Renamed) -> bool) -> Names {
+        self.0.retain(|r| !void(r));
+        self
+    }
+
     /// Forget what is older than `KEPT_MS`. Says whether anything went.
     pub fn prune(&mut self, now_ms: u64) -> bool {
         let before = self.0.len();

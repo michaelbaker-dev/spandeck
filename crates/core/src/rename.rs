@@ -333,6 +333,7 @@ impl Daemon {
             if r.at_ms > now + names::KEPT_MS
                 || now.saturating_sub(r.at_ms) >= names::KEPT_MS
                 || (r.from == self.station && names.now_called(&r.from) == self.station)
+                || self.fleet.borne(&r)
             {
                 continue;
             }

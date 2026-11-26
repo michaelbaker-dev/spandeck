@@ -46,6 +46,39 @@ pub struct Peer {
     pub info: Value,
 }
 
+/// A rename is this long old before a station answering under the former
+/// name makes it void: the renamed station itself answered under that
+/// name until the moment of the rename, and clocks differ.
+const BORNE_AFTER_MS: u64 = 120_000;
+
+/// A station that says itself it is called `r.from` answered well after
+/// the rename `r`: two stations have had the name, and it is the second's
+/// now. (The owner's Mac mini was called MacBookM5 for an hour, then
+/// renamed; after that everything sent to the portable of that name, an
+/// update among it, went to the Mac mini.)
+fn borne_since(peers: &BTreeMap<String, Peer>, r: &crate::names::Renamed) -> bool {
+    peers.get(&r.from).is_some_and(|p| {
+        p.info["station"].as_str() == Some(r.from.as_str())
+            && p.last_seen_ms > r.at_ms.saturating_add(BORNE_AFTER_MS)
+    })
+}
+
+/// The renames that hold: not one whose former name another station
+/// answers under now, nor the earlier ones that led to that name (they
+/// were the other station's, and would find the wrong one by it).
+fn holding(all: crate::names::Names, peers: &BTreeMap<String, Peer>) -> crate::names::Names {
+    let void: Vec<crate::names::Renamed> = all
+        .list()
+        .iter()
+        .filter(|r| borne_since(peers, r))
+        .cloned()
+        .collect();
+    all.without(|r| {
+        void.iter()
+            .any(|v| r == v || (r.to == v.from && r.at_ms <= v.at_ms))
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct TailnetSelf {
     pub user_id: i64,
@@ -342,9 +375,11 @@ impl FleetState {
         self.peers.lock().unwrap().remove(station).is_some()
     }
 
-    /// The renames this station knows.
+    /// The renames this station knows, those that no longer hold left out.
     pub fn names(&self) -> crate::names::Names {
-        self.renamed.read().unwrap().clone()
+        let all = self.renamed.read().unwrap().clone();
+        let peers = self.peers.lock().unwrap();
+        holding(all, &peers)
     }
 
     pub(crate) fn names_set(&self, names: crate::names::Names) {
@@ -353,7 +388,14 @@ impl FleetState {
 
     /// What the station once called `name` is called now.
     pub fn now_called(&self, name: &str) -> String {
-        self.renamed.read().unwrap().now_called(name)
+        self.names().now_called(name)
+    }
+
+    /// Does a station answer under `from` now, long after the rename `r`
+    /// took that name from another? Then the name is that station's, and
+    /// the rename finds nobody by it.
+    pub(crate) fn borne(&self, r: &crate::names::Renamed) -> bool {
+        borne_since(&self.peers.lock().unwrap(), r)
     }
 
     /// A station's entry goes under its new name, where its old name's
@@ -441,12 +483,11 @@ impl FleetState {
     /// Never a name that merely looks alike: two stations whose names
     /// differ by capitals are two stations.
     pub fn peer(&self, station: &str) -> Option<Peer> {
-        let peers = self.peers.lock().unwrap();
-        if let Some(p) = peers.get(station) {
+        if let Some(p) = self.peers.lock().unwrap().get(station) {
             return Some(p.clone());
         }
         let now = self.now_called(station);
-        peers.get(&now).cloned()
+        self.peers.lock().unwrap().get(&now).cloned()
     }
 
     fn addr_of(&self, station: &str) -> Option<String> {
@@ -1937,6 +1978,66 @@ impl crate::rounds::Link for Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What happened (26 Nov 2026): the owner's Mac mini joined as "Mac",
+    /// was renamed MacBookM5 and then mbagents-mac-mini, and the portable
+    /// that is called MacBookM5 was in the fleet. Everything sent to
+    /// MacBookM5 from another station (an update, a look at its files)
+    /// went to the Mac mini. A station that answers under a name long
+    /// after a rename took that name from another has the name; a station
+    /// just renamed, last seen under its old name, is found by it still.
+    #[test]
+    fn a_name_a_station_answers_under_is_not_another_stations_former_name() {
+        use crate::names::{Names, Renamed};
+        let pair = |from: &str, to: &str, at_ms| Renamed {
+            from: from.into(),
+            to: to.into(),
+            at_ms,
+        };
+        let seen = |name: &str, says: &str, last_seen_ms| {
+            let peer = Peer {
+                station: name.into(),
+                addr: format!("{name}:7391"),
+                version: "0.4.26".into(),
+                protocol: 2,
+                state: "online".into(),
+                last_seen_ms,
+                info: json!({"station": says}),
+            };
+            (name.to_string(), peer)
+        };
+        let hour = 3_600_000;
+        let renames = || {
+            Names::from_list(vec![
+                pair("Mac", "MacBookM5", hour),
+                pair("MacBookM5", "mbagents-mac-mini", 2 * hour),
+            ])
+        };
+        // The portable answers as MacBookM5 a day later: the name is its own.
+        let peers: BTreeMap<String, Peer> = [
+            seen("MacBookM5", "MacBookM5", 26 * hour),
+            seen("mbagents-mac-mini", "mbagents-mac-mini", 26 * hour),
+        ]
+        .into();
+        let names = holding(renames(), &peers);
+        assert_eq!(names.now_called("MacBookM5"), "MacBookM5");
+        assert_eq!(names.now_called("Mac"), "Mac");
+        assert_eq!(names.former_of("mbagents-mac-mini"), Vec::<String>::new());
+        assert_eq!(names.former_of("MacBookM5"), Vec::<String>::new());
+        // Only the Mac mini, last heard under the old name a moment before
+        // it was renamed (and a clock a minute ahead): the old name finds it.
+        let peers: BTreeMap<String, Peer> =
+            [seen("MacBookM5", "MacBookM5", 2 * hour + 60_000)].into();
+        let names = holding(renames(), &peers);
+        assert_eq!(names.now_called("MacBookM5"), "mbagents-mac-mini");
+        assert_eq!(names.now_called("Mac"), "mbagents-mac-mini");
+        // An entry under the old name where the renamed station answers
+        // (it says its new name) is not a station of the old name.
+        let peers: BTreeMap<String, Peer> =
+            [seen("MacBookM5", "mbagents-mac-mini", 26 * hour)].into();
+        let names = holding(renames(), &peers);
+        assert_eq!(names.now_called("MacBookM5"), "mbagents-mac-mini");
+    }
 
     /// The owner's Mac "monitoring" (17 Nov 2026): Tailscale's program,
     /// started with no terminal, printed that its window failed to start and
