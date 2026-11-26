@@ -111,6 +111,10 @@ impl Daemon {
             let mut keep = p.clone();
             // Enough to find, wake and describe it; not its whole live state.
             keep.info = json!({
+                // The name it says itself: a name a station answers under
+                // is not another's former name (fleet.rs), and that must
+                // hold after a restart while that station is asleep.
+                "station": p.info.get("station"),
                 "macs": p.info.get("macs"),
                 "os": p.info.get("os"),
                 "service": p.info.get("service"),
